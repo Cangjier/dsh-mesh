@@ -1,0 +1,24 @@
+{
+  "name": "dsh-person-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "个人版 DeepSeek Harness Web 部署：Linux 离线包、密码门、Chrome Headless 扫码登录，以及 DSH 升级后的适配文档集。",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "web",
+    "deployment",
+    "documentation"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "docs",
+    "code"
+  ],
+  "dsh": {
+    "kind": "documentation",
+    "appliesTo": "@deepseek-ai/dsh@0.2.2-rc.1",
+    "entry": "README.md"
+  }
+}

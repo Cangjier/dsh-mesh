@@ -1,0 +1,16 @@
+# 目录选择器覆盖层：把「用 Node 打开系统文件夹对话框」换成 Web 内置的目录浏览器。
+#
+# 默认的 `directory-picker` 行是自适应实现（auto）：在 loopback 监听 + 本机有图形界面时，
+# 它会选择原生系统对话框，而远程浏览器根本看不到那个对话框。这个覆盖层禁用它，改成固定
+# 挂载浏览式后端（host 侧列目录 + client 侧「选择工作目录」对话框），远程访问时由浏览器
+# 自己列目录、选目录、新建文件夹。
+#
+# 用法：dsh web --patch config/browse-picker.patch.yml
+# 行的 id 与上游仓库 apps/web/tests/pin-browse-picker.overlay.yml 保持一致。
+- id: directory-picker
+  disabled: true
+- insert:
+    - id: directory-picker-browse
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+    - id: ui-directory-picker-browse
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'

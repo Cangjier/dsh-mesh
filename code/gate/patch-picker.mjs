@@ -51,15 +51,19 @@ const CLOSE_BUTTON = `(0, react_jsx_runtime.jsx)("button", {
 								},
 								style: {
 									position: "absolute",
-									top: 6,
-									right: 22,
+									top: 18,
+									right: 13,
+									height: 28,
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
 									fontSize: 20,
 									lineHeight: 1,
 									cursor: "pointer",
 									background: "transparent",
 									border: 0,
 									color: "inherit",
-									padding: "2px 6px",
+									padding: 0,
 									zIndex: 2
 								},
 								children: "×"

@@ -83,7 +83,7 @@ name: listing.home,
 
 ### 3. 右上角关闭按钮
 
-头部是 `[h2(title), crumbBar]` 的横向布局，直接插一个按钮只会落在标题和面包屑之间的第二行。正确做法是让头部成为定位父级，按钮绝对定位到右上角：
+头部的直接子元素是 `[h2(标题), crumbBar(面包屑)]`，往上插按钮只会落在两行之间的第二行。正确做法：让头部成为定位父级，按钮绝对定位，并**按字符中心**去对齐标题和下面那排图标。
 
 ```js
 // 头部容器加一行
@@ -93,15 +93,40 @@ jsx("button", {
   type: "button", "aria-label": "关闭", title: "关闭",
   className: css.crumbEditZone,          // 复用已有的图标按钮样式
   onClick: () => { onClose() },
-  style: { position: "absolute", top: 6, right: 22, fontSize: 20, lineHeight: 1, cursor: "pointer", background: "transparent", border: 0, color: "inherit", padding: "2px 6px", zIndex: 2 },
+  style: {
+    position: "absolute",
+    top: 18, right: 13,                  // 见下：按字符中心算出来的
+    height: 28,                          // = h2 的高度，配合 flex 做垂直居中
+    display: "flex", alignItems: "center", justifyContent: "center",
+    fontSize: 20, lineHeight: 1,
+    cursor: "pointer", background: "transparent", border: 0, color: "inherit", padding: 0, zIndex: 2
+  },
   children: "×"
 })
 ```
 
-判断是否真的到位：截图里 `×` 的纵坐标应与标题「选择工作区目录」同一行，而不是与面包屑同行。
+**怎么定这两个数（别靠目测）**：用 Playwright 取三组矩形，按**字符/图标中心**对齐，而不是按盒子边缘：
 
-**右边距怎么定**：不要凭感觉。量出弹窗内容区的右边界（下面那排铅笔图标 / 文件夹箭头的右边缘），`right` 取「弹窗右边界 − 内容右边界」。本机实测弹窗右边界 980、内容右边界 957，所以取 `right: 22`（按钮自身还有 6px 内边距）。用 Playwright 比对 `getBoundingClientRect().right` 两个值即可，差 1px 以内算对齐。
+```js
+const glyph = (el) => {                       // 元素里文字的实际包围盒
+  const r = document.createRange(); r.selectNodeContents(el)
+  return r.getBoundingClientRect()
+}
+// 目标 1：与下面「编辑路径」铅笔图标同一个中心 x
+// 目标 2：与标题 h2 的字符同一个中心 y
+```
 
+本机实测（1280×900）：
+
+| 参照物 | 矩形 | 中心 |
+|---|---|---|
+| 标题 `h2` 字符 | y 221–242 | **231.5** |
+| 铅笔图标 `svg` | x 943–957 | **950** |
+| 关闭按钮 `×`（初版 `top:6/right:22`） | x 945 / y 216.5 | 偏左 5、偏上 15 |
+
+按差值补：`right` 减小 5 → 17、`top` 增加 15 → 21（换 `padding:0` + flex 居中后又各差 4/2 像素，再微调成 `right:13 / top:18`），最终 `×` 的字符中心落在 **(950, 231.5)**，与两个参照物完全重合。
+
+> 关键点：铅笔按钮本身很宽（点击区从 358 一直到 957），比它的**盒子右边缘**对齐会整体偏右 6–8px；要和**图标中心**对齐才对得上。
 ## 坑点与解决
 
 | 现象 | 原因 | 解决 |

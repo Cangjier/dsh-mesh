@@ -52,7 +52,7 @@ const CLOSE_BUTTON = `(0, react_jsx_runtime.jsx)("button", {
 								style: {
 									position: "absolute",
 									top: 6,
-									right: 8,
+									right: 22,
 									fontSize: 20,
 									lineHeight: 1,
 									cursor: "pointer",

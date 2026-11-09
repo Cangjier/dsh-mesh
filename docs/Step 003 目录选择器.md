@@ -93,12 +93,14 @@ jsx("button", {
   type: "button", "aria-label": "关闭", title: "关闭",
   className: css.crumbEditZone,          // 复用已有的图标按钮样式
   onClick: () => { onClose() },
-  style: { position: "absolute", top: 6, right: 8, fontSize: 20, lineHeight: 1, cursor: "pointer", background: "transparent", border: 0, color: "inherit", padding: "2px 6px", zIndex: 2 },
+  style: { position: "absolute", top: 6, right: 22, fontSize: 20, lineHeight: 1, cursor: "pointer", background: "transparent", border: 0, color: "inherit", padding: "2px 6px", zIndex: 2 },
   children: "×"
 })
 ```
 
 判断是否真的到位：截图里 `×` 的纵坐标应与标题「选择工作区目录」同一行，而不是与面包屑同行。
+
+**右边距怎么定**：不要凭感觉。量出弹窗内容区的右边界（下面那排铅笔图标 / 文件夹箭头的右边缘），`right` 取「弹窗右边界 − 内容右边界」。本机实测弹窗右边界 980、内容右边界 957，所以取 `right: 22`（按钮自身还有 6px 内边距）。用 Playwright 比对 `getBoundingClientRect().right` 两个值即可，差 1px 以内算对齐。
 
 ## 坑点与解决
 

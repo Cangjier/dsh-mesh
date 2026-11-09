@@ -108,6 +108,9 @@ code = code.replace(floatAnchor, `className: DirectoryBrowser_module_css_default
 										display: "flex",
 										alignItems: "center",
 										justifyContent: "center",
+										padding: 0,
+										margin: 0,
+										boxSizing: "border-box",
 										pointerEvents: "none",
 										zIndex: 3
 									},`)
@@ -152,6 +155,23 @@ code = code.replace(emptyAnchor, `children: visible.length === 0 && busy !== tru
 					children: filterPrefix ? "没有匹配的文件夹" : "此文件夹为空"
 				}) : visible.map((entry) => {`)
 steps.push('empty folder shows a hint')
+
+// 5. Picking a folder must not blank the right column while the next listing
+//    loads: keeping the previous level until the new one arrives is what makes
+//    the column feel like it slides instead of blinking.
+const flickerAnchor = `setPathDraft(null);
+				setSelected(entry);
+				setChild(null);
+				setLoading(true);`
+if (!code.includes(flickerAnchor)) {
+  console.error('anchor not found: select() child reset')
+  process.exit(1)
+}
+code = code.replace(flickerAnchor, `setPathDraft(null);
+				setSelected(entry);
+				// The previous level stays rendered until the new one is ready.
+				setLoading(true);`)
+steps.push('picking a folder keeps the right column')
 
 code = `/* dsh-picker-patched */\n${code}`
 copyFileSync(file, `${file}.orig`)

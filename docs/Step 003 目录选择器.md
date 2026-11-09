@@ -53,6 +53,7 @@ className: css.content, style: { position: "relative" },
 // ② 指示器铺满容器并 flex 居中（去掉 loadingFloat）
 className: css.status,
 style: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
+         padding: 0, margin: 0, boxSizing: "border-box",
          pointerEvents: "none", zIndex: 3 },
 
 // ③ 文字换成 SVG spinner（animateTransform，不需要额外 CSS）
@@ -71,8 +72,16 @@ children: jsx("svg", {
 ```
 
 > 只换文字不改定位 = 右下角多了一个转圈。必须同时去掉 `loadingFloat` 并给容器加 `position: relative`。
-> 验证办法：造一个 2 万个条目的目录（`seq 1 20000 | xargs -P16 -I{} mkdir -p {}`），导航进去必然超过 300ms，
-> 再量 `[role=status]` 的矩形——应当铺满列表区、spinner 落在该区域中心。
+
+**还有一个更隐蔽的坑**：`.status` 这个类自带左右 padding，`justify-content: center` 是在**内边距盒**里居中的，
+于是水平方向上偏了 58px（实测内容区 300–980，本该居中在 640，实际落在 582；垂直方向恰好没错）。
+补上 `padding: 0; margin: 0; boxSizing: border-box` 后，spinner 落到 **(640, 458)**，即内容区正中。
+
+验证办法：
+
+1. 造一个 2 万条目的目录（`seq 1 20000 | xargs -P16 -I{} mkdir -p {}`），导航进去必然超过 300ms；
+2. 或者临时把 `SLOW_SCAN_DELAY_MS = 300` 改成 `0` 让指示器每次都出现（量完记得改回来）；
+3. 量 `[role=status]` 的矩形与它里面 `svg` 的中心，两者应当重合在内容区中心。
 ### 2. 「主目录」→ 全路径
 
 面包屑的根节点原本用本地化文案：
@@ -160,6 +169,32 @@ children: visible.length === 0 && busy !== true
 
 > 判断是「空目录」还是「点坏了」：先看宿主。`find /home -maxdepth 1 -mindepth 1 | wc -l` 返回 0，
 > 就说明点击是好的、只是目录真的空。云服务器的 `/home` 通常就是空的。
+### 5. 切换文件夹时右栏不要闪
+
+点一个文件夹，右栏会**先整块消失再出现**——因为 `select()` 在发起列表请求前先把 child 清空了：
+
+```js
+setSelected(entry);
+setChild(null);      // ← 右栏立刻变空
+setLoading(true);
+scan.then((next) => { setChild(next); setLoading(false) })
+```
+
+多列浏览的舒适感来自「列是滑过去的，不是闪一下」。把清空去掉，让上一级内容留在原位直到新内容到达：
+
+```js
+setSelected(entry);
+// The previous level stays rendered until the new one is ready.
+setLoading(true);
+```
+
+配合居中的 spinner，观感就是「当前列 → 转圈 → 新列」，中间没有任何空白帧。
+
+验证：高频采样 `[role=list]` 的数量，点击前后**始终为 2**（1 说明右栏曾消失）：
+
+```js
+for (let i = 0; i < 40; i++) { samples.push(lists()); await wait(30) }
+```
 ## 坑点与解决
 
 | 现象 | 原因 | 解决 |

@@ -33,21 +33,29 @@ const args = [entry, '--patch', patchFile, '--profile', 'web', '--no-open', '--h
 
 用户反馈原版弹窗不够清楚，做了三处修改（`gate/patch-picker.mjs`）：
 
-### 1. 「加载中…」文字 → spinner
+### 1. 「加载中…」文字 → 居中 spinner
 
-原实现：只在「慢扫描」时出现一行文字，还飘在右下角。
+原实现两个问题：只有「慢扫描」（超过 `SLOW_SCAN_DELAY_MS = 300`）才出现，而且是**一行文字飘在右下角**。
 
 ```js
-loading && slowScan && jsx("div", {
-  className: clsx(css.status, css.loadingFloat),
-  role: "status",
-  children: t("browser.loading")      // ← 替换成 SVG spinner
-})
+// 原样式：浮在右下角
+className: clsx(css.status, css.loadingFloat),
+role: "status",
+children: t("browser.loading")
 ```
 
-替换为无文字的 SVG 旋转指示器（`animateTransform`，不需要额外 CSS）：
+三处一起改，才是「居中且无文字」：
 
 ```js
+// ① 让内容容器成为定位父级
+className: css.content, style: { position: "relative" },
+
+// ② 指示器铺满容器并 flex 居中（去掉 loadingFloat）
+className: css.status,
+style: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
+         pointerEvents: "none", zIndex: 3 },
+
+// ③ 文字换成 SVG spinner（animateTransform，不需要额外 CSS）
 children: jsx("svg", {
   width: 18, height: 18, viewBox: "0 0 24 24",
   "aria-label": t("browser.loading"),
@@ -62,6 +70,9 @@ children: jsx("svg", {
 })
 ```
 
+> 只换文字不改定位 = 右下角多了一个转圈。必须同时去掉 `loadingFloat` 并给容器加 `position: relative`。
+> 验证办法：造一个 2 万个条目的目录（`seq 1 20000 | xargs -P16 -I{} mkdir -p {}`），导航进去必然超过 300ms，
+> 再量 `[role=status]` 的矩形——应当铺满列表区、spinner 落在该区域中心。
 ### 2. 「主目录」→ 全路径
 
 面包屑的根节点原本用本地化文案：

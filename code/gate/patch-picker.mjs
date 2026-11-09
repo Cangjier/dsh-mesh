@@ -86,14 +86,39 @@ if (code === homeBefore) {
 }
 steps.push('home crumb shows the full path')
 
-// 2. Loading text becomes a spinner.
+// 2. Loading becomes a spinner, centred in the list area instead of floating in
+//    the bottom-right corner. The content area becomes the offset parent.
+const contentAnchor = 'className: DirectoryBrowser_module_css_default.content,'
+if (!code.includes(contentAnchor)) {
+  console.error('anchor not found: dialog content container')
+  process.exit(1)
+}
+code = code.replace(contentAnchor, `${contentAnchor}
+							style: { position: "relative" },`)
+
+const floatAnchor = 'className: clsx(DirectoryBrowser_module_css_default.status, DirectoryBrowser_module_css_default.loadingFloat),'
+if (!code.includes(floatAnchor)) {
+  console.error('anchor not found: floating loader')
+  process.exit(1)
+}
+code = code.replace(floatAnchor, `className: DirectoryBrowser_module_css_default.status,
+									style: {
+										position: "absolute",
+										inset: 0,
+										display: "flex",
+										alignItems: "center",
+										justifyContent: "center",
+										pointerEvents: "none",
+										zIndex: 3
+									},`)
+
 const loadBefore = code
 code = code.replace('children: t("browser.loading")', SPINNER)
 if (code === loadBefore) {
   console.error('anchor not found: loading indicator')
   process.exit(1)
 }
-steps.push('loading indicator is a spinner')
+steps.push('loading indicator is a centred spinner')
 
 // 3. Close button in the header, pinned to its top-right corner.
 //    The header becomes the offset parent; the button sits above the crumb row.

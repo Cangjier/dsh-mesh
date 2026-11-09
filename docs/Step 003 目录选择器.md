@@ -127,6 +127,28 @@ const glyph = (el) => {                       // 元素里文字的实际包围�
 按差值补：`right` 减小 5 → 17、`top` 增加 15 → 21（换 `padding:0` + flex 居中后又各差 4/2 像素，再微调成 `right:13 / top:18`），最终 `×` 的字符中心落在 **(950, 231.5)**，与两个参照物完全重合。
 
 > 关键点：铅笔按钮本身很宽（点击区从 358 一直到 957），比它的**盒子右边缘**对齐会整体偏右 6–8px；要和**图标中心**对齐才对得上。
+### 4. 空目录要有话说
+
+多列浏览（miller columns）里，点一个空文件夹，右栏就是一个**纯空白区域**，看起来像「点了没反应」。`LevelColumn` 只做 `visible.map(...)`，条目为 0 时什么都不渲染：
+
+```js
+children: visible.map((entry) => { … })     // 空数组 → 空 div
+```
+
+补一个空状态（注意 `busy` 时不显示，否则会和加载态打架）：
+
+```js
+children: visible.length === 0 && busy !== true
+  ? jsx("div", {
+      className: css.status,
+      style: { padding: "18px 14px", opacity: 0.55, fontSize: 13 },
+      children: filterPrefix ? "没有匹配的文件夹" : "此文件夹为空"
+    })
+  : visible.map((entry) => { … })
+```
+
+> 判断是「空目录」还是「点坏了」：先看宿主。`find /home -maxdepth 1 -mindepth 1 | wc -l` 返回 0，
+> 就说明点击是好的、只是目录真的空。云服务器的 `/home` 通常就是空的。
 ## 坑点与解决
 
 | 现象 | 原因 | 解决 |

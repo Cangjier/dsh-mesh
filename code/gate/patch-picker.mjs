@@ -114,6 +114,20 @@ code = code.replace(headerPattern, (_match, head) => `${head}${CLOSE_BUTTON}, (0
 								className: DirectoryBrowser_module_css_default.crumbBar,`)
 steps.push('close button at the top right')
 
+// 4. An empty folder says so. Without this the right-hand column is a blank
+//    area, which reads as "the click did nothing".
+const emptyAnchor = 'children: visible.map((entry) => {'
+if (!code.includes(emptyAnchor)) {
+  console.error('anchor not found: level column children')
+  process.exit(1)
+}
+code = code.replace(emptyAnchor, `children: visible.length === 0 && busy !== true ? (0, react_jsx_runtime.jsx)("div", {
+					className: DirectoryBrowser_module_css_default.status,
+					style: { padding: "18px 14px", opacity: 0.55, fontSize: 13 },
+					children: filterPrefix ? "没有匹配的文件夹" : "此文件夹为空"
+				}) : visible.map((entry) => {`)
+steps.push('empty folder shows a hint')
+
 code = `/* dsh-picker-patched */\n${code}`
 copyFileSync(file, `${file}.orig`)
 writeFileSync(file, code, 'utf8')

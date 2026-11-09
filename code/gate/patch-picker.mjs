@@ -50,15 +50,17 @@ const CLOSE_BUTTON = `(0, react_jsx_runtime.jsx)("button", {
 									onClose();
 								},
 								style: {
-									marginLeft: "auto",
-									marginRight: 4,
+									position: "absolute",
+									top: 6,
+									right: 8,
 									fontSize: 20,
 									lineHeight: 1,
 									cursor: "pointer",
 									background: "transparent",
 									border: 0,
 									color: "inherit",
-									padding: "0 4px"
+									padding: "2px 6px",
+									zIndex: 2
 								},
 								children: "×"
 							})`
@@ -89,7 +91,16 @@ if (code === loadBefore) {
 }
 steps.push('loading indicator is a spinner')
 
-// 3. Close button in the header, pushed to the right.
+// 3. Close button in the header, pinned to its top-right corner.
+//    The header becomes the offset parent; the button sits above the crumb row.
+const headerAnchor = /className: DirectoryBrowser_module_css_default\.header,/
+if (!headerAnchor.test(code)) {
+  console.error('anchor not found: dialog header container')
+  process.exit(1)
+}
+code = code.replace(headerAnchor, `className: DirectoryBrowser_module_css_default.header,
+							style: { position: "relative" },`)
+
 const headerPattern = /(children: t\("browser\.title"\)\s*\}\), )\(0, react_jsx_runtime\.jsx\)\("div", \{\s*className: DirectoryBrowser_module_css_default\.crumbBar,/
 if (!headerPattern.test(code)) {
   console.error('anchor not found: dialog header')

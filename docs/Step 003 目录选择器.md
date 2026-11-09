@@ -83,17 +83,22 @@ name: listing.home,
 
 ### 3. 右上角关闭按钮
 
-头部是 `[h2(title), crumbBar]`，在两者之间插入一个按钮并 `marginLeft:auto` 推到右侧：
+头部是 `[h2(title), crumbBar]` 的横向布局，直接插一个按钮只会落在标题和面包屑之间的第二行。正确做法是让头部成为定位父级，按钮绝对定位到右上角：
 
 ```js
+// 头部容器加一行
+className: css.header, style: { position: "relative" },
+// 标题之后插入按钮
 jsx("button", {
   type: "button", "aria-label": "关闭", title: "关闭",
   className: css.crumbEditZone,          // 复用已有的图标按钮样式
   onClick: () => { onClose() },
-  style: { marginLeft: "auto", fontSize: 20, lineHeight: 1, cursor: "pointer", background: "transparent", border: 0, color: "inherit" },
+  style: { position: "absolute", top: 6, right: 8, fontSize: 20, lineHeight: 1, cursor: "pointer", background: "transparent", border: 0, color: "inherit", padding: "2px 6px", zIndex: 2 },
   children: "×"
 })
 ```
+
+判断是否真的到位：截图里 `×` 的纵坐标应与标题「选择工作区目录」同一行，而不是与面包屑同行。
 
 ## 坑点与解决
 

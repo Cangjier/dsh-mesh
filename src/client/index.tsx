@@ -55,6 +55,12 @@ function formatBytes(value: number): string {
   return `${amount >= 10 || unit === 0 ? String(Math.round(amount)) : amount.toFixed(1)} ${units[unit]}`
 }
 
+function formatGb(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0 GB'
+  const gb = value / 1024 ** 3
+  return `${gb >= 100 ? String(Math.round(gb)) : gb.toFixed(1)} GB`
+}
+
 function memberSystem(member: Member): SystemInfo | null {
   return member.system ?? ((member.gate as { system?: SystemInfo } | null)?.system ?? null)
 }
@@ -73,7 +79,7 @@ function systemText(member: Member): string {
   const root = disks.find(disk => disk.mount === '/' || disk.mount === 'C:\\') ?? disks[0]
   if (root !== undefined) {
     const free = root.availableBytes ?? root.freeBytes ?? Math.max(0, (root.totalBytes ?? 0) - (root.usedBytes ?? 0))
-    parts.push(`${root.mount ?? 'disk'} ${formatBytes(free)} 可用`)
+    parts.push(`${root.mount ?? 'disk'} ${formatGb(free)} 可用`)
   }
   return parts.length === 0 ? '—' : parts.join(' · ')
 }
@@ -90,7 +96,7 @@ function systemDetails(member: Member): string {
   }
   for (const disk of system.disks ?? []) {
     const free = disk.availableBytes ?? disk.freeBytes ?? Math.max(0, (disk.totalBytes ?? 0) - (disk.usedBytes ?? 0))
-    lines.push(`${disk.mount ?? 'disk'} 可用 ${formatBytes(free)} / 共 ${formatBytes(disk.totalBytes ?? 0)} · 已用 ${String(disk.usedPercent ?? 0)}%`)
+    lines.push(`${disk.mount ?? 'disk'} 可用 ${formatGb(free)} / 共 ${formatGb(disk.totalBytes ?? 0)} · 已用 ${String(disk.usedPercent ?? 0)}%`)
   }
   return lines.join('\n')
 }

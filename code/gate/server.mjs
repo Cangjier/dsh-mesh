@@ -79,16 +79,41 @@ function envInt(name, fallback) {
 function resolveChrome() {
   const configured = process.env.DSH_GATE_CHROME
   if (configured !== undefined && configured !== '') return configured
-  for (const candidate of [
-    '/usr/bin/google-chrome',
-    '/opt/google/chrome/google-chrome',
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    '/usr/lib/chromium/chromium',
-  ]) {
+  const candidates = []
+  if (process.platform === 'win32') {
+    for (const root of [
+      process.env.PROGRAMFILES,
+      process.env['PROGRAMFILES(X86)'],
+      process.env.LOCALAPPDATA,
+    ]) {
+      if (root === undefined || root === '') continue
+      candidates.push(
+        path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        path.join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        path.join(root, 'Chromium', 'Application', 'chrome.exe'),
+      )
+    }
+  } else if (process.platform === 'darwin') {
+    candidates.push(
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    )
+  } else {
+    candidates.push(
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/opt/google/chrome/google-chrome',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/microsoft-edge',
+      '/usr/lib/chromium/chromium',
+    )
+  }
+  for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate
   }
-  return '/usr/bin/google-chrome'
+  return candidates[0] ?? 'google-chrome'
 }
 
 /**

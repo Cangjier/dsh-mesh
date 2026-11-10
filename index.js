@@ -660,12 +660,12 @@ async function assembleWebPackage(options) {
     await copyIfExists(path2.join(options.repositoryRoot, file), path2.join(packageDir, file));
   }
   for (const file of ["index.js", "client.js", "cordis.patch.yml", "package.json"]) {
-    await copyIfExists(path2.join(options.repositoryRoot, file), path2.join(packageDir, "plugin", file));
+    await copyIfExists(path2.join(options.repositoryRoot, file), path2.join(packageDir, "plugins", "dsh-person-web", file));
   }
-  await copyIfExists(path2.join(options.repositoryRoot, "locale"), path2.join(packageDir, "plugin", "locale"));
-  await copyIfExists(path2.join(options.repositoryRoot, "build"), path2.join(packageDir, "plugin", "build"));
-  await copyIfExists(path2.join(options.repositoryRoot, "code", "build"), path2.join(packageDir, "plugin", "code", "build"));
-  await copyIfExists(path2.join(options.repositoryRoot, "code", "shared"), path2.join(packageDir, "plugin", "code", "shared"));
+  await copyIfExists(path2.join(options.repositoryRoot, "locale"), path2.join(packageDir, "plugins", "dsh-person-web", "locale"));
+  await copyIfExists(path2.join(options.repositoryRoot, "build"), path2.join(packageDir, "plugins", "dsh-person-web", "build"));
+  await copyIfExists(path2.join(options.repositoryRoot, "code", "build"), path2.join(packageDir, "plugins", "dsh-person-web", "code", "build"));
+  await copyIfExists(path2.join(options.repositoryRoot, "code", "shared"), path2.join(packageDir, "plugins", "dsh-person-web", "code", "shared"));
   const manifest = {
     format: 1,
     name: "dsh-person-web",

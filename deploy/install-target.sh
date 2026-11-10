@@ -134,6 +134,9 @@ const block = [
   `    interopToken: '${token.replace(/'/g, "''")}'`,
   '    interopPort: 8765',
   '    interopUseGatePassword: false',
+  '- id: ui-settings-general',
+  '  config:',
+  '    welcomeNoticeVersion: "2026-09-28.1"',
   '# END dsh-person-web deploy',
   '',
 ].join('\n')

@@ -234,7 +234,7 @@ test('assembleWebPackage copies the web payload, gate, and plugin', async () => 
     assert.match(await readFile(path.join(result.packageDir, 'manifest.json'), 'utf8'), /linux/u)
     assert.match(await readFile(path.join(result.packageDir, 'web', 'index.html'), 'utf8'), /doctype/u)
     assert.match(await readFile(path.join(result.packageDir, 'gate', 'server.mjs'), 'utf8'), /gate/u)
-    assert.match(await readFile(path.join(result.packageDir, 'plugin', 'client.js'), 'utf8'), /client/u)
+    assert.match(await readFile(path.join(result.packageDir, 'plugins', 'dsh-person-web', 'client.js'), 'utf8'), /client/u)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

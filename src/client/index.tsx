@@ -561,6 +561,13 @@ function SidebarIcon({ size = 20 }: { size?: number }) {
 export const inject = ['slots', 'locale', 'theme']
 
 export function apply(ctx: any) {
+  ctx.effect(() => {
+    const tag = document.createElement('style')
+    tag.setAttribute('data-dsh-person-web', 'hide-preview-badge')
+    tag.textContent = '[class*="previewBadge"]{display:none!important}'
+    document.head.appendChild(tag)
+    return () => tag.remove()
+  }, 'person-web: hide preview badge')
   ctx.effect(() => ctx.locale.register(NS, {
     en: { 'panel.label': 'DSH Members' },
     zh: { 'panel.label': 'DSH 成员' },

@@ -531,14 +531,14 @@ export async function assembleWebPackage(options) {
     await copyIfExists(path.join(options.repositoryRoot, file), path.join(packageDir, file))
   }
   for (const file of ['index.js', 'client.js', 'cordis.patch.yml', 'package.json']) {
-    await copyIfExists(path.join(options.repositoryRoot, file), path.join(packageDir, 'plugin', file))
+    await copyIfExists(path.join(options.repositoryRoot, file), path.join(packageDir, 'plugins', 'dsh-person-web', file))
   }
-  await copyIfExists(path.join(options.repositoryRoot, 'locale'), path.join(packageDir, 'plugin', 'locale'))
+  await copyIfExists(path.join(options.repositoryRoot, 'locale'), path.join(packageDir, 'plugins', 'dsh-person-web', 'locale'))
   // The packaged plugin must be able to run `build_learn`/`build_resume` on a
   // deployed member, so its recipes, overlays, and build modules travel with it.
-  await copyIfExists(path.join(options.repositoryRoot, 'build'), path.join(packageDir, 'plugin', 'build'))
-  await copyIfExists(path.join(options.repositoryRoot, 'code', 'build'), path.join(packageDir, 'plugin', 'code', 'build'))
-  await copyIfExists(path.join(options.repositoryRoot, 'code', 'shared'), path.join(packageDir, 'plugin', 'code', 'shared'))
+  await copyIfExists(path.join(options.repositoryRoot, 'build'), path.join(packageDir, 'plugins', 'dsh-person-web', 'build'))
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'build'), path.join(packageDir, 'plugins', 'dsh-person-web', 'code', 'build'))
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'shared'), path.join(packageDir, 'plugins', 'dsh-person-web', 'code', 'shared'))
   const manifest = {
     format: 1,
     name: 'dsh-person-web',

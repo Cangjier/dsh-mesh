@@ -102,7 +102,7 @@ for (const key of Object.keys(pkg.dependencies)) {
   if (key === '@local/dsh-person-web' || key === '@local/dsh-wireguard') delete pkg.dependencies[key]
   if (/Cangjier\/dsh-(person-web|wireguard)/i.test(String(pkg.dependencies[key]))) delete pkg.dependencies[key]
 }
-pkg.dependencies['@local/dsh-person-web'] = `link:${root}/plugin`
+pkg.dependencies['@local/dsh-person-web'] = `link:${root}/plugins/dsh-person-web`
 pkg.dependencies['@local/dsh-wireguard'] = `link:${root}/plugins/dsh-wireguard`
 pkg.dsh ||= { profile: {} }
 pkg.dsh.profile ||= {}
@@ -113,7 +113,7 @@ fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`)
 NODE
 mkdir -p "$PROFILE/node_modules/@local"
 rm -rf "$PROFILE/node_modules/@local/dsh-person-web" "$PROFILE/node_modules/@local/dsh-wireguard"
-ln -s "$ROOT/plugin" "$PROFILE/node_modules/@local/dsh-person-web"
+ln -s "$ROOT/plugins/dsh-person-web" "$PROFILE/node_modules/@local/dsh-person-web"
 ln -s "$ROOT/plugins/dsh-wireguard" "$PROFILE/node_modules/@local/dsh-wireguard"
 say 'profile plugins replaced: dsh-person-web + dsh-wireguard'
 

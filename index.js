@@ -3,9 +3,9 @@ import { homedir } from "node:os";
 import path7 from "node:path";
 
 // src/lib/service.mjs
-import { readFile as readFile5, readdir as readdir3 } from "node:fs/promises";
-import { readFileSync, existsSync as existsSync3 } from "node:fs";
-import os4 from "node:os";
+import { readFile as readFile5, readdir as readdir3, stat as stat4 } from "node:fs/promises";
+import { readFileSync as readFileSync2, existsSync as existsSync4 } from "node:fs";
+import os5 from "node:os";
 import path5 from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -246,6 +246,7 @@ async function discoverMembers(options) {
     port: probe.port,
     latencyMs: probe.latencyMs,
     gate: probe.info,
+    system: probe.info?.system ?? null,
     error: probe.error
   }));
   const self = {
@@ -259,6 +260,7 @@ async function discoverMembers(options) {
     port: options.self?.port ?? null,
     latencyMs: 0,
     gate: options.self?.gate ?? null,
+    system: options.self?.system ?? null,
     error: options.self?.error ?? null
   };
   const warnings = [];
@@ -321,10 +323,10 @@ function sha256Text(text) {
   return createHash("sha256").update(text).digest("hex");
 }
 function parseTarget(target) {
-  const [os5, arch] = String(target).split("-");
-  if (!["linux", "win", "darwin"].includes(os5)) throw new Error(`unsupported target OS: ${target}`);
+  const [os6, arch] = String(target).split("-");
+  if (!["linux", "win", "darwin"].includes(os6)) throw new Error(`unsupported target OS: ${target}`);
   if (!["x64", "arm64"].includes(arch)) throw new Error(`unsupported target architecture: ${target}`);
-  return { os: os5, arch, libc: os5 === "linux" ? "glibc" : "" };
+  return { os: os6, arch, libc: os6 === "linux" ? "glibc" : "" };
 }
 function classifySource(source) {
   const value = String(source).trim().replace(/^git\+/u, "").replace(/\.git$/u, "").replace(/\/+$/u, "");
@@ -1157,8 +1159,8 @@ function inferRole(name) {
   if (text.includes("gate")) return "gate";
   return "dsh";
 }
-function normalizeServices(input, os5) {
-  const source = input === void 0 ? DEFAULT_SERVICES[os5] : input;
+function normalizeServices(input, os6) {
+  const source = input === void 0 ? DEFAULT_SERVICES[os6] : input;
   if (!Array.isArray(source) || source.length === 0) {
     throw new Error("at least one service is required");
   }
@@ -1173,7 +1175,7 @@ function normalizeServices(input, os5) {
     seen.add(name);
     const role = raw.role ?? inferRole(name);
     if (!(role in ROLE_ORDER)) throw new Error(`service ${name} has unknown role ${String(role)}`);
-    const command = typeof raw.command === "string" && raw.command.trim() !== "" ? raw.command.trim() : os5 === "linux" ? "start.sh" : "dsh-person-web-service.exe";
+    const command = typeof raw.command === "string" && raw.command.trim() !== "" ? raw.command.trim() : os6 === "linux" ? "start.sh" : "dsh-person-web-service.exe";
     return { name, role, command };
   });
   if (!services.some((service) => service.role === "gate")) {
@@ -1188,11 +1190,11 @@ function normalizeServices(input, os5) {
   }
   return services;
 }
-async function findLatestPackage(repositoryRoot, os5) {
+async function findLatestPackage(repositoryRoot, os6) {
   const dist = path4.join(repositoryRoot, "dist");
-  const suffix = os5 === "linux" ? ".tar.gz" : ".zip";
+  const suffix = os6 === "linux" ? ".tar.gz" : ".zip";
   const prefix = `dsh-person-web-`;
-  const marker = `-${os5 === "linux" ? "linux" : "win"}-x64`;
+  const marker = `-${os6 === "linux" ? "linux" : "win"}-x64`;
   const entries = await readdir2(dist).catch(() => []);
   const candidates = [];
   for (const entry of entries) {
@@ -1203,19 +1205,19 @@ async function findLatestPackage(repositoryRoot, os5) {
   }
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   if (candidates.length === 0) {
-    throw new Error(`no ${os5} package found in ${dist}; build one or pass --package`);
+    throw new Error(`no ${os6} package found in ${dist}; build one or pass --package`);
   }
   return candidates[0].file;
 }
 async function buildDeployPlan(options) {
   if (typeof options.host !== "string" || options.host.trim() === "") throw new Error("host is required");
-  const os5 = normalizeOs(options.os ?? "linux");
+  const os6 = normalizeOs(options.os ?? "linux");
   const repositoryRoot = options.repositoryRoot ?? process.cwd();
   let packagePath = "";
   let packageInfo = null;
   let sha256 = "";
   if (options.skipPackage !== true) {
-    packagePath = options.package ? path4.resolve(options.package) : await findLatestPackage(repositoryRoot, os5);
+    packagePath = options.package ? path4.resolve(options.package) : await findLatestPackage(repositoryRoot, os6);
     packageInfo = await stat3(packagePath);
     if (!packageInfo.isFile()) throw new Error(`package is not a file: ${packagePath}`);
     sha256 = await hashFile(packagePath);
@@ -1224,8 +1226,8 @@ async function buildDeployPlan(options) {
   if (!/^[A-Za-z0-9._-]{3,80}$/.test(release)) {
     throw new Error("release must be 3-80 chars of letters, digits, dot, underscore or dash");
   }
-  const appRoot = typeof options.appRoot === "string" && options.appRoot.trim() !== "" ? options.appRoot.trim() : DEFAULT_APP_ROOT[os5];
-  const services = normalizeServices(options.services, os5);
+  const appRoot = typeof options.appRoot === "string" && options.appRoot.trim() !== "" ? options.appRoot.trim() : DEFAULT_APP_ROOT[os6];
+  const services = normalizeServices(options.services, os6);
   const scope = options.scope === "dsh" ? "dsh" : "all";
   const gatePort = String(options.gatePort ?? "80");
   if (!/^\d{1,5}$/.test(gatePort) || Number(gatePort) > 65535) throw new Error("gatePort is invalid");
@@ -1236,20 +1238,20 @@ async function buildDeployPlan(options) {
     user: typeof options.user === "string" && options.user.trim() !== "" ? options.user.trim() : void 0,
     port: Number.isSafeInteger(options.port) ? options.port : 22,
     identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path4.resolve(options.identityFile) : void 0,
-    os: os5,
+    os: os6,
     package: { path: packagePath, bytes: packageInfo?.size ?? 0, sha256 },
     release,
     appRoot,
-    shared: `${appRoot}${os5 === "linux" ? "/shared" : "\\shared"}`,
-    current: `${appRoot}${os5 === "linux" ? "/current" : "\\current"}`,
-    previous: `${appRoot}${os5 === "linux" ? "/previous" : "\\previous"}`,
-    releases: `${appRoot}${os5 === "linux" ? "/releases" : "\\releases"}`,
+    shared: `${appRoot}${os6 === "linux" ? "/shared" : "\\shared"}`,
+    current: `${appRoot}${os6 === "linux" ? "/current" : "\\current"}`,
+    previous: `${appRoot}${os6 === "linux" ? "/previous" : "\\previous"}`,
+    releases: `${appRoot}${os6 === "linux" ? "/releases" : "\\releases"}`,
     services,
     scope,
     gatePort,
     retention,
     sudo: options.sudo !== false,
-    remotePackage: os5 === "linux" ? `/tmp/dsh-person-web-${release}${path4.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-person-web-${release}${path4.extname(packagePath)}`
+    remotePackage: os6 === "linux" ? `/tmp/dsh-person-web-${release}${path4.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-person-web-${release}${path4.extname(packagePath)}`
   };
 }
 function buildLinuxPrepareScript(plan) {
@@ -1612,9 +1614,9 @@ var SshRunner = class {
    * @param {'linux'|'windows'} os target OS.
    * @returns {Promise<void>}
    */
-  async script(script, os5) {
+  async script(script, os6) {
     const base = this.sshOptions();
-    if (os5 === "linux") {
+    if (os6 === "linux") {
       const remote = this.plan.sudo ? "sudo -n bash -s" : "bash -s";
       await this.runProcess("ssh", [...base, this.target(), remote], script);
       return;
@@ -1816,12 +1818,65 @@ var DeployManager = class {
   }
 };
 
+// code/shared/system-info.mjs
+import { execFile } from "node:child_process";
+import { existsSync as existsSync3, readFileSync, statfsSync } from "node:fs";
+import os4 from "node:os";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile);
+function round(value, digits = 1) {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+function safeNumber(value) {
+  return Number.isFinite(value) ? value : 0;
+}
+function quickSystemInfo() {
+  const cpus = os4.cpus();
+  const total = os4.totalmem();
+  const free = os4.freemem();
+  const used = Math.max(0, total - free);
+  const root = process.platform === "win32" ? `${(process.env.SystemDrive ?? "C:").replace(/\\$/u, "")}\\` : "/";
+  const disks = [];
+  try {
+    const stats = statfsSync(root);
+    const blockSize = safeNumber(stats.bsize);
+    const totalBytes = blockSize * safeNumber(stats.blocks);
+    const freeBytes = blockSize * safeNumber(stats.bfree);
+    if (totalBytes > 0) {
+      disks.push({
+        mount: root,
+        totalBytes,
+        freeBytes,
+        availableBytes: blockSize * safeNumber(stats.bavail),
+        usedBytes: Math.max(0, totalBytes - freeBytes),
+        usedPercent: round((totalBytes - freeBytes) / totalBytes * 100, 1)
+      });
+    }
+  } catch {
+  }
+  return {
+    sampledAt: (/* @__PURE__ */ new Date()).toISOString(),
+    hostname: os4.hostname(),
+    platform: process.platform,
+    arch: process.arch,
+    cpu: { model: cpus[0]?.model ?? "unknown", cores: cpus.length, usagePercent: 0 },
+    memory: {
+      totalBytes: total,
+      freeBytes: free,
+      usedBytes: used,
+      usedPercent: total === 0 ? 0 : round(used / total * 100, 1)
+    },
+    disks
+  };
+}
+
 // src/lib/service.mjs
 var HERE = path5.dirname(fileURLToPath(import.meta.url));
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync3(path5.join(current, "build", "recipes.json")) && existsSync3(path5.join(current, "code", "build"))) {
+    if (existsSync4(path5.join(current, "build", "recipes.json")) && existsSync4(path5.join(current, "code", "build"))) {
       return current;
     }
     const parent = path5.dirname(current);
@@ -1833,7 +1888,7 @@ function findRepositoryRoot(start) {
 var REPOSITORY_ROOT = findRepositoryRoot(HERE);
 function packageVersion() {
   try {
-    const parsed = JSON.parse(readFileSync(path5.join(REPOSITORY_ROOT, "package.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync2(path5.join(REPOSITORY_ROOT, "package.json"), "utf8"));
     return typeof parsed.version === "string" ? parsed.version : "0.0.0";
   } catch {
     return "0.0.0";
@@ -1856,12 +1911,21 @@ var PersonWebService = class {
     this.overlayRoot = path5.join(REPOSITORY_ROOT, "build", "overlays");
     this.home = path5.dirname(this.dataDir);
     this.deployRoot = path5.join(this.dataDir, "deploy");
+    this.packagesDir = path5.join(os5.homedir(), ".dsh", "packages");
     this.deploy = new DeployManager({
       repositoryRoot: REPOSITORY_ROOT,
       dataDir: this.deployRoot,
       log: (line) => this.logLine(`deploy: ${line}`)
     });
     this.running = /* @__PURE__ */ new Map();
+    this.systemCache = null;
+  }
+  /** Cached local host inventory for the member table. */
+  async systemInfo() {
+    if (this.systemCache !== null && this.systemCache.expiresAt > Date.now()) return this.systemCache.value;
+    const value = quickSystemInfo();
+    this.systemCache = { value, expiresAt: Date.now() + 3e4 };
+    return value;
   }
   /** No child process is owned directly; jobs own their own. */
   async dispose() {
@@ -1878,7 +1942,7 @@ var PersonWebService = class {
     return {
       ok: true,
       host: {
-        hostname: os4.hostname(),
+        hostname: os5.hostname(),
         platform: process.platform,
         arch: process.arch,
         version: this.version,
@@ -1920,13 +1984,14 @@ var PersonWebService = class {
     const self = {
       id: "local",
       kind: "self",
-      name: identity?.selfName ?? os4.hostname(),
+      name: identity?.selfName ?? os5.hostname(),
       ip: identity?.selfIp ?? "",
       online: true,
       dsh: true,
       port: null,
       latencyMs: 0,
       gate: null,
+      system: await this.systemInfo(),
       error: null
     };
     const snapshot = await discoverMembers({
@@ -2015,7 +2080,7 @@ var PersonWebService = class {
    * @returns {Promise<object[]>} jobs.
    */
   async jobs() {
-    if (!existsSync3(this.jobRoot)) return [];
+    if (!existsSync4(this.jobRoot)) return [];
     const entries = await readdir3(this.jobRoot, { withFileTypes: true });
     const jobs = [];
     for (const entry of entries) {
@@ -2074,6 +2139,55 @@ var PersonWebService = class {
         files: (step.files ?? []).map((file) => ({ path: file.path, baseSha256: file.baseSha256 ?? null }))
       }))
     };
+  }
+  /**
+   * Local deployment packages. The fixed directory is `~/.dsh/packages`.
+   * @returns {Promise<object>} package list.
+   */
+  async packages() {
+    const entries = await readdir3(this.packagesDir, { withFileTypes: true }).catch(() => []);
+    const packages = [];
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(entry.name)) continue;
+      const file = path5.join(this.packagesDir, entry.name);
+      const info = await stat4(file).catch(() => null);
+      if (info === null) continue;
+      packages.push({
+        name: entry.name,
+        path: file,
+        bytes: info.size,
+        mtime: info.mtime.toISOString(),
+        target: /win(?:dows)?/iu.test(entry.name) ? "windows" : "linux"
+      });
+    }
+    packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
+    return { ok: true, dir: this.packagesDir, packages };
+  }
+  /**
+   * Deploy one local package to a discovered member over SSH.
+   * @param {{member?: string, package?: string}} request member id/ip and package filename.
+   * @returns {Promise<object>} deploy job.
+   */
+  async deployMember(request) {
+    const memberId = typeof request.member === "string" ? request.member.trim() : "";
+    const packageName = typeof request.package === "string" ? request.package.trim() : "";
+    if (memberId === "") throw new Error("member is required");
+    if (packageName === "" || path5.basename(packageName) !== packageName) throw new Error("package must be a filename");
+    const listed = await this.packages();
+    const selected = listed.packages.find((entry) => entry.name === packageName);
+    if (selected === void 0) throw new Error(`package not found in ${this.packagesDir}`);
+    const snapshot = await this.members();
+    const member = [snapshot.local, ...snapshot.members].find((candidate) => candidate.id === memberId);
+    if (member === void 0) throw new Error(`member not found: ${memberId}`);
+    if (member.ip === "") throw new Error(`member ${memberId} has no VPN address`);
+    const result = await this.deploy.start({
+      host: member.ip,
+      user: "root",
+      os: selected.target === "windows" ? "windows" : "linux",
+      package: selected.path
+    });
+    return { ok: true, job: result.job, member: { id: member.id, name: member.name, ip: member.ip }, packagesDir: this.packagesDir };
   }
   /**
    * Plan an SSH blue-green deployment without touching the network.
@@ -2178,6 +2292,10 @@ function registerApi(ctx, service) {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() });
           return;
         }
+        if (method === "GET" && path8 === "/packages") {
+          writeJson(response, 200, await service.packages());
+          return;
+        }
         if (method === "GET") {
           const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path8);
           if (read !== null) {
@@ -2199,6 +2317,15 @@ function registerApi(ctx, service) {
         }
         if (request.headers[AGENT_HEADER] !== "1") {
           writeJson(response, 403, { ok: false, error: { code: "forbidden", message: `Missing the ${AGENT_HEADER} header.` } });
+          return;
+        }
+        if (path8 === "/deploy") {
+          const body = await readJson(request);
+          const result = await service.deployMember({
+            member: typeof body.member === "string" ? body.member : void 0,
+            package: typeof body.package === "string" ? body.package : void 0
+          });
+          writeJson(response, 202, result);
           return;
         }
         if (path8 === "/build") {
@@ -2240,15 +2367,15 @@ function registerApi(ctx, service) {
 // src/lib/member-tasks.mjs
 import { randomUUID } from "node:crypto";
 import { mkdir as mkdir4, readFile as readFile6, readdir as readdir4, rename as rename3, writeFile as writeFile4 } from "node:fs/promises";
-import { existsSync as existsSync4, readFileSync as readFileSync2 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync3 } from "node:fs";
 import path6 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
 function envFile(file) {
   const values = {};
-  if (!existsSync4(file)) return values;
-  for (const raw of readFileSync2(file, "utf8").split(/\r?\n/)) {
+  if (!existsSync5(file)) return values;
+  for (const raw of readFileSync3(file, "utf8").split(/\r?\n/)) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;
     const index = line.indexOf("=");

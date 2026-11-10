@@ -77,6 +77,10 @@ export function registerApi(ctx, service) {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() })
           return
         }
+        if (method === 'GET' && path === '/packages') {
+          writeJson(response, 200, await service.packages())
+          return
+        }
         if (method === 'GET') {
           const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path)
           if (read !== null) {
@@ -98,6 +102,15 @@ export function registerApi(ctx, service) {
         }
         if (request.headers[AGENT_HEADER] !== '1') {
           writeJson(response, 403, { ok: false, error: { code: 'forbidden', message: `Missing the ${AGENT_HEADER} header.` } })
+          return
+        }
+        if (path === '/deploy') {
+          const body = await readJson(request)
+          const result = await service.deployMember({
+            member: typeof body.member === 'string' ? body.member : undefined,
+            package: typeof body.package === 'string' ? body.package : undefined,
+          })
+          writeJson(response, 202, result)
           return
         }
         if (path === '/build') {

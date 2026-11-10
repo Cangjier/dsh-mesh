@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { collectSystemInfo } from '../code/interop-service/system-info.mjs'
+import { collectSystemInfo } from '../code/shared/system-info.mjs'
 
 test('system inventory reports CPU, memory and disk facts', async () => {
   const info = await collectSystemInfo({ sampleMs: 50 })

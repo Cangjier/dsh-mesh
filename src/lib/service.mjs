@@ -8,7 +8,7 @@
  * @module @local/dsh-person-web/service
  */
 
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile, readdir, stat } from 'node:fs/promises'
 import { readFileSync, existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -27,6 +27,7 @@ import {
 } from '../../code/build/job.mjs'
 import { DEFAULT_REF, DEFAULT_SOURCE } from '../../code/build/engine.mjs'
 import { DeployManager } from '../../code/deploy/engine.mjs'
+import { quickSystemInfo } from '../../code/shared/system-info.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -83,6 +84,7 @@ export class PersonWebService {
     this.overlayRoot = path.join(REPOSITORY_ROOT, 'build', 'overlays')
     this.home = path.dirname(this.dataDir)
     this.deployRoot = path.join(this.dataDir, 'deploy')
+    this.packagesDir = path.join(os.homedir(), '.dsh', 'packages')
     this.deploy = new DeployManager({
       repositoryRoot: REPOSITORY_ROOT,
       dataDir: this.deployRoot,
@@ -90,6 +92,16 @@ export class PersonWebService {
     })
     /** @type {Map<string, Promise<object>>} */
     this.running = new Map()
+    /** @type {{value: object, expiresAt: number}|null} */
+    this.systemCache = null
+  }
+
+  /** Cached local host inventory for the member table. */
+  async systemInfo() {
+    if (this.systemCache !== null && this.systemCache.expiresAt > Date.now()) return this.systemCache.value
+    const value = quickSystemInfo()
+    this.systemCache = { value, expiresAt: Date.now() + 30_000 }
+    return value
   }
 
   /** No child process is owned directly; jobs own their own. */
@@ -160,6 +172,7 @@ export class PersonWebService {
       port: null,
       latencyMs: 0,
       gate: null,
+      system: await this.systemInfo(),
       error: null,
     }
     const snapshot = await discoverMembers({
@@ -323,6 +336,57 @@ export class PersonWebService {
         files: (step.files ?? []).map(file => ({ path: file.path, baseSha256: file.baseSha256 ?? null })),
       })),
     }
+  }
+
+  /**
+   * Local deployment packages. The fixed directory is `~/.dsh/packages`.
+   * @returns {Promise<object>} package list.
+   */
+  async packages() {
+    const entries = await readdir(this.packagesDir, { withFileTypes: true }).catch(() => [])
+    const packages = []
+    for (const entry of entries) {
+      if (!entry.isFile()) continue
+      if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(entry.name)) continue
+      const file = path.join(this.packagesDir, entry.name)
+      const info = await stat(file).catch(() => null)
+      if (info === null) continue
+      packages.push({
+        name: entry.name,
+        path: file,
+        bytes: info.size,
+        mtime: info.mtime.toISOString(),
+        target: /win(?:dows)?/iu.test(entry.name) ? 'windows' : 'linux',
+      })
+    }
+    packages.sort((left, right) => right.mtime.localeCompare(left.mtime))
+    return { ok: true, dir: this.packagesDir, packages }
+  }
+
+  /**
+   * Deploy one local package to a discovered member over SSH.
+   * @param {{member?: string, package?: string}} request member id/ip and package filename.
+   * @returns {Promise<object>} deploy job.
+   */
+  async deployMember(request) {
+    const memberId = typeof request.member === 'string' ? request.member.trim() : ''
+    const packageName = typeof request.package === 'string' ? request.package.trim() : ''
+    if (memberId === '') throw new Error('member is required')
+    if (packageName === '' || path.basename(packageName) !== packageName) throw new Error('package must be a filename')
+    const listed = await this.packages()
+    const selected = listed.packages.find(entry => entry.name === packageName)
+    if (selected === undefined) throw new Error(`package not found in ${this.packagesDir}`)
+    const snapshot = await this.members()
+    const member = [snapshot.local, ...snapshot.members].find(candidate => candidate.id === memberId)
+    if (member === undefined) throw new Error(`member not found: ${memberId}`)
+    if (member.ip === '') throw new Error(`member ${memberId} has no VPN address`)
+    const result = await this.deploy.start({
+      host: member.ip,
+      user: 'root',
+      os: selected.target === 'windows' ? 'windows' : 'linux',
+      package: selected.path,
+    })
+    return { ok: true, job: result.job, member: { id: member.id, name: member.name, ip: member.ip }, packagesDir: this.packagesDir }
   }
 
   /**

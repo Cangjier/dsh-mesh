@@ -4,15 +4,14 @@ import {
   Button,
   Card,
   ConfigProvider,
-  Descriptions,
   Empty,
-  Input,
+  Modal,
   Select,
   Space,
   Spin,
   Table,
-  Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
   theme as antdTheme,
@@ -20,25 +19,18 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import {
   ApartmentOutlined,
-  CheckCircleOutlined,
-  CloudServerOutlined,
+  CloudDownloadOutlined,
   ReloadOutlined,
-  RocketOutlined,
+  SwapOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
 import enUS from 'antd/locale/en_US'
 import styles from './styles.css'
-import { api, ApiError, type BuildJob, type HostStatus, type Member, type Snapshot } from './api'
+import { api, ApiError, type Member, type PackageInfo, type Snapshot, type SystemInfo } from './api'
 
 const NS = 'dsh-person-web'
 const PANEL_ID = 'person-web'
-const TARGET_OPTIONS = [
-  { value: 'linux-x64', label: 'Linux x64' },
-  { value: 'win-x64', label: 'Windows x64' },
-  { value: 'linux-arm64', label: 'Linux arm64' },
-]
-const DEFAULT_SOURCE = 'https://github.com/deepseek-ai/deepseek-harness'
 
 function useThemeMode(ctx: any): 'light' | 'dark' {
   const [snapshot, setSnapshot] = useState<any>(() => ctx.theme.getTheme())
@@ -51,42 +43,66 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function statusColor(status: string): string {
-  if (status === 'done') return 'success'
-  if (status === 'running' || status === 'created' || status === 'planned') return 'processing'
-  if (status === 'needs-fix') return 'warning'
-  if (status === 'failed' || status === 'build-failed') return 'error'
-  return 'default'
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0'
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  let amount = value
+  let unit = 0
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024
+    unit += 1
+  }
+  return `${amount >= 10 || unit === 0 ? String(Math.round(amount)) : amount.toFixed(1)} ${units[unit]}`
 }
 
-function statusLabel(status: string): string {
-  const map: Record<string, string> = {
-    created: '已创建',
-    running: '运行中',
-    planned: '检查通过',
-    'needs-fix': '需要修复',
-    'build-failed': '构建失败',
-    done: '完成',
-    failed: '失败',
+function memberSystem(member: Member): SystemInfo | null {
+  return member.system ?? ((member.gate as { system?: SystemInfo } | null)?.system ?? null)
+}
+
+function systemText(member: Member): string {
+  const system = memberSystem(member)
+  if (system === null) return '—'
+  const parts: string[] = []
+  if (system.cpu !== undefined) {
+    parts.push(`CPU ${String(system.cpu.cores ?? '?')}C ${String(system.cpu.usagePercent ?? 0)}%`)
   }
-  return map[status] ?? status
+  if (system.memory !== undefined) {
+    parts.push(`MEM ${String(system.memory.usedPercent ?? 0)}%`)
+  }
+  const disks = system.disks ?? []
+  const root = disks.find(disk => disk.mount === '/' || disk.mount === 'C:\\') ?? disks[0]
+  if (root !== undefined) parts.push(`${root.mount ?? 'disk'} ${String(root.usedPercent ?? 0)}%`)
+  return parts.length === 0 ? '—' : parts.join(' · ')
+}
+
+function systemDetails(member: Member): string {
+  const system = memberSystem(member)
+  if (system === null) return '未获取到系统信息'
+  const lines: string[] = []
+  if (system.cpu !== undefined) {
+    lines.push(`${system.cpu.model ?? 'CPU'} · ${String(system.cpu.cores ?? '?')} 核 · ${String(system.cpu.usagePercent ?? 0)}%`)
+  }
+  if (system.memory !== undefined) {
+    lines.push(`内存 ${formatBytes(system.memory.usedBytes ?? 0)} / ${formatBytes(system.memory.totalBytes ?? 0)} · ${String(system.memory.usedPercent ?? 0)}%`)
+  }
+  for (const disk of system.disks ?? []) {
+    lines.push(`${disk.mount ?? 'disk'} ${formatBytes(disk.usedBytes ?? 0)} / ${formatBytes(disk.totalBytes ?? 0)} · ${String(disk.usedPercent ?? 0)}%`)
+  }
+  return lines.join('\n')
 }
 
 function Panel({ ctx }: { ctx: any }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
-  const [host, setHost] = useState<HostStatus | null>(null)
   const [gateAvailable, setGateAvailable] = useState(false)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState<string | null>(null)
-  const [tab, setTab] = useState('members')
-  const [source, setSource] = useState('')
-  const [ref, setRef] = useState('')
-  const [targets, setTargets] = useState<string[]>(['linux-x64', 'win-x64'])
-  const [jobs, setJobs] = useState<BuildJob[]>([])
-  const [job, setJob] = useState<BuildJob | null>(null)
-  const [logLines, setLogLines] = useState<string[]>([])
-  const [buildBusy, setBuildBusy] = useState('')
+  const [deployTarget, setDeployTarget] = useState<Member | null>(null)
+  const [packages, setPackages] = useState<PackageInfo[]>([])
+  const [packagesDir, setPackagesDir] = useState('')
+  const [packagesLoading, setPackagesLoading] = useState(false)
+  const [packagesError, setPackagesError] = useState('')
+  const [selectedPackage, setSelectedPackage] = useState<string | undefined>(undefined)
   const [messageApi, contextHolder] = message.useMessage()
   const mode = useThemeMode(ctx)
 
@@ -97,11 +113,9 @@ function Panel({ ctx }: { ctx: any }) {
       if (gate !== null) {
         setGateAvailable(true)
         setSnapshot(gate)
-        setHost(null)
       } else {
         setGateAvailable(false)
-        const [status, members] = await Promise.all([api.hostStatus(), api.hostMembers()])
-        setHost(status)
+        const members = await api.hostMembers()
         setSnapshot({ ...members, target: 'local' })
       }
       setError(null)
@@ -112,388 +126,174 @@ function Panel({ ctx }: { ctx: any }) {
     }
   }, [])
 
-  const loadJobs = useCallback(async () => {
-    try {
-      const result = await api.jobs()
-      setJobs(result.jobs)
-    } catch {
-      // A panel opened through a gate whose host plugin is older simply has no
-      // job API; the member tab still works.
-    }
-  }, [])
-
   useEffect(() => {
     void load()
-    void loadJobs()
-  }, [load, loadJobs])
+  }, [load])
 
-  const currentTarget = snapshot?.target ?? 'local'
   const memberRows = useMemo(() => {
     if (snapshot === null) return []
-    const local = snapshot.local ?? (snapshot as unknown as { self?: Member }).self
+    const local = snapshot.local
     const peers = snapshot.members.filter(member => member.id !== 'local')
     return local ? [local, ...peers] : peers
   }, [snapshot])
-  const targetMember = useMemo(
-    () => memberRows.find(member => member.id === currentTarget) ?? null,
-    [memberRows, currentTarget],
-  )
 
-  const select = useCallback(async (id: string) => {
-    if (!gateAvailable) {
-      messageApi.warning('当前页面不是通过网关访问的，成员切换不可用。')
-      return
-    }
-    setBusy(id)
+  const currentTarget = snapshot?.target ?? 'local'
+
+  const switchMember = useCallback(async (member: Member) => {
+    if (!gateAvailable) return
+    setBusy(member.id)
     try {
-      await api.gateSelect(id)
+      await api.gateSelect(member.id)
       window.location.reload()
     } catch (failure) {
       setError(errorText(failure))
       setBusy('')
     }
-  }, [gateAvailable, messageApi])
+  }, [gateAvailable])
 
-  const refreshJob = useCallback(async (id: string) => {
+  const loadPackages = useCallback(async () => {
+    setPackagesLoading(true)
+    setPackagesError('')
     try {
-      const result = await api.job(id)
-      setJob(result.job)
-      const log = await api.log(id, 120)
-      setLogLines(log.lines)
+      const result = await api.packages()
+      setPackages(result.packages)
+      setPackagesDir(result.dir)
+      setSelectedPackage(result.packages[0]?.name)
     } catch (failure) {
-      setError(errorText(failure))
+      setPackagesError(errorText(failure))
+      setPackages([])
+      setSelectedPackage(undefined)
+    } finally {
+      setPackagesLoading(false)
     }
   }, [])
 
-  const chooseJob = useCallback(async (id: string) => {
-    const found = jobs.find(candidate => candidate.id === id)
-    if (found === undefined) return
-    setJob(found)
-    await refreshJob(id)
-  }, [jobs, refreshJob])
+  const openDeploy = useCallback((member: Member) => {
+    setDeployTarget(member)
+    setPackages([])
+    setPackagesDir('')
+    setPackagesError('')
+    setSelectedPackage(undefined)
+    void loadPackages()
+  }, [loadPackages])
 
-  const refreshAll = useCallback(async () => {
-    await Promise.all([load(), loadJobs()])
-    if (job !== null) await refreshJob(job.id)
-  }, [load, loadJobs, job, refreshJob])
-
-  const refreshBuild = useCallback(async () => {
-    await loadJobs()
-    if (job !== null) await refreshJob(job.id)
-  }, [loadJobs, job, refreshJob])
-
-  const startBuild = useCallback(async (planOnly: boolean) => {
-    setBuildBusy(planOnly ? 'plan' : 'build')
+  const deploy = useCallback(async () => {
+    if (deployTarget === null || selectedPackage === undefined) return
+    setBusy(deployTarget.id)
     try {
-      const result = await api.startBuild({
-        source: source.trim() === '' ? undefined : source.trim(),
-        ref: ref.trim() === '' ? undefined : ref.trim(),
-        targets,
-        planOnly,
-      })
-      setJob(result.job)
-      setLogLines([])
-      setTab('build')
-      await loadJobs()
-      await refreshJob(result.job.id)
+      const result = await api.deploy(deployTarget.id, selectedPackage)
+      messageApi.success(`部署任务已启动：${result.job.id}；完成后点右上角刷新`)
+      setDeployTarget(null)
+      setError(null)
     } catch (failure) {
       setError(errorText(failure))
     } finally {
-      setBuildBusy('')
+      setBusy('')
     }
-  }, [source, ref, targets, loadJobs, refreshJob])
+  }, [deployTarget, selectedPackage, messageApi])
 
-  const learn = useCallback(async () => {
-    if (job === null) return
-    setBuildBusy('learn')
-    try {
-      await api.learn(job.id)
-      await refreshJob(job.id)
-      await loadJobs()
-      messageApi.success('已把工作树里的修改收成覆盖层。')
-    } catch (failure) {
-      setError(errorText(failure))
-    } finally {
-      setBuildBusy('')
-    }
-  }, [job, refreshJob, loadJobs, messageApi])
-
-  const resume = useCallback(async () => {
-    if (job === null) return
-    setBuildBusy('resume')
-    try {
-      const result = await api.resume(job.id)
-      setJob(result.job)
-      await loadJobs()
-      await refreshJob(job.id)
-      messageApi.success('已继续构建，复用现有工作树。')
-    } catch (failure) {
-      setError(errorText(failure))
-    } finally {
-      setBuildBusy('')
-    }
-  }, [job, refreshJob, loadJobs, messageApi])
-
-  const columns: ColumnsType<Member> = [
-    {
-      title: '成员',
-      dataIndex: 'name',
-      render: (_value, member) => (
-        <Space size={6}>
-          {member.kind === 'self' ? <Tag color="blue">本机</Tag> : <CloudServerOutlined />}
-          <span>{member.name}</span>
-        </Space>
-      ),
-    },
-    {
-      title: '地址 / id',
-      dataIndex: 'id',
-      render: value => <span className={"dsh-pw-mono"}>{value}</span>,
-    },
-    {
-      title: '状态',
-      width: 210,
-      render: (_value, member) => (
-        <Space size={4} wrap>
-          <Tag color={member.online ? 'green' : 'default'}>{member.online ? '在线' : '离线'}</Tag>
-          {member.dsh
-            ? <Tag color="cyan">DSH :{member.port}</Tag>
-            : <Tag>未部署 / 不可达</Tag>}
-        </Space>
-      ),
-    },
-    {
-      title: '延迟',
-      dataIndex: 'latencyMs',
-      width: 90,
-      render: value => (typeof value === 'number' && value > 0 ? `${String(value)} ms` : '—'),
-    },
-    {
+  const columns: ColumnsType<Member> = useMemo(() => {
+    const actionColumn: ColumnsType<Member>[number] = {
       title: '操作',
-      width: 120,
+      key: 'action',
+      width: 150,
+      align: 'right',
       render: (_value, member) => {
-        if (member.id === currentTarget) return <Tag color="processing">当前</Tag>
-        return (
-          <Button
-            size="small"
-            disabled={!gateAvailable || busy !== ''}
-            loading={busy === member.id}
-            onClick={() => { void select(member.id) }}
-          >
-            {member.id === 'local' ? '返回本机' : '切换'}
-          </Button>
-        )
-      },
-    },
-  ]
-
-  const memberTab = (
-    <Space direction="vertical" size={14} style={{ width: '100%' }}>
-      {!gateAvailable ? (
-        <Alert
-          type="info"
-          showIcon
-          message="当前页面没有网关"
-          description="成员切换需要页面由 dsh-person-web 网关提供。直接打开 DSH 时仍可查看本机、WireGuard 状态并运行构建。"
-        />
-      ) : null}
-      <div className={"dsh-pw-target"}>
-        <Space size={8} wrap>
-          <Typography.Text strong>当前成员</Typography.Text>
-          <Tag color="blue">{targetMember?.name ?? currentTarget}</Tag>
-          <span className={"dsh-pw-mono"}>{currentTarget}</span>
-          {snapshot?.cluster?.configured === false ? <Tag color="orange">cluster secret 未配置</Tag> : null}
-        </Space>
-        {currentTarget !== 'local' ? (
-          <Button size="small" onClick={() => { api.gateReset() }}>返回本机</Button>
-        ) : null}
-      </div>
-      {(snapshot?.warnings?.length ?? 0) > 0 ? (
-        <Alert
-          type="warning"
-          showIcon
-          message="WireGuard 提示"
-          description={snapshot?.warnings.join('；')}
-        />
-      ) : null}
-      <Table<Member>
-        rowKey="id"
-        size="middle"
-        pagination={false}
-        dataSource={memberRows}
-        columns={columns}
-        locale={{ emptyText: <Empty description="还没有发现成员" /> }}
-      />
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        成员来自 dsh-wireguard 的 peer 列表；每个 peer 的 /__gate/member 会报告它的网关与 DSH 状态。
-        切换后浏览器会带着 dsh_gate_target cookie 重新加载，后续请求由网关转发到该成员。
-      </Typography.Text>
-    </Space>
-  )
-
-  const buildTab = (
-    <Space direction="vertical" size={14} style={{ width: '100%' }}>
-      <Card
-        size="small"
-        title="从 DSH 源码构建修改版 Web 包"
-        extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => { void refreshBuild() }}>刷新任务</Button>}
-      >
-        <div className={"dsh-pw-form"}>
-          <label>
-            <Typography.Text type="secondary">源码（留空用固定上游）</Typography.Text>
-            <Input
-              value={source}
-              placeholder={DEFAULT_SOURCE}
-              onChange={event => setSource(event.target.value)}
-            />
-          </label>
-          <label>
-            <Typography.Text type="secondary">ref</Typography.Text>
-            <Input value={ref} placeholder="master" onChange={event => setRef(event.target.value)} />
-          </label>
-          <label>
-            <Typography.Text type="secondary">目标</Typography.Text>
-            <Select
-              mode="multiple"
-              value={targets}
-              options={TARGET_OPTIONS}
-              onChange={value => setTargets(value)}
-              style={{ width: '100%' }}
-            />
-          </label>
-          <Space>
+        if (member.id === currentTarget) return <Tag color="blue">当前</Tag>
+        if (member.dsh && gateAvailable && member.port !== null) {
+          return (
             <Button
-              type="primary"
-              icon={<RocketOutlined />}
-              loading={buildBusy === 'build'}
-              onClick={() => { void startBuild(false) }}
-            >
-              开始构建
-            </Button>
-            <Button
-              loading={buildBusy === 'plan'}
-              onClick={() => { void startBuild(true) }}
-            >
-              只检查覆盖层
-            </Button>
-          </Space>
-        </div>
-        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12, marginBottom: 0 }}>
-          构建在后台运行：应用 build/recipes.json 的源码覆盖层，运行 pnpm install 与 pnpm run build:web，
-          然后按目标打包。覆盖层失配时会先生成工作单，不会带着半套修改继续构建。
-          运行中的任务不会自动轮询，点“刷新任务”或右上角“刷新”查看最新状态。
-        </Typography.Paragraph>
-      </Card>
-
-      <Card size="small" title="任务">
-        <Space wrap style={{ marginBottom: 12 }}>
-          <Select
-            style={{ minWidth: 320 }}
-            placeholder="选择已有任务"
-            value={job?.id}
-            onChange={id => { void chooseJob(id) }}
-            options={jobs.map(item => ({
-              value: item.id,
-              label: `${item.id}  ·  ${statusLabel(item.status)}  ·  ${item.ref}`,
-            }))}
-          />
-          {job !== null ? (
-            <Button size="small" icon={<ReloadOutlined />} onClick={() => { void refreshJob(job.id) }}>
-              刷新当前任务
-            </Button>
-          ) : null}
-        </Space>
-
-        {job === null ? (
-          <Empty description="还没有选择任务" />
-        ) : (
-          <Space direction="vertical" size={10} style={{ width: '100%' }}>
-            <Descriptions
               size="small"
-              column={2}
-              items={[
-                { key: 'id', label: '任务', children: <span className={"dsh-pw-mono"}>{job.id}</span> },
-                { key: 'status', label: '状态', children: <Tag color={statusColor(job.status)}>{statusLabel(job.status)}</Tag> },
-                { key: 'phase', label: '阶段', children: job.phase },
-                { key: 'ref', label: '源码', children: <span className={"dsh-pw-mono"}>{job.source}@{job.ref}</span> },
-                { key: 'targets', label: '目标', children: job.targets.join(', ') },
-                { key: 'updated', label: '更新', children: job.updatedAt },
-              ]}
-            />
-            {job.error ? <Alert type="error" showIcon message="构建失败" description={job.error} /> : null}
-            {job.status === 'needs-fix' ? (
-              <>
-                <Alert
-                  type="warning"
-                  showIcon
-                  message="覆盖层需要修复"
-                  description={job.workOrderMarkdown ?? '工作单已写入任务目录。把工作单交给 subagent 修好工作树后，点“学习覆盖层”，再继续构建。'}
-                />
-                <Space wrap>
-                  <Button
-                    type={job.learnedAt ? 'default' : 'primary'}
-                    loading={buildBusy === 'learn'}
-                    onClick={() => { void learn() }}
-                  >
-                    学习覆盖层
-                  </Button>
-                  <Button
-                    loading={buildBusy === 'resume'}
-                    onClick={() => { void resume() }}
-                  >
-                    继续构建
-                  </Button>
-                </Space>
-              </>
-            ) : null}
-            {job.workOrderPrompt ? (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                工作单提示词文件：<span className={"dsh-pw-mono"}>{job.workOrderPrompt}</span>
-              </Typography.Text>
-            ) : null}
-            {(job.artifacts?.length ?? 0) > 0 ? (
-              <ul className={"dsh-pw-artifacts"}>
-                {job.artifacts?.map(artifact => (
-                  <li key={artifact.target}>
-                    <Tag>{artifact.target}</Tag>
-                    <span className={"dsh-pw-mono"}>{artifact.archive}</span>
-                    {' '}
-                    ({(artifact.bytes / 1024 / 1024).toFixed(1)} MB)
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-            <pre className={"dsh-pw-log"}>{logLines.length > 0 ? logLines.join('\n') : '暂无日志'}</pre>
+              icon={<SwapOutlined />}
+              loading={busy === member.id}
+              onClick={() => { void switchMember(member) }}
+            >
+              切换
+            </Button>
+          )
+        }
+        if (!member.dsh) {
+          return (
+            <Button
+              size="small"
+              icon={<CloudDownloadOutlined />}
+              onClick={() => openDeploy(member)}
+            >
+              部署
+            </Button>
+          )
+        }
+        return <Typography.Text type="secondary">—</Typography.Text>
+      },
+    }
+    const base: ColumnsType<Member> = [
+      {
+        title: '成员',
+        key: 'member',
+        render: (_value, member) => (
+          <Space direction="vertical" size={0}>
+            <Space size={6}>
+              <Typography.Text strong>{member.name}</Typography.Text>
+              {member.kind === 'self' ? <Tag>本机</Tag> : null}
+            </Space>
+            <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+              {member.gate?.hostname !== undefined ? String(member.gate.hostname) : member.id}
+            </Typography.Text>
           </Space>
-        )}
-      </Card>
-    </Space>
-  )
+        ),
+      },
+      {
+        title: '地址',
+        key: 'address',
+        width: 150,
+        render: (_value, member) => (
+          <Typography.Text className="dsh-pw-mono" style={{ fontSize: 12 }}>
+            {member.ip || member.id}
+          </Typography.Text>
+        ),
+      },
+      {
+        title: '状态',
+        key: 'status',
+        width: 190,
+        render: (_value, member) => (
+          <Space size={6} wrap>
+            <Tag color={member.online ? 'green' : 'default'}>{member.online ? '在线' : '离线'}</Tag>
+            {member.dsh
+              ? <Tag color="cyan">DSH :{String(member.port ?? '?')}</Tag>
+              : <Tag>未部署</Tag>}
+            {member.latencyMs > 0 ? <Typography.Text type="secondary" style={{ fontSize: 11 }}>{String(member.latencyMs)} ms</Typography.Text> : null}
+          </Space>
+        ),
+      },
+      {
+        title: '系统',
+        key: 'system',
+        width: 260,
+        render: (_value, member) => (
+          <Tooltip title={<pre style={{ margin: 0, fontFamily: 'inherit', whiteSpace: 'pre-wrap' }}>{systemDetails(member)}</pre>}>
+            <Typography.Text style={{ fontSize: 12 }}>{systemText(member)}</Typography.Text>
+          </Tooltip>
+        ),
+      },
+    ]
+    return [...base, actionColumn]
+  }, [busy, currentTarget, gateAvailable, openDeploy, switchMember])
 
-  const pages = [
-    {
-      key: 'members',
-      label: (
-        <Space size={6}>
-          <CheckCircleOutlined />
-          成员
-          <Tag>{memberRows.length}</Tag>
-        </Space>
-      ),
-      children: memberTab,
-    },
-    {
-      key: 'build',
-      label: (
-        <Space size={6}>
-          <RocketOutlined />
-          构建
-          {job !== null ? <Tag color={statusColor(job.status)}>{statusLabel(job.status)}</Tag> : null}
-        </Space>
-      ),
-      children: buildTab,
-    },
-  ]
+  if (loading && snapshot === null) {
+    return (
+      <ConfigProvider
+        locale={ctx.locale.getSnapshot().active?.startsWith('zh') === false ? enUS : zhCN}
+        theme={{ algorithm: mode === 'dark' ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm }}
+      >
+        <style>{styles}</style>
+        <div className="dsh-pw-boot">
+          <Typography.Title level={3} style={{ margin: 0 }}>DSH 成员</Typography.Title>
+          <Spin size="large" />
+        </div>
+      </ConfigProvider>
+    )
+  }
 
   return (
     <ConfigProvider
@@ -501,20 +301,17 @@ function Panel({ ctx }: { ctx: any }) {
       theme={{ algorithm: mode === 'dark' ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm }}
     >
       <style>{styles}</style>
-      <div className={"dsh-pw-page"}>
-        <div className={"dsh-pw-header"}>
+      <div className="dsh-pw-page">
+        <div className="dsh-pw-header">
           <div>
-            <h1 className={"dsh-pw-title"}>DSH 成员</h1>
-            <p className={"dsh-pw-subtitle"}>
-              WireGuard 局域网里的 DSH 发现、切换与源码构建。
-              {host !== null ? ` 本机 ${host.host.hostname} · ${host.host.platform}-${host.host.arch}` : ''}
-            </p>
+            <h1 className="dsh-pw-title">DSH 成员</h1>
+            <p className="dsh-pw-subtitle">WireGuard 局域网里的 DSH 发现、切换与部署。</p>
           </div>
-          <div className={"dsh-pw-toolbar"}>
-            <Tag icon={gateAvailable ? <CheckCircleOutlined /> : <WarningOutlined />} color={gateAvailable ? 'green' : 'default'}>
-              {gateAvailable ? '网关已连接' : '无网关'}
+          <div className="dsh-pw-toolbar">
+            <Tag icon={gateAvailable ? <ApartmentOutlined /> : <WarningOutlined />} color={gateAvailable ? 'green' : 'default'}>
+              {gateAvailable ? '网关已连接' : '本机直连'}
             </Tag>
-            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { void refreshAll() }}>刷新</Button>
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { void load() }}>刷新</Button>
           </div>
         </div>
 
@@ -530,13 +327,64 @@ function Panel({ ctx }: { ctx: any }) {
           />
         ) : null}
 
-        {loading && snapshot === null ? (
-          <div style={{ padding: 60, textAlign: 'center' }}><Spin size="large" /></div>
-        ) : (
-          <Tabs activeKey={tab} onChange={setTab} items={pages} />
-        )}
+        <Card size="small">
+          <Table<Member>
+            rowKey="id"
+            size="middle"
+            pagination={false}
+            dataSource={memberRows}
+            columns={columns}
+            locale={{ emptyText: <Empty description="还没有发现成员" /> }}
+          />
+        </Card>
         {contextHolder}
       </div>
+
+      <Modal
+        open={deployTarget !== null}
+        title={`部署到 ${deployTarget?.name ?? ''}`}
+        okText="开始部署"
+        cancelText="取消"
+        confirmLoading={busy !== ''}
+        okButtonProps={{ disabled: selectedPackage === undefined }}
+        onCancel={() => setDeployTarget(null)}
+        onOk={() => { void deploy() }}
+        destroyOnHidden
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            部署包目录：<span className="dsh-pw-mono">{packagesDir || '~/.dsh/packages'}</span>
+          </Typography.Text>
+          <Space.Compact style={{ width: '100%' }}>
+            <Select
+              style={{ width: '100%' }}
+              loading={packagesLoading}
+              value={selectedPackage}
+              placeholder={packages.length === 0 ? '目录里没有部署包' : '选择部署包'}
+              onChange={value => setSelectedPackage(value)}
+              options={packages.map(item => ({
+                value: item.name,
+                label: `${item.name}  ·  ${item.target === 'windows' ? 'Windows' : 'Linux'}  ·  ${formatBytes(item.bytes)}`,
+              }))}
+            />
+            <Button icon={<ReloadOutlined />} loading={packagesLoading} onClick={() => { void loadPackages() }}>
+              刷新
+            </Button>
+          </Space.Compact>
+          {packagesError !== '' ? <Alert type="error" showIcon message={packagesError} /> : null}
+          {!packagesLoading && packages.length === 0 && packagesError === '' ? (
+            <Alert
+              type="info"
+              showIcon
+              message="没有可用的部署包"
+              description="把 .tar.gz / .zip 部署包放进 ~/.dsh/packages/，再点刷新。"
+            />
+          ) : null}
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            部署通过 SSH 在成员 22 端口执行，使用当前主机的默认 SSH 凭据；任务启动后不会自动刷新。
+          </Typography.Text>
+        </Space>
+      </Modal>
     </ConfigProvider>
   )
 }

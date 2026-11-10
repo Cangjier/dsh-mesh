@@ -168,6 +168,52 @@ function networkInfo() {
 }
 
 /**
+ * Fast CPU/memory/root-disk snapshot for member discovery. It never enumerates
+ * every mount or samples CPU, so it cannot stall a member probe.
+ * @returns {object} system summary.
+ */
+export function quickSystemInfo() {
+  const cpus = os.cpus()
+  const total = os.totalmem()
+  const free = os.freemem()
+  const used = Math.max(0, total - free)
+  const root = process.platform === 'win32'
+    ? `${(process.env.SystemDrive ?? 'C:').replace(/\\$/u, '')}\\`
+    : '/'
+  const disks = []
+  try {
+    const stats = statfsSync(root)
+    const blockSize = safeNumber(stats.bsize)
+    const totalBytes = blockSize * safeNumber(stats.blocks)
+    const freeBytes = blockSize * safeNumber(stats.bfree)
+    if (totalBytes > 0) {
+      disks.push({
+        mount: root,
+        totalBytes,
+        freeBytes,
+        availableBytes: blockSize * safeNumber(stats.bavail),
+        usedBytes: Math.max(0, totalBytes - freeBytes),
+        usedPercent: round(((totalBytes - freeBytes) / totalBytes) * 100, 1),
+      })
+    }
+  } catch { }
+  return {
+    sampledAt: new Date().toISOString(),
+    hostname: os.hostname(),
+    platform: process.platform,
+    arch: process.arch,
+    cpu: { model: cpus[0]?.model ?? 'unknown', cores: cpus.length, usagePercent: 0 },
+    memory: {
+      totalBytes: total,
+      freeBytes: free,
+      usedBytes: used,
+      usedPercent: total === 0 ? 0 : round((used / total) * 100, 1),
+    },
+    disks,
+  }
+}
+
+/**
  * Collect one host inventory snapshot.
  * @param {{sampleMs?: number}} [options] options.
  * @returns {Promise<object>} inventory.

@@ -37,6 +37,7 @@ import {
   readWireGuardState,
   wireGuardIdentity,
 } from '../shared/wireguard.mjs'
+import { quickSystemInfo } from '../shared/system-info.mjs'
 
 /** Path prefix that carries one proxied request to a member gate. */
 export const CLUSTER_PREFIX = '/__gate/cluster'
@@ -128,6 +129,7 @@ export class MemberService {
       arch: process.arch,
       dsh: { reachable: this.isUpstreamReady() },
       cluster: { configured: this.clusterKey !== '' },
+      system: quickSystemInfo(),
       updatedAt: new Date().toISOString(),
     }
   }

@@ -1,5 +1,14 @@
 /** Browser API for the person-web panel. */
 
+export interface SystemInfo {
+  hostname?: string
+  platform?: string
+  arch?: string
+  cpu?: { model?: string; cores?: number; usagePercent?: number }
+  memory?: { totalBytes?: number; usedBytes?: number; usedPercent?: number }
+  disks?: Array<{ mount?: string; totalBytes?: number; usedBytes?: number; usedPercent?: number }>
+}
+
 export interface Member {
   id: string
   kind: 'self' | 'peer'
@@ -11,6 +20,7 @@ export interface Member {
   latencyMs: number
   lastHandshakeAt: string | null
   gate: Record<string, unknown> | null
+  system?: SystemInfo | null
   error: string | null
 }
 
@@ -72,6 +82,27 @@ export interface BuildJob {
   running?: boolean
   learnedAt?: string | null
   artifacts?: Array<{ target: string; archive: string; bytes: number }>
+}
+
+export interface PackageInfo {
+  name: string
+  path: string
+  bytes: number
+  mtime: string
+  target: 'linux' | 'windows'
+}
+
+export interface PackagesResponse {
+  ok: boolean
+  dir: string
+  packages: PackageInfo[]
+}
+
+export interface DeployResponse {
+  ok: boolean
+  job: { id: string; target: { host: string; os: string }; status: string; phase: string }
+  member: { id: string; name: string; ip: string }
+  packagesDir: string
 }
 
 export class ApiError extends Error {
@@ -143,6 +174,18 @@ export const api = {
 
   hostMembers(): Promise<Snapshot> {
     return request<Snapshot>('/api/dsh-person-web/members')
+  },
+
+  packages(): Promise<PackagesResponse> {
+    return request<PackagesResponse>('/api/dsh-person-web/packages')
+  },
+
+  deploy(member: string, packageName: string): Promise<DeployResponse> {
+    return request<DeployResponse>('/api/dsh-person-web/deploy', {
+      method: 'POST',
+      headers: { 'x-dsh-person-web': '1' },
+      body: JSON.stringify({ member, package: packageName }),
+    })
   },
 
   jobs(): Promise<{ jobs: BuildJob[] }> {

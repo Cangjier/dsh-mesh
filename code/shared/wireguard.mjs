@@ -334,6 +334,7 @@ export async function discoverMembers(options) {
     port: probe.port,
     latencyMs: probe.latencyMs,
     gate: probe.info,
+    system: probe.info?.system ?? null,
     error: probe.error,
   }))
   const self = {
@@ -347,6 +348,7 @@ export async function discoverMembers(options) {
     port: options.self?.port ?? null,
     latencyMs: 0,
     gate: options.self?.gate ?? null,
+    system: options.self?.system ?? null,
     error: options.self?.error ?? null,
   }
   const warnings = []

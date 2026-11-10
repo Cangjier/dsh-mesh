@@ -5,6 +5,7 @@ import path7 from "node:path";
 // src/lib/service.mjs
 import { readFile as readFile5, readdir as readdir3, stat as stat4 } from "node:fs/promises";
 import { readFileSync as readFileSync2, existsSync as existsSync4 } from "node:fs";
+import { createHash as createHash3 } from "node:crypto";
 import os5 from "node:os";
 import path5 from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2189,9 +2190,22 @@ var PersonWebService = class {
     const member = [snapshot.local, ...snapshot.members].find((candidate) => candidate.id === memberId);
     if (member === void 0) throw new Error(`member not found: ${memberId}`);
     if (member.ip === "") throw new Error(`member ${memberId} has no VPN address`);
+    let user = "root";
+    let identityFile;
+    const { state } = await readWireGuardState({ file: path5.join(this.home, "wireguard", "state.json") });
+    const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
+    if (peer !== void 0 && peer !== null) {
+      if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
+      if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
+        const digest = createHash3("sha256").update(peer.publicKey).digest("hex");
+        const candidate = path5.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        if (existsSync4(candidate)) identityFile = candidate;
+      }
+    }
     const result = await this.deploy.start({
       host: member.ip,
-      user: "root",
+      user,
+      identityFile,
       os: selected.target === "windows" ? "windows" : "linux",
       package: selected.path
     });

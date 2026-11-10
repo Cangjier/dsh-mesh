@@ -6,7 +6,7 @@ export interface SystemInfo {
   arch?: string
   cpu?: { model?: string; cores?: number; usagePercent?: number }
   memory?: { totalBytes?: number; usedBytes?: number; usedPercent?: number }
-  disks?: Array<{ mount?: string; totalBytes?: number; usedBytes?: number; usedPercent?: number }>
+  disks?: Array<{ mount?: string; totalBytes?: number; usedBytes?: number; freeBytes?: number; availableBytes?: number; usedPercent?: number }>
 }
 
 export interface Member {

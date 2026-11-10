@@ -71,7 +71,10 @@ function systemText(member: Member): string {
   }
   const disks = system.disks ?? []
   const root = disks.find(disk => disk.mount === '/' || disk.mount === 'C:\\') ?? disks[0]
-  if (root !== undefined) parts.push(`${root.mount ?? 'disk'} ${String(root.usedPercent ?? 0)}%`)
+  if (root !== undefined) {
+    const free = root.availableBytes ?? root.freeBytes ?? Math.max(0, (root.totalBytes ?? 0) - (root.usedBytes ?? 0))
+    parts.push(`${root.mount ?? 'disk'} ${formatBytes(free)} 可用`)
+  }
   return parts.length === 0 ? '—' : parts.join(' · ')
 }
 
@@ -86,7 +89,8 @@ function systemDetails(member: Member): string {
     lines.push(`内存 ${formatBytes(system.memory.usedBytes ?? 0)} / ${formatBytes(system.memory.totalBytes ?? 0)} · ${String(system.memory.usedPercent ?? 0)}%`)
   }
   for (const disk of system.disks ?? []) {
-    lines.push(`${disk.mount ?? 'disk'} ${formatBytes(disk.usedBytes ?? 0)} / ${formatBytes(disk.totalBytes ?? 0)} · ${String(disk.usedPercent ?? 0)}%`)
+    const free = disk.availableBytes ?? disk.freeBytes ?? Math.max(0, (disk.totalBytes ?? 0) - (disk.usedBytes ?? 0))
+    lines.push(`${disk.mount ?? 'disk'} 可用 ${formatBytes(free)} / 共 ${formatBytes(disk.totalBytes ?? 0)} · 已用 ${String(disk.usedPercent ?? 0)}%`)
   }
   return lines.join('\n')
 }

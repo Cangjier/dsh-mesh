@@ -605,9 +605,51 @@ function forwardableHeaders(req) {
   }
   const peer = req.socket.remoteAddress ?? ''
   headers['x-forwarded-for'] = peer
-  headers['x-forwarded-proto'] = 'http'
+  headers['x-forwarded-proto'] = req.socket.encrypted === true ? 'https' : 'http'
   headers['x-forwarded-host'] = req.headers.host ?? ''
   return headers
+}
+
+/** Authority the private DSH listener sees on every proxied request. */
+function upstreamAuthority() {
+  return `127.0.0.1:${String(upstream.port)}`
+}
+
+/**
+ * Headers for the private DSH listener. A browser may use any Host after the
+ * gate password; the upstream sees one canonical loopback authority so DSH's
+ * Host/Origin fence and its host-derived cookie name stay stable.
+ * @param {import('node:http').IncomingMessage} req incoming request.
+ * @returns {Record<string, string|string[]>} headers.
+ */
+function localProxyHeaders(req) {
+  const headers = forwardableHeaders(req)
+  const authority = upstreamAuthority()
+  headers.host = authority
+  const origin = headers.origin
+  if (typeof origin === 'string' && origin !== '' && origin !== 'null') {
+    try {
+      const parsed = new URL(origin)
+      headers.origin = `${parsed.protocol}//${authority}`
+    } catch {
+      // A malformed Origin stays malformed; the upstream fence decides.
+    }
+  }
+  return headers
+}
+
+/**
+ * Rewrite a redirect the private listener issued in its canonical loopback
+ * origin back to the browser-facing authority.
+ * @param {import('node:http').IncomingMessage} req incoming request.
+ * @param {string} location upstream Location value.
+ * @returns {string} browser-facing Location.
+ */
+function browserLocation(req, location) {
+  const canonical = `http://${upstreamAuthority()}`
+  if (location !== canonical && !location.startsWith(`${canonical}/`)) return location
+  const scheme = req.socket.encrypted === true ? 'https' : 'http'
+  return `${scheme}://${req.headers.host ?? ''}${location.slice(canonical.length)}`
 }
 
 /** Send a complete HTML response. */
@@ -989,34 +1031,6 @@ function isGatePath(pathname) {
   return pathname === '/__gate' || pathname.startsWith('/__gate/')
 }
 
-/**
- * Hostname of one bare authority, normalized the way WHATWG parses it so that
- * `[::1]`, `localhost`, and `Host: example.com:8080` compare consistently.
- * @param authority - `host` or `host:port` text.
- */
-function authorityHostname(authority) {
-  try {
-    return new URL(`http://${authority}`).hostname.toLowerCase()
-  } catch {
-    return authority.toLowerCase()
-  }
-}
-
-/**
- * Whether the browser-facing authority is one this deployment accepts.
- *
- * A cloud server usually has a 1:1 NAT public address that appears on no
- * interface, so the auto-enumerated list cannot contain it; without this check
- * the page loads and then every API call answers 403 with no explanation.
- * @param hostHeader - the request's `Host` header.
- * @returns true when the authority is loopback, a local address, or configured.
- */
-function isKnownAuthority(hostHeader) {
-  if (hostHeader === undefined || hostHeader === '') return true
-  const known = new Set(trustedAuthorities().map(authorityHostname))
-  return known.has(authorityHostname(hostHeader))
-}
-
 // ─── proxying ──────────────────────────────────────────────────────────────
 
 const agent = new http.Agent({ keepAlive: true, maxSockets: 128 })
@@ -1073,13 +1087,15 @@ function proxyRequest(req, res) {
     port: upstream.port,
     method: req.method,
     path: req.url,
-    headers: forwardableHeaders(req),
+    headers: localProxyHeaders(req),
     agent,
   }, (upstreamRes) => {
     const headers = {}
     for (const [name, value] of Object.entries(upstreamRes.headers)) {
       if (value === undefined || HOP_BY_HOP.has(name.toLowerCase())) continue
-      headers[name] = value
+      headers[name] = name.toLowerCase() === 'location' && typeof value === 'string'
+        ? browserLocation(req, value)
+        : value
     }
     res.writeHead(upstreamRes.statusCode ?? 502, headers)
     upstreamRes.pipe(res)
@@ -1150,7 +1166,7 @@ function proxyUpgradeLocal(req, socket, head) {
     socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
     return
   }
-  const headers = forwardableHeaders(req)
+  const headers = localProxyHeaders(req)
   // An upgrade keeps these two, which ordinary requests must drop.
   if (req.headers.upgrade !== undefined) headers.upgrade = req.headers.upgrade
   headers.connection = 'Upgrade'
@@ -1235,19 +1251,9 @@ async function dispatch(req, res) {
     return
   }
 
-  if (!isKnownAuthority(req.headers.host)) {
-    const host = String(req.headers.host)
-    log(`refused ${String(req.url)} for untrusted authority ${host}: add it to DSH_TRUSTED_HOSTS`)
-    sendHtml(res, 403, page({
-      title: '访问地址未被信任',
-      heading: '访问地址未被信任',
-      body: `你正在用 ${host} 访问，但这个部署的可信地址列表里没有它，`
-        + '所以接口会被拒绝。请把该地址（或域名）写进 config/gate.env 的 '
-        + 'DSH_TRUSTED_HOSTS 后重启服务；云服务器的公网 IP 常是 NAT 映射，'
-        + '不会自动出现在列表里，必须手工填写。',
-    }))
-    return
-  }
+  // The gate password is the single admission rule. Any browser-facing Host
+  // is accepted here; the private DSH listener always sees a canonical
+  // loopback authority, so its own Host/Origin fence cannot reject the request.
 
   // Application metadata answers before the password check: the browser asks
   // for it on any navigation, including the login page itself. An admitted
@@ -1296,7 +1302,7 @@ async function dispatch(req, res) {
   // another authority, or a DSH restart) goes through the launch-token
   // exchange before anything else; DSH then sets its own session cookie.
   if (req.method === 'GET' && pathname === '/') {
-    const expected = dshCookieName(req.headers.host)
+    const expected = dshCookieName(upstreamAuthority())
     const held = expected !== undefined && cookieFrom(req, expected) !== undefined
     const hasToken = url.searchParams.has('token')
     if (!held && !hasToken) {

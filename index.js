@@ -92,11 +92,37 @@ function normalizePeer(value) {
     lastHandshakeAt: typeof peer.lastHandshakeAt === "string" ? peer.lastHandshakeAt : null
   };
 }
+async function fetchServerControlPeers(state, options, timeoutMs, fetchImpl) {
+  const settings = state?.settings !== null && typeof state?.settings === "object" ? state.settings : {};
+  const server = state?.server !== null && typeof state?.server === "object" ? state.server : {};
+  const rawPort = settings.controlPort ?? server.controlPort;
+  const port = Number.isInteger(rawPort) && rawPort > 0 && rawPort <= 65535 ? rawPort : 0;
+  if (port === 0) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(`http://127.0.0.1:${String(port)}/api/dsh-wireguard/state`, {
+      headers: { accept: "application/json" },
+      signal: controller.signal
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const peers = payload?.state?.server?.peers ?? payload?.server?.peers;
+    if (!Array.isArray(peers)) return null;
+    return peers.map(normalizePeer).filter((peer) => peer !== null);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function fetchPeers(state, options = {}) {
   const identity = wireGuardIdentity(state);
   const timeoutMs = options.timeoutMs ?? 3e3;
   const fetchImpl = options.fetchImpl ?? fetch;
   if (identity.role === "server") {
+    const live = await fetchServerControlPeers(state, options, timeoutMs, fetchImpl);
+    if (live !== null) return { peers: live, source: "server-control-panel", error: null };
     const raw = state?.server?.peers;
     if (!Array.isArray(raw)) {
       return { peers: [], source: "server-state", error: "wireguard server state has no peer list" };

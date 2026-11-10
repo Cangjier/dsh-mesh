@@ -138,6 +138,41 @@ export function normalizePeer(value) {
 }
 
 /**
+ * Read the live peer list from the server control service. `state.json` is a
+ * snapshot written when the server starts; peer handshakes and online flags
+ * change continuously, so the control service is the authoritative source.
+ * @param {object|null} state parsed state.
+ * @param {{fetchImpl?: typeof fetch}} options fetch options.
+ * @param {number} timeoutMs request timeout.
+ * @param {typeof fetch} fetchImpl fetch implementation.
+ * @returns {Promise<object[]|null>} normalized peers, or null when unavailable.
+ */
+async function fetchServerControlPeers(state, options, timeoutMs, fetchImpl) {
+  const settings = state?.settings !== null && typeof state?.settings === 'object' ? state.settings : {}
+  const server = state?.server !== null && typeof state?.server === 'object' ? state.server : {}
+  const rawPort = settings.controlPort ?? server.controlPort
+  const port = Number.isInteger(rawPort) && rawPort > 0 && rawPort <= 65_535 ? rawPort : 0
+  if (port === 0) return null
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetchImpl(`http://127.0.0.1:${String(port)}/api/dsh-wireguard/state`, {
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    })
+    if (!response.ok) return null
+    const payload = await response.json()
+    const peers = payload?.state?.server?.peers ?? payload?.server?.peers
+    if (!Array.isArray(peers)) return null
+    return peers.map(normalizePeer).filter(peer => peer !== null)
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
  * Ask the WireGuard server for its peers. In client mode this is the only way
  * to see the other clients: a client's own tunnel config contains just the
  * server.
@@ -150,6 +185,8 @@ export async function fetchPeers(state, options = {}) {
   const timeoutMs = options.timeoutMs ?? 3_000
   const fetchImpl = options.fetchImpl ?? fetch
   if (identity.role === 'server') {
+    const live = await fetchServerControlPeers(state, options, timeoutMs, fetchImpl)
+    if (live !== null) return { peers: live, source: 'server-control-panel', error: null }
     const raw = state?.server?.peers
     if (!Array.isArray(raw)) {
       return { peers: [], source: 'server-state', error: 'wireguard server state has no peer list' }

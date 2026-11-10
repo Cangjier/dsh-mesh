@@ -68,6 +68,42 @@ test('fetchPeers asks the control panel with the stored join code', async () => 
   assert.match(seen[0], /\/peers\?code=client-code$/u)
 })
 
+test('fetchPeers prefers the live server control panel over the state snapshot', async () => {
+  const state = {
+    version: 1,
+    role: 'server',
+    settings: { vpnCidr: '10.66.66.0/24', serverIp: '10.66.66.1', controlPort: 51821 },
+    server: {
+      running: true,
+      peers: [{ name: 'desktop', ip: '10.66.66.4', online: false, lastHandshakeAt: '2026-11-10T12:02:30.000Z' }],
+    },
+    client: {},
+  }
+  const seen = []
+  const fetchImpl = async (url) => {
+    seen.push(String(url))
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          ok: true,
+          state: {
+            server: {
+              peers: [{ name: 'desktop', ip: '10.66.66.4', online: true, lastHandshakeAt: '2026-11-10T13:03:13.000Z' }],
+            },
+          },
+        }
+      },
+    }
+  }
+  const result = await fetchPeers(state, { fetchImpl, timeoutMs: 100 })
+  assert.equal(result.source, 'server-control-panel')
+  assert.equal(result.error, null)
+  assert.equal(result.peers[0].online, true)
+  assert.equal(seen[0], 'http://127.0.0.1:51821/api/dsh-wireguard/state')
+})
+
 test('discoverMembers merges self, the server, and every peer', async () => {
   const fetchImpl = async (url) => {
     const text = String(url)

@@ -1,0 +1,41 @@
+{
+  "format": 1,
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "ref": "master",
+  "tree": "fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159",
+  "notes": "Source-level equivalents of the built-bundle patches in code/gate/patch-picker.mjs and patch-login.mjs. Overlays are full replacement files; baseSha256 pins the pristine input so a new upstream revision produces a work order instead of a silent half-patch.",
+  "steps": [
+    {
+      "id": "directory-picker",
+      "title": "远程目录选择器",
+      "doc": "docs/Step 003 目录选择器.md",
+      "files": [
+        {
+          "path": "packages/client/ui-directory-picker-browse/src/client/DirectoryBrowser.tsx",
+          "baseSha256": "656af2c5e143d92acbd1e2204db6a1ce781bd139348fc4442e12c7d951ee482c",
+          "overlay": "packages/client/ui-directory-picker-browse/src/client/DirectoryBrowser.tsx",
+          "marker": "dsh-person-web overlay: picker"
+        }
+      ]
+    },
+    {
+      "id": "account-login",
+      "title": "账号登录页内弹层",
+      "doc": "docs/Step 005 账号登录前端补丁.md",
+      "files": [
+        {
+          "path": "packages/client/ui-settings-account/src/client/index.ts",
+          "baseSha256": "40d8c63acf8e7d24bde89dcab0870049b83baf9c36bb2805679ff3866dee4ff3",
+          "overlay": "packages/client/ui-settings-account/src/client/index.ts",
+          "marker": "dsh-person-web overlay: login"
+        },
+        {
+          "path": "packages/client/ui-settings-account/src/client/gate-login-overlay.ts",
+          "baseSha256": null,
+          "overlay": "packages/client/ui-settings-account/src/client/gate-login-overlay.ts",
+          "marker": "openGateLoginOverlay"
+        }
+      ]
+    }
+  ]
+}

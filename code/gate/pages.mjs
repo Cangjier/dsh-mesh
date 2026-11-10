@@ -296,10 +296,12 @@ window.addEventListener('pagehide', () => {
 
 /**
  * A short status page: a heading, one paragraph, and optionally auto-refresh.
- * @param options - page title, heading, body text, and refresh interval in seconds.
+ * `rawBody` is trusted HTML for callers that must render a link; `body` is
+ * escaped.
+ * @param options - page title, heading, body text, trusted raw body, and refresh interval in seconds.
  */
 export function page(options) {
-  const { title, heading, body, refresh } = options
+  const { title, heading, body, rawBody, refresh } = options
   const spinner = refresh === undefined ? '' : '<span class="spinner"></span>'
   return shell({
     title,
@@ -307,7 +309,7 @@ export function page(options) {
     body: `<main class="card">
   ${BRAND}
   <h1>${spinner}${escapeHtml(heading)}</h1>
-  <p class="body-text">${escapeHtml(body)}</p>
+  <p class="body-text">${rawBody === undefined ? escapeHtml(body ?? '') : rawBody}</p>
 </main>`,
   })
 }

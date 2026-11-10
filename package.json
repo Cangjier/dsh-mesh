@@ -1,24 +1,67 @@
 {
-  "name": "dsh-person-web",
-  "version": "0.1.0",
+  "name": "@local/dsh-person-web",
+  "version": "0.2.0",
   "private": true,
-  "description": "个人版 DeepSeek Harness Web 部署：Linux 离线包、密码门、Chrome Headless 扫码登录，以及 DSH 升级后的适配文档集。",
+  "description": "个人版 DSH Web：WireGuard 成员发现、成员切换（gate cookie）、源码级多平台离线构建。",
   "keywords": [
     "deepseek-harness",
     "dsh",
-    "web",
-    "deployment",
-    "documentation"
+    "wireguard",
+    "gateway",
+    "build",
+    "offline"
   ],
   "license": "MIT",
   "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
   "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "code",
+    "build",
     "docs",
-    "code"
+    "start-interop.sh",
+    "install-interop-service.sh",
+    "uninstall-interop-service.sh",
+    "README.md"
   ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:package": "node code/build/cli.mjs build",
+    "plan:package": "node code/build/cli.mjs plan",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/*.test.mjs\""
+  },
   "dsh": {
-    "kind": "documentation",
-    "appliesTo": "@deepseek-ai/dsh@0.2.2-rc.1",
-    "entry": "README.md"
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ]
+    }
+  },
+  "devDependencies": {
+    "@ant-design/icons": "^5.6.1",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "antd": "^5.27.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.2"
   }
 }

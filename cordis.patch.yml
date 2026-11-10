@@ -1,0 +1,30 @@
+- insert:
+    - id: dsh-person-web
+      name: '@local/dsh-person-web'
+      config:
+        # Optional: the public gate URL. Empty means "same origin".
+        gateUrl: ''
+        # Host-side member discovery cache.
+        discoveryCacheMs: 10000
+        # Ports probed when DSH is opened directly (the gate has its own list).
+        memberPorts:
+          - 80
+          - 8080
+        # Member-to-member DSH interop HTTP service.
+        interopPort: 8765
+        # Empty: use DSH_INTEROP_TOKEN, DSH_GATE_PASSWORD, or config/gate.env.
+        interopToken: ''
+        # Reuse the gateway password when no explicit interopToken exists.
+        interopUseGatePassword: true
+        # Build defaults. Empty source means build/recipes.json's fixed upstream.
+        build:
+          source: ''
+          ref: 'master'
+          targets:
+            - linux-x64
+            - win-x64
+          # true: app/ + runtime/node/ + gate + plugin (offline package).
+          # false: web/ + gate + plugin only.
+          full: true
+          # Empty: use the Node version running this DSH.
+          nodeVersion: ''

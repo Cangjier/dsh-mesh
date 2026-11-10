@@ -208,7 +208,14 @@ DSH_GATE_COOKIE_DAYS=30
 # 工作目录：新会话的默认工作区，也是 Web 里“选择文件夹”的起点。
 DSH_WORKDIR=${ROOT}/workspace
 # 额外的可信主机名（浏览器用域名访问时填写，逗号分隔）。本机所有 IP 已自动加入。
+# 作为成员被其他网关切换时，把外层入口的域名/IP 也写进来，否则成员 DSH 的 Host 栅栏会 403。
 #DSH_TRUSTED_HOSTS=dsh.example.com,harness.internal
+# 成员组网：所有成员填同一个 32+ 字节随机串。留空则只做本机网关，不参与成员切换。
+#DSH_GATE_CLUSTER_KEY=change-me-to-a-long-random-string
+# 如果 peer 通过不同端口访问本 gate，填这个端口（默认等于 DSH_GATE_PORT）。
+#DSH_GATE_MEMBER_PORT=80
+# 允许调用 /__gate/cluster 的额外来源地址（默认只允许回环与 RFC1918/VPN 网段）。
+#DSH_GATE_CLUSTER_ALLOW=203.0.113.10
 # 内部 dsh web 监听端口，0 表示由系统分配（推荐）。
 DSH_WEB_PORT=0
 # dsh web 的堆上限（MB）。留空 = 自动：内存小于 3.5 GB 的机器限到 1024，避免 OOM 拖死整机；0 = 不限制。
@@ -379,3 +386,10 @@ cat <<EOF
    * 修改密码：编辑 config/gate.env 后 systemctl restart dsh-web。
 ────────────────────────────────────────────────────────────
 EOF
+
+# Split the gateway and DSH into independent systemd services.
+if [ "$INSTALL_SYSTEMD" = "1" ] && [ "$(id -u)" = "0" ] && command -v systemctl >/dev/null 2>&1; then
+  if [ -f "$ROOT/code/dsh-service/install-split.sh" ]; then
+    bash "$ROOT/code/dsh-service/install-split.sh" || warn "split service install failed; inspect journalctl"
+  fi
+fi

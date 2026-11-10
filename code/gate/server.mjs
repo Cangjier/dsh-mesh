@@ -37,9 +37,19 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loginPage, page, accountLoginPage, PAGE_CSP } from './pages.mjs'
 import { AccountLogin } from './account-login.mjs'
+import { CLUSTER_PREFIX, MemberService } from './members.mjs'
+import { TARGET_COOKIE } from '../shared/wireguard.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = path.resolve(HERE, '..')
+const PACKAGE_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8'))
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+})()
 
 /** Read one env value, falling back to the given default. */
 function env(name, fallback) {
@@ -130,6 +140,8 @@ const CONFIG = {
   noSpawn: env('DSH_GATE_NO_SPAWN', '0') === '1',
   /** Launch URL (with token) when DSH runs outside this process. */
   externalTokenUrl: env('DSH_WEB_TOKEN_URL', ''),
+  /** JSON handoff file written by the independent DSH service. */
+  externalTokenFile: env('DSH_WEB_TOKEN_FILE', ''),
   /** Loader overlay that pins the in-browser directory picker. */
   patchFile: env('DSH_GATE_PATCH', path.join(PACKAGE_ROOT, 'config', 'browse-picker.patch.yml')),
   /** Log every request line. */
@@ -152,6 +164,26 @@ const CONFIG = {
   },
   /** Browser used by the local account sign-in helper. */
   chromeBinary: resolveChrome(),
+  /** Shared secret every member gate uses to accept peer requests. Empty disables clustering. */
+  clusterKey: env('DSH_GATE_CLUSTER_KEY', ''),
+  /** Port peers use to reach this gate; defaults to the public listener port. */
+  memberPort: envInt('DSH_GATE_MEMBER_PORT', envInt('DSH_GATE_PORT', 80)),
+  /** Extra ports probed on every peer (for custom member ports). */
+  memberPorts: env('DSH_GATE_MEMBER_PORTS', '')
+    .split(',')
+    .map(value => Number.parseInt(value.trim(), 10))
+    .filter(value => Number.isSafeInteger(value) && value > 0 && value <= 65_535),
+  /** Per-peer probe timeout while discovering members. */
+  discoveryTimeoutMs: envInt('DSH_GATE_DISCOVERY_TIMEOUT_MS', 800),
+  /** Discovery cache lifetime. */
+  discoveryCacheMs: envInt('DSH_GATE_DISCOVERY_CACHE_MS', 10_000),
+  /** Expose /__gate/member to non-private sources. Off by default. */
+  memberPublic: env('DSH_GATE_MEMBER_PUBLIC', '0') === '1',
+  /** Extra exact source addresses allowed to call /__gate/cluster. */
+  clusterAllow: env('DSH_GATE_CLUSTER_ALLOW', '')
+    .split(',')
+    .map(value => value.trim())
+    .filter(value => value !== ''),
 }
 
 const COOKIE_NAME = 'dsh_gate'
@@ -257,6 +289,7 @@ function cookieFrom(req, name) {
 
 /** Whether the request carries a valid gate cookie. */
 function isAdmitted(req) {
+  if (req.__dshCluster === true) return true
   const value = cookieFrom(req, COOKIE_NAME)
   return value !== undefined && verifyCookie(value, Date.now())
 }
@@ -386,8 +419,49 @@ function scanForLaunchUrl(text) {
   log(`dsh web ready on 127.0.0.1:${String(upstream.port)}`)
 }
 
+/** Follow the token handoff file written by the independent DSH service. */
+function startExternalTokenFile() {
+  const file = CONFIG.externalTokenFile
+  let lastKey = ''
+  let warned = false
+  const read = () => {
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8'))
+      const port = Number.parseInt(String(parsed.port ?? ''), 10)
+      const token = typeof parsed.token === 'string' ? parsed.token : ''
+      if (!Number.isSafeInteger(port) || port <= 0 || port > 65_535) throw new Error('invalid port')
+      const key = `${String(port)}:${token}`
+      if (key === lastKey) return
+      upstream.port = port
+      upstream.token = token === '' ? undefined : token
+      upstream.launchUrl = typeof parsed.launchUrl === 'string' && parsed.launchUrl !== ''
+        ? parsed.launchUrl
+        : `http://127.0.0.1:${String(port)}/${token === '' ? '' : `?token=${encodeURIComponent(token)}`}`
+      upstream.ready = true
+      lastKey = key
+      warned = false
+      log(`external dsh web ready on 127.0.0.1:${String(port)}`)
+    } catch (error) {
+      if (upstream.ready || !warned) {
+        log(`external dsh token file not ready (${error instanceof Error ? error.message : String(error)})`)
+      }
+      warned = true
+      upstream.ready = false
+      lastKey = ''
+    }
+  }
+  read()
+  const timer = setInterval(read, 1_000)
+  timer.unref?.()
+  log(`watching external dsh token file ${file}`)
+}
+
 /** Spawn one supervised `dsh web` child and wire its output into the gate. */
 function startUpstream() {
+  if (CONFIG.externalTokenFile !== '') {
+    startExternalTokenFile()
+    return
+  }
   if (CONFIG.noSpawn) {
     if (CONFIG.externalTokenUrl === '') {
       log('DSH_GATE_NO_SPAWN=1 without DSH_WEB_TOKEN_URL: every page will answer 503')
@@ -835,14 +909,18 @@ async function handleLoginSubmit(req, res, url) {
 
 /** Clear the gate cookie and every DSH session cookie this browser presented. */
 function handleLogout(req, res) {
-  const expired = [`${COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`]
+  const expired = [
+    `${COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`,
+    `${TARGET_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`,
+  ]
   const raw = req.headers.cookie
   if (typeof raw === 'string') {
     for (const segment of raw.split(';')) {
       const at = segment.indexOf('=')
       if (at === -1) continue
       const name = segment.slice(0, at).trim()
-      if (!name.startsWith('dsh-auth-')) continue
+      // DSH mints `dsh-auth-*`; a proxied member's jars live under `dsh_m_*`.
+      if (!name.startsWith('dsh-auth-') && !name.startsWith('dsh_m_')) continue
       // DSH's own cookie is HttpOnly too, so only a response can remove it.
       expired.push(`${name}=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict`)
     }
@@ -910,6 +988,32 @@ function isKnownAuthority(hostHeader) {
 
 const agent = new http.Agent({ keepAlive: true, maxSockets: 128 })
 
+/**
+ * Member discovery, selection, and the remote proxy. The service is the only
+ * place that knows how to reach another member; the dispatch path below only
+ * asks it which route a request takes.
+ */
+const members = new MemberService({
+  clusterKey: CONFIG.clusterKey,
+  memberPort: CONFIG.memberPort,
+  discoveryPorts: CONFIG.memberPorts,
+  stateFile: path.join(env('DSH_HOME', path.join(os.homedir(), '.dsh')), 'wireguard', 'state.json'),
+  discoveryTimeoutMs: CONFIG.discoveryTimeoutMs,
+  discoveryCacheMs: CONFIG.discoveryCacheMs,
+  clusterAllow: CONFIG.clusterAllow,
+  memberPublic: CONFIG.memberPublic,
+  version: PACKAGE_VERSION,
+  fetchImpl: fetch,
+  log,
+  isAdmitted,
+  isUpstreamReady: () => upstream.ready,
+  forwardableHeaders,
+  agent,
+  page,
+  sendHtml,
+  now: Date.now,
+})
+
 /** A short page telling the visitor DSH is still coming up. */
 function sendStarting(res) {
   sendHtml(res, 503, page({
@@ -974,7 +1078,37 @@ function proxyRequest(req, res) {
  * @param socket - the client socket.
  * @param head - bytes already read from the client.
  */
-function proxyUpgrade(req, socket, head) {
+async function proxyUpgrade(req, socket, head) {
+  if (!isAdmitted(req)) {
+    socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+    return
+  }
+  let target
+  try {
+    target = await members.resolveTarget(req)
+  } catch (error) {
+    log(`member resolution failed for upgrade ${req.url ?? '/'}: ${error instanceof Error ? error.message : String(error)}`)
+    socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+    return
+  }
+  if (target.kind === 'remote') {
+    members.proxyRemoteUpgrade(req, socket, head, target.member)
+    return
+  }
+  if (target.kind === 'unavailable') {
+    socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+    return
+  }
+  proxyUpgradeLocal(req, socket, head)
+}
+
+/**
+ * Forward one WebSocket (or other upgrade) request to the private listener.
+ * @param req - the HTTP upgrade request.
+ * @param socket - the client socket.
+ * @param head - bytes already read from the client.
+ */
+function proxyUpgradeLocal(req, socket, head) {
   if (!isAdmitted(req)) {
     socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
     return
@@ -1035,7 +1169,15 @@ async function dispatch(req, res) {
   const url = new URL(req.url ?? '/', 'http://gate.invalid')
   const pathname = url.pathname
 
+  // A peer gate forwards here under /__gate/cluster/...; strip and serve it
+  // from the local DSH as if the browser had asked this gate directly.
+  if (pathname === CLUSTER_PREFIX || pathname.startsWith(`${CLUSTER_PREFIX}/`)) {
+    await members.handleCluster(req, res, dispatch)
+    return
+  }
+
   if (isGatePath(pathname)) {
+    if (await members.handle(req, res, url)) return
     if (pathname.startsWith('/__gate/account-login')) {
       await handleAccountLogin(req, res, pathname)
       return
@@ -1075,8 +1217,9 @@ async function dispatch(req, res) {
   }
 
   // Application metadata answers before the password check: the browser asks
-  // for it on any navigation, including the login page itself.
-  if (PUBLIC_ASSETS.has(pathname)) {
+  // for it on any navigation, including the login page itself. An admitted
+  // browser follows the target like every other request.
+  if (PUBLIC_ASSETS.has(pathname) && !isAdmitted(req)) {
     proxyRequest(req, res)
     return
   }
@@ -1099,6 +1242,20 @@ async function dispatch(req, res) {
       return
     }
     sendText(res, 401, 'dsh-web-gate: authentication required\n')
+    return
+  }
+
+  // The target cookie is the only routing input. `local` keeps the original
+  // single-upstream behaviour; a peer is proxied through its gate with a
+  // signed cluster request, and an unreachable peer gets a page with a way
+  // back to the local DSH instead of a dead end.
+  const target = await members.resolveTarget(req)
+  if (target.kind === 'remote') {
+    await members.proxyRemote(req, res, target.member)
+    return
+  }
+  if (target.kind === 'unavailable') {
+    members.sendUnavailable(res, target.id, target.reason)
     return
   }
 
@@ -1143,11 +1300,15 @@ function requestListener(req, res) {
 function wire(instance) {
   instance.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '/', 'http://gate.invalid')
+    if (url.pathname === CLUSTER_PREFIX || url.pathname.startsWith(`${CLUSTER_PREFIX}/`)) {
+      members.handleClusterUpgrade(req, socket, head, proxyUpgradeLocal)
+      return
+    }
     if (isGatePath(url.pathname)) {
       socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
       return
     }
-    proxyUpgrade(req, socket, head)
+    void proxyUpgrade(req, socket, head)
   })
   instance.on('clientError', (error, socket) => {
     if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
@@ -1266,6 +1427,9 @@ if (CONFIG.password.length < 8) {
 log(`package root ${PACKAGE_ROOT}`)
 log(`workdir ${CONFIG.workdir}`)
 log(`trusted authorities: ${trustedAuthorities().join(', ')}`)
+log(CONFIG.clusterKey === ''
+  ? 'member clustering disabled: set DSH_GATE_CLUSTER_KEY to enable it'
+  : `member clustering enabled; peers reach this gate on port ${String(CONFIG.memberPort)}`)
 log(CONFIG.heapMb > 0
   ? `dsh web heap ceiling: ${String(CONFIG.heapMb)} MB (machine has ${String(Math.round(os.totalmem() / 1024 / 1024))} MB)`
   : 'dsh web heap ceiling: none (set DSH_WEB_HEAP_MB to cap it)')

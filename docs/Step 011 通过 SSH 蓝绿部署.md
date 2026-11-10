@@ -1,0 +1,137 @@
+# Step 011 通过 SSH 蓝绿部署成员
+
+这个步骤给 `dsh-person-web` 增加第二个模型工具 `dsh_person_deploy`：从 A 通过 SSH 部署成员 B，不覆盖正在运行的目录；先解压到新的 `releases/<release>` 并完成全部准备，最后才切换 `current` 并重启服务。**gateway 永远是最后一个重启的服务**。
+
+## 目标目录
+
+Linux：
+
+```text
+/opt/dsh-person-web/
+  releases/20261110-120000-abcdef12/
+  current -> releases/20261110-120000-abcdef12
+  previous -> releases/20261109-...
+  shared/
+    config/      # gate.env 等，所有 release 共用
+    data/        # gate secret、pid、日志
+    home/        # DSH_HOME，profile 与会话
+    workspace/   # agent 工作区
+```
+
+Windows：
+
+```text
+C:\dsh-person-web\
+  releases\<release>\
+  current       (junction)
+  previous      (junction)
+  shared\config|data|home|workspace
+```
+
+新 release 里的 `config`、`data`、`home`、`workspace` 都替换为指向 `shared` 的符号链接（Windows 用 junction），所以切换版本不会丢配置、会话或 gate secret。
+
+## 两个阶段
+
+```text
+prepare   上传包 → 解压到新 release → 建立 shared 链接 → 改写 gate.env
+          的 DSH_HOME/DSH_WORKDIR → 更新服务定义指向 current → 校验
+          node/gate/manifest。此阶段不重启任何服务。
+
+activate  切换 current → previous 指向旧 release → 按
+          control → dsh → gate 顺序重启 → 健康检查。
+          失败时切回 previous 并重启。
+```
+
+`prepare` 和 `activate` 分开执行，所以“解压、准备”和“切换服务”之间可以检查；`prepare` 失败时线上服务完全没动。
+
+健康检查通过后只保留**最近 3 个 release**（默认 `retention: 3`）；`current` 和 `previous` 指向的目录无论新旧都不会被删。这样磁盘不会无限增长，同时始终有最近两个版本可回退。
+
+## 服务顺序
+
+工具强制顺序：
+
+```text
+control   WireGuard 控制面板（如果单独部署）
+dsh       DSH Web
+gate      网关，必须最后
+```
+
+原因：用户可能正通过成员 B 的网关操作成员 A。B 的 DSH 重启不会影响 B 的网关；但如果 B 的网关先重启，B→A 的路径立刻断掉。因此 B 的网关必须等 DSH 健康后再重启。
+
+当前单服务包可以这样写：
+
+```json
+[
+  { "name": "dsh-web.service", "role": "gate", "command": "start.sh" }
+]
+```
+
+服务拆分后的清单：
+
+```json
+{
+  "linux": [
+    { "name": "dsh-wg-control.service", "role": "control", "command": "start-control.sh" },
+    { "name": "dsh-web-app.service", "role": "dsh", "command": "start-dsh.sh" },
+    { "name": "dsh-web-gate.service", "role": "gate", "command": "start.sh" }
+  ],
+  "windows": [
+    { "name": "DSH-WireGuard-Control", "role": "control", "command": "dsh-wg-control-service.exe" },
+    { "name": "DSH-Web-App", "role": "dsh", "command": "dsh-web-app-service.exe" },
+    { "name": "DSH-Person-Web", "role": "gate", "command": "dsh-person-web-service.exe" }
+  ]
+}
+```
+
+`scope: "dsh"` 只重启 control/dsh，不重启 gateway：适合只换 DSH、不动网关的更新。
+
+## 用法
+
+```text
+dsh_person_deploy action="plan" host="10.66.66.3" user="root" os="linux" \
+  package="dist/dsh-person-web-0.2.2-rc.1-linux-x64.tar.gz"
+```
+
+先看计划，再执行：
+
+```text
+dsh_person_deploy action="deploy" host="10.66.66.3" user="root" os="linux" \
+  identityFile="C:\Users\Admin\.ssh\id_ed25519" \
+  retention=3 \
+  services=[{"name":"dsh-web.service","role":"gate","command":"start.sh"}]
+```
+
+返回 deploy job id；查看进度：
+
+```text
+dsh_person_deploy action="status" jobId="deploy-..."
+dsh_person_deploy action="logs" jobId="deploy-..." lines=120
+```
+
+回滚：
+
+```text
+dsh_person_deploy action="rollback" host="10.66.66.3" user="root" os="linux" \
+  identityFile="C:\Users\Admin\.ssh\id_ed25519"
+```
+
+## SSH 前提
+
+- 密钥登录，`BatchMode=yes`；工具不会交互式询问密码。
+- Linux 默认 `sudo -n bash -s`；要么 SSH 用户是 root，要么配置免密 sudo。传 `sudo=false` 可直接以当前用户执行（要求该用户拥有 `/opt/dsh-person-web`）。
+- Windows 目标需要 OpenSSH Server，SSH 用户有管理员权限；服务切换用 `sc.exe` / `Restart-Service`。
+- 目标必须已经安装过一次，`shared/config/gate.env` 存在；第一次部署不从零生成密码/集群密钥。
+- 服务定义必须能被 systemd/SCM 找到；`prepare` 会写 systemd drop-in 或 `sc.exe config`，但不会创建服务本身。
+
+## 安全
+
+- SSH 命令通过 `spawn` 直接执行，不经过本地 shell；远程脚本通过 stdin/EncodedCommand 传入。
+- 包会计算 SHA-256 并写入计划；目标端仍应校验传输完整性。
+- 工具不上传私钥；`identityFile` 只在本机 `ssh`/`scp` 参数中使用。
+- 部署只操作 `appRoot` 和服务，不碰桌面版 DSH。
+
+## 当前边界
+
+- 当前离线包还是**一个网关服务**（DSH 是它的子进程），所以清单里只有一个 gate；服务拆分、独立 WireGuard 控制面板是部署前要完成的架构步骤。工具已经按 `control → dsh → gate` 的清单工作，拆分后只需要改清单和启动命令。
+- Windows 的 `dsh-person-web-service.exe` 不在离线包里，`prepare` 会从当前 release 复制；首次部署前必须先安装一次服务。
+- 还没有做远端 systemd/SCM 的服务创建，只做“切换 + 重启 + 回滚”。

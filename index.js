@@ -1836,6 +1836,14 @@ function quickSystemInfo() {
   const total = os4.totalmem();
   const free = os4.freemem();
   const used = Math.max(0, total - free);
+  let cpuTotal = 0;
+  let cpuIdle = 0;
+  for (const cpu of cpus) {
+    const times = cpu.times;
+    cpuTotal += times.user + times.nice + times.sys + times.irq + times.idle;
+    cpuIdle += times.idle;
+  }
+  const cpuUsage = cpuTotal === 0 ? 0 : round((1 - cpuIdle / cpuTotal) * 100, 1);
   const root = process.platform === "win32" ? `${(process.env.SystemDrive ?? "C:").replace(/\\$/u, "")}\\` : "/";
   const disks = [];
   try {
@@ -1860,7 +1868,7 @@ function quickSystemInfo() {
     hostname: os4.hostname(),
     platform: process.platform,
     arch: process.arch,
-    cpu: { model: cpus[0]?.model ?? "unknown", cores: cpus.length, usagePercent: 0 },
+    cpu: { model: cpus[0]?.model ?? "unknown", cores: cpus.length, usagePercent: cpuUsage },
     memory: {
       totalBytes: total,
       freeBytes: free,

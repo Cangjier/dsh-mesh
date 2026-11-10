@@ -28,7 +28,7 @@
 
 import { spawn } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import { createServer as createSecureServer } from 'node:https'
@@ -476,8 +476,16 @@ function startExternalTokenFile() {
     }
   }
   read()
-  const timer = setInterval(read, 1_000)
-  timer.unref?.()
+  try {
+    const directory = path.dirname(file)
+    const base = path.basename(file)
+    const watcher = watch(directory, { persistent: false }, (_event, changed) => {
+      if (changed === null || String(changed) === base) read()
+    })
+    watcher.unref?.()
+  } catch (error) {
+    log(`cannot watch external dsh token file: ${error instanceof Error ? error.message : String(error)}`)
+  }
   log(`watching external dsh token file ${file}`)
 }
 

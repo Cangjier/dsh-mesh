@@ -127,30 +127,6 @@ function Panel({ ctx }: { ctx: any }) {
     void loadJobs()
   }, [load, loadJobs])
 
-  useEffect(() => {
-    if (job === null) return
-    let alive = true
-    let timer: ReturnType<typeof setInterval> | undefined
-    const tick = async () => {
-      try {
-        const result = await api.job(job.id)
-        if (!alive) return
-        setJob(result.job)
-        const log = await api.log(job.id, 120)
-        if (alive) setLogLines(log.lines)
-      } catch {
-        // A transient read failure keeps the last snapshot on screen.
-      }
-    }
-    if (job.running === true || ['created', 'running'].includes(job.status)) {
-      timer = setInterval(() => { void tick() }, 2500)
-    }
-    return () => {
-      alive = false
-      if (timer !== undefined) clearInterval(timer)
-    }
-  }, [job?.id, job?.status, job?.running])
-
   const currentTarget = snapshot?.target ?? 'local'
   const memberRows = useMemo(() => {
     if (snapshot === null) return []
@@ -195,6 +171,16 @@ function Panel({ ctx }: { ctx: any }) {
     setJob(found)
     await refreshJob(id)
   }, [jobs, refreshJob])
+
+  const refreshAll = useCallback(async () => {
+    await Promise.all([load(), loadJobs()])
+    if (job !== null) await refreshJob(job.id)
+  }, [load, loadJobs, job, refreshJob])
+
+  const refreshBuild = useCallback(async () => {
+    await loadJobs()
+    if (job !== null) await refreshJob(job.id)
+  }, [loadJobs, job, refreshJob])
 
   const startBuild = useCallback(async (planOnly: boolean) => {
     setBuildBusy(planOnly ? 'plan' : 'build')
@@ -350,7 +336,7 @@ function Panel({ ctx }: { ctx: any }) {
       <Card
         size="small"
         title="从 DSH 源码构建修改版 Web 包"
-        extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => { void loadJobs() }}>刷新任务</Button>}
+        extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => { void refreshBuild() }}>刷新任务</Button>}
       >
         <div className={"dsh-pw-form"}>
           <label>
@@ -395,6 +381,7 @@ function Panel({ ctx }: { ctx: any }) {
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12, marginBottom: 0 }}>
           构建在后台运行：应用 build/recipes.json 的源码覆盖层，运行 pnpm install 与 pnpm run build:web，
           然后按目标打包。覆盖层失配时会先生成工作单，不会带着半套修改继续构建。
+          运行中的任务不会自动轮询，点“刷新任务”或右上角“刷新”查看最新状态。
         </Typography.Paragraph>
       </Card>
 
@@ -527,7 +514,7 @@ function Panel({ ctx }: { ctx: any }) {
             <Tag icon={gateAvailable ? <CheckCircleOutlined /> : <WarningOutlined />} color={gateAvailable ? 'green' : 'default'}>
               {gateAvailable ? '网关已连接' : '无网关'}
             </Tag>
-            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { void load() }}>刷新</Button>
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { void refreshAll() }}>刷新</Button>
           </div>
         </div>
 

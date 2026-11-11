@@ -142,6 +142,22 @@ function createHttpApiHandler(service2) {
     }
   };
 }
+function isLoopbackAddress(address) {
+  if (!address) return false;
+  const text = address.startsWith("::ffff:") ? address.slice(7) : address;
+  if (text === "::1") return true;
+  return /^127\./.test(text) && text.split(".").length === 4;
+}
+function createControlExtraHandler(service2) {
+  const api = createHttpApiHandler(service2);
+  return async (request, response) => {
+    if (!isLoopbackAddress(request.socket?.remoteAddress)) return false;
+    const path6 = new URL(request.url ?? "/", "http://local.invalid").pathname;
+    if (path6 !== API_PREFIX && !path6.startsWith(`${API_PREFIX}/`)) return false;
+    await api(request, response);
+    return true;
+  };
+}
 
 // src/lib/service.ts
 import { execFile as execFile2 } from "node:child_process";
@@ -2283,8 +2299,8 @@ var WireGuardService = class {
    * @param {((request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean> | boolean) | null} handler handler.
    * @returns {void}
    */
-  setControlExtraHandler(handler2) {
-    this.controlExtraHandler = handler2;
+  setControlExtraHandler(handler) {
+    this.controlExtraHandler = handler;
   }
   /**
    * Start the control panel explicitly, even when `externalControlPanel` is
@@ -3346,11 +3362,7 @@ var service = new WireGuardService({
   dataDir: path5.join(home, "wireguard"),
   log: (line) => console.log(`[wireguard-control] ${line}`)
 });
-var handler = createHttpApiHandler(service);
-service.setControlExtraHandler(async (request, response) => {
-  await handler(request, response);
-  return true;
-});
+service.setControlExtraHandler(createControlExtraHandler(service));
 await service.init();
 await service.startControlPanel();
 console.log("[wireguard-control] ready; control panel owns 51821");

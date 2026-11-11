@@ -632,7 +632,6 @@ function RunningService({
   busy,
   onStop,
   onRemove,
-  onOpenControl,
   onConfigureSsh,
 }: {
   state: Snapshot;
@@ -640,7 +639,6 @@ function RunningService({
   busy: string;
   onStop: () => void;
   onRemove: (publicKey: string) => void;
-  onOpenControl: () => void;
   onConfigureSsh: (publicKey: string, user: string) => Promise<{ linux: string; windows: string } | undefined>;
 }) {
   const server: ServerState = state.server;
@@ -740,9 +738,16 @@ function RunningService({
           </Space>
         )}
         extra={(
-          <Button size="small" icon={<LinkOutlined />} onClick={onOpenControl} disabled={!controlUrl}>
-            {t('service.openControl')}
-          </Button>
+          <Popconfirm
+            title={t('service.stopConfirm')}
+            okText={t('service.stop')}
+            cancelText={t('page.cancel')}
+            onConfirm={onStop}
+          >
+            <Button size="small" danger icon={<StopOutlined />} loading={busy === 'stop'}>
+              {t('service.stop')}
+            </Button>
+          </Popconfirm>
         )}
       >
         <Descriptions bordered size="small" column={{ xs: 1, sm: 1, md: 2 }} style={{ marginTop: 0 }}>
@@ -764,19 +769,6 @@ function RunningService({
               : <Typography.Text type="secondary">{t('service.joinCodeNone')}</Typography.Text>}
           </Descriptions.Item>
         </Descriptions>
-
-        <Space wrap style={{ marginTop: 14 }}>
-          <Popconfirm
-            title={t('service.stopConfirm')}
-            okText={t('service.stop')}
-            cancelText={t('page.cancel')}
-            onConfirm={onStop}
-          >
-            <Button danger icon={<StopOutlined />} loading={busy === 'stop'}>
-              {t('service.stop')}
-            </Button>
-          </Popconfirm>
-        </Space>
 
         {server.warnings?.length ? (
           <Alert
@@ -1118,9 +1110,6 @@ export function WireGuardPanel({ ctx, embedded = false, t: providedT }: { ctx: a
 
   const locale = ctx.locale.getSnapshot().active || '';
   const isZh = locale.toLowerCase().startsWith('zh');
-  const openControl = () => {
-    if (state?.server.controlUrl) window.open(state.server.controlUrl, '_blank', 'noopener,noreferrer');
-  };
 
   const serviceTab = state ? (
     state.server.running ? (
@@ -1130,7 +1119,6 @@ export function WireGuardPanel({ ctx, embedded = false, t: providedT }: { ctx: a
         busy={busy}
         onStop={() => void controller.stopServer()}
         onRemove={(publicKey) => void controller.removePeer(publicKey)}
-        onOpenControl={openControl}
         onConfigureSsh={controller.configureSsh}
       />
     ) : (

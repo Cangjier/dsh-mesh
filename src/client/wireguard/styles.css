@@ -152,4 +152,4 @@
 
 .dsh-wg-embedded .dsh-wg-header { display: none; }
 .dsh-wg-embedded.dsh-wg-root { height: auto; max-height: none; overflow: visible; padding: 0; }
-.dsh-wg-embedded .dsh-wg-shell { padding: 0; }
+.dsh-wg-embedded .dsh-wg-shell { width: 100%; max-width: none; margin: 0; padding: 0; }

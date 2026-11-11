@@ -75,6 +75,15 @@ export function formatBytes(value) {
   return `${amount >= 10 || unit === 0 ? String(Math.round(amount)) : amount.toFixed(1)} ${units[unit]}`
 }
 
+/** Add an actionable hint when SSH refused a changed host key. */
+export function describeDeployFailure(message) {
+  const text = String(message ?? '')
+  if (!/REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed/iu.test(text)) return text
+  return `${text}
+
+SSH 主机密钥与 known_hosts 中的记录不一致：目标机可能重装过系统，或这个 VPN 地址已经属于另一台机器。请在 WireGuard 面板对该成员重新执行一次「SSH 授权」（生成命令时会同时刷新本机 known_hosts），或者手动执行 ssh-keygen -R <目标地址> 后重试。`
+}
+
 /** Deployment steps reported by the panel while a job runs. */
 export function initialDeploySteps() {
   return [
@@ -1090,7 +1099,7 @@ export class DeployManager {
     } catch (error) {
       state.status = 'failed'
       state.phase = 'failed'
-      state.error = error instanceof Error ? error.message : String(error)
+      state.error = describeDeployFailure(error instanceof Error ? error.message : String(error))
       state.updatedAt = stamp()
       const active = state.steps.find(item => item.status === 'running')
       if (active !== undefined) {
@@ -1229,7 +1238,7 @@ export class DeployManager {
       } catch (error) {
         state.status = 'failed'
         state.phase = 'failed'
-        state.error = error instanceof Error ? error.message : String(error)
+        state.error = describeDeployFailure(error instanceof Error ? error.message : String(error))
       }
       await this.#save(stateFile, state)
       await log(state.status === 'succeeded' ? 'rollback succeeded' : `rollback failed: ${state.error}`)

@@ -14,6 +14,7 @@ import { WireGuardError, missingToolHint } from './errors';
 import { installWireGuard as installPlatformWireGuard } from './installer';
 import { allocatePeerIp, ipv4ToString, isUsableHost, parseCidr, parseIpv4 } from './ip';
 import { keyFingerprint, normalizeKey } from './keys';
+import { forgetKnownHosts, refreshKnownHosts } from './known-hosts';
 import { detectGlobalIpv6, detectLanAddress, detectPlatform, localHostname, type PlatformInfo } from './platform';
 import { buildSshAuthorizeCommand, buildWindowsSshAuthorizeCommand, SSH_USER_PATTERN } from './ssh';
 import { emptyState, Store, type PluginState } from './store';
@@ -29,6 +30,11 @@ export interface WireGuardServiceOptions {
   fetchImpl?: typeof fetch;
   now?: () => number;
   log?: (line: string) => void;
+  /** Known-hosts maintenance, overridable in tests. */
+  knownHosts?: {
+    refresh?: (host: string) => Promise<unknown>;
+    forget?: (host: string) => Promise<void>;
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -51,6 +57,7 @@ export class WireGuardService {
   readonly logger: (line: string) => void;
   control: ControlPanel | null;
   controlExtraHandler: ((request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean> | boolean) | null;
+  knownHosts: { refresh: (host: string) => Promise<unknown>; forget: (host: string) => Promise<void> };
   platform: PlatformInfo | null;
   tunnel: any;
   platformAt: number;
@@ -67,6 +74,10 @@ export class WireGuardService {
     this.logger = options.log ?? ((line) => console.log(`[dsh-wireguard] ${line}`));
     this.control = null;
     this.controlExtraHandler = null;
+    this.knownHosts = {
+      refresh: options.knownHosts?.refresh ?? ((host: string) => refreshKnownHosts(host)),
+      forget: options.knownHosts?.forget ?? ((host: string) => forgetKnownHosts(host)),
+    };
     this.platform = null;
     this.tunnel = null;
     this.platformAt = 0;
@@ -854,6 +865,11 @@ export class WireGuardService {
       }
       this.state.server.peers = this.state.server.peers.filter((candidate) => candidate.publicKey !== key);
       await this.#removeSshKey(key);
+      try {
+        await this.knownHosts.forget(peer.ip);
+      } catch {
+        // Best effort: an absent entry is already the desired state.
+      }
       await this.#safeRewriteServerConfig();
       await this.#persist();
       return this.snapshot();
@@ -888,6 +904,14 @@ export class WireGuardService {
       peer.sshUser = user;
       await this.#persist();
       this.#log(`configured SSH access for ${peer.name} as ${user}`);
+      // The peer's sshd host key may be newer than the stale entry left by a
+      // reinstall or by another machine that used this VPN address.
+      try {
+        const keys = await this.knownHosts.refresh(peer.ip);
+        this.#log(`refreshed the SSH host key for ${peer.name} (${Array.isArray(keys) ? keys.length : 0} key(s))`);
+      } catch (error) {
+        this.#log(`could not refresh the SSH host key for ${peer.name}: ${errorMessage(error)}`);
+      }
       const commands = {
         linux: buildSshAuthorizeCommand(user, publicSshKey),
         windows: buildWindowsSshAuthorizeCommand(user, publicSshKey),

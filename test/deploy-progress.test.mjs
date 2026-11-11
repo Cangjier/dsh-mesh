@@ -92,3 +92,25 @@ test('a failed step marks the job and that step as failed', async () => {
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('a changed host key adds an actionable hint to the failure', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mesh-deploy-'))
+  const packagePath = path.join(root, 'package.tar.gz')
+  await writeFile(packagePath, 'not really a tarball')
+  const manager = managerWith(() => ({
+    async upload() {
+      throw new Error('scp exited with 255: @ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @')
+    },
+    async script() {},
+  }), path.join(root, 'jobs'))
+
+  try {
+    const started = await manager.start({ host: '10.66.66.4', os: 'windows', package: packagePath, appRoot: 'C:\\dsh-mesh' })
+    const final = await manager.wait(started.job.id)
+    assert.equal(final.status, 'failed')
+    assert.match(final.error, /REMOTE HOST IDENTIFICATION HAS CHANGED/u)
+    assert.match(final.error, /ssh-keygen -R/u)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

@@ -62,7 +62,7 @@ async function freePort() {
   return port;
 }
 
-async function withService(run) {
+async function withService(run, options = {}) {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'dsh-wireguard-test-'));
   const tunnel = fakeTunnel();
   const service = new WireGuardService({
@@ -70,6 +70,7 @@ async function withService(run) {
     platformFactory: async () => fakePlatform(),
     tunnelFactory: () => tunnel,
     log: () => {},
+    ...options,
   });
   await service.init();
   try {
@@ -334,6 +335,73 @@ test('configures SSH access for a joined peer and removes its private key with t
     assert.equal(remaining.length, 0);
     await service.stopServer();
     assert.ok(tunnel.downCalls >= 1);
+  });
+});
+
+test('SSH authorization refreshes known hosts and peer removal forgets them', async () => {
+  const calls: string[] = [];
+  await withService(async ({ service }) => {
+    const port = await freePort();
+    await service.startServer({
+      controlPort: port,
+      listenPort: 51820,
+      vpnCidr: '10.66.66.0/24',
+      serverIp: '10.66.66.1',
+      endpointHost: '192.168.1.10',
+      joinCode: 'secret-code',
+      mtu: 1420,
+      interfaceName: 'dshwg0',
+      dns: '',
+    });
+    const client = generateKeyPair();
+    await service.joinPeer({ name: 'known-hosts-client', publicKey: client.publicKey, code: 'secret-code' });
+    const configured = await service.configurePeerSsh({ publicKey: client.publicKey, user: 'ubuntu' });
+    const peer = configured.state.server.peers.find((candidate) => candidate.publicKey === client.publicKey);
+    assert.ok(peer);
+    assert.deepEqual(calls, [`refresh ${peer.ip}`]);
+
+    await service.removePeer(client.publicKey);
+    assert.deepEqual(calls, [`refresh ${peer.ip}`, `forget ${peer.ip}`]);
+    await service.stopServer();
+  }, {
+    knownHosts: {
+      refresh: async (host: string) => {
+        calls.push(`refresh ${host}`);
+        return ['ssh-ed25519 AAAA'];
+      },
+      forget: async (host: string) => {
+        calls.push(`forget ${host}`);
+      },
+    },
+  });
+});
+
+test('a failed host-key refresh does not break SSH authorization', async () => {
+  await withService(async ({ service }) => {
+    const port = await freePort();
+    await service.startServer({
+      controlPort: port,
+      listenPort: 51820,
+      vpnCidr: '10.66.66.0/24',
+      serverIp: '10.66.66.1',
+      endpointHost: '192.168.1.10',
+      joinCode: 'secret-code',
+      mtu: 1420,
+      interfaceName: 'dshwg0',
+      dns: '',
+    });
+    const client = generateKeyPair();
+    await service.joinPeer({ name: 'offline-client', publicKey: client.publicKey, code: 'secret-code' });
+    const configured = await service.configurePeerSsh({ publicKey: client.publicKey, user: 'ubuntu' });
+    assert.match(configured.command, /ssh-ed25519 /);
+    await service.stopServer();
+  }, {
+    knownHosts: {
+      refresh: async () => {
+        throw new Error('ssh-keyscan timed out');
+      },
+      forget: async () => {},
+    },
   });
 });
 

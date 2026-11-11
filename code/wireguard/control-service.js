@@ -1,6 +1,6 @@
 // src/wireguard/control-service.ts
-import { homedir } from "node:os";
-import path5 from "node:path";
+import { homedir as homedir2 } from "node:os";
+import path6 from "node:path";
 
 // src/wireguard/lib/constants.ts
 var PLUGIN_VERSION = "0.2.0";
@@ -88,12 +88,12 @@ function createHttpApiHandler(service2) {
     try {
       const method = request.method ?? "GET";
       const url = new URL(request.url ?? "/", "http://local.invalid");
-      const path6 = url.pathname;
-      if (method === "GET" && path6 === `${API_PREFIX}/state`) {
+      const path7 = url.pathname;
+      if (method === "GET" && path7 === `${API_PREFIX}/state`) {
         writeJson(response, 200, { ok: true, state: await service2.getState() });
         return;
       }
-      if (method === "GET" && path6 === `${API_PREFIX}/health`) {
+      if (method === "GET" && path7 === `${API_PREFIX}/health`) {
         writeJson(response, 200, { ok: true, service: "dsh-wireguard" });
         return;
       }
@@ -107,15 +107,15 @@ function createHttpApiHandler(service2) {
       }
       const body = await readJson(request);
       let result;
-      if (path6 === `${API_PREFIX}/install`) result = await service2.installWireGuard();
-      else if (path6 === `${API_PREFIX}/server/start`) result = await service2.startServer(body);
-      else if (path6 === `${API_PREFIX}/server/stop`) result = await service2.stopServer();
-      else if (path6 === `${API_PREFIX}/peers/remove`) result = await service2.removePeer(String(body.publicKey ?? ""));
-      else if (path6 === `${API_PREFIX}/peers/ssh`) result = await service2.configurePeerSsh(body);
-      else if (path6 === `${API_PREFIX}/client/connect`) result = await service2.connectClient(body);
-      else if (path6 === `${API_PREFIX}/client/retry`) result = await service2.retryClient();
-      else if (path6 === `${API_PREFIX}/client/disconnect`) result = await service2.disconnectClient();
-      else if (path6 === `${API_PREFIX}/refresh`) result = await service2.getState({ force: true });
+      if (path7 === `${API_PREFIX}/install`) result = await service2.installWireGuard();
+      else if (path7 === `${API_PREFIX}/server/start`) result = await service2.startServer(body);
+      else if (path7 === `${API_PREFIX}/server/stop`) result = await service2.stopServer();
+      else if (path7 === `${API_PREFIX}/peers/remove`) result = await service2.removePeer(String(body.publicKey ?? ""));
+      else if (path7 === `${API_PREFIX}/peers/ssh`) result = await service2.configurePeerSsh(body);
+      else if (path7 === `${API_PREFIX}/client/connect`) result = await service2.connectClient(body);
+      else if (path7 === `${API_PREFIX}/client/retry`) result = await service2.retryClient();
+      else if (path7 === `${API_PREFIX}/client/disconnect`) result = await service2.disconnectClient();
+      else if (path7 === `${API_PREFIX}/refresh`) result = await service2.getState({ force: true });
       else {
         writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown WireGuard endpoint." } });
         return;
@@ -152,20 +152,20 @@ function createControlExtraHandler(service2) {
   const api = createHttpApiHandler(service2);
   return async (request, response) => {
     if (!isLoopbackAddress(request.socket?.remoteAddress)) return false;
-    const path6 = new URL(request.url ?? "/", "http://local.invalid").pathname;
-    if (path6 !== API_PREFIX && !path6.startsWith(`${API_PREFIX}/`)) return false;
+    const path7 = new URL(request.url ?? "/", "http://local.invalid").pathname;
+    if (path7 !== API_PREFIX && !path7.startsWith(`${API_PREFIX}/`)) return false;
     await api(request, response);
     return true;
   };
 }
 
 // src/wireguard/lib/service.ts
-import { execFile as execFile2 } from "node:child_process";
+import { execFile as execFile3 } from "node:child_process";
 import { createHash as createHash2 } from "node:crypto";
-import { chmod as chmod2, mkdir as mkdir3, readFile as readFile2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import { chmod as chmod2, mkdir as mkdir4, readFile as readFile2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { isIP as isIP2 } from "node:net";
-import path4 from "node:path";
-import { promisify } from "node:util";
+import path5 from "node:path";
+import { promisify as promisify2 } from "node:util";
 
 // src/wireguard/lib/access.ts
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
@@ -1529,6 +1529,46 @@ function keyFingerprint(publicKey) {
   return `${normalized.slice(0, 6)}\u2026${normalized.slice(-6)}`;
 }
 
+// src/wireguard/lib/known-hosts.ts
+import { execFile as execFile2 } from "node:child_process";
+import { appendFile, mkdir as mkdir2 } from "node:fs/promises";
+import { homedir } from "node:os";
+import path3 from "node:path";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile2);
+function knownHostsPath() {
+  return path3.join(homedir(), ".ssh", "known_hosts");
+}
+function parseScannedHostKeys(output) {
+  return output.split(/\r?\n/u).map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("#"));
+}
+async function refreshKnownHosts(host, port = 22, options = {}) {
+  const scan = await execFileAsync("ssh-keyscan", ["-T", "8", "-p", String(port), host], {
+    timeout: 2e4,
+    windowsHide: true
+  });
+  const keys = parseScannedHostKeys(String(scan.stdout ?? ""));
+  if (keys.length === 0) throw new Error("ssh-keyscan returned no host keys");
+  const file = options.file ?? knownHostsPath();
+  await mkdir2(path3.dirname(file), { recursive: true, mode: 448 });
+  const target = port === 22 ? host : `[${host}]:${port}`;
+  try {
+    await execFileAsync("ssh-keygen", ["-R", target, "-f", file], { timeout: 1e4, windowsHide: true });
+  } catch {
+  }
+  await appendFile(file, `${keys.join("\n")}
+`, { mode: 384 });
+  return keys;
+}
+async function forgetKnownHosts(host, port = 22, options = {}) {
+  const file = options.file ?? knownHostsPath();
+  const target = port === 22 ? host : `[${host}]:${port}`;
+  try {
+    await execFileAsync("ssh-keygen", ["-R", target, "-f", file], { timeout: 1e4, windowsHide: true });
+  } catch {
+  }
+}
+
 // src/wireguard/lib/ssh.ts
 var SSH_USER_PATTERN = /^[A-Za-z_][A-Za-z0-9_-]{0,31}$/;
 function buildSshAuthorizeCommand(user, publicKey) {
@@ -1567,8 +1607,8 @@ Write-Output 'SSH public key installed for Windows user ' + $user`;
 }
 
 // src/wireguard/lib/store.ts
-import { chmod, mkdir as mkdir2, readFile, rename, rm, writeFile } from "node:fs/promises";
-import path3 from "node:path";
+import { chmod, mkdir as mkdir3, readFile, rename, rm, writeFile } from "node:fs/promises";
+import path4 from "node:path";
 function emptyState() {
   return {
     version: 1,
@@ -1685,12 +1725,12 @@ var Store = class {
   existed;
   constructor(dataDir) {
     this.dataDir = dataDir;
-    this.statePath = path3.join(dataDir, "state.json");
+    this.statePath = path4.join(dataDir, "state.json");
     this.state = emptyState();
     this.existed = false;
   }
   async init() {
-    await mkdir2(this.dataDir, { recursive: true, mode: 448 });
+    await mkdir3(this.dataDir, { recursive: true, mode: 448 });
     try {
       await chmod(this.dataDir, 448);
     } catch {
@@ -1739,7 +1779,7 @@ var Store = class {
    * @returns {Promise<{ privateKey: string, publicKey: string, privateKeyPath: string }>}
    */
   async ensureKey(role) {
-    const privateKeyPath = path3.join(this.dataDir, `${role}.key`);
+    const privateKeyPath = path4.join(this.dataDir, `${role}.key`);
     try {
       const stored = await readFile(privateKeyPath, "utf8");
       const normalized = normalizeKey(stored);
@@ -1778,8 +1818,8 @@ var Store = class {
    * @returns {string} absolute config path.
    */
   configPath(role, interfaceName = null, windows = false) {
-    if (windows && interfaceName) return path3.join(this.dataDir, `${interfaceName}.conf`);
-    return path3.join(this.dataDir, `${role}.conf`);
+    if (windows && interfaceName) return path4.join(this.dataDir, `${interfaceName}.conf`);
+    return path4.join(this.dataDir, `${role}.conf`);
   }
   /**
    * @param {'server' | 'client'} role config owner.
@@ -2105,7 +2145,7 @@ var Tunnel = class {
 };
 
 // src/wireguard/lib/service.ts
-var execFileAsync = promisify(execFile2);
+var execFileAsync2 = promisify2(execFile3);
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -2123,6 +2163,7 @@ var WireGuardService = class {
   logger;
   control;
   controlExtraHandler;
+  knownHosts;
   platform;
   tunnel;
   platformAt;
@@ -2138,6 +2179,10 @@ var WireGuardService = class {
     this.logger = options.log ?? ((line) => console.log(`[dsh-wireguard] ${line}`));
     this.control = null;
     this.controlExtraHandler = null;
+    this.knownHosts = {
+      refresh: options.knownHosts?.refresh ?? ((host) => refreshKnownHosts(host)),
+      forget: options.knownHosts?.forget ?? ((host) => forgetKnownHosts(host))
+    };
     this.platform = null;
     this.tunnel = null;
     this.platformAt = 0;
@@ -2894,6 +2939,10 @@ var WireGuardService = class {
       }
       this.state.server.peers = this.state.server.peers.filter((candidate) => candidate.publicKey !== key);
       await this.#removeSshKey(key);
+      try {
+        await this.knownHosts.forget(peer.ip);
+      } catch {
+      }
       await this.#safeRewriteServerConfig();
       await this.#persist();
       return this.snapshot();
@@ -2927,6 +2976,12 @@ var WireGuardService = class {
       peer.sshUser = user;
       await this.#persist();
       this.#log(`configured SSH access for ${peer.name} as ${user}`);
+      try {
+        const keys = await this.knownHosts.refresh(peer.ip);
+        this.#log(`refreshed the SSH host key for ${peer.name} (${Array.isArray(keys) ? keys.length : 0} key(s))`);
+      } catch (error) {
+        this.#log(`could not refresh the SSH host key for ${peer.name}: ${errorMessage(error)}`);
+      }
       const commands = {
         linux: buildSshAuthorizeCommand(user, publicSshKey),
         windows: buildWindowsSshAuthorizeCommand(user, publicSshKey)
@@ -2940,7 +2995,7 @@ var WireGuardService = class {
    */
   #sshKeyPath(peerPublicKey) {
     const digest = createHash2("sha256").update(peerPublicKey).digest("hex");
-    return path4.join(this.store.dataDir, "ssh", `${digest}.key`);
+    return path5.join(this.store.dataDir, "ssh", `${digest}.key`);
   }
   /**
    * Reuse a peer's SSH key if present, otherwise generate a new Ed25519 key.
@@ -2950,8 +3005,8 @@ var WireGuardService = class {
   async #ensureSshKey(peerPublicKey) {
     const keyPath = this.#sshKeyPath(peerPublicKey);
     const publicPath = `${keyPath}.pub`;
-    const directory = path4.dirname(keyPath);
-    await mkdir3(directory, { recursive: true, mode: 448 });
+    const directory = path5.dirname(keyPath);
+    await mkdir4(directory, { recursive: true, mode: 448 });
     try {
       await chmod2(directory, 448);
     } catch {
@@ -2970,7 +3025,7 @@ var WireGuardService = class {
     try {
       await readFile2(keyPath, "utf8");
       try {
-        const derived = await execFileAsync("ssh-keygen", ["-y", "-f", keyPath]);
+        const derived = await execFileAsync2("ssh-keygen", ["-y", "-f", keyPath]);
         const publicKey2 = String(derived.stdout ?? "").trim();
         if (publicKey2) {
           await writeFile2(publicPath, `${publicKey2}
@@ -2990,7 +3045,7 @@ var WireGuardService = class {
     await rm2(publicPath, { force: true }).catch(() => {
     });
     try {
-      await execFileAsync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "dsh-wireguard", "-f", keyPath]);
+      await execFileAsync2("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "dsh-wireguard", "-f", keyPath]);
     } catch {
       throw new WireGuardError("ssh_keygen_failed", "Could not generate an SSH key for the client.", {
         status: 500,
@@ -3353,13 +3408,13 @@ var WireGuardService = class {
 };
 
 // src/wireguard/control-service.ts
-var home = process.env.DSH_HOME && process.env.DSH_HOME.trim() ? process.env.DSH_HOME.trim() : path5.join(homedir(), ".dsh");
+var home = process.env.DSH_HOME && process.env.DSH_HOME.trim() ? process.env.DSH_HOME.trim() : path6.join(homedir2(), ".dsh");
 var service = new WireGuardService({
   config: {
     externalControlPanel: true,
     keepTunnelOnExit: true
   },
-  dataDir: path5.join(home, "wireguard"),
+  dataDir: path6.join(home, "wireguard"),
   log: (line) => console.log(`[wireguard-control] ${line}`)
 });
 service.setControlExtraHandler(createControlExtraHandler(service));

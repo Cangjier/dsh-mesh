@@ -1151,6 +1151,13 @@ function formatBytes(value) {
   }
   return `${amount >= 10 || unit === 0 ? String(Math.round(amount)) : amount.toFixed(1)} ${units[unit]}`;
 }
+function describeDeployFailure(message) {
+  const text = String(message ?? "");
+  if (!/REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed/iu.test(text)) return text;
+  return `${text}
+
+SSH \u4E3B\u673A\u5BC6\u94A5\u4E0E known_hosts \u4E2D\u7684\u8BB0\u5F55\u4E0D\u4E00\u81F4\uFF1A\u76EE\u6807\u673A\u53EF\u80FD\u91CD\u88C5\u8FC7\u7CFB\u7EDF\uFF0C\u6216\u8FD9\u4E2A VPN \u5730\u5740\u5DF2\u7ECF\u5C5E\u4E8E\u53E6\u4E00\u53F0\u673A\u5668\u3002\u8BF7\u5728 WireGuard \u9762\u677F\u5BF9\u8BE5\u6210\u5458\u91CD\u65B0\u6267\u884C\u4E00\u6B21\u300CSSH \u6388\u6743\u300D\uFF08\u751F\u6210\u547D\u4EE4\u65F6\u4F1A\u540C\u65F6\u5237\u65B0\u672C\u673A known_hosts\uFF09\uFF0C\u6216\u8005\u624B\u52A8\u6267\u884C ssh-keygen -R <\u76EE\u6807\u5730\u5740> \u540E\u91CD\u8BD5\u3002`;
+}
 function initialDeploySteps() {
   return [
     { key: "upload", label: "\u4E0A\u4F20\u5B89\u88C5\u5305", status: "pending", startedAt: null, finishedAt: null, detail: "" },
@@ -1997,7 +2004,7 @@ var DeployManager = class {
     } catch (error) {
       state.status = "failed";
       state.phase = "failed";
-      state.error = error instanceof Error ? error.message : String(error);
+      state.error = describeDeployFailure(error instanceof Error ? error.message : String(error));
       state.updatedAt = stamp();
       const active = state.steps.find((item) => item.status === "running");
       if (active !== void 0) {
@@ -2134,7 +2141,7 @@ var DeployManager = class {
       } catch (error) {
         state.status = "failed";
         state.phase = "failed";
-        state.error = error instanceof Error ? error.message : String(error);
+        state.error = describeDeployFailure(error instanceof Error ? error.message : String(error));
       }
       await this.#save(stateFile, state);
       await log(state.status === "succeeded" ? "rollback succeeded" : `rollback failed: ${state.error}`);

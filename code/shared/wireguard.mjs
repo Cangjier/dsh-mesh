@@ -249,7 +249,7 @@ export async function probeMember(ip, options = {}) {
     return { ok: false, port: null, info: null, latencyMs: 0, error: 'not an IP address' }
   }
   const ports = [...new Set((options.ports ?? DEFAULT_MEMBER_PORTS).filter(port => Number.isInteger(port) && port > 0 && port <= 65_535))]
-  const timeoutMs = options.timeoutMs ?? 800
+  const timeoutMs = options.timeoutMs ?? 2_500
   const fetchImpl = options.fetchImpl ?? fetch
   let lastError = 'no member port answered'
   for (const port of ports) {

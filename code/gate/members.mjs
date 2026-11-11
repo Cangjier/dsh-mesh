@@ -86,7 +86,7 @@ export class MemberService {
     this.memberPort = Number.isInteger(options.memberPort) ? options.memberPort : 80
     this.discoveryPorts = [...new Set((options.discoveryPorts ?? []).filter(port => Number.isInteger(port) && port > 0))]
     this.stateFile = options.stateFile
-    this.discoveryTimeoutMs = options.discoveryTimeoutMs ?? 800
+    this.discoveryTimeoutMs = options.discoveryTimeoutMs ?? 2_500
     this.discoveryCacheMs = options.discoveryCacheMs ?? DEFAULT_CACHE_MS
     this.clusterAllow = new Set((options.clusterAllow ?? []).map(normalizeAddress).filter(Boolean))
     this.memberPublic = options.memberPublic === true

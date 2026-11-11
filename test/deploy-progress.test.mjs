@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -173,6 +173,45 @@ test('Windows extraction reports entry progress and skips Expand-Archive', async
     assert.ok(seenScripts.length >= 2)
     assert.ok(seenScripts.every(script => !script.includes('Expand-Archive')), 'the slow extractor must be skipped')
     assert.ok(seenScripts.some(script => script.includes('release directory missing')))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a first install inherits the deployer gateway credentials', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mesh-deploy-'))
+  const packagePath = path.join(root, 'package.zip')
+  await writeFile(packagePath, 'zip placeholder')
+  const scripts = []
+  const manager = managerWith(() => ({
+    async upload() {},
+    async archiveEntries() {
+      return 1
+    },
+    async extractArchive(_remote, _target, onEntry) {
+      onEntry?.('')
+    },
+    async script(script) {
+      scripts.push(script)
+    },
+  }), path.join(root, 'jobs'))
+
+  try {
+    const started = await manager.start({
+      host: '10.66.66.4',
+      os: 'windows',
+      package: packagePath,
+      appRoot: 'C:\\dsh-mesh',
+      gatePassword: 'shared-gate-pw',
+      clusterKey: 'shared-cluster-key',
+    })
+    const final = await manager.wait(started.job.id)
+    assert.equal(final.status, 'succeeded')
+    assert.ok(scripts.some(script => script.includes("$password = 'shared-gate-pw'")))
+    assert.ok(scripts.some(script => script.includes("$clusterKey = 'shared-cluster-key'")))
+    assert.ok(scripts.some(script => script.includes('copied from the deployer')))
+    const state = JSON.parse(await readFile(path.join(root, 'jobs', started.job.id, 'job.json'), 'utf8'))
+    assert.equal(JSON.stringify(state).includes('shared-gate-pw'), false, 'the job state never stores the secret')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

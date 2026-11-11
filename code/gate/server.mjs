@@ -1033,7 +1033,11 @@ function isGatePath(pathname) {
 
 // ─── proxying ──────────────────────────────────────────────────────────────
 
-const agent = new http.Agent({ keepAlive: true, maxSockets: 128 })
+// A fresh socket per upstream request. The private DSH listener closes idle
+// keep-alive connections after a few seconds, and a socket the pool still
+// believes in can swallow the next request without any error - the page then
+// hangs behind a healthy-looking gate until the gate is restarted.
+const agent = new http.Agent({ keepAlive: false, maxSockets: 128 })
 
 /**
  * Member discovery, selection, and the remote proxy. The service is the only
@@ -1082,6 +1086,7 @@ function proxyRequest(req, res) {
     return
   }
   const startedAtMs = Date.now()
+  let responseTimer
   const upstreamReq = http.request({
     host: '127.0.0.1',
     port: upstream.port,
@@ -1090,6 +1095,7 @@ function proxyRequest(req, res) {
     headers: localProxyHeaders(req),
     agent,
   }, (upstreamRes) => {
+    clearTimeout(responseTimer)
     const headers = {}
     for (const [name, value] of Object.entries(upstreamRes.headers)) {
       if (value === undefined || HOP_BY_HOP.has(name.toLowerCase())) continue
@@ -1099,13 +1105,28 @@ function proxyRequest(req, res) {
     }
     res.writeHead(upstreamRes.statusCode ?? 502, headers)
     upstreamRes.pipe(res)
+    upstreamRes.on('error', () => {
+      if (!res.writableEnded) res.destroy()
+    })
     upstreamRes.on('end', () => {
       if (CONFIG.accessLog) {
         log(`${req.method ?? 'GET'} ${req.url ?? '/'} ${String(upstreamRes.statusCode)} ${String(Date.now() - startedAtMs)}ms`)
       }
     })
   })
+  // A request whose response headers never arrive must fail instead of
+  // pinning a browser (and, before keep-alive was disabled, a socket) forever.
+  responseTimer = setTimeout(() => {
+    upstreamReq.destroy(new Error('upstream response timeout'))
+  }, 60_000)
+  // The browser closing the page, navigating away, or cancelling a stream
+  // leaves the upstream half open unless this request is torn down with it.
+  res.on('close', () => {
+    clearTimeout(responseTimer)
+    if (!res.writableFinished) upstreamReq.destroy()
+  })
   upstreamReq.on('error', (error) => {
+    clearTimeout(responseTimer)
     if (res.headersSent) {
       res.destroy()
       return

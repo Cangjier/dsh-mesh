@@ -222,3 +222,17 @@
     padding-right: 20px;
   }
 }
+
+/* Deploy progress: the log tail keeps its own scroll so the modal stays put. */
+.dsh-pw-deploy-log {
+  margin: 8px 0 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.12);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

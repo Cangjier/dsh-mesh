@@ -516,7 +516,7 @@ export class MeshService {
         ? 'windows'
         : member.system?.platform?.toLowerCase().startsWith('win') ? 'windows' : 'linux'
       const deployRequest = await this.#memberDeployRequest(member, packagePath, os)
-      const started = await this.deploy.start(deployRequest)
+      const started = await this.deploy.start({ ...deployRequest, member: member.id })
       return {
         ok: true,
         job: started.job,
@@ -652,6 +652,15 @@ export class MeshService {
    */
   async deployStatus(id) {
     return this.deploy.status(id)
+  }
+
+  /**
+   * List recent deployment jobs, newest first.
+   * @param {number} [limit] maximum count.
+   * @returns {Promise<object[]>} jobs.
+   */
+  async deployJobs(limit = 20) {
+    return this.deploy.list(limit)
   }
 
   /**

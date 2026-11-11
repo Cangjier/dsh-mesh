@@ -61,6 +61,38 @@ function ps(value) {
   return `'${String(value).replace(/'/g, "''")}'`
 }
 
+/** Human-readable byte count for progress details. */
+export function formatBytes(value) {
+  const bytes = Number(value)
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  let amount = bytes
+  let unit = 0
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024
+    unit += 1
+  }
+  return `${amount >= 10 || unit === 0 ? String(Math.round(amount)) : amount.toFixed(1)} ${units[unit]}`
+}
+
+/** Deployment steps reported by the panel while a job runs. */
+export function initialDeploySteps() {
+  return [
+    { key: 'upload', label: '上传安装包', status: 'pending', startedAt: null, finishedAt: null, detail: '' },
+    { key: 'prepare', label: '解压并准备新版本', status: 'pending', startedAt: null, finishedAt: null, detail: '' },
+    { key: 'activate', label: '切换并重启服务', status: 'pending', startedAt: null, finishedAt: null, detail: '' },
+  ]
+}
+
+/** Encode a PowerShell script that copies stdin to one file (Windows upload). */
+function windowsStdinWriter(remote) {
+  const script = `$ErrorActionPreference = 'Stop'
+$stdin = [Console]::OpenStandardInput()
+$file = [IO.File]::Open(${ps(remote)}, [IO.FileMode]::Create)
+try { $stdin.CopyTo($file) } finally { $file.Dispose() }`
+  return Buffer.from(script, 'utf16le').toString('base64')
+}
+
 /**
  * Hash a file without loading it into memory.
  * @param {string} file path.
@@ -723,16 +755,95 @@ export class SshRunner {
   }
 
   /**
-   * Upload a local file with scp.
+   * Upload a local file and report byte progress.
+   *
+   * The file is streamed through the SSH connection when the target can accept
+   * stdin (POSIX `cat` or a PowerShell stdin writer). scp stays as a fallback
+   * when streaming fails, so an exotic target still deploys even without a
+   * progress meter.
    * @param {string} local local path.
    * @param {string} remote remote path.
+   * @param {(progress: {bytes:number,totalBytes:number,percent:number,speed:number,indeterminate?:boolean}) => void} [onProgress] progress callback.
    * @returns {Promise<void>}
    */
-  async upload(local, remote) {
-    const args = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-P', String(this.plan.port)]
-    if (this.plan.identityFile) args.push('-i', this.plan.identityFile)
-    args.push(local, `${this.target()}:${remote}`)
-    await this.runProcess('scp', args)
+  async upload(local, remote, onProgress) {
+    const totalBytes = (await stat(local)).size
+    try {
+      await this.#uploadStream(local, remote, totalBytes, onProgress)
+    } catch (error) {
+      this.log(`streamed upload failed (${error instanceof Error ? error.message : String(error)}); retrying with scp`)
+      onProgress?.({ bytes: 0, totalBytes, percent: 0, speed: 0, indeterminate: true })
+      const args = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-P', String(this.plan.port)]
+      if (this.plan.identityFile) args.push('-i', this.plan.identityFile)
+      args.push(local, `${this.target()}:${remote}`)
+      await this.runProcess('scp', args)
+      onProgress?.({ bytes: totalBytes, totalBytes, percent: 100, speed: 0, indeterminate: false })
+    }
+  }
+
+  /**
+   * Stream one file to the remote path through `ssh` stdin.
+   * @param {string} local local path.
+   * @param {string} remote remote path.
+   * @param {number} totalBytes file size.
+   * @param {Function} [onProgress] progress callback.
+   * @returns {Promise<void>}
+   */
+  #uploadStream(local, remote, totalBytes, onProgress) {
+    const remoteCommand = this.plan.os === 'windows'
+      ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${windowsStdinWriter(remote)}`
+      : `cat > ${sh(remote)}`
+    const args = [...this.sshOptions(), this.target(), remoteCommand]
+    return new Promise((resolve, reject) => {
+      const child = spawn('ssh', args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+      const source = createReadStream(local)
+      let sent = 0
+      let stderr = ''
+      let settled = false
+      let lastAt = Date.now()
+      let lastBytes = 0
+      let speed = 0
+      const finish = error => {
+        if (settled) return
+        settled = true
+        source.destroy()
+        if (error) reject(error)
+        else resolve()
+      }
+      const report = (force = false) => {
+        const now = Date.now()
+        if (!force && now - lastAt < 200) return
+        const seconds = Math.max(1, now - lastAt) / 1000
+        speed = Math.max(0, (sent - lastBytes) / seconds)
+        lastAt = now
+        lastBytes = sent
+        onProgress?.({
+          bytes: sent,
+          totalBytes,
+          percent: totalBytes > 0 ? Math.min(100, Math.round((sent / totalBytes) * 100)) : 0,
+          speed,
+          indeterminate: false,
+        })
+      }
+      source.on('data', chunk => {
+        sent += chunk.length
+        report()
+      })
+      source.once('error', error => finish(error))
+      child.stdout.resume()
+      child.stderr.on('data', chunk => { stderr += String(chunk) })
+      child.once('error', error => finish(error))
+      child.once('exit', code => {
+        if (code === 0) {
+          report(true)
+          finish()
+        } else {
+          finish(new Error(`ssh upload exited with ${String(code)}: ${stderr.trim()}`))
+        }
+      })
+      child.stdin.once('error', () => {})
+      source.pipe(child.stdin)
+    })
   }
 
   /**
@@ -742,15 +853,39 @@ export class SshRunner {
    * @param {string} [input] stdin.
    * @returns {Promise<{stdout:string,stderr:string}>} output.
    */
-  runProcess(command, args, input) {
+  runProcess(command, args, input, onLine) {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
       let stdout = ''
       let stderr = ''
-      child.stdout.on('data', chunk => { stdout += String(chunk) })
-      child.stderr.on('data', chunk => { stderr += String(chunk) })
+      const buffers = { out: '', err: '' }
+      const emit = (key, chunk) => {
+        const text = buffers[key] + String(chunk)
+        const lines = text.split(/\r?\n/u)
+        buffers[key] = lines.pop() ?? ''
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (trimmed !== '') onLine?.(trimmed)
+        }
+      }
+      const flush = () => {
+        for (const key of ['out', 'err']) {
+          const trimmed = buffers[key].trim()
+          if (trimmed !== '') onLine?.(trimmed)
+          buffers[key] = ''
+        }
+      }
+      child.stdout.on('data', chunk => {
+        stdout += String(chunk)
+        emit('out', chunk)
+      })
+      child.stderr.on('data', chunk => {
+        stderr += String(chunk)
+        emit('err', chunk)
+      })
       child.once('error', reject)
       child.once('exit', code => {
+        flush()
         if (code === 0) resolve({ stdout, stderr })
         else reject(new Error(`${command} exited with ${String(code)}: ${stderr.trim() || stdout.trim()}`))
       })
@@ -765,15 +900,20 @@ export class SshRunner {
    * @param {'linux'|'windows'} os target OS.
    * @returns {Promise<void>}
    */
-  async script(script, os) {
+  async script(script, os, onLine) {
     const base = this.sshOptions()
     if (os === 'linux') {
       const remote = this.plan.sudo ? 'sudo -n bash -s' : 'bash -s'
-      await this.runProcess('ssh', [...base, this.target(), remote], script)
+      await this.runProcess('ssh', [...base, this.target(), remote], script, onLine)
       return
     }
     const encoded = Buffer.from(script, 'utf16le').toString('base64')
-    await this.runProcess('ssh', [...base, this.target(), `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`])
+    await this.runProcess(
+      'ssh',
+      [...base, this.target(), `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`],
+      undefined,
+      onLine,
+    )
   }
 }
 
@@ -791,6 +931,10 @@ export class DeployManager {
     this.runnerFactory = options.runnerFactory ?? (plan => new SshRunner(plan, { log: line => this.logLine(line) }))
     /** @type {Map<string, Promise<object>>} */
     this.running = new Map()
+    /** @type {Map<string, object>} live job state, so progress reads skip the disk */
+    this.states = new Map()
+    /** @type {Map<string, number>} last progress flush per job */
+    this.saves = new Map()
   }
 
   /** @returns {Promise<void>} no owned process. */
@@ -850,6 +994,8 @@ export class DeployManager {
     const state = {
       id,
       createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      member: typeof request.member === 'string' && request.member !== '' ? request.member : null,
       target: { host: plan.host, user: plan.user ?? null, port: plan.port, os: plan.os, appRoot: plan.appRoot },
       release: plan.release,
       package: plan.package.path,
@@ -857,7 +1003,14 @@ export class DeployManager {
       status: 'running',
       phase: 'starting',
       error: null,
+      steps: initialDeploySteps(),
+      progress: { bytes: 0, totalBytes: plan.package.bytes, percent: 0, speed: 0, indeterminate: false },
     }
+    if (this.states.size >= 100) {
+      const oldest = this.states.keys().next()
+      if (!oldest.done) this.states.delete(oldest.value)
+    }
+    this.states.set(id, state)
     await writeFile(stateFile, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
     const log = async line => {
       const stamp = new Date().toISOString()
@@ -871,32 +1024,97 @@ export class DeployManager {
   }
 
   async #run(plan, state, stateFile, log) {
+    const stamp = () => new Date().toISOString()
+    const stepOf = key => state.steps.find(item => item.key === key)
+    const mark = async (key, status, detail) => {
+      const step = stepOf(key)
+      if (step !== undefined) {
+        step.status = status
+        if (status === 'running' && step.startedAt === null) step.startedAt = stamp()
+        if (status === 'succeeded' || status === 'failed') step.finishedAt = stamp()
+        if (typeof detail === 'string' && detail !== '') step.detail = detail
+      }
+      state.updatedAt = stamp()
+      await this.#save(stateFile, state)
+    }
+    const note = (key, text) => {
+      const step = stepOf(key)
+      if (step !== undefined) step.detail = text
+      state.updatedAt = stamp()
+      void log(text).catch(() => {})
+    }
     try {
       const runner = this.runnerFactory(plan)
       await log(`target ${plan.host} (${plan.os}), release ${plan.release}`)
       await log(`package ${plan.package.path} (${plan.package.sha256.slice(0, 12)}…)`)
       await log(`uploading to ${plan.remotePackage}`)
-      await runner.upload(plan.package.path, plan.remotePackage)
+      await mark('upload', 'running')
+      const uploadStarted = Date.now()
+      await runner.upload(plan.package.path, plan.remotePackage, progress => {
+        const totalBytes = progress.totalBytes ?? plan.package.bytes
+        state.progress = {
+          bytes: progress.bytes ?? 0,
+          totalBytes,
+          percent: progress.percent ?? (totalBytes > 0 ? Math.min(100, Math.round(((progress.bytes ?? 0) / totalBytes) * 100)) : 0),
+          speed: progress.speed ?? 0,
+          indeterminate: progress.indeterminate === true,
+        }
+        state.updatedAt = stamp()
+        this.#saveThrottled(stateFile, state)
+      })
+      const uploadSeconds = Math.max(0.1, (Date.now() - uploadStarted) / 1000)
+      state.progress = {
+        bytes: plan.package.bytes,
+        totalBytes: plan.package.bytes,
+        percent: 100,
+        speed: plan.package.bytes / uploadSeconds,
+        indeterminate: false,
+      }
+      await mark('upload', 'succeeded', `${formatBytes(plan.package.bytes)} · ${uploadSeconds.toFixed(1)}s · ${formatBytes(plan.package.bytes / uploadSeconds)}/s`)
       const scripts = this.scripts(plan)
       state.phase = 'prepare'
-      await this.#save(stateFile, state)
+      await mark('prepare', 'running')
       await log('prepare: extract, shared dirs, service definitions (no switch)')
-      await runner.script(scripts.prepare, plan.os)
+      await runner.script(scripts.prepare, plan.os, line => note('prepare', line))
+      await mark('prepare', 'succeeded')
       state.phase = 'activate'
-      await this.#save(stateFile, state)
+      await mark('activate', 'running')
       await log('activate: switch current, restart services with the gateway last')
-      await runner.script(scripts.activate, plan.os)
+      await runner.script(scripts.activate, plan.os, line => note('activate', line))
+      await mark('activate', 'succeeded')
       state.status = 'succeeded'
       state.phase = 'done'
+      state.updatedAt = stamp()
       await this.#save(stateFile, state)
       await log('deployment succeeded')
     } catch (error) {
       state.status = 'failed'
       state.phase = 'failed'
       state.error = error instanceof Error ? error.message : String(error)
+      state.updatedAt = stamp()
+      const active = state.steps.find(item => item.status === 'running')
+      if (active !== undefined) {
+        active.status = 'failed'
+        active.finishedAt = stamp()
+      }
       await this.#save(stateFile, state).catch(() => {})
       await log(`deployment failed: ${state.error}`).catch(() => {})
+    } finally {
+      this.running.delete(state.id)
     }
+  }
+
+  /**
+   * Persist upload progress at most a few times per second.
+   * @param {string} stateFile job state file.
+   * @param {object} state job state.
+   * @returns {void}
+   */
+  #saveThrottled(stateFile, state) {
+    const now = Date.now()
+    if (now - (this.saves.get(state.id) ?? 0) < 300) return
+    this.saves.set(state.id, now)
+    void this.#save(stateFile, state).catch(() => {})
   }
 
   async #save(stateFile, state) {
@@ -921,11 +1139,41 @@ export class DeployManager {
    */
   async status(id) {
     if (typeof id !== 'string' || !/^deploy-[A-Za-z0-9-]+$/.test(id)) return null
+    const live = this.states.get(id)
+    if (live !== undefined) return live
     try {
       return JSON.parse(await readFile(path.join(this.dataDir, id, 'job.json'), 'utf8'))
     } catch {
       return null
     }
+  }
+
+  /**
+   * List recent deployment jobs, newest first.
+   * @param {number} [limit] maximum number of jobs.
+   * @returns {Promise<object[]>} jobs.
+   */
+  async list(limit = 20) {
+    const jobs = []
+    let entries = []
+    try {
+      entries = await readdir(this.dataDir, { withFileTypes: true })
+    } catch {
+      entries = []
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith('deploy-')) continue
+      try {
+        jobs.push(JSON.parse(await readFile(path.join(this.dataDir, entry.name, 'job.json'), 'utf8')))
+      } catch {
+        // A job directory without a readable state is not worth reporting.
+      }
+    }
+    for (const [id, live] of this.states) {
+      if (!jobs.some(job => job.id === id)) jobs.push(live)
+    }
+    jobs.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
+    return jobs.slice(0, Math.max(1, Math.min(limit, 100)))
   }
 
   /**

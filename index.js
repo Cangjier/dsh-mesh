@@ -1139,6 +1139,32 @@ function sh(value) {
 function ps(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let amount = bytes;
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024;
+    unit += 1;
+  }
+  return `${amount >= 10 || unit === 0 ? String(Math.round(amount)) : amount.toFixed(1)} ${units[unit]}`;
+}
+function initialDeploySteps() {
+  return [
+    { key: "upload", label: "\u4E0A\u4F20\u5B89\u88C5\u5305", status: "pending", startedAt: null, finishedAt: null, detail: "" },
+    { key: "prepare", label: "\u89E3\u538B\u5E76\u51C6\u5907\u65B0\u7248\u672C", status: "pending", startedAt: null, finishedAt: null, detail: "" },
+    { key: "activate", label: "\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", status: "pending", startedAt: null, finishedAt: null, detail: "" }
+  ];
+}
+function windowsStdinWriter(remote) {
+  const script = `$ErrorActionPreference = 'Stop'
+$stdin = [Console]::OpenStandardInput()
+$file = [IO.File]::Open(${ps(remote)}, [IO.FileMode]::Create)
+try { $stdin.CopyTo($file) } finally { $file.Dispose() }`;
+  return Buffer.from(script, "utf16le").toString("base64");
+}
 function hashFile(file) {
   return new Promise((resolve, reject) => {
     const hash = createHash2("sha256");
@@ -1645,16 +1671,95 @@ var SshRunner = class {
     return this.plan.user ? `${this.plan.user}@${this.plan.host}` : this.plan.host;
   }
   /**
-   * Upload a local file with scp.
+   * Upload a local file and report byte progress.
+   *
+   * The file is streamed through the SSH connection when the target can accept
+   * stdin (POSIX `cat` or a PowerShell stdin writer). scp stays as a fallback
+   * when streaming fails, so an exotic target still deploys even without a
+   * progress meter.
    * @param {string} local local path.
    * @param {string} remote remote path.
+   * @param {(progress: {bytes:number,totalBytes:number,percent:number,speed:number,indeterminate?:boolean}) => void} [onProgress] progress callback.
    * @returns {Promise<void>}
    */
-  async upload(local, remote) {
-    const args = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-P", String(this.plan.port)];
-    if (this.plan.identityFile) args.push("-i", this.plan.identityFile);
-    args.push(local, `${this.target()}:${remote}`);
-    await this.runProcess("scp", args);
+  async upload(local, remote, onProgress) {
+    const totalBytes = (await stat3(local)).size;
+    try {
+      await this.#uploadStream(local, remote, totalBytes, onProgress);
+    } catch (error) {
+      this.log(`streamed upload failed (${error instanceof Error ? error.message : String(error)}); retrying with scp`);
+      onProgress?.({ bytes: 0, totalBytes, percent: 0, speed: 0, indeterminate: true });
+      const args = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-P", String(this.plan.port)];
+      if (this.plan.identityFile) args.push("-i", this.plan.identityFile);
+      args.push(local, `${this.target()}:${remote}`);
+      await this.runProcess("scp", args);
+      onProgress?.({ bytes: totalBytes, totalBytes, percent: 100, speed: 0, indeterminate: false });
+    }
+  }
+  /**
+   * Stream one file to the remote path through `ssh` stdin.
+   * @param {string} local local path.
+   * @param {string} remote remote path.
+   * @param {number} totalBytes file size.
+   * @param {Function} [onProgress] progress callback.
+   * @returns {Promise<void>}
+   */
+  #uploadStream(local, remote, totalBytes, onProgress) {
+    const remoteCommand = this.plan.os === "windows" ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${windowsStdinWriter(remote)}` : `cat > ${sh(remote)}`;
+    const args = [...this.sshOptions(), this.target(), remoteCommand];
+    return new Promise((resolve, reject) => {
+      const child = spawn2("ssh", args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      const source = createReadStream(local);
+      let sent = 0;
+      let stderr = "";
+      let settled = false;
+      let lastAt = Date.now();
+      let lastBytes = 0;
+      let speed = 0;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        source.destroy();
+        if (error) reject(error);
+        else resolve();
+      };
+      const report = (force = false) => {
+        const now = Date.now();
+        if (!force && now - lastAt < 200) return;
+        const seconds = Math.max(1, now - lastAt) / 1e3;
+        speed = Math.max(0, (sent - lastBytes) / seconds);
+        lastAt = now;
+        lastBytes = sent;
+        onProgress?.({
+          bytes: sent,
+          totalBytes,
+          percent: totalBytes > 0 ? Math.min(100, Math.round(sent / totalBytes * 100)) : 0,
+          speed,
+          indeterminate: false
+        });
+      };
+      source.on("data", (chunk) => {
+        sent += chunk.length;
+        report();
+      });
+      source.once("error", (error) => finish(error));
+      child.stdout.resume();
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      child.once("error", (error) => finish(error));
+      child.once("exit", (code) => {
+        if (code === 0) {
+          report(true);
+          finish();
+        } else {
+          finish(new Error(`ssh upload exited with ${String(code)}: ${stderr.trim()}`));
+        }
+      });
+      child.stdin.once("error", () => {
+      });
+      source.pipe(child.stdin);
+    });
   }
   /**
    * Run a local process and reject on a non-zero exit.
@@ -1663,19 +1768,39 @@ var SshRunner = class {
    * @param {string} [input] stdin.
    * @returns {Promise<{stdout:string,stderr:string}>} output.
    */
-  runProcess(command, args, input) {
+  runProcess(command, args, input, onLine) {
     return new Promise((resolve, reject) => {
       const child = spawn2(command, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
+      const buffers = { out: "", err: "" };
+      const emit = (key, chunk) => {
+        const text = buffers[key] + String(chunk);
+        const lines = text.split(/\r?\n/u);
+        buffers[key] = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed !== "") onLine?.(trimmed);
+        }
+      };
+      const flush = () => {
+        for (const key of ["out", "err"]) {
+          const trimmed = buffers[key].trim();
+          if (trimmed !== "") onLine?.(trimmed);
+          buffers[key] = "";
+        }
+      };
       child.stdout.on("data", (chunk) => {
         stdout += String(chunk);
+        emit("out", chunk);
       });
       child.stderr.on("data", (chunk) => {
         stderr += String(chunk);
+        emit("err", chunk);
       });
       child.once("error", reject);
       child.once("exit", (code) => {
+        flush();
         if (code === 0) resolve({ stdout, stderr });
         else reject(new Error(`${command} exited with ${String(code)}: ${stderr.trim() || stdout.trim()}`));
       });
@@ -1689,15 +1814,20 @@ var SshRunner = class {
    * @param {'linux'|'windows'} os target OS.
    * @returns {Promise<void>}
    */
-  async script(script, os6) {
+  async script(script, os6, onLine) {
     const base = this.sshOptions();
     if (os6 === "linux") {
       const remote = this.plan.sudo ? "sudo -n bash -s" : "bash -s";
-      await this.runProcess("ssh", [...base, this.target(), remote], script);
+      await this.runProcess("ssh", [...base, this.target(), remote], script, onLine);
       return;
     }
     const encoded = Buffer.from(script, "utf16le").toString("base64");
-    await this.runProcess("ssh", [...base, this.target(), `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`]);
+    await this.runProcess(
+      "ssh",
+      [...base, this.target(), `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`],
+      void 0,
+      onLine
+    );
   }
 };
 var DeployManager = class {
@@ -1711,6 +1841,8 @@ var DeployManager = class {
     });
     this.runnerFactory = options.runnerFactory ?? ((plan) => new SshRunner(plan, { log: (line) => this.logLine(line) }));
     this.running = /* @__PURE__ */ new Map();
+    this.states = /* @__PURE__ */ new Map();
+    this.saves = /* @__PURE__ */ new Map();
   }
   /** @returns {Promise<void>} no owned process. */
   async dispose() {
@@ -1766,14 +1898,23 @@ var DeployManager = class {
     const state = {
       id,
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      member: typeof request.member === "string" && request.member !== "" ? request.member : null,
       target: { host: plan.host, user: plan.user ?? null, port: plan.port, os: plan.os, appRoot: plan.appRoot },
       release: plan.release,
       package: plan.package.path,
       services: plan.services.map((service) => service.name),
       status: "running",
       phase: "starting",
-      error: null
+      error: null,
+      steps: initialDeploySteps(),
+      progress: { bytes: 0, totalBytes: plan.package.bytes, percent: 0, speed: 0, indeterminate: false }
     };
+    if (this.states.size >= 100) {
+      const oldest = this.states.keys().next();
+      if (!oldest.done) this.states.delete(oldest.value);
+    }
+    this.states.set(id, state);
     await writeFile3(stateFile, `${JSON.stringify(state, null, 2)}
 `, "utf8");
     const log = async (line) => {
@@ -1789,34 +1930,100 @@ var DeployManager = class {
     return { ok: true, job: state };
   }
   async #run(plan, state, stateFile, log) {
+    const stamp = () => (/* @__PURE__ */ new Date()).toISOString();
+    const stepOf = (key) => state.steps.find((item) => item.key === key);
+    const mark = async (key, status, detail) => {
+      const step = stepOf(key);
+      if (step !== void 0) {
+        step.status = status;
+        if (status === "running" && step.startedAt === null) step.startedAt = stamp();
+        if (status === "succeeded" || status === "failed") step.finishedAt = stamp();
+        if (typeof detail === "string" && detail !== "") step.detail = detail;
+      }
+      state.updatedAt = stamp();
+      await this.#save(stateFile, state);
+    };
+    const note = (key, text) => {
+      const step = stepOf(key);
+      if (step !== void 0) step.detail = text;
+      state.updatedAt = stamp();
+      void log(text).catch(() => {
+      });
+    };
     try {
       const runner = this.runnerFactory(plan);
       await log(`target ${plan.host} (${plan.os}), release ${plan.release}`);
       await log(`package ${plan.package.path} (${plan.package.sha256.slice(0, 12)}\u2026)`);
       await log(`uploading to ${plan.remotePackage}`);
-      await runner.upload(plan.package.path, plan.remotePackage);
+      await mark("upload", "running");
+      const uploadStarted = Date.now();
+      await runner.upload(plan.package.path, plan.remotePackage, (progress) => {
+        const totalBytes = progress.totalBytes ?? plan.package.bytes;
+        state.progress = {
+          bytes: progress.bytes ?? 0,
+          totalBytes,
+          percent: progress.percent ?? (totalBytes > 0 ? Math.min(100, Math.round((progress.bytes ?? 0) / totalBytes * 100)) : 0),
+          speed: progress.speed ?? 0,
+          indeterminate: progress.indeterminate === true
+        };
+        state.updatedAt = stamp();
+        this.#saveThrottled(stateFile, state);
+      });
+      const uploadSeconds = Math.max(0.1, (Date.now() - uploadStarted) / 1e3);
+      state.progress = {
+        bytes: plan.package.bytes,
+        totalBytes: plan.package.bytes,
+        percent: 100,
+        speed: plan.package.bytes / uploadSeconds,
+        indeterminate: false
+      };
+      await mark("upload", "succeeded", `${formatBytes(plan.package.bytes)} \xB7 ${uploadSeconds.toFixed(1)}s \xB7 ${formatBytes(plan.package.bytes / uploadSeconds)}/s`);
       const scripts = this.scripts(plan);
       state.phase = "prepare";
-      await this.#save(stateFile, state);
+      await mark("prepare", "running");
       await log("prepare: extract, shared dirs, service definitions (no switch)");
-      await runner.script(scripts.prepare, plan.os);
+      await runner.script(scripts.prepare, plan.os, (line) => note("prepare", line));
+      await mark("prepare", "succeeded");
       state.phase = "activate";
-      await this.#save(stateFile, state);
+      await mark("activate", "running");
       await log("activate: switch current, restart services with the gateway last");
-      await runner.script(scripts.activate, plan.os);
+      await runner.script(scripts.activate, plan.os, (line) => note("activate", line));
+      await mark("activate", "succeeded");
       state.status = "succeeded";
       state.phase = "done";
+      state.updatedAt = stamp();
       await this.#save(stateFile, state);
       await log("deployment succeeded");
     } catch (error) {
       state.status = "failed";
       state.phase = "failed";
       state.error = error instanceof Error ? error.message : String(error);
+      state.updatedAt = stamp();
+      const active = state.steps.find((item) => item.status === "running");
+      if (active !== void 0) {
+        active.status = "failed";
+        active.finishedAt = stamp();
+      }
       await this.#save(stateFile, state).catch(() => {
       });
       await log(`deployment failed: ${state.error}`).catch(() => {
       });
+    } finally {
+      this.running.delete(state.id);
     }
+  }
+  /**
+   * Persist upload progress at most a few times per second.
+   * @param {string} stateFile job state file.
+   * @param {object} state job state.
+   * @returns {void}
+   */
+  #saveThrottled(stateFile, state) {
+    const now = Date.now();
+    if (now - (this.saves.get(state.id) ?? 0) < 300) return;
+    this.saves.set(state.id, now);
+    void this.#save(stateFile, state).catch(() => {
+    });
   }
   async #save(stateFile, state) {
     await writeFile3(stateFile, `${JSON.stringify(state, null, 2)}
@@ -1839,11 +2046,39 @@ var DeployManager = class {
    */
   async status(id) {
     if (typeof id !== "string" || !/^deploy-[A-Za-z0-9-]+$/.test(id)) return null;
+    const live = this.states.get(id);
+    if (live !== void 0) return live;
     try {
       return JSON.parse(await readFile4(path4.join(this.dataDir, id, "job.json"), "utf8"));
     } catch {
       return null;
     }
+  }
+  /**
+   * List recent deployment jobs, newest first.
+   * @param {number} [limit] maximum number of jobs.
+   * @returns {Promise<object[]>} jobs.
+   */
+  async list(limit = 20) {
+    const jobs = [];
+    let entries = [];
+    try {
+      entries = await readdir2(this.dataDir, { withFileTypes: true });
+    } catch {
+      entries = [];
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith("deploy-")) continue;
+      try {
+        jobs.push(JSON.parse(await readFile4(path4.join(this.dataDir, entry.name, "job.json"), "utf8")));
+      } catch {
+      }
+    }
+    for (const [id, live] of this.states) {
+      if (!jobs.some((job) => job.id === id)) jobs.push(live);
+    }
+    jobs.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
+    return jobs.slice(0, Math.max(1, Math.min(limit, 100)));
   }
   /**
    * Tail a job log.
@@ -2410,7 +2645,7 @@ var MeshService = class {
     if (member !== void 0) {
       const os7 = /win(?:dows)?/iu.test(path5.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
       const deployRequest = await this.#memberDeployRequest(member, packagePath, os7);
-      const started2 = await this.deploy.start(deployRequest);
+      const started2 = await this.deploy.start({ ...deployRequest, member: member.id });
       return {
         ok: true,
         job: started2.job,
@@ -2533,6 +2768,14 @@ var MeshService = class {
     return this.deploy.status(id);
   }
   /**
+   * List recent deployment jobs, newest first.
+   * @param {number} [limit] maximum count.
+   * @returns {Promise<object[]>} jobs.
+   */
+  async deployJobs(limit = 20) {
+    return this.deploy.list(limit);
+  }
+  /**
    * Read one deployment job's log tail.
    * @param {string} id job id.
    * @param {number} [lines] line count.
@@ -2619,7 +2862,26 @@ function registerApi(ctx, service) {
           writeJson(response, 200, await service.packages());
           return;
         }
+        if (method === "GET" && path8 === "/deploy/jobs") {
+          writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) });
+          return;
+        }
         if (method === "GET") {
+          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path8);
+          if (deployRead !== null) {
+            const lines = Number.parseInt(url.searchParams.get("lines") ?? "200", 10);
+            const job = await service.deployStatus(deployRead[1]);
+            if (job === null) {
+              writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown deploy job." } });
+              return;
+            }
+            writeJson(response, 200, {
+              ok: true,
+              job,
+              lines: await service.deployLogs(deployRead[1], Number.isSafeInteger(lines) ? Math.min(Math.max(lines, 1), 500) : 200)
+            });
+            return;
+          }
           const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path8);
           if (read !== null) {
             if (read[2] === "/log") {
@@ -3354,7 +3616,7 @@ function formatBuild(job) {
     lines.push(`\u5B50\u4EE3\u7406\u63D0\u793A\uFF1A${job.workOrder.prompt}`);
   }
   for (const artifact of job.artifacts ?? []) {
-    lines.push(`\u4EA7\u7269 ${artifact.target}\uFF1A${artifact.archive}\uFF08${formatBytes(artifact.bytes)}\uFF09`);
+    lines.push(`\u4EA7\u7269 ${artifact.target}\uFF1A${artifact.archive}\uFF08${formatBytes2(artifact.bytes)}\uFF09`);
   }
   const tail = Array.isArray(job.logTail) ? job.logTail.slice(-15) : [];
   if (tail.length > 0) lines.push("\u6700\u8FD1\u65E5\u5FD7\uFF1A", ...tail);
@@ -3399,7 +3661,7 @@ function formatMembers(snapshot) {
   if (snapshot.warnings?.length) lines.push(`\u8B66\u544A\uFF1A${snapshot.warnings.join("\uFF1B")}`);
   return lines.join("\n");
 }
-function formatBytes(value) {
+function formatBytes2(value) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount <= 0) return "0 B";
   const units = ["B", "KiB", "MiB", "GiB"];

@@ -85,7 +85,26 @@ export function registerApi(ctx, service) {
           writeJson(response, 200, await service.packages())
           return
         }
+        if (method === 'GET' && path === '/deploy/jobs') {
+          writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) })
+          return
+        }
         if (method === 'GET') {
+          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path)
+          if (deployRead !== null) {
+            const lines = Number.parseInt(url.searchParams.get('lines') ?? '200', 10)
+            const job = await service.deployStatus(deployRead[1])
+            if (job === null) {
+              writeJson(response, 404, { ok: false, error: { code: 'not_found', message: 'Unknown deploy job.' } })
+              return
+            }
+            writeJson(response, 200, {
+              ok: true,
+              job,
+              lines: await service.deployLogs(deployRead[1], Number.isSafeInteger(lines) ? Math.min(Math.max(lines, 1), 500) : 200),
+            })
+            return
+          }
           const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path)
           if (read !== null) {
             if (read[2] === '/log') {

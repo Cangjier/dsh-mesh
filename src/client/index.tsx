@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Button,
@@ -9,9 +9,11 @@ import {
   Grid,
   Input,
   Modal,
+  Progress,
   Select,
   Space,
   Spin,
+  Steps,
   Table,
   Tabs,
   Tag,
@@ -26,6 +28,7 @@ import {
   CloudDownloadOutlined,
   EditOutlined,
   InfoCircleOutlined,
+  LoadingOutlined,
   ReloadOutlined,
   SwapOutlined,
   WarningOutlined,
@@ -33,7 +36,7 @@ import {
 import zhCN from 'antd/locale/zh_CN'
 import enUS from 'antd/locale/en_US'
 import styles from './styles.css'
-import { api, ApiError, type Member, type PackageInfo, type Snapshot, type SystemInfo } from './api'
+import { api, ApiError, type DeployJob, type Member, type PackageInfo, type Snapshot, type SystemInfo } from './api'
 import { WireGuardPanel } from './wireguard'
 import { EN as WIREGUARD_EN, dictionary as wireguardDictionary } from './wireguard/i18n'
 
@@ -146,6 +149,107 @@ function systemDetails(member: Member): string {
   return lines.join('\n')
 }
 
+/** Map a deploy step state onto the antd Steps vocabulary. */
+function stepStatus(status: string): 'wait' | 'process' | 'finish' | 'error' {
+  if (status === 'running') return 'process'
+  if (status === 'succeeded') return 'finish'
+  if (status === 'failed') return 'error'
+  return 'wait'
+}
+
+/** Human duration between two ISO timestamps; open intervals use "now". */
+function durationText(from: string | null | undefined, to: string | null | undefined): string {
+  if (from === null || from === undefined || from === '') return ''
+  const start = Date.parse(from)
+  const end = to !== null && to !== undefined && to !== '' ? Date.parse(to) : Date.now()
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return ''
+  const seconds = Math.max(0, (end - start) / 1000)
+  if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : String(Math.round(seconds))} 秒`
+  return `${String(Math.floor(seconds / 60))} 分 ${String(Math.round(seconds % 60))} 秒`
+}
+
+/** Remaining upload time at the current speed. */
+function etaText(speed: number, remaining: number): string {
+  if (!Number.isFinite(speed) || speed <= 0 || !Number.isFinite(remaining) || remaining <= 0) return ''
+  const seconds = Math.ceil(remaining / speed)
+  if (seconds < 60) return `剩余约 ${String(seconds)} 秒`
+  return `剩余约 ${String(Math.floor(seconds / 60))} 分 ${String(seconds % 60)} 秒`
+}
+
+/** Detail view for one deployment: upload meter, steps, and log tail. */
+function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] }) {
+  const progress = job.progress
+  const total = progress?.totalBytes ?? 0
+  const bytes = progress?.bytes ?? 0
+  const speed = progress?.speed ?? 0
+  const indeterminate = progress?.indeterminate === true
+  const percent = indeterminate ? 100 : Math.max(0, Math.min(100, progress?.percent ?? 0))
+  const running = job.status === 'running'
+  const uploadText = indeterminate
+    ? `已上传 ${formatBytes(bytes)} / ${formatBytes(total)}（服务器不支持流式上传，无法显示百分比）`
+    : `${formatBytes(bytes)} / ${formatBytes(total)}${speed > 0 ? ` · ${formatBytes(speed)}/s` : ''}${etaText(speed, total - bytes)}`
+  return (
+    <Space direction="vertical" size={14} style={{ width: '100%' }}>
+      <Space size={8} wrap>
+        {running
+          ? <Tag color="processing">部署中</Tag>
+          : job.status === 'succeeded'
+            ? <Tag color="success">部署成功</Tag>
+            : <Tag color="error">部署失败</Tag>}
+        <Typography.Text type="secondary" className="dsh-pw-mono">{job.id}</Typography.Text>
+        <Typography.Text type="secondary">
+          {job.target.os === 'windows' ? 'Windows' : 'Linux'} · {job.target.host}
+          {job.target.user !== null && job.target.user !== undefined && job.target.user !== '' ? `（${job.target.user}）` : ''}
+        </Typography.Text>
+      </Space>
+      <Descriptions
+        size="small"
+        bordered
+        column={1}
+        styles={{ label: { width: 90, whiteSpace: 'nowrap' }, content: { minWidth: 0 } }}
+        items={[
+          { key: 'release', label: '发布版本', children: <span className="dsh-pw-mono">{job.release}</span> },
+          { key: 'root', label: '安装目录', children: <span className="dsh-pw-mono">{job.target.appRoot}</span> },
+          { key: 'created', label: '开始时间', children: new Date(job.createdAt).toLocaleString() },
+        ]}
+      />
+      <div>
+        <Typography.Text strong>上传安装包</Typography.Text>
+        <Progress
+          percent={percent}
+          status={job.status === 'failed' ? 'exception' : percent >= 100 ? 'success' : 'active'}
+          showInfo={!indeterminate}
+        />
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>{uploadText}</Typography.Text>
+      </div>
+      <Steps
+        direction="vertical"
+        size="small"
+        status={job.status === 'failed' ? 'error' : job.status === 'succeeded' ? 'finish' : 'process'}
+        items={(job.steps ?? []).map(step => {
+          const duration = durationText(step.startedAt, step.finishedAt)
+          return {
+            title: step.label,
+            status: stepStatus(step.status),
+            description: (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {duration}
+                {step.detail !== '' ? `${duration === '' ? '' : ' · '}${step.detail}` : ''}
+              </Typography.Text>
+            ),
+          }
+        })}
+      />
+      {job.status === 'failed' ? <Alert type="error" showIcon message="部署失败" description={job.error ?? '未知错误'} /> : null}
+      {job.status === 'succeeded' ? <Alert type="success" showIcon message="部署完成" description={`健康检查通过，发布 ${job.release}`} /> : null}
+      <div>
+        <Typography.Text strong>日志</Typography.Text>
+        <pre className="dsh-pw-deploy-log">{lines.length > 0 ? lines.slice(-200).join('\n') : '等待日志…'}</pre>
+      </div>
+    </Space>
+  )
+}
+
 function Panel({ ctx }: { ctx: any }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [gateAvailable, setGateAvailable] = useState(false)
@@ -158,6 +262,10 @@ function Panel({ ctx }: { ctx: any }) {
   const [packagesLoading, setPackagesLoading] = useState(false)
   const [packagesError, setPackagesError] = useState('')
   const [selectedPackage, setSelectedPackage] = useState<string | undefined>(undefined)
+  const [deployJobs, setDeployJobs] = useState<DeployJob[]>([])
+  const [progressJob, setProgressJob] = useState<DeployJob | null>(null)
+  const [progressLog, setProgressLog] = useState<string[]>([])
+  const deployStatusRef = useRef<Record<string, string>>({})
   const [panelTab, setPanelTab] = useState<'members' | 'network'>('members')
   const [tags, setTags] = useState<Record<string, string>>({})
   const [tagTarget, setTagTarget] = useState<Member | null>(null)
@@ -193,6 +301,69 @@ function Panel({ ctx }: { ctx: any }) {
   useEffect(() => {
     void load()
   }, [load])
+
+  const refreshDeployJobs = useCallback(async () => {
+    try {
+      const result = await api.deployJobs()
+      setDeployJobs(result.jobs)
+    } catch {
+      // Keep the last snapshot when the host API is briefly busy.
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshDeployJobs()
+    const timer = window.setInterval(() => { void refreshDeployJobs() }, 2000)
+    return () => { window.clearInterval(timer) }
+  }, [refreshDeployJobs])
+
+  useEffect(() => {
+    let finished = false
+    for (const job of deployJobs) {
+      const previous = deployStatusRef.current[job.id]
+      deployStatusRef.current[job.id] = job.status
+      if (previous === 'running' && job.status === 'succeeded') {
+        messageApi.success(`部署完成：${job.release}`)
+        finished = true
+      }
+      if (previous === 'running' && job.status === 'failed') {
+        messageApi.error(`部署失败：${job.error ?? job.id}`)
+        finished = true
+      }
+    }
+    if (finished) void load()
+  }, [deployJobs, load, messageApi])
+
+  const openProgress = useCallback((job: DeployJob) => {
+    setProgressLog([])
+    setProgressJob(job)
+  }, [])
+
+  const latestJobOf = useCallback((member: Member): DeployJob | undefined => {
+    return deployJobs.find(job => job.member === member.id || job.target?.host === member.ip)
+  }, [deployJobs])
+
+  const progressId = progressJob?.id ?? ''
+  useEffect(() => {
+    if (progressId === '') return
+    let alive = true
+    const tick = async () => {
+      try {
+        const result = await api.deployJob(progressId, 300)
+        if (!alive) return
+        setProgressJob(result.job)
+        setProgressLog(result.lines)
+      } catch {
+        // Keep the last snapshot; the next tick retries.
+      }
+    }
+    void tick()
+    const timer = window.setInterval(() => { void tick() }, 1000)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [progressId])
 
   const memberRows = useMemo(() => {
     if (snapshot === null) return []
@@ -271,15 +442,17 @@ function Panel({ ctx }: { ctx: any }) {
     setBusy(deployTarget.id)
     try {
       const result = await api.deploy(deployTarget.id, selectedPackage)
-      messageApi.success(`部署任务已启动：${result.job.id}；完成后点右上角刷新`)
       setDeployTarget(null)
       setError(null)
+      setDeployJobs(current => [result.job, ...current.filter(job => job.id !== result.job.id)])
+      openProgress(result.job)
+      messageApi.info(`部署已开始：${result.job.id}`)
     } catch (failure) {
       setError(errorText(failure))
     } finally {
       setBusy('')
     }
-  }, [deployTarget, selectedPackage, messageApi])
+  }, [deployTarget, selectedPackage, messageApi, openProgress])
 
   const columns: ColumnsType<Member> = useMemo(() => {
     const actionColumn: ColumnsType<Member>[number] = {
@@ -288,6 +461,19 @@ function Panel({ ctx }: { ctx: any }) {
       width: screens.lg === true ? '11%' : 120,
       align: 'right',
       render: (_value, member) => {
+        const runningJob = deployJobs.find(job => job.status === 'running'
+          && (job.member === member.id || job.target?.host === member.ip))
+        if (runningJob !== undefined) {
+          return (
+            <Button
+              size="small"
+              icon={<LoadingOutlined />}
+              onClick={() => openProgress(runningJob)}
+            >
+              正在部署
+            </Button>
+          )
+        }
         if (member.id === currentTarget) return <Tag color="blue">当前</Tag>
         if (member.dsh && gateAvailable && member.port !== null) {
           return (
@@ -398,7 +584,7 @@ function Panel({ ctx }: { ctx: any }) {
       },
     ]
     return [...base, actionColumn]
-  }, [busy, currentTarget, gateAvailable, openDeploy, openTag, screens, switchMember, tags])
+  }, [busy, currentTarget, deployJobs, gateAvailable, openDeploy, openProgress, openTag, screens, switchMember, tags])
 
   if (loading && snapshot === null) {
     return (
@@ -600,6 +786,31 @@ function Panel({ ctx }: { ctx: any }) {
               ? `（~：${deployTarget.system.home}）`
               : ''}
           </Typography.Text>
+          {deployTarget !== null ? (() => {
+            const job = latestJobOf(deployTarget)
+            if (job === undefined) return null
+            return (
+              <Space size={8} wrap>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>最近一次部署：</Typography.Text>
+                <Tag color={job.status === 'succeeded' ? 'success' : job.status === 'failed' ? 'error' : 'processing'}>
+                  {job.status === 'succeeded' ? '成功' : job.status === 'failed' ? '失败' : '进行中'}
+                </Tag>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {new Date(job.createdAt).toLocaleString()}
+                </Typography.Text>
+                <Button
+                  type="link"
+                  size="small"
+                  onClick={() => {
+                    setDeployTarget(null)
+                    openProgress(job)
+                  }}
+                >
+                  查看详情
+                </Button>
+              </Space>
+            )
+          })() : null}
           <Space.Compact style={{ width: '100%' }}>
             <Select
               style={{ width: '100%' }}
@@ -626,6 +837,22 @@ function Panel({ ctx }: { ctx: any }) {
             />
           ) : null}
         </Space>
+      </Modal>
+
+      <Modal
+        open={progressJob !== null}
+        title={`部署进度 · ${
+          progressJob === null
+            ? ''
+            : memberRows.find(row => row.id === progressJob.member || row.ip === progressJob.target.host)?.name
+              ?? progressJob.target.host
+        }`}
+        onCancel={() => setProgressJob(null)}
+        footer={<Button onClick={() => setProgressJob(null)}>关闭</Button>}
+        width={760}
+        destroyOnHidden
+      >
+        {progressJob !== null ? <DeployProgressView job={progressJob} lines={progressLog} /> : null}
       </Modal>
     </ConfigProvider>
   )

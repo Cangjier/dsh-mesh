@@ -107,9 +107,42 @@ export interface PackagesResponse {
   packages: PackageInfo[]
 }
 
+export interface DeployStep {
+  key: string
+  label: string
+  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  startedAt: string | null
+  finishedAt: string | null
+  detail: string
+}
+
+export interface DeployProgress {
+  bytes: number
+  totalBytes: number
+  percent: number
+  speed: number
+  indeterminate: boolean
+}
+
+export interface DeployJob {
+  id: string
+  createdAt: string
+  updatedAt?: string
+  member?: string | null
+  release: string
+  package?: string
+  services?: string[]
+  target: { host: string; user?: string | null; port: number; os: string; appRoot: string }
+  status: 'running' | 'succeeded' | 'failed' | string
+  phase: string
+  error: string | null
+  steps?: DeployStep[]
+  progress?: DeployProgress
+}
+
 export interface DeployResponse {
   ok: boolean
-  job: { id: string; target: { host: string; os: string }; status: string; phase: string }
+  job: DeployJob
   member: { id: string; name: string; ip: string }
   packagesDir: string
 }
@@ -211,6 +244,16 @@ export const api = {
 
   jobs(): Promise<{ jobs: BuildJob[] }> {
     return request<{ jobs: BuildJob[] }>('/api/dsh-mesh/jobs')
+  },
+
+  deployJobs(): Promise<{ jobs: DeployJob[] }> {
+    return request<{ jobs: DeployJob[] }>('/api/dsh-mesh/deploy/jobs')
+  },
+
+  deployJob(id: string, lines = 200): Promise<{ job: DeployJob; lines: string[] }> {
+    return request<{ job: DeployJob; lines: string[] }>(
+      `/api/dsh-mesh/deploy/${encodeURIComponent(id)}?lines=${String(lines)}`,
+    )
   },
 
   startBuild(body: { source?: string; ref?: string; targets?: string[]; planOnly?: boolean }): Promise<{ job: BuildJob }> {

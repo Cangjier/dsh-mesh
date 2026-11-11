@@ -375,6 +375,7 @@ function Panel({ ctx }: { ctx: any }) {
         </div>
 
         {error !== null ? (
+          <div className="dsh-pw-error">
           <Alert
             type="error"
             showIcon
@@ -384,6 +385,7 @@ function Panel({ ctx }: { ctx: any }) {
             onClose={() => setError(null)}
             style={{ marginBottom: 14 }}
           />
+          </div>
         ) : null}
 
         <Tabs
@@ -395,6 +397,7 @@ function Panel({ ctx }: { ctx: any }) {
               key: 'members',
               label: '成员',
               children: (
+        <div className="dsh-pw-tabbody">
         <Card size="small">
               <Table<Member>
                 rowKey="id"
@@ -412,12 +415,13 @@ function Panel({ ctx }: { ctx: any }) {
                 locale={{ emptyText: <Empty description="还没有发现成员" /> }}
               />
             </Card>
+        </div>
               ),
             },
             {
               key: 'network',
               label: '组网',
-              children: <WireGuardPanel ctx={ctx} embedded />,
+              children: <div className="dsh-pw-tabbody"><WireGuardPanel ctx={ctx} embedded /></div>,
             },
           ]}
         />

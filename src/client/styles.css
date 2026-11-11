@@ -1,10 +1,9 @@
 .dsh-pw-page {
-  padding: 20px 24px 0;
+  padding: 0;
   width: 100%;
-  max-width: 1180px;
   min-width: 0;
   box-sizing: border-box;
-  margin: 0 auto;
+  margin: 0;
   height: 100%;
   overflow: hidden;
   display: flex;
@@ -13,6 +12,27 @@
 
 .dsh-pw-header {
   flex: 0 0 auto;
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px 24px 0;
+  box-sizing: border-box;
+}
+
+.dsh-pw-error {
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 24px;
+  box-sizing: border-box;
+}
+
+.dsh-pw-tabbody {
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 24px 24px;
+  box-sizing: border-box;
 }
 
 .dsh-pw-tabs {
@@ -24,7 +44,11 @@
 
 .dsh-pw-tabs > .ant-tabs-nav {
   flex: 0 0 auto;
-  margin-bottom: 0;
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 24px;
+  box-sizing: border-box;
 }
 
 .dsh-pw-tabs .ant-tabs-content-holder {
@@ -33,7 +57,6 @@
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding-bottom: 24px;
 }
 
 .dsh-pw-tabs .ant-tabs-tabpane {

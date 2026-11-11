@@ -4,6 +4,9 @@ export interface SystemInfo {
   hostname?: string
   platform?: string
   arch?: string
+  home?: string
+  appRoot?: string
+  user?: string
   cpu?: { model?: string; cores?: number; usagePercent?: number }
   memory?: { totalBytes?: number; usedBytes?: number; usedPercent?: number }
   disks?: Array<{ mount?: string; totalBytes?: number; usedBytes?: number; freeBytes?: number; availableBytes?: number; usedPercent?: number }>

@@ -47,6 +47,7 @@ if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
 fi
 
 mkdir -p "$ROOT/data"
+export DSH_PACKAGE_ROOT="$ROOT"
 export DSH_APP_DIR="${DSH_APP_DIR:-$ROOT/app}"
 export DSH_GATE_DATA_DIR="${DSH_GATE_DATA_DIR:-$ROOT/data}"
 exec "$NODE" "$ROOT/gate/server.mjs"

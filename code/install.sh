@@ -216,8 +216,8 @@ DSH_WORKDIR=${ROOT}/workspace
 #DSH_GATE_MEMBER_PORT=80
 # 允许调用 /__gate/cluster 的额外来源地址（默认只允许回环与 RFC1918/VPN 网段）。
 #DSH_GATE_CLUSTER_ALLOW=203.0.113.10
-# 内部 dsh web 监听端口，0 表示由系统分配（推荐）。
-DSH_WEB_PORT=0
+# 内部 dsh web 监听端口；固定端口让浏览器会话 cookie 在重启后仍然有效（0 = 随机，重启会使已打开页面掉线）。
+DSH_WEB_PORT=31280
 # dsh web 的堆上限（MB）。留空 = 自动：内存小于 3.5 GB 的机器限到 1024，避免 OOM 拖死整机；0 = 不限制。
 #DSH_WEB_HEAP_MB=1024
 EOF

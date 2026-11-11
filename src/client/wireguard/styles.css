@@ -1,0 +1,155 @@
+.dsh-wg-root {
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+  padding: calc(var(--dsh-frame-top-clearance, 48px) + 18px) 28px 44px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-size: var(--dsh-content-font-size, 14px);
+}
+
+.dsh-wg-shell {
+  width: min(1040px, 100%);
+  margin: 0 auto;
+}
+
+.dsh-wg-header {
+  margin-bottom: 18px;
+}
+
+.dsh-wg-mark {
+  width: 46px;
+  height: 46px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  color: #fff;
+  font-size: 22px;
+  background: linear-gradient(145deg, var(--dsw-alias-brand-primary), #2f7cff);
+  box-shadow: 0 8px 24px rgba(47, 124, 255, 0.22);
+}
+
+.dsh-wg-title {
+  margin: 0 !important;
+  font-size: 22px !important;
+  line-height: 1.3 !important;
+  letter-spacing: -0.02em;
+}
+
+.dsh-wg-subtitle {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+}
+
+.dsh-wg-tabs .ant-tabs-nav {
+  margin-bottom: 18px;
+}
+
+.dsh-wg-card {
+  border-radius: 14px;
+}
+
+.dsh-wg-card .ant-card-head {
+  min-height: 58px;
+}
+
+.dsh-wg-card .ant-card-head-title {
+  padding: 14px 0;
+}
+
+.dsh-wg-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dsh-wg-ip {
+  margin: 2px 0 0 !important;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+  font-size: 30px !important;
+  line-height: 1.25 !important;
+  letter-spacing: -0.03em;
+}
+
+.dsh-wg-mono {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+  font-size: 12.5px;
+}
+
+.dsh-wg-command {
+  display: block;
+  margin: 6px 0 0;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.dsh-wg-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 20px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+}
+
+.dsh-wg-footer code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.dsh-wg-empty {
+  padding: 22px 0;
+}
+
+.dsh-wg-install-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.dsh-wg-warning-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (max-width: 760px) {
+  .dsh-wg-root {
+    padding: calc(var(--dsh-frame-top-clearance, 40px) + 12px) 14px 32px;
+  }
+
+  .dsh-wg-header {
+    align-items: flex-start;
+  }
+
+  .dsh-wg-ip {
+    font-size: 24px !important;
+  }
+
+  .dsh-wg-card .ant-card-body {
+    padding: 16px;
+  }
+}
+
+.dsh-wg-embedded .dsh-wg-header { display: none; }
+.dsh-wg-embedded.dsh-wg-root { padding: 0; }
+.dsh-wg-embedded .dsh-wg-shell { padding: 0; }

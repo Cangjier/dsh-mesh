@@ -5,11 +5,13 @@ import {
   Card,
   ConfigProvider,
   Empty,
+  Grid,
   Modal,
   Select,
   Space,
   Spin,
   Table,
+  Tabs,
   Tag,
   Tooltip,
   Typography,
@@ -28,6 +30,7 @@ import zhCN from 'antd/locale/zh_CN'
 import enUS from 'antd/locale/en_US'
 import styles from './styles.css'
 import { api, ApiError, type Member, type PackageInfo, type Snapshot, type SystemInfo } from './api'
+import { WireGuardPanel } from './wireguard'
 
 const NS = 'dsh-person-web'
 const PANEL_ID = 'person-web'
@@ -53,6 +56,33 @@ function formatBytes(value: number): string {
     unit += 1
   }
   return `${amount >= 10 || unit === 0 ? String(Math.round(amount)) : amount.toFixed(1)} ${units[unit]}`
+}
+
+/**
+ * The member's OS. A member without DSH cannot report its platform, so fall
+ * back to a name hint (`VM-0-2-ubuntu`, `win-build`) instead of letting the
+ * newest package decide and picking a Windows archive for Ubuntu.
+ */
+function preferredTarget(member: Member): 'linux' | 'windows' | undefined {
+  const platform = member.system?.platform?.toLowerCase() ?? ''
+  if (platform.startsWith('win')) return 'windows'
+  if (platform !== '') return 'linux'
+  const name = member.name.toLowerCase()
+  if (/windows|(^|[-_.])win($|[-_.])/.test(name)) return 'windows'
+  if (/ubuntu|debian|centos|alma|rocky|fedora|linux|suse|redhat/.test(name)) return 'linux'
+  return undefined
+}
+
+/** The member's install root, straight from its system info when it is up. */
+function memberAppRoot(member: Member | null): string {
+  if (member === null) return ''
+  const system = memberSystem(member)
+  const root = system?.appRoot?.trim() ?? ''
+  if (root !== '') return root
+  const home = system?.home?.trim() ?? ''
+  if (home === '') return ''
+  const base = home.replace(/[\\/]+$/u, '')
+  return system?.platform === 'win32' ? `${base}\\.dsh\\dsh-person-web` : `${base}/.dsh/dsh-person-web`
 }
 
 function formatGb(value: number): string {
@@ -94,6 +124,9 @@ function systemDetails(member: Member): string {
   if (system.memory !== undefined) {
     lines.push(`内存 ${formatBytes(system.memory.usedBytes ?? 0)} / ${formatBytes(system.memory.totalBytes ?? 0)} · ${String(system.memory.usedPercent ?? 0)}%`)
   }
+  if (system.home !== undefined && system.home !== '') lines.push(`用户目录 ${system.home}`)
+  if (system.appRoot !== undefined && system.appRoot !== '') lines.push(`部署目录 ${system.appRoot}`)
+  if (system.user !== undefined && system.user !== '') lines.push(`运行用户 ${system.user}`)
   for (const disk of system.disks ?? []) {
     const free = disk.availableBytes ?? disk.freeBytes ?? Math.max(0, (disk.totalBytes ?? 0) - (disk.usedBytes ?? 0))
     lines.push(`${disk.mount ?? 'disk'} 可用 ${formatGb(free)} / 共 ${formatGb(disk.totalBytes ?? 0)} · 已用 ${String(disk.usedPercent ?? 0)}%`)
@@ -113,8 +146,10 @@ function Panel({ ctx }: { ctx: any }) {
   const [packagesLoading, setPackagesLoading] = useState(false)
   const [packagesError, setPackagesError] = useState('')
   const [selectedPackage, setSelectedPackage] = useState<string | undefined>(undefined)
+  const [panelTab, setPanelTab] = useState<'members' | 'network'>('members')
   const [messageApi, contextHolder] = message.useMessage()
   const mode = useThemeMode(ctx)
+  const screens = Grid.useBreakpoint()
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -161,14 +196,20 @@ function Panel({ ctx }: { ctx: any }) {
     }
   }, [gateAvailable])
 
-  const loadPackages = useCallback(async () => {
+  const loadPackages = useCallback(async (preferred?: 'linux' | 'windows', keepCurrent = false) => {
     setPackagesLoading(true)
     setPackagesError('')
     try {
       const result = await api.packages()
       setPackages(result.packages)
       setPackagesDir(result.dir)
-      setSelectedPackage(result.packages[0]?.name)
+      setSelectedPackage(current => {
+        const keep = keepCurrent && current !== undefined
+          ? result.packages.find(item => item.name === current)
+          : undefined
+        const match = preferred !== undefined ? result.packages.find(item => item.target === preferred) : undefined
+        return (keep ?? match)?.name
+      })
     } catch (failure) {
       setPackagesError(errorText(failure))
       setPackages([])
@@ -184,7 +225,7 @@ function Panel({ ctx }: { ctx: any }) {
     setPackagesDir('')
     setPackagesError('')
     setSelectedPackage(undefined)
-    void loadPackages()
+    void loadPackages(preferredTarget(member))
   }, [loadPackages])
 
   const deploy = useCallback(async () => {
@@ -240,11 +281,15 @@ function Panel({ ctx }: { ctx: any }) {
       {
         title: '成员',
         key: 'member',
+        width: 260,
         render: (_value, member) => (
           <Space direction="vertical" size={0}>
-            <Space size={6}>
+            <Space size={6} wrap>
               <Typography.Text strong>{member.name}</Typography.Text>
               {member.kind === 'self' ? <Tag>本机</Tag> : null}
+              {screens.sm !== true ? (
+                <Tag color={member.online ? 'green' : 'default'}>{member.online ? '在线' : '离线'}</Tag>
+              ) : null}
             </Space>
             <Typography.Text type="secondary" style={{ fontSize: 11 }}>
               {member.gate?.hostname !== undefined ? String(member.gate.hostname) : member.id}
@@ -256,6 +301,7 @@ function Panel({ ctx }: { ctx: any }) {
         title: '地址',
         key: 'address',
         width: 150,
+        responsive: ['lg'],
         render: (_value, member) => (
           <Typography.Text className="dsh-pw-mono" style={{ fontSize: 12 }}>
             {member.ip || member.id}
@@ -266,6 +312,7 @@ function Panel({ ctx }: { ctx: any }) {
         title: '状态',
         key: 'status',
         width: 190,
+        responsive: ['sm'],
         render: (_value, member) => (
           <Space size={6} wrap>
             <Tag color={member.online ? 'green' : 'default'}>{member.online ? '在线' : '离线'}</Tag>
@@ -280,6 +327,7 @@ function Panel({ ctx }: { ctx: any }) {
         title: '系统',
         key: 'system',
         width: 260,
+        responsive: ['lg'],
         render: (_value, member) => (
           <Tooltip title={<pre style={{ margin: 0, fontFamily: 'inherit', whiteSpace: 'pre-wrap' }}>{systemDetails(member)}</pre>}>
             <Typography.Text style={{ fontSize: 12 }}>{systemText(member)}</Typography.Text>
@@ -288,7 +336,7 @@ function Panel({ ctx }: { ctx: any }) {
       },
     ]
     return [...base, actionColumn]
-  }, [busy, currentTarget, gateAvailable, openDeploy, switchMember])
+  }, [busy, currentTarget, gateAvailable, openDeploy, screens, switchMember])
 
   if (loading && snapshot === null) {
     return (
@@ -337,16 +385,40 @@ function Panel({ ctx }: { ctx: any }) {
           />
         ) : null}
 
+        <Tabs
+          activeKey={panelTab}
+          onChange={key => setPanelTab(key as 'members' | 'network')}
+          items={[
+            {
+              key: 'members',
+              label: '成员',
+              children: (
         <Card size="small">
-          <Table<Member>
-            rowKey="id"
-            size="middle"
-            pagination={false}
-            dataSource={memberRows}
-            columns={columns}
-            locale={{ emptyText: <Empty description="还没有发现成员" /> }}
-          />
-        </Card>
+              <Table<Member>
+                rowKey="id"
+                size="middle"
+                dataSource={memberRows}
+                columns={columns}
+                scroll={{ x: screens.lg === true ? 1000 : undefined, y: 'max(240px, calc(100vh - 320px))' }}
+                pagination={{
+                  pageSize: 10,
+                  showSizeChanger: true,
+                  pageSizeOptions: ['10', '20', '50', '100'],
+                  showTotal: total => `共 ${String(total)} 个成员`,
+                  hideOnSinglePage: true,
+                }}
+                locale={{ emptyText: <Empty description="还没有发现成员" /> }}
+              />
+            </Card>
+              ),
+            },
+            {
+              key: 'network',
+              label: '组网',
+              children: <WireGuardPanel ctx={ctx} embedded />,
+            },
+          ]}
+        />
         {contextHolder}
       </div>
 
@@ -363,7 +435,13 @@ function Panel({ ctx }: { ctx: any }) {
       >
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            部署包目录：<span className="dsh-pw-mono">{packagesDir || '~/.dsh/packages'}</span>
+            部署包来自本机：<span className="dsh-pw-mono">{packagesDir || '~/.dsh/packages'}</span>
+          </Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            部署到成员目录：<span className="dsh-pw-mono">{memberAppRoot(deployTarget) || '沿用成员现有安装目录（部署时自动探测）'}</span>
+            {deployTarget?.system?.home !== undefined && deployTarget.system.home !== ''
+              ? `（~：${deployTarget.system.home}）`
+              : ''}
           </Typography.Text>
           <Space.Compact style={{ width: '100%' }}>
             <Select
@@ -377,7 +455,7 @@ function Panel({ ctx }: { ctx: any }) {
                 label: `${item.name}  ·  ${item.target === 'windows' ? 'Windows' : 'Linux'}  ·  ${formatBytes(item.bytes)}`,
               }))}
             />
-            <Button icon={<ReloadOutlined />} loading={packagesLoading} onClick={() => { void loadPackages() }}>
+            <Button icon={<ReloadOutlined />} loading={packagesLoading} onClick={() => { void loadPackages(undefined, true) }}>
               刷新
             </Button>
           </Space.Compact>
@@ -387,12 +465,9 @@ function Panel({ ctx }: { ctx: any }) {
               type="info"
               showIcon
               message="没有可用的部署包"
-              description="把 .tar.gz / .zip 部署包放进 ~/.dsh/packages/，再点刷新。"
+              description="把 .tar.gz / .zip 部署包放进本机 ~/.dsh/packages/，再点刷新。"
             />
           ) : null}
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            部署通过 SSH 在成员 22 端口执行，使用当前主机的默认 SSH 凭据；任务启动后不会自动刷新。
-          </Typography.Text>
         </Space>
       </Modal>
     </ConfigProvider>

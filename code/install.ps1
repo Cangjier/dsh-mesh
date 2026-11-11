@@ -34,7 +34,7 @@ if (-not (Test-Path $EnvFile)) {
     "DSH_GATE_PASSWORD=$Password",
     'DSH_GATE_COOKIE_DAYS=30',
     "DSH_WORKDIR=$Workspace",
-    'DSH_WEB_PORT=0',
+    'DSH_WEB_PORT=31280',
     "DSH_GATE_MEMBER_PORT=$Port",
     "DSH_GATE_CLUSTER_KEY=$ClusterKey",
     "DSH_TRUSTED_HOSTS=$TrustedHosts"

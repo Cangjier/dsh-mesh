@@ -172,7 +172,7 @@ function networkInfo() {
  * every mount or samples CPU, so it cannot stall a member probe.
  * @returns {object} system summary.
  */
-export function quickSystemInfo() {
+export function quickSystemInfo(options = {}) {
   const cpus = os.cpus()
   const total = os.totalmem()
   const free = os.freemem()
@@ -210,6 +210,9 @@ export function quickSystemInfo() {
     hostname: os.hostname(),
     platform: process.platform,
     arch: process.arch,
+    home: options.home ?? os.homedir(),
+    appRoot: options.appRoot ?? process.env.DSH_PACKAGE_ROOT ?? process.cwd(),
+    user: os.userInfo().username,
     cpu: { model: cpus[0]?.model ?? 'unknown', cores: cpus.length, usagePercent: cpuUsage },
     memory: {
       totalBytes: total,
@@ -245,6 +248,9 @@ export async function collectSystemInfo(options = {}) {
     platform: process.platform,
     arch: process.arch,
     release: os.release(),
+    home: options.home ?? os.homedir(),
+    appRoot: options.appRoot ?? process.env.DSH_PACKAGE_ROOT ?? process.cwd(),
+    user: os.userInfo().username,
     uptimeSeconds: Math.floor(os.uptime()),
     node: process.version,
     cpu: {

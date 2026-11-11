@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$env:DSH_PACKAGE_ROOT = $Root
 $EnvFile = Join-Path $Root 'config\gate.env'
 if (-not (Test-Path $EnvFile)) {
   throw "Missing $EnvFile. Run install.ps1 first."

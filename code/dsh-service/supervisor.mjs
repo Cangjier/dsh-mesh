@@ -52,6 +52,10 @@ const dshHome = process.env.DSH_HOME || envFile.DSH_HOME || path.join(DATA, 'hom
 const workdir = process.env.DSH_WORKDIR || envFile.DSH_WORKDIR || path.join(ROOT, 'workspace')
 const agentsHome = process.env.DSH_AGENTS_HOME || envFile.DSH_AGENTS_HOME || path.join(DATA, 'agents')
 const heapMb = Number.parseInt(process.env.DSH_WEB_HEAP_MB || envFile.DSH_WEB_HEAP_MB || '0', 10)
+// A fixed listener port keeps the browser-session cookie's authority stable
+// across restarts; with port 0 every restart invalidated every open tab.
+const configuredPort = process.env.DSH_WEB_PORT || envFile.DSH_WEB_PORT || '0'
+const webPort = /^\d{1,5}$/u.test(configuredPort) && Number(configuredPort) <= 65_535 ? configuredPort : '0'
 mkdirSync(workdir, { recursive: true })
 mkdirSync(dshHome, { recursive: true })
 
@@ -103,7 +107,7 @@ function startChild() {
   }
   const args = []
   if (existsSync(PATCH_FILE)) args.push('--patch', PATCH_FILE)
-  args.push('--profile', 'web', '--no-open', '--host', '127.0.0.1', '--port', '0')
+  args.push('--profile', 'web', '--no-open', '--host', '127.0.0.1', '--port', webPort)
   for (const authority of trustedAuthorities()) args.push('--trusted-host', authority)
   const env = {
     ...process.env,
@@ -113,6 +117,7 @@ function startChild() {
   if (Number.isSafeInteger(heapMb) && heapMb > 0) {
     env.NODE_OPTIONS = `${process.env.NODE_OPTIONS ?? ''} --max-old-space-size=${String(heapMb)}`.trim()
   }
+  env.DSH_PACKAGE_ROOT = ROOT
   log(`spawning dsh web (workdir ${workdir}, home ${dshHome})`)
   child = spawn(process.execPath, [DSH_ENTRY, ...args], {
     cwd: workdir,

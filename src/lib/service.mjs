@@ -394,16 +394,27 @@ export class PersonWebService {
       }
     }
     const os = selected.target === 'windows' ? 'windows' : 'linux'
-    // Deploy into the tree the member already runs, not a guessed system path:
-    // root installs live under /root/.dsh, normal users under /home/<user>/.dsh.
-    let appRoot
-    let serviceUser
-    try {
-      const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os })
-      appRoot = detected.appRoot
-      serviceUser = detected.serviceUser
-    } catch {
-      // Keep the SSH error for the deploy job; fall back to the user's home.
+    // The gate reports its own install root, home and run user, so a healthy
+    // member needs no SSH round-trip just to learn where it lives.
+    const system = member.system
+    let appRoot = typeof system?.appRoot === 'string' && system.appRoot.trim() !== ''
+      ? system.appRoot.trim()
+      : undefined
+    let serviceUser = typeof system?.user === 'string' && system.user.trim() !== ''
+      ? system.user.trim()
+      : undefined
+    if (appRoot === undefined) {
+      try {
+        const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os })
+        appRoot = detected.appRoot
+        serviceUser = serviceUser ?? detected.serviceUser
+      } catch {
+        // Keep the SSH error for the deploy job; fall back below.
+      }
+    }
+    if (appRoot === undefined && typeof system?.home === 'string' && system.home.trim() !== '') {
+      const home = system.home.trim().replace(/[\\/]+$/u, '')
+      appRoot = os === 'windows' ? `${home}\\.dsh\\dsh-person-web` : `${home}/.dsh/dsh-person-web`
     }
     if (appRoot === undefined) {
       const home = os === 'windows'

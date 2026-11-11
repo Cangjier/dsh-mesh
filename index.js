@@ -1922,7 +1922,7 @@ function round(value, digits = 1) {
 function safeNumber(value) {
   return Number.isFinite(value) ? value : 0;
 }
-function quickSystemInfo() {
+function quickSystemInfo(options = {}) {
   const cpus = os4.cpus();
   const total = os4.totalmem();
   const free = os4.freemem();
@@ -1959,6 +1959,9 @@ function quickSystemInfo() {
     hostname: os4.hostname(),
     platform: process.platform,
     arch: process.arch,
+    home: options.home ?? os4.homedir(),
+    appRoot: options.appRoot ?? process.env.DSH_PACKAGE_ROOT ?? process.cwd(),
+    user: os4.userInfo().username,
     cpu: { model: cpus[0]?.model ?? "unknown", cores: cpus.length, usagePercent: cpuUsage },
     memory: {
       totalBytes: total,
@@ -2293,13 +2296,20 @@ var PersonWebService = class {
       }
     }
     const os6 = selected.target === "windows" ? "windows" : "linux";
-    let appRoot;
-    let serviceUser;
-    try {
-      const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os: os6 });
-      appRoot = detected.appRoot;
-      serviceUser = detected.serviceUser;
-    } catch {
+    const system = member.system;
+    let appRoot = typeof system?.appRoot === "string" && system.appRoot.trim() !== "" ? system.appRoot.trim() : void 0;
+    let serviceUser = typeof system?.user === "string" && system.user.trim() !== "" ? system.user.trim() : void 0;
+    if (appRoot === void 0) {
+      try {
+        const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os: os6 });
+        appRoot = detected.appRoot;
+        serviceUser = serviceUser ?? detected.serviceUser;
+      } catch {
+      }
+    }
+    if (appRoot === void 0 && typeof system?.home === "string" && system.home.trim() !== "") {
+      const home = system.home.trim().replace(/[\\/]+$/u, "");
+      appRoot = os6 === "windows" ? `${home}\\.dsh\\dsh-person-web` : `${home}/.dsh/dsh-person-web`;
     }
     if (appRoot === void 0) {
       const home = os6 === "windows" ? `C:\\Users\\${user}` : user === "root" ? "/root" : `/home/${user}`;

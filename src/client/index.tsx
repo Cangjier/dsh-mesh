@@ -315,14 +315,6 @@ function Panel({ ctx }: { ctx: any }) {
             <Space size={6} wrap>
               <Typography.Text strong>{member.name}</Typography.Text>
               {member.kind === 'self' ? <Tag>本机</Tag> : null}
-              {tags[member.id] !== undefined ? <Tag color="blue">{tags[member.id]}</Tag> : null}
-              <Button
-                type="text"
-                size="small"
-                icon={<EditOutlined />}
-                title="设置标签"
-                onClick={() => openTag(member)}
-              />
               {screens.sm !== true ? (
                 <Tag color={member.online ? 'green' : 'default'}>{member.online ? '在线' : '离线'}</Tag>
               ) : null}
@@ -342,6 +334,24 @@ function Panel({ ctx }: { ctx: any }) {
           <Typography.Text className="dsh-pw-mono" style={{ fontSize: 12 }}>
             {member.ip || member.id}
           </Typography.Text>
+        ),
+      },
+      {
+        title: '标签',
+        key: 'tag',
+        width: 150,
+        responsive: ['md'],
+        render: (_value, member) => (
+          <Space size={4} wrap>
+            {tags[member.id] !== undefined ? <Tag color="blue">{tags[member.id]}</Tag> : null}
+            <Button
+              type="text"
+              size="small"
+              icon={<EditOutlined />}
+              title="设置标签"
+              onClick={() => openTag(member)}
+            />
+          </Space>
         ),
       },
       {

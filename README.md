@@ -7,6 +7,7 @@
 - **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `build` / `deploy` / `members` / `call_member` 工具。
 - **网关**：`code/gate/`，负责密码门、反向代理、成员 cluster 认证、目标 cookie。
 - **构建引擎**：`code/build/`，从 DSH GitHub 源码确定性地应用覆盖层、构建 Web 前端、按目标系统和架构打包。
+- **WireGuard 控制服务源码**：`src/wireguard/`（引擎 + 51821 面板），`pnpm build` 会把 `code/wireguard/control-service.js` 从源码重建；引擎测试在 `test/wireguard/`，用 `pnpm test:wireguard` 跑。
 - **文档集**：Step 001–010，记录每个坑和对应检查。
 
 ## 三个功能

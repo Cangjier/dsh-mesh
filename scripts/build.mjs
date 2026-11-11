@@ -24,6 +24,30 @@ async function buildHost() {
   await writeFile(path.join(root, 'index.js'), code, 'utf8')
 }
 
+/**
+ * Bundle the standalone WireGuard control service. The deployment package
+ * ships the output as code/wireguard/control-service.js, so this step keeps
+ * the artifact reproducible from the TypeScript source in src/wireguard.
+ */
+async function buildControlService() {
+  const result = await build({
+    entryPoints: [path.join(root, 'src/wireguard/control-service.ts')],
+    write: false,
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node20',
+    packages: 'external',
+    sourcemap: false,
+    legalComments: 'none',
+    logLevel: 'info',
+  })
+  if (result.errors.length > 0) throw new Error('Control service build failed')
+  const code = result.outputFiles?.[0]?.text
+  if (!code) throw new Error('Control service build produced no output')
+  await writeFile(path.join(root, 'code', 'wireguard', 'control-service.js'), code, 'utf8')
+}
+
 async function buildClient() {
   const result = await build({
     entryPoints: [path.join(root, 'src/client/index.tsx')],
@@ -57,5 +81,6 @@ async function buildClient() {
 }
 
 await buildHost()
+await buildControlService()
 await buildClient()
-console.log('Built index.js and client.js')
+console.log('Built index.js, code/wireguard/control-service.js, and client.js')

@@ -1,8 +1,8 @@
-// src/control-service.ts
+// src/wireguard/control-service.ts
 import { homedir } from "node:os";
 import path5 from "node:path";
 
-// src/lib/constants.ts
+// src/wireguard/lib/constants.ts
 var PLUGIN_VERSION = "0.2.0";
 var SERVICE_NAME = "dsh-wireguard";
 var API_PREFIX = "/api/dsh-wireguard";
@@ -16,7 +16,7 @@ var MAX_PEERS = 1024;
 var MAX_STATE_BYTES = 2 * 1024 * 1024;
 var MAX_REQUEST_BYTES = 64 * 1024;
 
-// src/lib/errors.ts
+// src/wireguard/lib/errors.ts
 var WireGuardError = class extends Error {
   code;
   status;
@@ -50,7 +50,7 @@ function missingToolHint(tool, platform) {
   return `WireGuard is supported on Windows and Linux; this host reports ${platform}.`;
 }
 
-// src/lib/http-api.ts
+// src/wireguard/lib/http-api.ts
 var AGENT_HEADER = "x-dsh-wireguard";
 function writeJson(response, status, value) {
   const body = JSON.stringify(value);
@@ -159,7 +159,7 @@ function createControlExtraHandler(service2) {
   };
 }
 
-// src/lib/service.ts
+// src/wireguard/lib/service.ts
 import { execFile as execFile2 } from "node:child_process";
 import { createHash as createHash2 } from "node:crypto";
 import { chmod as chmod2, mkdir as mkdir3, readFile as readFile2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
@@ -167,7 +167,7 @@ import { isIP as isIP2 } from "node:net";
 import path4 from "node:path";
 import { promisify } from "node:util";
 
-// src/lib/access.ts
+// src/wireguard/lib/access.ts
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 function generateJoinCode() {
   return randomBytes(9).toString("base64url");
@@ -179,10 +179,10 @@ function secretsMatch(supplied, expected) {
   return timingSafeEqual(left, right);
 }
 
-// src/lib/config.ts
+// src/wireguard/lib/config.ts
 import { isIP } from "node:net";
 
-// src/lib/ip.ts
+// src/wireguard/lib/ip.ts
 var IPV4_PATTERN = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
 function parseIpv4(value) {
   if (typeof value !== "string") return null;
@@ -240,7 +240,7 @@ function allocatePeerIp(cidr, used, serverIp) {
   return null;
 }
 
-// src/lib/config.ts
+// src/wireguard/lib/config.ts
 var DEFAULT_SETTINGS = Object.freeze({
   controlPort: DEFAULT_CONTROL_PORT,
   listenPort: DEFAULT_LISTEN_PORT,
@@ -421,11 +421,11 @@ function parseServerAddress(value, defaultPort = DEFAULT_CONTROL_PORT) {
   return { host, port, controlUrl, display: `${formatEndpointHost(host)}:${port}` };
 }
 
-// src/lib/control-panel.ts
+// src/wireguard/lib/control-panel.ts
 import { randomBytes as randomBytes2 } from "node:crypto";
 import { createServer } from "node:http";
 
-// src/lib/client-script.ts
+// src/wireguard/lib/client-script.ts
 var LINUX_CLIENT_SCRIPT = String.raw`#!/bin/sh
 # DSH WireGuard client bootstrap for Linux (unknown distribution).
 # Usage: sudo sh dsh-wg-client.sh <control-url> <join-code> [ipv4|ipv6] [interface]
@@ -624,7 +624,7 @@ if command -v wg >/dev/null 2>&1; then
 fi
 `;
 
-// src/lib/control-panel.ts
+// src/wireguard/lib/control-panel.ts
 var RATE_WINDOW_MS = 6e4;
 var RATE_LIMIT = 30;
 var COOKIE_NAME = "dsh_wg_panel";
@@ -1079,7 +1079,7 @@ code { background: #eef3fa; padding: 2px 6px; border-radius: 5px; }
   }
 };
 
-// src/lib/installer.ts
+// src/wireguard/lib/installer.ts
 import { createWriteStream } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import path2 from "node:path";
@@ -1087,7 +1087,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
-// src/lib/platform.ts
+// src/wireguard/lib/platform.ts
 import { execFile } from "node:child_process";
 import { accessSync, constants as syncConstants } from "node:fs";
 import { networkInterfaces, hostname as osHostname } from "node:os";
@@ -1286,7 +1286,7 @@ function localHostname() {
   return value || "this-device";
 }
 
-// src/lib/installer.ts
+// src/wireguard/lib/installer.ts
 var WINDOWS_INSTALLER_URL = "https://download.wireguard.com/windows-client/wireguard-installer.exe";
 var WINDOWS_INSTALLER_MAX_BYTES = 128 * 1024 * 1024;
 var INSTALL_TIMEOUT_MS = 18e4;
@@ -1486,7 +1486,7 @@ async function installWireGuard(platform, dataDir, log) {
   });
 }
 
-// src/lib/keys.ts
+// src/wireguard/lib/keys.ts
 import { createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
 var KEY_PATTERN = /^[A-Za-z0-9+/]{43}=$/;
 function base64urlToBase64(value) {
@@ -1529,7 +1529,7 @@ function keyFingerprint(publicKey) {
   return `${normalized.slice(0, 6)}\u2026${normalized.slice(-6)}`;
 }
 
-// src/lib/ssh.ts
+// src/wireguard/lib/ssh.ts
 var SSH_USER_PATTERN = /^[A-Za-z_][A-Za-z0-9_-]{0,31}$/;
 function buildSshAuthorizeCommand(user, publicKey) {
   const parts = publicKey.trim().split(/\s+/);
@@ -1566,7 +1566,7 @@ Write-Output 'SSH public key installed for Windows user ' + $user`;
   return `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
 }
 
-// src/lib/store.ts
+// src/wireguard/lib/store.ts
 import { chmod, mkdir as mkdir2, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path3 from "node:path";
 function emptyState() {
@@ -1821,7 +1821,7 @@ var Store = class {
   }
 };
 
-// src/lib/tunnel.ts
+// src/wireguard/lib/tunnel.ts
 import { setTimeout as delay2 } from "node:timers/promises";
 function parseWgDump(stdout) {
   const lines = String(stdout ?? "").split(/\r?\n/).filter((line) => line.trim() !== "");
@@ -2104,7 +2104,7 @@ var Tunnel = class {
   }
 };
 
-// src/lib/service.ts
+// src/wireguard/lib/service.ts
 var execFileAsync = promisify(execFile2);
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -3352,7 +3352,7 @@ var WireGuardService = class {
   }
 };
 
-// src/control-service.ts
+// src/wireguard/control-service.ts
 var home = process.env.DSH_HOME && process.env.DSH_HOME.trim() ? process.env.DSH_HOME.trim() : path5.join(homedir(), ".dsh");
 var service = new WireGuardService({
   config: {

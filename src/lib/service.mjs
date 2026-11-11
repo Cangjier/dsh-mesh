@@ -8,7 +8,7 @@
  * @module @local/dsh-person-web/service
  */
 
-import { readFile, readdir, stat } from 'node:fs/promises'
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { readFileSync, existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import os from 'node:os'
@@ -85,6 +85,7 @@ export class PersonWebService {
     this.overlayRoot = path.join(REPOSITORY_ROOT, 'build', 'overlays')
     this.home = path.dirname(this.dataDir)
     this.deployRoot = path.join(this.dataDir, 'deploy')
+    this.memberTagsFile = path.join(this.dataDir, 'member-tags.json')
     this.packagesDir = path.join(os.homedir(), '.dsh', 'packages')
     this.deploy = new DeployManager({
       repositoryRoot: REPOSITORY_ROOT,
@@ -184,7 +185,49 @@ export class PersonWebService {
     })
     // Keep the gate and host responses shaped the same: `local` is the row for
     // this machine, `members` are the peers.
-    return { ...snapshot, local: snapshot.self }
+    const tags = await this.memberTags()
+    self.tag = tags[self.id] ?? null
+    const members = snapshot.members.map(member => ({
+      ...member,
+      tag: tags[member.id] ?? null,
+    }))
+    return { ...snapshot, self, members, local: self }
+  }
+
+  /**
+   * User labels for members, keyed by member id.
+   * @returns {Promise<Record<string, string>>} tags.
+   */
+  async memberTags() {
+    try {
+      const parsed = JSON.parse(await readFile(this.memberTagsFile, 'utf8'))
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+      const tags = {}
+      for (const [id, tag] of Object.entries(parsed)) {
+        if (typeof id === 'string' && typeof tag === 'string' && tag.trim() !== '') tags[id] = tag.trim().slice(0, 32)
+      }
+      return tags
+    } catch {
+      return {}
+    }
+  }
+
+  /**
+   * Set or clear one member's label.
+   * @param {string} id member id.
+   * @param {string} tag label; empty removes it.
+   * @returns {Promise<{ok: boolean, tags: Record<string, string>}>} saved tags.
+   */
+  async setMemberTag(id, tag) {
+    if (typeof id !== 'string' || id.trim() === '') throw new Error('member id is required')
+    const memberId = id.trim()
+    const label = typeof tag === 'string' ? tag.trim().slice(0, 32) : ''
+    const tags = await this.memberTags()
+    if (label === '') delete tags[memberId]
+    else tags[memberId] = label
+    await mkdir(this.dataDir, { recursive: true })
+    await writeFile(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}\n`, 'utf8')
+    return { ok: true, tags }
   }
 
   /**

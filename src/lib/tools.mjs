@@ -363,7 +363,34 @@ export function registerTools(ctx, toolsCtx, service) {
     },
   }
 
-  for (const tool of [definition, deployDefinition, memberTaskDefinition]) {
+  const membersDefinition = {
+    name: 'members',
+    description: [
+      '发现当前 WireGuard 网络里的所有 DSH 成员。',
+      '',
+      '返回每个成员的 id、名称、VPN IP、在线状态、DSH 端口、延迟、系统信息（CPU/内存/磁盘/home/部署目录/运行用户）和用户标签。',
+      '数据与面板“成员”页一致；本机作为 id=local 的一行返回。',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{
+        type: 'text',
+        text: typeof value?.text === 'string' ? value.text : JSON.stringify(value, null, 2),
+      }],
+    },
+    isConcurrencySafe: () => true,
+    async execute() {
+      const data = await service.members()
+      return { ok: true, text: formatMembers(data), data }
+    },
+  }
+
+  for (const tool of [definition, deployDefinition, memberTaskDefinition, membersDefinition]) {
     try {
       toolsCtx.tools.register(tool)
       ctx.logger?.info?.(`person-web: registered tool ${tool.name}`)
@@ -477,7 +504,9 @@ function formatMembers(snapshot) {
   const lines = [`更新于 ${snapshot.updatedAt}，共 ${snapshot.members.length} 个成员`]
   for (const member of snapshot.members) {
     const status = member.id === 'local' ? '本机' : member.dsh ? `DSH :${member.port}` : '未部署/不可达'
-    lines.push(`- ${member.name}  ${member.id}  ${status}  ${member.online ? 'online' : 'offline'}`)
+    const tag = member.tag ? ` [${member.tag}]` : ''
+    const ip = member.ip ? ` ${member.ip}` : ''
+    lines.push(`- ${member.name}${tag}${ip}  ${member.id}  ${status}  ${member.online ? 'online' : 'offline'}`)
   }
   if (snapshot.warnings?.length) lines.push(`警告：${snapshot.warnings.join('；')}`)
   return lines.join('\n')

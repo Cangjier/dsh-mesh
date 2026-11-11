@@ -73,6 +73,10 @@ export function registerApi(ctx, service) {
           writeJson(response, 200, await service.members())
           return
         }
+        if (method === 'GET' && path === '/member-tags') {
+          writeJson(response, 200, { ok: true, tags: await service.memberTags() })
+          return
+        }
         if (method === 'GET' && path === '/jobs') {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() })
           return
@@ -111,6 +115,14 @@ export function registerApi(ctx, service) {
             package: typeof body.package === 'string' ? body.package : undefined,
           })
           writeJson(response, 202, result)
+          return
+        }
+        if (path === '/member-tags') {
+          const body = await readJson(request)
+          writeJson(response, 200, await service.setMemberTag(
+            typeof body.id === 'string' ? body.id : '',
+            typeof body.tag === 'string' ? body.tag : '',
+          ))
           return
         }
         if (path === '/build') {

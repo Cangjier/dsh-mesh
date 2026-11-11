@@ -6,6 +6,7 @@ import {
   ConfigProvider,
   Empty,
   Grid,
+  Input,
   Modal,
   Select,
   Space,
@@ -22,6 +23,7 @@ import type { ColumnsType } from 'antd/es/table'
 import {
   ApartmentOutlined,
   CloudDownloadOutlined,
+  EditOutlined,
   ReloadOutlined,
   SwapOutlined,
   WarningOutlined,
@@ -148,6 +150,10 @@ function Panel({ ctx }: { ctx: any }) {
   const [packagesError, setPackagesError] = useState('')
   const [selectedPackage, setSelectedPackage] = useState<string | undefined>(undefined)
   const [panelTab, setPanelTab] = useState<'members' | 'network'>('members')
+  const [tags, setTags] = useState<Record<string, string>>({})
+  const [tagTarget, setTagTarget] = useState<Member | null>(null)
+  const [tagText, setTagText] = useState('')
+  const [tagSaving, setTagSaving] = useState(false)
   const [messageApi, contextHolder] = message.useMessage()
   const mode = useThemeMode(ctx)
   const screens = Grid.useBreakpoint()
@@ -164,6 +170,8 @@ function Panel({ ctx }: { ctx: any }) {
         const members = await api.hostMembers()
         setSnapshot({ ...members, target: 'local' })
       }
+      const memberTags = await api.memberTags()
+      setTags(memberTags.tags)
       setError(null)
     } catch (failure) {
       setError(errorText(failure))
@@ -184,6 +192,25 @@ function Panel({ ctx }: { ctx: any }) {
   }, [snapshot])
 
   const currentTarget = snapshot?.target ?? 'local'
+
+  const openTag = useCallback((member: Member) => {
+    setTagTarget(member)
+    setTagText(tags[member.id] ?? '')
+  }, [tags])
+
+  const saveTag = useCallback(async () => {
+    if (tagTarget === null) return
+    setTagSaving(true)
+    try {
+      const result = await api.setMemberTag(tagTarget.id, tagText.trim())
+      setTags(result.tags)
+      setTagTarget(null)
+    } catch (failure) {
+      setError(errorText(failure))
+    } finally {
+      setTagSaving(false)
+    }
+  }, [tagTarget, tagText])
 
   const switchMember = useCallback(async (member: Member) => {
     if (!gateAvailable) return
@@ -288,6 +315,14 @@ function Panel({ ctx }: { ctx: any }) {
             <Space size={6} wrap>
               <Typography.Text strong>{member.name}</Typography.Text>
               {member.kind === 'self' ? <Tag>本机</Tag> : null}
+              {tags[member.id] !== undefined ? <Tag color="blue">{tags[member.id]}</Tag> : null}
+              <Button
+                type="text"
+                size="small"
+                icon={<EditOutlined />}
+                title="设置标签"
+                onClick={() => openTag(member)}
+              />
               {screens.sm !== true ? (
                 <Tag color={member.online ? 'green' : 'default'}>{member.online ? '在线' : '离线'}</Tag>
               ) : null}
@@ -337,7 +372,7 @@ function Panel({ ctx }: { ctx: any }) {
       },
     ]
     return [...base, actionColumn]
-  }, [busy, currentTarget, gateAvailable, openDeploy, screens, switchMember])
+  }, [busy, currentTarget, gateAvailable, openDeploy, openTag, screens, switchMember, tags])
 
   if (loading && snapshot === null) {
     return (
@@ -426,6 +461,26 @@ function Panel({ ctx }: { ctx: any }) {
         />
         {contextHolder}
       </div>
+
+      <Modal
+        open={tagTarget !== null}
+        title={`设置标签 · ${tagTarget?.name ?? ''}`}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={tagSaving}
+        onCancel={() => setTagTarget(null)}
+        onOk={() => { void saveTag() }}
+        destroyOnHidden
+      >
+        <Input
+          maxLength={32}
+          showCount
+          value={tagText}
+          placeholder="例如 生产 / 测试 / 客户 A"
+          onChange={event => setTagText(event.target.value)}
+          onPressEnter={() => { void saveTag() }}
+        />
+      </Modal>
 
       <Modal
         open={deployTarget !== null}

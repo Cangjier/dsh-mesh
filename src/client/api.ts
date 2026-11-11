@@ -24,7 +24,13 @@ export interface Member {
   lastHandshakeAt: string | null
   gate: Record<string, unknown> | null
   system?: SystemInfo | null
+  tag?: string | null
   error: string | null
+}
+
+export interface MemberTags {
+  ok: boolean
+  tags: Record<string, string>
 }
 
 export interface Snapshot {
@@ -177,6 +183,18 @@ export const api = {
 
   hostMembers(): Promise<Snapshot> {
     return request<Snapshot>('/api/dsh-person-web/members')
+  },
+
+  memberTags(): Promise<MemberTags> {
+    return request<MemberTags>('/api/dsh-person-web/member-tags')
+  },
+
+  setMemberTag(id: string, tag: string): Promise<MemberTags> {
+    return request<MemberTags>('/api/dsh-person-web/member-tags', {
+      method: 'POST',
+      headers: { 'x-dsh-person-web': '1' },
+      body: JSON.stringify({ id, tag }),
+    })
   },
 
   packages(): Promise<PackagesResponse> {

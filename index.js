@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path7 from "node:path";
 
 // src/lib/service.mjs
-import { readFile as readFile5, readdir as readdir3, stat as stat4 } from "node:fs/promises";
+import { mkdir as mkdir4, readFile as readFile5, readdir as readdir3, stat as stat4, writeFile as writeFile4 } from "node:fs/promises";
 import { readFileSync as readFileSync2, existsSync as existsSync4 } from "node:fs";
 import { createHash as createHash3 } from "node:crypto";
 import os5 from "node:os";
@@ -2005,6 +2005,7 @@ var PersonWebService = class {
     this.overlayRoot = path5.join(REPOSITORY_ROOT, "build", "overlays");
     this.home = path5.dirname(this.dataDir);
     this.deployRoot = path5.join(this.dataDir, "deploy");
+    this.memberTagsFile = path5.join(this.dataDir, "member-tags.json");
     this.packagesDir = path5.join(os5.homedir(), ".dsh", "packages");
     this.deploy = new DeployManager({
       repositoryRoot: REPOSITORY_ROOT,
@@ -2094,7 +2095,48 @@ var PersonWebService = class {
       self,
       ports: Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080]
     });
-    return { ...snapshot, local: snapshot.self };
+    const tags = await this.memberTags();
+    self.tag = tags[self.id] ?? null;
+    const members = snapshot.members.map((member) => ({
+      ...member,
+      tag: tags[member.id] ?? null
+    }));
+    return { ...snapshot, self, members, local: self };
+  }
+  /**
+   * User labels for members, keyed by member id.
+   * @returns {Promise<Record<string, string>>} tags.
+   */
+  async memberTags() {
+    try {
+      const parsed = JSON.parse(await readFile5(this.memberTagsFile, "utf8"));
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      const tags = {};
+      for (const [id, tag] of Object.entries(parsed)) {
+        if (typeof id === "string" && typeof tag === "string" && tag.trim() !== "") tags[id] = tag.trim().slice(0, 32);
+      }
+      return tags;
+    } catch {
+      return {};
+    }
+  }
+  /**
+   * Set or clear one member's label.
+   * @param {string} id member id.
+   * @param {string} tag label; empty removes it.
+   * @returns {Promise<{ok: boolean, tags: Record<string, string>}>} saved tags.
+   */
+  async setMemberTag(id, tag) {
+    if (typeof id !== "string" || id.trim() === "") throw new Error("member id is required");
+    const memberId = id.trim();
+    const label = typeof tag === "string" ? tag.trim().slice(0, 32) : "";
+    const tags = await this.memberTags();
+    if (label === "") delete tags[memberId];
+    else tags[memberId] = label;
+    await mkdir4(this.dataDir, { recursive: true });
+    await writeFile4(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
+`, "utf8");
+    return { ok: true, tags };
   }
   /**
    * Start one build job in the background.
@@ -2417,6 +2459,10 @@ function registerApi(ctx, service) {
           writeJson(response, 200, await service.members());
           return;
         }
+        if (method === "GET" && path8 === "/member-tags") {
+          writeJson(response, 200, { ok: true, tags: await service.memberTags() });
+          return;
+        }
         if (method === "GET" && path8 === "/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() });
           return;
@@ -2455,6 +2501,14 @@ function registerApi(ctx, service) {
             package: typeof body.package === "string" ? body.package : void 0
           });
           writeJson(response, 202, result);
+          return;
+        }
+        if (path8 === "/member-tags") {
+          const body = await readJson(request);
+          writeJson(response, 200, await service.setMemberTag(
+            typeof body.id === "string" ? body.id : "",
+            typeof body.tag === "string" ? body.tag : ""
+          ));
           return;
         }
         if (path8 === "/build") {
@@ -2541,7 +2595,7 @@ function registerWireGuardApi(ctx) {
 
 // src/lib/member-tasks.mjs
 import { randomUUID } from "node:crypto";
-import { mkdir as mkdir4, readFile as readFile6, readdir as readdir4, rename as rename3, writeFile as writeFile4 } from "node:fs/promises";
+import { mkdir as mkdir5, readFile as readFile6, readdir as readdir4, rename as rename3, writeFile as writeFile5 } from "node:fs/promises";
 import { existsSync as existsSync5, readFileSync as readFileSync3 } from "node:fs";
 import path6 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
@@ -2593,7 +2647,7 @@ var MemberTaskService = class {
   async #ensureLoaded() {
     if (this.loaded) return;
     this.loaded = true;
-    await mkdir4(this.taskRoot, { recursive: true });
+    await mkdir5(this.taskRoot, { recursive: true });
     let files = [];
     try {
       files = await readdir4(this.taskRoot);
@@ -2618,8 +2672,8 @@ var MemberTaskService = class {
     task.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     const file = path6.join(this.taskRoot, `${task.id}.json`);
     const temporary = `${file}.${process.pid}.tmp`;
-    await mkdir4(this.taskRoot, { recursive: true });
-    await writeFile4(temporary, `${JSON.stringify(task, null, 2)}
+    await mkdir5(this.taskRoot, { recursive: true });
+    await writeFile5(temporary, `${JSON.stringify(task, null, 2)}
 `, "utf8");
     await rename3(temporary, file);
   }
@@ -2627,7 +2681,7 @@ var MemberTaskService = class {
     const text = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
 `;
     try {
-      await writeFile4(path6.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
+      await writeFile5(path6.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
     } catch {
     }
     try {
@@ -3234,7 +3288,33 @@ ${job.worktree ?? ""}`,
       throw new Error(`unknown action: ${action}`);
     }
   };
-  for (const tool of [definition, deployDefinition, memberTaskDefinition]) {
+  const membersDefinition = {
+    name: "members",
+    description: [
+      "\u53D1\u73B0\u5F53\u524D WireGuard \u7F51\u7EDC\u91CC\u7684\u6240\u6709 DSH \u6210\u5458\u3002",
+      "",
+      "\u8FD4\u56DE\u6BCF\u4E2A\u6210\u5458\u7684 id\u3001\u540D\u79F0\u3001VPN IP\u3001\u5728\u7EBF\u72B6\u6001\u3001DSH \u7AEF\u53E3\u3001\u5EF6\u8FDF\u3001\u7CFB\u7EDF\u4FE1\u606F\uFF08CPU/\u5185\u5B58/\u78C1\u76D8/home/\u90E8\u7F72\u76EE\u5F55/\u8FD0\u884C\u7528\u6237\uFF09\u548C\u7528\u6237\u6807\u7B7E\u3002",
+      "\u6570\u636E\u4E0E\u9762\u677F\u201C\u6210\u5458\u201D\u9875\u4E00\u81F4\uFF1B\u672C\u673A\u4F5C\u4E3A id=local \u7684\u4E00\u884C\u8FD4\u56DE\u3002"
+    ].join("\n"),
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    },
+    output: {
+      schema: { type: "object", additionalProperties: true },
+      render: (_args, value) => [{
+        type: "text",
+        text: typeof value?.text === "string" ? value.text : JSON.stringify(value, null, 2)
+      }]
+    },
+    isConcurrencySafe: () => true,
+    async execute() {
+      const data = await service.members();
+      return { ok: true, text: formatMembers(data), data };
+    }
+  };
+  for (const tool of [definition, deployDefinition, memberTaskDefinition, membersDefinition]) {
     try {
       toolsCtx.tools.register(tool);
       ctx.logger?.info?.(`person-web: registered tool ${tool.name}`);
@@ -3305,7 +3385,9 @@ function formatMembers(snapshot) {
   const lines = [`\u66F4\u65B0\u4E8E ${snapshot.updatedAt}\uFF0C\u5171 ${snapshot.members.length} \u4E2A\u6210\u5458`];
   for (const member of snapshot.members) {
     const status = member.id === "local" ? "\u672C\u673A" : member.dsh ? `DSH :${member.port}` : "\u672A\u90E8\u7F72/\u4E0D\u53EF\u8FBE";
-    lines.push(`- ${member.name}  ${member.id}  ${status}  ${member.online ? "online" : "offline"}`);
+    const tag = member.tag ? ` [${member.tag}]` : "";
+    const ip = member.ip ? ` ${member.ip}` : "";
+    lines.push(`- ${member.name}${tag}${ip}  ${member.id}  ${status}  ${member.online ? "online" : "offline"}`);
   }
   if (snapshot.warnings?.length) lines.push(`\u8B66\u544A\uFF1A${snapshot.warnings.join("\uFF1B")}`);
   return lines.join("\n");

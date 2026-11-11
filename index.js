@@ -681,6 +681,7 @@ async function assembleWebPackage(options) {
   await copyIfExists(path2.join(options.repositoryRoot, "code", "config"), path2.join(packageDir, "config"));
   await copyIfExists(path2.join(options.repositoryRoot, "code", "windows-service"), path2.join(packageDir, "code", "windows-service"));
   await copyIfExists(path2.join(options.repositoryRoot, "code", "interop-service"), path2.join(packageDir, "code", "interop-service"));
+  await copyIfExists(path2.join(options.repositoryRoot, "code", "wireguard"), path2.join(packageDir, "code", "wireguard"));
   await copyIfExists(path2.join(options.repositoryRoot, "docs"), path2.join(packageDir, "docs"));
   for (const file of ["install.sh", "start.sh", "stop.sh", "status.sh", "doctor.sh", "install.ps1", "start.ps1", "stop.ps1", "start.cmd", "stop.cmd", "VERSION"]) {
     await copyIfExists(path2.join(options.repositoryRoot, "code", file), path2.join(packageDir, file));
@@ -695,15 +696,6 @@ async function assembleWebPackage(options) {
   await copyIfExists(path2.join(options.repositoryRoot, "build"), path2.join(packageDir, "plugins", "dsh-person-web", "build"));
   await copyIfExists(path2.join(options.repositoryRoot, "code", "build"), path2.join(packageDir, "plugins", "dsh-person-web", "code", "build"));
   await copyIfExists(path2.join(options.repositoryRoot, "code", "shared"), path2.join(packageDir, "plugins", "dsh-person-web", "code", "shared"));
-  const wireguardRoot = path2.resolve(options.repositoryRoot, "..", "dsh-wireguard");
-  if (existsSync(path2.join(wireguardRoot, "package.json"))) {
-    await cp(wireguardRoot, path2.join(packageDir, "plugins", "dsh-wireguard"), {
-      recursive: true,
-      filter: (source) => !/[\\/](?:node_modules|\.git)(?:[\\/]|$)/u.test(source)
-    });
-  } else {
-    options.log?.(`warning: sibling dsh-wireguard not found at ${wireguardRoot}`);
-  }
   const manifest = {
     format: 1,
     name: "dsh-person-web",
@@ -2501,6 +2493,52 @@ function registerApi(ctx, service) {
   }), "person-web local api");
 }
 
+// src/lib/wireguard-api.mjs
+import { request as httpRequest } from "node:http";
+var API_PREFIX2 = "/api/dsh-wireguard";
+function proxy(request, response) {
+  const port = Number(process.env.DSH_WIREGUARD_CONTROL_PORT ?? "51821");
+  return new Promise((resolve) => {
+    const upstream = httpRequest({
+      host: "127.0.0.1",
+      port: Number.isSafeInteger(port) && port > 0 ? port : 51821,
+      method: request.method,
+      path: request.url,
+      headers: { ...request.headers, host: `127.0.0.1:${String(port)}` }
+    }, (answer) => {
+      response.writeHead(answer.statusCode ?? 502, answer.headers);
+      answer.pipe(response);
+      answer.once("end", resolve);
+    });
+    upstream.once("error", () => {
+      if (!response.headersSent) {
+        const body = JSON.stringify({
+          ok: false,
+          error: {
+            code: "control_panel_unavailable",
+            message: "The standalone WireGuard control service is not reachable on 51821."
+          }
+        });
+        response.writeHead(503, {
+          "content-type": "application/json; charset=utf-8",
+          "content-length": Buffer.byteLength(body),
+          "cache-control": "no-store"
+        });
+        response.end(body);
+      }
+      resolve();
+    });
+    request.pipe(upstream);
+  });
+}
+function registerWireGuardApi(ctx) {
+  ctx.effect(() => ctx.webServer.register({
+    kind: "prefix",
+    path: API_PREFIX2,
+    handler: proxy
+  }), "person-web wireguard api");
+}
+
 // src/lib/member-tasks.mjs
 import { randomUUID } from "node:crypto";
 import { mkdir as mkdir4, readFile as readFile6, readdir as readdir4, rename as rename3, writeFile as writeFile4 } from "node:fs/promises";
@@ -3289,6 +3327,7 @@ async function apply(ctx, config = {}) {
     void service.dispose();
   }, "person-web service lifetime");
   registerApi(ctx, service);
+  registerWireGuardApi(ctx);
   try {
     ctx.inject(["tools"], (toolsCtx) => {
       registerTools(ctx, toolsCtx, service);

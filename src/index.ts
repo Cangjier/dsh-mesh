@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import { PersonWebService } from './lib/service.mjs'
 import { registerApi } from './lib/http-api.mjs'
+import { registerWireGuardApi } from './lib/wireguard-api.mjs'
 import { registerTools } from './lib/tools.mjs'
 
 export const inject = ['webServer']
@@ -33,6 +34,7 @@ export async function apply(ctx: any, config: any = {}) {
     void service.dispose()
   }, 'person-web service lifetime')
   registerApi(ctx, service)
+  registerWireGuardApi(ctx)
   try {
     ctx.inject(['tools'], (toolsCtx: any) => {
       registerTools(ctx, toolsCtx, service)

@@ -103,19 +103,18 @@ for (const key of Object.keys(pkg.dependencies)) {
   if (/Cangjier\/dsh-(person-web|wireguard)/i.test(String(pkg.dependencies[key]))) delete pkg.dependencies[key]
 }
 pkg.dependencies['@local/dsh-person-web'] = `link:${root}/plugins/dsh-person-web`
-pkg.dependencies['@local/dsh-wireguard'] = `link:${root}/plugins/dsh-wireguard`
+delete pkg.dependencies['@local/dsh-wireguard']
 pkg.dsh ||= { profile: {} }
 pkg.dsh.profile ||= {}
 pkg.dsh.profile.bundles ||= []
 pkg.dsh.profile.bundles = pkg.dsh.profile.bundles.filter(name => name !== '@local/dsh-person-web' && name !== '@local/dsh-wireguard')
-pkg.dsh.profile.bundles.push('@local/dsh-person-web', '@local/dsh-wireguard')
+pkg.dsh.profile.bundles.push('@local/dsh-person-web')
 fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`)
 NODE
 mkdir -p "$PROFILE/node_modules/@local"
 rm -rf "$PROFILE/node_modules/@local/dsh-person-web" "$PROFILE/node_modules/@local/dsh-wireguard"
 ln -s "$ROOT/plugins/dsh-person-web" "$PROFILE/node_modules/@local/dsh-person-web"
-ln -s "$ROOT/plugins/dsh-wireguard" "$PROFILE/node_modules/@local/dsh-wireguard"
-say 'profile plugins replaced: dsh-person-web + dsh-wireguard'
+say 'profile plugin replaced: dsh-person-web'
 
 # Add deploy-owned patch rows without touching unrelated user patch entries.
 "$NODE" - "$PROFILE/cordis.patch.yml" "$INTEROP_TOKEN" <<'NODE'
@@ -125,10 +124,6 @@ let text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '[]\n'
 text = text.replace(/# BEGIN dsh-person-web deploy[\s\S]*?# END dsh-person-web deploy\n?/g, '')
 const block = [
   '# BEGIN dsh-person-web deploy',
-  '- id: dsh-wireguard',
-  '  config:',
-  '    externalControlPanel: true',
-  '    keepTunnelOnExit: true',
   '- id: dsh-person-web',
   '  config:',
   `    interopToken: '${token.replace(/'/g, "''")}'`,
@@ -188,8 +183,8 @@ else
 fi
 
 # Independent 51821 control service.
-bash "$ROOT/plugins/dsh-wireguard/install-control-service.sh" \
-  --root "$ROOT/plugins/dsh-wireguard" \
+bash "$ROOT/code/wireguard/install-control-service.sh" \
+  --root "$ROOT/code/wireguard" \
   --dsh-home "$DSH_HOME" \
   --node "$NODE"
 for _ in $(seq 1 30); do

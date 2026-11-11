@@ -5,6 +5,15 @@
   min-width: 0;
   box-sizing: border-box;
   margin: 0 auto;
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.dsh-pw-tabs .ant-tabs-content-holder,
+.dsh-pw-tabs .ant-tabs-tabpane {
+  min-width: 0;
 }
 
 .dsh-pw-header {

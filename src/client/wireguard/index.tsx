@@ -659,6 +659,7 @@ function RunningService({
       title: t('service.peerName'),
       dataIndex: 'name',
       key: 'name',
+      width: 220,
       render: (_value, peer) => (
         <Space direction="vertical" size={0}>
           <Typography.Text strong>{peer.name}</Typography.Text>
@@ -670,11 +671,13 @@ function RunningService({
       title: t('service.peerIp'),
       dataIndex: 'ip',
       key: 'ip',
+      width: 110,
       render: (value) => <Typography.Text className="dsh-wg-mono">{value}</Typography.Text>,
     },
     {
       title: t('service.peerStatus'),
       key: 'status',
+      width: 100,
       render: (_value, peer) => {
         if (!peer.applied) return <Badge status="warning" text={t('service.pendingApply')} />;
         return peer.online
@@ -686,6 +689,7 @@ function RunningService({
       title: t('service.peerHandshake'),
       dataIndex: 'lastHandshakeAt',
       key: 'lastHandshakeAt',
+      width: 150,
       render: (value) => value
         ? <Typography.Text type="secondary">{formatTime(value)}</Typography.Text>
         : <Typography.Text type="warning">{t('service.neverHandshake')}</Typography.Text>,
@@ -693,6 +697,7 @@ function RunningService({
     {
       title: t('service.peerActions'),
       key: 'actions',
+      width: 110,
       align: 'right',
       render: (_value, peer) => (
         <Space size={2}>
@@ -826,7 +831,7 @@ function RunningService({
           dataSource={server.peers}
           pagination={false}
           size="small"
-          scroll={{ x: 700 }}
+          scroll={{ x: 760 }}
           locale={{
             emptyText: <Empty className="dsh-wg-empty" image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('service.noPeers')} />,
           }}

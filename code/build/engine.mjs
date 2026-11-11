@@ -523,6 +523,7 @@ export async function assembleWebPackage(options) {
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'config'), path.join(packageDir, 'config'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'windows-service'), path.join(packageDir, 'code', 'windows-service'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'interop-service'), path.join(packageDir, 'code', 'interop-service'))
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'wireguard'), path.join(packageDir, 'code', 'wireguard'))
   await copyIfExists(path.join(options.repositoryRoot, 'docs'), path.join(packageDir, 'docs'))
   for (const file of ['install.sh', 'start.sh', 'stop.sh', 'status.sh', 'doctor.sh', 'install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'VERSION']) {
     await copyIfExists(path.join(options.repositoryRoot, 'code', file), path.join(packageDir, file))
@@ -539,18 +540,6 @@ export async function assembleWebPackage(options) {
   await copyIfExists(path.join(options.repositoryRoot, 'build'), path.join(packageDir, 'plugins', 'dsh-person-web', 'build'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'build'), path.join(packageDir, 'plugins', 'dsh-person-web', 'code', 'build'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'shared'), path.join(packageDir, 'plugins', 'dsh-person-web', 'code', 'shared'))
-  // The control panel ships with the package: install-target.sh links
-  // plugins/dsh-wireguard into the member profile, so a package without it
-  // would install only the person-web half of the product.
-  const wireguardRoot = path.resolve(options.repositoryRoot, '..', 'dsh-wireguard')
-  if (existsSync(path.join(wireguardRoot, 'package.json'))) {
-    await cp(wireguardRoot, path.join(packageDir, 'plugins', 'dsh-wireguard'), {
-      recursive: true,
-      filter: source => !/[\\/](?:node_modules|\.git)(?:[\\/]|$)/u.test(source),
-    })
-  } else {
-    options.log?.(`warning: sibling dsh-wireguard not found at ${wireguardRoot}`)
-  }
   const manifest = {
     format: 1,
     name: 'dsh-person-web',

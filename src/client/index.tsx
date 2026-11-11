@@ -31,6 +31,7 @@ import enUS from 'antd/locale/en_US'
 import styles from './styles.css'
 import { api, ApiError, type Member, type PackageInfo, type Snapshot, type SystemInfo } from './api'
 import { WireGuardPanel } from './wireguard'
+import { EN as WIREGUARD_EN, dictionary as wireguardDictionary } from './wireguard/i18n'
 
 const NS = 'dsh-person-web'
 const PANEL_ID = 'person-web'
@@ -386,6 +387,7 @@ function Panel({ ctx }: { ctx: any }) {
         ) : null}
 
         <Tabs
+          className="dsh-pw-tabs"
           activeKey={panelTab}
           onChange={key => setPanelTab(key as 'members' | 'network')}
           items={[
@@ -492,6 +494,10 @@ export function apply(ctx: any) {
     en: { 'panel.label': 'DSH Members' },
     zh: { 'panel.label': 'DSH 成员' },
   }), 'person-web dictionaries')
+  ctx.effect(() => ctx.locale.register('dsh-wireguard', {
+    en: WIREGUARD_EN,
+    zh: wireguardDictionary('zh'),
+  }), 'wireguard dictionaries')
   const t = ctx.locale.bind(NS)
   const page = (props: any) => <Panel {...props} ctx={ctx} />
   ctx.slots.inject('main', () => ctx.slots.register({

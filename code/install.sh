@@ -392,4 +392,12 @@ if [ "$INSTALL_SYSTEMD" = "1" ] && [ "$(id -u)" = "0" ] && command -v systemctl 
   if [ -f "$ROOT/code/dsh-service/install-split.sh" ]; then
     bash "$ROOT/code/dsh-service/install-split.sh" || warn "split service install failed; inspect journalctl"
   fi
+  # The WireGuard control panel ships inside this package; keep it independent
+  # from DSH so a Harness restart cannot drop the mesh.
+  if [ -x "$ROOT/code/wireguard/install-control-service.sh" ]; then
+    bash "$ROOT/code/wireguard/install-control-service.sh" \
+      --root "$ROOT/code/wireguard" \
+      --dsh-home "${DSH_HOME:-$ROOT/home}" \
+      --node "${NODE_BIN:-$ROOT/runtime/node/bin/node}" || warn "WireGuard control service install failed"
+  fi
 fi

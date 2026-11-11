@@ -738,10 +738,8 @@ function RunningService({
             <span>{t('service.running')}</span>
           </Space>
         )}
-        extra={<Tag color="success">{t('status.server')}</Tag>}
       >
-        <Typography.Text type="secondary">{t('service.runningSub')}</Typography.Text>
-        <Descriptions bordered size="small" column={{ xs: 1, sm: 1, md: 2 }} style={{ marginTop: 14 }}>
+        <Descriptions bordered size="small" column={{ xs: 1, sm: 1, md: 2 }} style={{ marginTop: 0 }}>
           <Descriptions.Item label={t('service.controlAddress')} span={2}>
             <CopyText value={controlUrl} t={t} />
           </Descriptions.Item>
@@ -761,15 +759,6 @@ function RunningService({
           </Descriptions.Item>
         </Descriptions>
 
-        <Alert
-          type="info"
-          showIcon
-          icon={<GlobalOutlined />}
-          style={{ marginTop: 14 }}
-          message={t('service.clientHelpTitle')}
-          description={t('service.clientHelp', { address: controlUrl || t('page.none') })}
-        />
-
         <Space wrap style={{ marginTop: 14 }}>
           <Button icon={<LinkOutlined />} onClick={onOpenControl} disabled={!controlUrl}>
             {t('service.openControl')}
@@ -784,7 +773,6 @@ function RunningService({
               {t('service.stop')}
             </Button>
           </Popconfirm>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{t('service.stopHint')}</Typography.Text>
         </Space>
 
         {server.warnings?.length ? (

@@ -364,7 +364,6 @@ function Panel({ ctx }: { ctx: any }) {
         <div className="dsh-pw-header">
           <div>
             <h1 className="dsh-pw-title">DSH 成员</h1>
-            <p className="dsh-pw-subtitle">WireGuard 局域网里的 DSH 发现、切换与部署。</p>
           </div>
           <div className="dsh-pw-toolbar">
             <Tag icon={gateAvailable ? <ApartmentOutlined /> : <WarningOutlined />} color={gateAvailable ? 'green' : 'default'}>

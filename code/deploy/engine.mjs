@@ -62,6 +62,16 @@ function ps(value) {
   return `'${String(value).replace(/'/g, "''")}'`
 }
 
+/** Escape a value for a .NET regex replacement string. */
+function psReplacement(value) {
+  return ps(String(value).replace(/\$/g, '$$$$'))
+}
+
+/** Escape a value for a sed replacement that uses `|` as its delimiter. */
+function sedReplacement(value) {
+  return String(value).replace(/[\\|&]/g, match => `\\${match}`)
+}
+
 /** Human-readable byte count for progress details. */
 export function formatBytes(value) {
   const bytes = Number(value)
@@ -437,7 +447,16 @@ sed -i "s|^DSH_HOME=.*|DSH_HOME=$SHARED/home|" "$ENV_FILE"
 sed -i "s|^DSH_WORKDIR=.*|DSH_WORKDIR=$SHARED/workspace|" "$ENV_FILE"
 grep -q '^DSH_HOME=' "$ENV_FILE" || echo "DSH_HOME=$SHARED/home" >> "$ENV_FILE"
 grep -q '^DSH_WORKDIR=' "$ENV_FILE" || echo "DSH_WORKDIR=$SHARED/workspace" >> "$ENV_FILE"
-
+# Credentials belong to the deployer: an install that predates the inheritance
+# fix keeps a random secret, which makes every later member switch fail the
+# cluster signature check.
+${plan.gatePassword ? `sed -i ${sh(`s|^DSH_GATE_PASSWORD=.*|DSH_GATE_PASSWORD=${sedReplacement(plan.gatePassword)}|`)} "$ENV_FILE"
+grep -q '^DSH_GATE_PASSWORD=' "$ENV_FILE" || echo ${sh(`DSH_GATE_PASSWORD=${plan.gatePassword}`)} >> "$ENV_FILE"
+echo 'gateway password synced from the deployer'
+` : ''}${plan.clusterKey ? `sed -i ${sh(`s|^DSH_GATE_CLUSTER_KEY=.*|DSH_GATE_CLUSTER_KEY=${sedReplacement(plan.clusterKey)}|`)} "$ENV_FILE"
+grep -q '^DSH_GATE_CLUSTER_KEY=' "$ENV_FILE" || echo ${sh(`DSH_GATE_CLUSTER_KEY=${plan.clusterKey}`)} >> "$ENV_FILE"
+echo 'cluster key synced from the deployer'
+` : ''}
 test -x "$NEW/runtime/node/node"
 "$NEW/runtime/node/node" --check "$NEW/gate/server.mjs"
 test -f "$NEW/manifest.json"
@@ -646,7 +665,13 @@ $text = [regex]::Replace($text, '(?m)^DSH_HOME=.*$', "DSH_HOME=$Shared\\home")
 $text = [regex]::Replace($text, '(?m)^DSH_WORKDIR=.*$', "DSH_WORKDIR=$Shared\\workspace")
 if ($text -notmatch '(?m)^DSH_HOME=') { $text += "\`r\`nDSH_HOME=$Shared\\home" }
 if ($text -notmatch '(?m)^DSH_WORKDIR=') { $text += "\`r\`nDSH_WORKDIR=$Shared\\workspace" }
-Set-Content -LiteralPath $envFile -Value $text -Encoding utf8 -NoNewline
+${plan.gatePassword ? `$text = [regex]::Replace($text, '(?m)^DSH_GATE_PASSWORD=.*$', ${psReplacement(`DSH_GATE_PASSWORD=${plan.gatePassword}`)})
+if ($text -notmatch '(?m)^DSH_GATE_PASSWORD=') { $text += [Environment]::NewLine + ${ps(`DSH_GATE_PASSWORD=${plan.gatePassword}`)} }
+Write-Output 'gateway password synced from the deployer'
+` : ''}${plan.clusterKey ? `$text = [regex]::Replace($text, '(?m)^DSH_GATE_CLUSTER_KEY=.*$', ${psReplacement(`DSH_GATE_CLUSTER_KEY=${plan.clusterKey}`)})
+if ($text -notmatch '(?m)^DSH_GATE_CLUSTER_KEY=') { $text += [Environment]::NewLine + ${ps(`DSH_GATE_CLUSTER_KEY=${plan.clusterKey}`)} }
+Write-Output 'cluster key synced from the deployer'
+` : ''}Set-Content -LiteralPath $envFile -Value $text -Encoding utf8 -NoNewline
 $node = Join-Path $New 'runtime\\node\\node.exe'
 if (-not (Test-Path $node)) { throw "missing $node" }
 & $node --check (Join-Path $New 'gate\\server.mjs')

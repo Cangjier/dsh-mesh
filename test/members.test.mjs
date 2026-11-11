@@ -246,3 +246,201 @@ test('select sets the target cookie and status reports it', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+/**
+ * Build a service backed by one fake peer that answers discovery probes.
+ * @param {object} options fixture options.
+ * @param {(req: http.IncomingMessage, res: http.ServerResponse) => boolean} options.clusterProbe handler for `/__gate/cluster/*`.
+ * @param {number} [options.checkTimeoutMs] pre-switch probe timeout.
+ * @returns {Promise<{members: MemberService, gatePort: number, close: () => Promise<void>}>} fixture.
+ */
+async function peerFixture(options) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-test-'))
+  const stateFile = path.join(dir, 'state.json')
+  const peer = await listen((req, res) => {
+    if (req.url === '/__gate/member') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        ok: true,
+        service: 'dsh-mesh',
+        name: 'peer',
+        gatePort: peer.port,
+        dsh: { reachable: true },
+      }))
+      return
+    }
+    if (options.clusterProbe(req, res)) return
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+  await writeFile(stateFile, JSON.stringify({
+    role: 'server',
+    settings: { vpnCidr: '10.66.66.0/24', serverIp: '10.66.66.1' },
+    server: { running: true, hostname: 'self', peers: [{ name: 'peer', ip: '127.0.0.1', online: true }] },
+    client: {},
+  }), 'utf8')
+  const members = new MemberService({
+    clusterKey: 'outer-cluster-key',
+    memberPort: peer.port,
+    stateFile,
+    discoveryTimeoutMs: 500,
+    discoveryCacheMs: 0,
+    checkTimeoutMs: options.checkTimeoutMs ?? 1_000,
+    version: 'test',
+    fetchImpl: fetch,
+    log: () => {},
+    isAdmitted: () => true,
+    isUpstreamReady: () => true,
+    forwardableHeaders: req => ({ host: req.headers.host, cookie: req.headers.cookie }),
+    agent: new http.Agent({ keepAlive: false }),
+    page: () => '<html>unavailable</html>',
+    sendHtml: (res, status, html) => {
+      res.writeHead(status, { 'content-type': 'text/html' })
+      res.end(html)
+    },
+  })
+  const gate = await listen((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://gate.invalid')
+    members.handle(req, res, url).then((handled) => {
+      if (handled) return
+      res.writeHead(404)
+      res.end('not found')
+    }).catch((error) => {
+      res.writeHead(500)
+      res.end(String(error))
+    })
+  })
+  return {
+    members,
+    gatePort: gate.port,
+    close: async () => {
+      await gate.close()
+      await peer.close()
+      await rm(dir, { recursive: true, force: true })
+    },
+  }
+}
+
+/**
+ * POST one member switch through the fixture gate.
+ * @param {number} gatePort gate port.
+ * @param {string} id member id.
+ * @returns {Promise<{status: number, headers: http.IncomingHttpHeaders, body: string}>} response.
+ */
+function selectMember(gatePort, id) {
+  return request(gatePort, {
+    method: 'POST',
+    path: '/__gate/select',
+    headers: {
+      host: `127.0.0.1:${gatePort}`,
+      origin: `http://127.0.0.1:${gatePort}`,
+      'sec-fetch-site': 'same-origin',
+      'x-dsh-gate': '1',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ id }),
+  })
+}
+
+test('select refuses a peer whose gateway rejects the cluster signature', async () => {
+  const fixture = await peerFixture({
+    clusterProbe: (req, res) => {
+      if (!String(req.url).startsWith('/__gate/cluster/')) return false
+      res.writeHead(403, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, error: 'cluster_request_refused' }))
+      return true
+    },
+  })
+  try {
+    const response = await selectMember(fixture.gatePort, '127.0.0.1')
+    assert.equal(response.status, 409)
+    const body = JSON.parse(response.body)
+    assert.equal(body.ok, false)
+    assert.equal(body.code, 'cluster_key_mismatch')
+    assert.match(body.error, /DSH_GATE_CLUSTER_KEY/u)
+    assert.equal(response.headers['set-cookie'], undefined)
+  } finally {
+    await fixture.close()
+  }
+})
+
+test('select accepts a peer that verifies the cluster signature', async () => {
+  const fixture = await peerFixture({
+    clusterProbe: (req, res) => {
+      if (!String(req.url).startsWith('/__gate/cluster/')) return false
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, gate: 'up' }))
+      return true
+    },
+  })
+  try {
+    const response = await selectMember(fixture.gatePort, '127.0.0.1')
+    assert.equal(response.status, 200)
+    assert.match(String(response.headers['set-cookie']), /dsh_gate_target=127\.0\.0\.1/u)
+  } finally {
+    await fixture.close()
+  }
+})
+
+test('select refuses a peer whose gateway does not answer the probe', async () => {
+  const fixture = await peerFixture({
+    checkTimeoutMs: 250,
+    clusterProbe: (req) => {
+      // Accept the connection but never answer the cluster probe.
+      return String(req.url).startsWith('/__gate/cluster/')
+    },
+  })
+  try {
+    const response = await selectMember(fixture.gatePort, '127.0.0.1')
+    assert.equal(response.status, 504)
+    const body = JSON.parse(response.body)
+    assert.equal(body.code, 'member_offline')
+    assert.equal(response.headers['set-cookie'], undefined)
+  } finally {
+    await fixture.close()
+  }
+})
+
+test('proxying sends the browser home when a member refuses the signature', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-test-'))
+  const stateFile = path.join(dir, 'state.json')
+  await writeFile(stateFile, JSON.stringify({ role: 'server', settings: {}, server: { running: true, peers: [] }, client: {} }), 'utf8')
+  const peer = await listen((req, res) => {
+    res.writeHead(403, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, error: 'cluster_request_refused' }))
+  })
+  const members = new MemberService({
+    clusterKey: 'k',
+    memberPort: peer.port,
+    stateFile,
+    log: () => {},
+    isAdmitted: () => true,
+    isUpstreamReady: () => true,
+    forwardableHeaders: req => ({ host: req.headers.host }),
+    agent: new http.Agent({ keepAlive: false }),
+    page: () => '<html>unavailable</html>',
+    sendHtml: (res, status, html) => {
+      res.writeHead(status, { 'content-type': 'text/html' })
+      res.end(html)
+    },
+  })
+  const gate = await listen((req, res) => {
+    members.proxyRemote(req, res, { id: '127.0.0.1', ip: '127.0.0.1', port: peer.port }).catch((error) => {
+      res.writeHead(500)
+      res.end(String(error))
+    })
+  })
+  try {
+    const response = await request(gate.port, {
+      path: '/conversation?x=1',
+      headers: { cookie: 'dsh_gate_target=127.0.0.1' },
+    })
+    assert.equal(response.status, 303)
+    assert.equal(response.headers.location, '/conversation?x=1')
+    assert.match(String(response.headers['set-cookie']), /dsh_gate_target=; Max-Age=0/u)
+  } finally {
+    await gate.close()
+    await peer.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

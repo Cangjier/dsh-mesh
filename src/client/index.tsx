@@ -434,7 +434,9 @@ function Panel({ ctx }: { ctx: any }) {
       await api.gateSelect(member.id)
       window.location.reload()
     } catch (failure) {
-      setError(errorText(failure))
+      // The gate refuses an unusable member with a readable reason; the HTTP
+      // status adds nothing for the operator.
+      setError(failure instanceof ApiError ? failure.message : errorText(failure))
       setBusy('')
     }
   }, [gateAvailable])

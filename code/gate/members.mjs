@@ -44,6 +44,8 @@ export const CLUSTER_PREFIX = '/__gate/cluster'
 
 /** Default discovery cache lifetime. */
 const DEFAULT_CACHE_MS = 10_000
+/** How long a pre-switch member check may take before the switch is refused. */
+const MEMBER_CHECK_TIMEOUT_MS = 3_000
 
 /** Hop-by-hop headers a proxy must not copy from an upstream response. */
 const HOP_BY_HOP = new Set([
@@ -68,6 +70,7 @@ export class MemberService {
    * @param {string} options.stateFile `$DSH_HOME/wireguard/state.json`.
    * @param {number} [options.discoveryTimeoutMs] per-probe timeout.
    * @param {number} [options.discoveryCacheMs] discovery cache lifetime.
+   * @param {number} [options.checkTimeoutMs] pre-switch member check timeout.
    * @param {string[]} [options.clusterAllow] extra exact source addresses allowed to call the cluster endpoint.
    * @param {boolean} [options.memberPublic] expose `/__gate/member` to non-private sources.
    * @param {string} [options.version] plugin version reported in member info.
@@ -88,6 +91,9 @@ export class MemberService {
     this.stateFile = options.stateFile
     this.discoveryTimeoutMs = options.discoveryTimeoutMs ?? 2_500
     this.discoveryCacheMs = options.discoveryCacheMs ?? DEFAULT_CACHE_MS
+    this.checkTimeoutMs = Number.isInteger(options.checkTimeoutMs) && options.checkTimeoutMs > 0
+      ? options.checkTimeoutMs
+      : MEMBER_CHECK_TIMEOUT_MS
     this.clusterAllow = new Set((options.clusterAllow ?? []).map(normalizeAddress).filter(Boolean))
     this.memberPublic = options.memberPublic === true
     this.version = options.version ?? '0.0.0'
@@ -291,8 +297,18 @@ export class MemberService {
     }
     if (id !== LOCAL_MEMBER_ID) {
       const snapshot = await this.snapshot()
-      if (!snapshot.members.some(member => member.id === id)) {
+      const member = snapshot.members.find(candidate => candidate.id === id)
+      if (member === undefined) {
         this._json(res, 404, { ok: false, error: 'unknown_member' })
+        return
+      }
+      // Probe before committing the cookie. A peer that will not accept this
+      // gate's signature cannot serve the browser, so fail here with a readable
+      // reason instead of bouncing every later request off a bare 403.
+      const refusal = await this._checkMember(member)
+      if (refusal !== null) {
+        this.log(`refused member switch to ${id}: ${refusal.code}`)
+        this._json(res, refusal.status, { ok: false, error: refusal.message, code: refusal.code })
         return
       }
     }
@@ -304,6 +320,87 @@ export class MemberService {
     })
     res.end(JSON.stringify({ ok: true, target: id }))
     this.log(`member target set to ${id}`)
+  }
+
+  /**
+   * Check that a member will accept this gate's signed requests.
+   *
+   * Cancellation is the only routing input a browser has, and the target lives
+   * in an HttpOnly cookie the page cannot edit, so a member that rejects the
+   * gate's signature would strand the tab. Refuse the switch instead and say
+   * which check failed.
+   *
+   * @param {object} member discovered member.
+   * @returns {Promise<{status: number, code: string, message: string}|null>} refusal, or null when the member is usable.
+   */
+  async _checkMember(member) {
+    const name = typeof member.name === 'string' && member.name !== '' ? member.name : String(member.id)
+    if (this.clusterKey === '') {
+      return {
+        status: 409,
+        code: 'cluster_not_configured',
+        message: '本机没有配置 DSH_GATE_CLUSTER_KEY，无法切换到其他成员。',
+      }
+    }
+    if (member.dsh !== true || member.port === null) {
+      // `member.error` carries the raw probe failure (a socket timeout or an
+      // abort message), which means nothing to the operator.
+      return {
+        status: 409,
+        code: 'member_unavailable',
+        message: member.online === true
+          ? `「${name}」在线，但 DSH 网关没有响应（端口不通或服务未启动），无法切换过去。`
+          : `「${name}」当前离线，无法切换过去。`,
+      }
+    }
+    const host = String(member.ip).includes(':') ? `[${String(member.ip)}]` : String(member.ip)
+    const path = `${CLUSTER_PREFIX}/__gate/health`
+    let response
+    try {
+      response = await this.fetchImpl(`http://${host}:${String(member.port)}${path}`, {
+        method: 'GET',
+        headers: { [CLUSTER_HEADER]: signClusterRequest(this.clusterKey, { method: 'GET', path }) },
+        signal: AbortSignal.timeout(this.checkTimeoutMs),
+      })
+    } catch {
+      return {
+        status: 504,
+        code: 'member_offline',
+        message: `连接「${name}」的网关超时，已保持在本机。请确认成员在线后重试。`,
+      }
+    }
+    if (response.status === 200) {
+      let health = null
+      try {
+        health = await response.json()
+      } catch {
+        health = null
+      }
+      if (health !== null && typeof health === 'object' && health.gate === 'up') return null
+      return {
+        status: 502,
+        code: 'member_gate_unknown',
+        message: `「${name}」的网关返回了无法识别的响应，已保持在本机。`,
+      }
+    }
+    let text = ''
+    try {
+      text = await response.text()
+    } catch {
+      text = ''
+    }
+    if (text.includes('cluster_request_refused')) {
+      return {
+        status: 409,
+        code: 'cluster_key_mismatch',
+        message: `「${name}」拒绝了本机的集群签名：两边的 DSH_GATE_CLUSTER_KEY 不一致。请把两边 gate.env 的 DSH_GATE_CLUSTER_KEY 改成同一个值并重启网关后再切换。`,
+      }
+    }
+    return {
+      status: 502,
+      code: 'member_gate_error',
+      message: `「${name}」的网关返回 ${String(response.status)}，已保持在本机。`,
+    }
   }
 
   /**
@@ -376,12 +473,23 @@ export class MemberService {
       headers,
       agent: this.agent,
     }, (upstreamRes) => {
+      const status = upstreamRes.statusCode ?? 502
       const responseHeaders = this._responseHeaders(upstreamRes.headers, member.id)
-      res.writeHead(upstreamRes.statusCode ?? 502, responseHeaders)
+      // A peer whose cluster secret differs answers every proxied request with a
+      // bare `403 cluster_request_refused`. Streaming that JSON to the browser
+      // strands the tab, so recognise the answer and send the browser home.
+      if (status === 403) {
+        this._relayRefusal(req, res, member, upstreamRes, responseHeaders).catch(() => {
+          if (res.headersSent) res.destroy()
+          else this.sendUnavailable(res, member.id, '成员返回了无法处理的响应。')
+        })
+        return
+      }
+      res.writeHead(status, responseHeaders)
       upstreamRes.pipe(res)
       upstreamRes.on('end', () => {
         if (res.writableFinished) return
-        this.log(`${req.method ?? 'GET'} ${req.url ?? '/'} -> ${member.id} ${String(upstreamRes.statusCode)} ${String(this.now() - startedAt)}ms`)
+        this.log(`${req.method ?? 'GET'} ${req.url ?? '/'} -> ${member.id} ${String(status)} ${String(this.now() - startedAt)}ms`)
       })
     })
     upstream.setTimeout(20_000, () => {
@@ -396,6 +504,64 @@ export class MemberService {
       this.sendUnavailable(res, member.id, '连接成员网关失败，成员可能已经离线。')
     })
     req.pipe(upstream)
+  }
+
+  /**
+   * Handle a 403 answered by a peer gate.
+   *
+   * `cluster_request_refused` means the peer did not accept this gate's signed
+   * request, so the answer is a routing failure rather than application data.
+   * Clear the target cookie and let the browser retry against the local DSH;
+   * otherwise every navigation keeps hitting the same wall.
+   *
+   * @param {import('node:http').IncomingMessage} req request.
+   * @param {import('node:http').ServerResponse} res response.
+   * @param {object} member discovered member.
+   * @param {import('node:http').IncomingMessage} upstreamRes peer response.
+   * @param {Record<string, string|string[]>} responseHeaders headers rewritten for the browser.
+   * @returns {Promise<void>} completion.
+   */
+  async _relayRefusal(req, res, member, upstreamRes, responseHeaders) {
+    /** @type {Buffer[]} */
+    const chunks = []
+    let size = 0
+    for await (const chunk of upstreamRes) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      chunks.push(buffer)
+      size += buffer.length
+      if (size > 262_144) {
+        upstreamRes.destroy()
+        if (!res.headersSent) this.sendUnavailable(res, member.id, '成员返回了过大的错误响应。')
+        else res.destroy()
+        return
+      }
+    }
+    const body = Buffer.concat(chunks)
+    if (!body.toString('utf8').includes('cluster_request_refused')) {
+      if (res.headersSent) return
+      res.writeHead(upstreamRes.statusCode ?? 403, responseHeaders)
+      res.end(body)
+      return
+    }
+    this.log(`member ${member.id} refused the signed request (${req.method ?? 'GET'} ${req.url ?? '/'}); sending the browser back to the local DSH`)
+    if (res.headersSent) {
+      res.destroy()
+      return
+    }
+    const expired = this._expiredTargetCookie(req)
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      const location = typeof req.url === 'string' && req.url.startsWith('/') ? req.url : '/'
+      res.writeHead(303, {
+        'cache-control': 'no-store',
+        location,
+        'set-cookie': expired,
+        'referrer-policy': 'no-referrer',
+      })
+      res.end()
+      return
+    }
+    res.writeHead(403, { ...responseHeaders, 'set-cookie': expired })
+    res.end(body)
   }
 
   /**

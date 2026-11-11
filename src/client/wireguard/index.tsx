@@ -590,6 +590,7 @@ function ClientDeployScript({ state, t }: { state: Snapshot; t: T }) {
         ) : null}
         <Button
           type="primary"
+          size="small"
           icon={<CopyOutlined />}
           disabled={!target.available}
           title={t('service.deployWarning')}
@@ -738,6 +739,11 @@ function RunningService({
             <span>{t('service.running')}</span>
           </Space>
         )}
+        extra={(
+          <Button size="small" icon={<LinkOutlined />} onClick={onOpenControl} disabled={!controlUrl}>
+            {t('service.openControl')}
+          </Button>
+        )}
       >
         <Descriptions bordered size="small" column={{ xs: 1, sm: 1, md: 2 }} style={{ marginTop: 0 }}>
           <Descriptions.Item label={t('service.controlAddress')} span={2}>
@@ -760,9 +766,6 @@ function RunningService({
         </Descriptions>
 
         <Space wrap style={{ marginTop: 14 }}>
-          <Button icon={<LinkOutlined />} onClick={onOpenControl} disabled={!controlUrl}>
-            {t('service.openControl')}
-          </Button>
           <Popconfirm
             title={t('service.stopConfirm')}
             okText={t('service.stop')}

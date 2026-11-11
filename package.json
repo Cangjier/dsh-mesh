@@ -39,7 +39,8 @@
     "plan:package": "node code/build/cli.mjs plan",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.wireguard.json --noEmit",
     "test": "node --test \"test/*.test.mjs\"",
-    "test:wireguard": "node --test --import tsx \"test/wireguard/*.test.ts\""
+    "test:wireguard": "node --test --import tsx \"test/wireguard/*.test.ts\"",
+    "build:control": "node scripts/build.mjs control"
   },
   "dsh": {
     "bundle": {

@@ -80,7 +80,12 @@ async function buildClient() {
   await writeFile(path.join(root, 'client.js'), wrapped, 'utf8')
 }
 
-await buildHost()
-await buildControlService()
-await buildClient()
-console.log('Built index.js, code/wireguard/control-service.js, and client.js')
+// Optional target names keep it possible to rebuild only one bundle, which
+// matters because client.js depends on the installed UI packages.
+const requested = new Set(process.argv.slice(2))
+const wants = (name) => requested.size === 0 || requested.has(name)
+
+if (wants('host')) await buildHost()
+if (wants('control')) await buildControlService()
+if (wants('client')) await buildClient()
+console.log(`Built ${[...requested.size === 0 ? ['host', 'control', 'client'] : requested].join(', ')}`)

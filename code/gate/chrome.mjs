@@ -94,6 +94,7 @@ async function waitForFile(file, timeoutMs) {
 export class ChromeSession {
   #child
   #cdp
+  #browser
   #profileDir
 
   /**
@@ -163,6 +164,31 @@ export class ChromeSession {
     return session
   }
 
+  /**
+   * Attach to a browser that is already listening on a debugging port, such as
+   * one started inside the interactive Windows session.
+   * @param port - loopback debugging port.
+   * @param options - viewport size.
+   */
+  static async attach(port, { width = 560, height = 820 } = {}) {
+    const session = new ChromeSession()
+    const version = await (await fetch(`http://127.0.0.1:${String(port)}/json/version`, {
+      signal: AbortSignal.timeout(5_000),
+    })).json()
+    const browser = await CdpSocket.open(String(version.webSocketDebuggerUrl))
+    session.#browser = browser
+    const created = await browser.send('Target.createTarget', { url: 'about:blank' })
+    const listed = await (await fetch(`http://127.0.0.1:${String(port)}/json/list`)).json()
+    const target = listed.find(entry => entry.id === created.targetId)
+    if (target === undefined) throw new Error('the attached browser created no page target')
+    session.#cdp = await CdpSocket.open(target.webSocketDebuggerUrl)
+    await session.#cdp.send('Page.enable')
+    await session.#cdp.send('Emulation.setDeviceMetricsOverride', {
+      width, height, deviceScaleFactor: 1, mobile: false,
+    })
+    return session
+  }
+
   /** Navigate the page and wait for the load event. */
   async goto(url, timeoutMs = 30_000) {
     await this.#cdp.send('Page.navigate', { url })
@@ -222,6 +248,12 @@ export class ChromeSession {
   /** Terminate the browser and drop its profile directory. */
   kill() {
     this.#cdp?.close()
+    if (this.#browser !== undefined) {
+      // The browser belongs to the interactive session, so ask it to exit
+      // instead of killing a process this gate does not own.
+      const browser = this.#browser
+      browser.send('Browser.close', {}).catch(() => undefined).finally(() => browser.close())
+    }
     try {
       this.#child?.kill('SIGKILL')
     } catch {

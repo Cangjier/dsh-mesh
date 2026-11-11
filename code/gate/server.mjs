@@ -37,6 +37,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loginPage, page, accountLoginPage, PAGE_CSP } from './pages.mjs'
 import { AccountLogin } from './account-login.mjs'
+import { InteractiveBrowser } from './windows-browser.mjs'
 import { CLUSTER_PREFIX, MemberService } from './members.mjs'
 import { deriveClusterSecret } from '../shared/cluster.mjs'
 import { TARGET_COOKIE } from '../shared/wireguard.mjs'
@@ -190,6 +191,8 @@ const CONFIG = {
   },
   /** Browser used by the local account sign-in helper. */
   chromeBinary: resolveChrome(),
+  /** Loopback debugging port of a browser started in the interactive session. */
+  chromePort: envInt('DSH_GATE_CHROME_PORT', 9222),
   /** Port peers use to reach this gate; defaults to the public listener port. */
   memberPort: envInt('DSH_GATE_MEMBER_PORT', envInt('DSH_GATE_PORT', 80)),
   /** Extra ports probed on every peer (for custom member ports). */
@@ -211,6 +214,20 @@ const CONFIG = {
 }
 /** Peer requests are signed with a secret derived from the gateway password. */
 CONFIG.clusterKey = deriveClusterSecret(CONFIG.password)
+
+/**
+ * Send plain-HTTP browser traffic to the TLS listener. On by default whenever
+ * TLS material is configured; `DSH_GATE_REDIRECT_HTTPS=0` keeps HTTP usable
+ * and `=1` forces the redirect even without a certificate (tests, proxies).
+ */
+{
+  const explicit = env('DSH_GATE_REDIRECT_HTTPS', '')
+  CONFIG.redirectHttps = explicit === '1'
+    ? true
+    : explicit === '0'
+      ? false
+      : CONFIG.tls.certFile !== '' && CONFIG.tls.keyFile !== ''
+}
 
 
 const COOKIE_NAME = 'dsh_gate'
@@ -650,7 +667,7 @@ function localProxyHeaders(req) {
 function browserLocation(req, location) {
   const canonical = `http://${upstreamAuthority()}`
   if (location !== canonical && !location.startsWith(`${canonical}/`)) return location
-  const scheme = req.socket.encrypted === true ? 'https' : 'http'
+  const scheme = isSecureRequest(req) ? 'https' : 'http'
   return `${scheme}://${req.headers.host ?? ''}${location.slice(canonical.length)}`
 }
 
@@ -722,6 +739,14 @@ function accountLoginHelper() {
     token: upstream.token,
     chromeBinary: CONFIG.chromeBinary,
     log,
+    browserLauncher: process.platform === 'win32'
+      ? new InteractiveBrowser({
+        binary: CONFIG.chromeBinary,
+        directory: path.join(CONFIG.dataDir, 'login-browser'),
+        port: CONFIG.chromePort,
+        log,
+      })
+      : undefined,
   })
   return accountLogin
 }
@@ -1237,9 +1262,82 @@ function proxyUpgradeLocal(req, socket, head) {
 const PUBLIC_ASSETS = new Set(['/manifest.webmanifest', '/favicon.ico', '/robots.txt', '/apple-touch-icon.png'])
 
 /** Route one public request. */
+/**
+ * Paths a peer or a monitor calls over plain HTTP. Redirecting them would
+ * break member discovery, cluster proxying, and health checks.
+ */
+const HTTPS_REDIRECT_EXEMPT = [
+  /^\/__gate\/cluster(?:\/|$)/u,
+  /^\/__gate\/health$/u,
+  /^\/__gate\/member$/u,
+  /^\/\.well-known\/acme-challenge\//u,
+]
+
+/**
+ * Host header without its port, keeping an IPv6 literal in brackets.
+ * @param {unknown} header raw `Host` header.
+ * @returns {string} host, or an empty string when unusable.
+ */
+function hostWithoutPort(header) {
+  if (typeof header !== 'string' || header === '') return ''
+  if (header.startsWith('[')) {
+    const end = header.indexOf(']')
+    return end === -1 ? '' : header.slice(0, end + 1)
+  }
+  const colon = header.lastIndexOf(':')
+  return colon === -1 ? header : header.slice(0, colon)
+}
+
+/**
+ * Whether the browser reached this gate over TLS.
+ *
+ * A gate behind a TLS-terminating proxy (Cloudflare, nginx, a load balancer)
+ * only ever sees plain HTTP on its own listener. Redirecting those requests
+ * would send the browser back through the proxy to the same plain listener,
+ * and the two would bounce until the browser reports ERR_TOO_MANY_REDIRECTS.
+ * The proxy reports the browser-facing scheme in `X-Forwarded-Proto`.
+ *
+ * @param {import('node:http').IncomingMessage} req request.
+ * @returns {boolean} true when the browser connection is encrypted.
+ */
+function isSecureRequest(req) {
+  if (req.socket.encrypted === true) return true
+  const header = req.headers['x-forwarded-proto']
+  const value = Array.isArray(header) ? header[0] : header
+  if (typeof value !== 'string') return false
+  return value.split(',')[0].trim().toLowerCase() === 'https'
+}
+
+/**
+ * Answer a browser request that arrived on the plain listener with a redirect
+ * to the TLS listener.
+ * @param {import('node:http').IncomingMessage} req request.
+ * @param {import('node:http').ServerResponse} res response.
+ * @param {URL} url parsed request URL.
+ * @param {string} pathname request path.
+ * @returns {boolean} true when the request was answered.
+ */
+function redirectPlainHttp(req, res, url, pathname) {
+  if (CONFIG.redirectHttps !== true) return false
+  if (isSecureRequest(req)) return false
+  if (HTTPS_REDIRECT_EXEMPT.some(pattern => pattern.test(pathname))) return false
+  const host = hostWithoutPort(req.headers.host)
+  if (host === '') return false
+  const port = CONFIG.tls.port === 443 ? '' : `:${String(CONFIG.tls.port)}`
+  res.writeHead(308, {
+    // `no-store` keeps a config change from being pinned by the browser cache.
+    'cache-control': 'no-store',
+    location: `https://${host}${port}${pathname}${url.search}`,
+    'referrer-policy': 'no-referrer',
+  })
+  res.end()
+  return true
+}
+
 async function dispatch(req, res) {
   const url = new URL(req.url ?? '/', 'http://gate.invalid')
   const pathname = url.pathname
+  if (redirectPlainHttp(req, res, url, pathname)) return
 
   // A peer gate forwards here under /__gate/cluster/...; strip and serve it
   // from the local DSH as if the browser had asked this gate directly.
@@ -1489,6 +1587,7 @@ if (CONFIG.password.length < 8) {
 log(`package root ${PACKAGE_ROOT}`)
 log(`workdir ${CONFIG.workdir}`)
 log(`trusted authorities: ${trustedAuthorities().join(', ')}`)
+if (CONFIG.redirectHttps) log(`plain HTTP redirects to HTTPS on :${String(CONFIG.tls.port)}`)
 log(`member clustering enabled (peer requests sign with a secret derived from the gateway password); peers reach this gate on port ${String(CONFIG.memberPort)}`)
 log(CONFIG.heapMb > 0
   ? `dsh web heap ceiling: ${String(CONFIG.heapMb)} MB (machine has ${String(Math.round(os.totalmem() / 1024 / 1024))} MB)`

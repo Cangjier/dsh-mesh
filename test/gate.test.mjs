@@ -210,3 +210,72 @@ test('the gate serves member discovery and selection end to end', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('plain HTTP redirects browsers to HTTPS but leaves machine endpoints alone', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-gate-'))
+  const upstream = await fakeUpstream()
+  const port = await freePort()
+  const child = spawn(process.execPath, [gateEntry], {
+    cwd: root,
+    env: {
+      ...process.env,
+      DSH_GATE_BIND: '127.0.0.1',
+      DSH_GATE_PORT: String(port),
+      DSH_GATE_MEMBER_PORT: String(port),
+      DSH_GATE_PASSWORD: 'redirect-password',
+      DSH_GATE_DATA_DIR: path.join(dir, 'data'),
+      DSH_HOME: path.join(dir, 'home'),
+      DSH_GATE_NO_SPAWN: '1',
+      DSH_WEB_TOKEN_URL: `http://127.0.0.1:${String(upstream.port)}/?token=test-token`,
+      DSH_GATE_REDIRECT_HTTPS: '1',
+      DSH_GATE_DISCOVERY_TIMEOUT_MS: '100',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  try {
+    await waitForListening(child)
+    const browser = await request(port, {
+      path: '/conversation?x=1',
+      headers: { host: `127.0.0.1:${String(port)}` },
+    })
+    assert.equal(browser.status, 308)
+    assert.equal(browser.headers.location, 'https://127.0.0.1/conversation?x=1')
+    assert.equal(browser.headers['cache-control'], 'no-store')
+
+    const api = await request(port, {
+      method: 'POST',
+      path: '/api/chat',
+      headers: { host: `127.0.0.1:${String(port)}` },
+    })
+    assert.equal(api.status, 308, 'a POST is redirected without losing its method')
+    assert.equal(api.headers.location, 'https://127.0.0.1/api/chat')
+
+    const health = await request(port, { path: '/__gate/health' })
+    assert.equal(health.status, 200, 'health checks keep working over plain HTTP')
+
+    const cluster = await request(port, {
+      path: '/__gate/cluster/__gate/health',
+      headers: { host: `127.0.0.1:${String(port)}` },
+    })
+    assert.equal(cluster.status, 403, 'a peer request is refused by the signature check, not redirected')
+
+    const member = await request(port, { path: '/__gate/member' })
+    assert.notEqual(member.status, 308)
+
+    // Cloudflare (and any TLS-terminating proxy) speaks plain HTTP to the
+    // origin but reports the browser-facing scheme. Redirecting those requests
+    // would bounce them between proxy and gate until ERR_TOO_MANY_REDIRECTS.
+    const proxied = await request(port, {
+      path: '/conversation',
+      headers: {
+        host: `127.0.0.1:${String(port)}`,
+        'x-forwarded-proto': 'https',
+      },
+    })
+    assert.equal(proxied.status, 401, 'an already-HTTPS browser behind a proxy is not redirected')
+  } finally {
+    child.kill('SIGKILL')
+    await upstream.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

@@ -118,6 +118,8 @@ powershell -ExecutionPolicy Bypass -File .\code\windows-service\uninstall-servic
 - 成员只需要 gate；「DSH 成员」面板和 `build` / `deploy` 工具装在你想操作的那台 DSH（通常是入口）即可，包里的 `plugin/` 是同一份插件。
 - 每个成员的 `DSH_TRUSTED_HOSTS` 要包含外层入口的域名/IP，否则成员 DSH 的 Host 栅栏会 403。
 - 外层入口的网关负责密码门；成员 gate 用「密码派生密钥」的 HMAC 接受外层请求，用户只输一次密码。
+- 配了 TLS（`DSH_GATE_TLS_CERT`/`DSH_GATE_TLS_KEY`）后，80 端口的浏览器请求默认 308 跳到 443；`DSH_GATE_REDIRECT_HTTPS=0` 关闭。前面有 Cloudflare/nginx 终止 TLS 时，会按 `X-Forwarded-Proto: https` 判定「浏览器已经是 https」而不再跳转；`/__gate/cluster/*`、`/__gate/health`、`/__gate/member` 等机器间接口不跳转。
+- Windows 服务默认以 LocalSystem 运行，Edge/Chrome 在该账户下无法启动，扫码登录会退回「交互会话」方式：网关用 `schtasks` 以当前登录用户（`DSH-Login-Browser` 任务，Interactive）启动 headless 浏览器，再用 CDP 连上它；调试端口由 `DSH_GATE_CHROME_PORT`（默认 9222）指定。
 - Windows 默认端口 8080（80 常需要管理员/URL ACL）；`DSH_GATE_MEMBER_PORT` 要与 peer 实际访问端口一致。
 - 自定义成员端口：入口网关设 `DSH_GATE_MEMBER_PORTS=8081,9000`；发现阶段会按这个列表探测。
 

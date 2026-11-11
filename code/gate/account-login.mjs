@@ -167,11 +167,14 @@ export class AccountLogin {
   /**
    * @param options - DSH listener port, its launch token, the Chrome binary, and a logger.
    */
-  constructor({ port, token, chromeBinary, log }) {
+  constructor({ port, token, chromeBinary, log, browserLauncher }) {
     this.port = port
     this.token = token
     this.chromeBinary = chromeBinary
     this.log = log
+    // Present on Windows: starts the browser in the logged-on user's session
+    // when this service account is not allowed to start one itself.
+    this.browserLauncher = browserLauncher
   }
 
   /** Whether a sign-in browser is currently up. */
@@ -273,13 +276,32 @@ export class AccountLogin {
     if (authorizeUrl === undefined) {
       throw new Error('DSH 没有返回授权链接（可能上一个登录尝试还在收尾，请重试）')
     }
-    const session = await ChromeSession.launch(this.chromeBinary, { width: 560, height: 900 })
+    const session = await this.#startBrowser()
     this.#running = { session, attemptId, startedAt: Date.now() }
     this.#phase = 'browser'
     this.log(`account sign-in: opened ${String(authorizeUrl).slice(0, 80)}…`)
     await session.goto(String(authorizeUrl)).catch((error) => {
       this.log(`account sign-in: navigation failed: ${error.message}`)
     })
+  }
+
+  /**
+   * Start the sign-in browser, falling back to the interactive Windows
+   * session when this service account is not allowed to start one.
+   * @returns {Promise<import('./chrome.mjs').ChromeSession>} browser session.
+   */
+  async #startBrowser() {
+    try {
+      return await ChromeSession.launch(this.chromeBinary, { width: 560, height: 900 })
+    } catch (error) {
+      if (this.browserLauncher === undefined) throw error
+      this.log(`account sign-in: ${error instanceof Error ? error.message : String(error)}`)
+      this.log('account sign-in: retrying in the interactive session')
+      await this.browserLauncher.start()
+      const session = await ChromeSession.attach(this.browserLauncher.port, { width: 560, height: 900 })
+      this.log('account sign-in: attached to the interactive browser')
+      return session
+    }
   }
 
   /**

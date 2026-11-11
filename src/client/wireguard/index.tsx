@@ -120,6 +120,7 @@ function useController(ctx: any) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
+  const [retries, setRetries] = useState(0);
   const [busy, setBusy] = useState('');
   const sequence = useRef(0);
   const alive = useRef(true);
@@ -139,9 +140,12 @@ function useController(ctx: any) {
       if (!alive.current || current !== sequence.current) return;
       setState(next);
       setError(null);
+      setRetries(0);
     } catch (failure) {
       if (!alive.current || current !== sequence.current) return;
       setError(failure instanceof ApiError ? failure : new ApiError({ code: 'unknown', message: String(failure) }, 0));
+      // The Host is restarting; try again shortly instead of waiting for the user.
+      setRetries(failure instanceof ApiError && failure.code === 'backend_unavailable' ? count => count + 1 : 0);
       if (failure instanceof ApiError && failure.state) setState(failure.state);
     } finally {
       if (alive.current) {
@@ -157,6 +161,13 @@ function useController(ctx: any) {
     void refresh(false);
   }, [refresh]);
 
+  // While the Host is starting up, retry on our own for about two minutes.
+  useEffect(() => {
+    if (retries === 0 || retries > 30) return;
+    const timer = window.setTimeout(() => { void refresh(false); }, 4000);
+    return () => { window.clearTimeout(timer); };
+  }, [retries, refresh]);
+
   const action = useCallback(async (key: string, operation: () => Promise<Snapshot>) => {
     setBusy(key);
     try {
@@ -164,6 +175,7 @@ function useController(ctx: any) {
       if (alive.current) {
         setState(next);
         setError(null);
+        setRetries(0);
       }
       return next;
     } catch (failure) {
@@ -184,6 +196,7 @@ function useController(ctx: any) {
       if (alive.current) {
         setState(result.state);
         setError(null);
+        setRetries(0);
       }
       return result.commands;
     } catch (failure) {

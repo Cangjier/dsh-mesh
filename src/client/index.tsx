@@ -36,7 +36,7 @@ import {
 import zhCN from 'antd/locale/zh_CN'
 import enUS from 'antd/locale/en_US'
 import styles from './styles.css'
-import { api, ApiError, type DeployJob, type Member, type PackageInfo, type Snapshot, type SystemInfo } from './api'
+import { api, ApiError, isStartingError, STARTING_MESSAGE, OFFLINE_MESSAGE, type DeployJob, type Member, type PackageInfo, type Snapshot, type SystemInfo } from './api'
 import { WireGuardPanel } from './wireguard'
 import { EN as WIREGUARD_EN, dictionary as wireguardDictionary } from './wireguard/i18n'
 
@@ -57,7 +57,10 @@ function useThemeMode(ctx: any): 'light' | 'dark' {
 }
 
 function errorText(error: unknown): string {
-  if (error instanceof ApiError) return `${error.message}（HTTP ${String(error.status)}）`
+  if (error instanceof ApiError) {
+    if (isStartingError(error)) return error.message
+    return `${error.message}（HTTP ${String(error.status)}）`
+  }
   return error instanceof Error ? error.message : String(error)
 }
 
@@ -268,6 +271,8 @@ function Panel({ ctx }: { ctx: any }) {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [startingHint, setStartingHint] = useState('')
+  const [startupRetry, setStartupRetry] = useState(0)
   const [deployTarget, setDeployTarget] = useState<Member | null>(null)
   const [packages, setPackages] = useState<PackageInfo[]>([])
   const [packagesDir, setPackagesDir] = useState('')
@@ -303,8 +308,17 @@ function Panel({ ctx }: { ctx: any }) {
       const memberTags = await api.memberTags()
       setTags(memberTags.tags)
       setError(null)
+      setStartingHint('')
+      setStartupRetry(0)
     } catch (failure) {
       setError(errorText(failure))
+      if (isStartingError(failure)) {
+        setStartingHint(failure instanceof ApiError && failure.kind === 'offline' ? OFFLINE_MESSAGE : STARTING_MESSAGE)
+        setStartupRetry(count => count + 1)
+      } else {
+        setStartingHint('')
+        setStartupRetry(0)
+      }
     } finally {
       setLoading(false)
     }
@@ -313,6 +327,14 @@ function Panel({ ctx }: { ctx: any }) {
   useEffect(() => {
     void load()
   }, [load])
+
+  // A restart usually clears within a few seconds, so keep retrying on our own
+  // instead of asking the user to refresh. Give up after roughly two minutes.
+  useEffect(() => {
+    if (startupRetry === 0 || startupRetry > 30) return
+    const timer = window.setTimeout(() => { void load() }, 4000)
+    return () => { window.clearTimeout(timer) }
+  }, [startupRetry, load])
 
   const refreshDeployJobs = useCallback(async () => {
     try {
@@ -634,15 +656,33 @@ function Panel({ ctx }: { ctx: any }) {
 
         {error !== null ? (
           <div className="dsh-pw-error">
-          <Alert
-            type="error"
-            showIcon
-            closable
-            message="操作失败"
-            description={error}
-            onClose={() => setError(null)}
-            style={{ marginBottom: 14 }}
-          />
+          {startingHint !== '' ? (
+            <Alert
+              type="warning"
+              showIcon
+              message={startingHint === OFFLINE_MESSAGE ? '连接中断' : '服务正在启动'}
+              description={startupRetry > 30
+                ? '自动重试已停止，请稍后手动刷新。'
+                : `${startingHint === OFFLINE_MESSAGE ? '无法连接到本机服务，可能正在重启。' : 'DeepSeek Harness 正在启动或重启，通常需要十几秒。'}页面会自动重试。`}
+              action={(
+                <Space size={6}>
+                  <Button size="small" loading={loading} onClick={() => { void load() }}>重试</Button>
+                  <Button size="small" type="text" onClick={() => { setError(null); setStartingHint(''); setStartupRetry(0) }}>关闭</Button>
+                </Space>
+              )}
+              style={{ marginBottom: 14 }}
+            />
+          ) : (
+            <Alert
+              type="error"
+              showIcon
+              closable
+              message="操作失败"
+              description={error}
+              onClose={() => setError(null)}
+              style={{ marginBottom: 14 }}
+            />
+          )}
           </div>
         ) : null}
 

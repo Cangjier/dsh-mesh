@@ -148,39 +148,80 @@ export interface DeployResponse {
   packagesDir: string
 }
 
+/**
+ * `starting` and `offline` mean the host did not answer with JSON at all: the
+ * gate serves an HTML page while DSH boots, and a restart can also drop the
+ * connection outright. Both are transient, so the panel shows a friendly hint
+ * and retries instead of surfacing the raw page.
+ */
+export type ApiErrorKind = 'starting' | 'offline' | 'auth'
+
+export const STARTING_MESSAGE = 'DeepSeek Harness 正在启动，请稍等几秒再试。'
+export const OFFLINE_MESSAGE = '无法连接到服务，可能正在重启或网络中断，请稍后刷新重试。'
+
 export class ApiError extends Error {
   status: number
+  kind?: ApiErrorKind
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, kind?: ApiErrorKind) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.kind = kind
   }
 }
 
+/** True when a failed call only means the host is not ready yet. */
+export function isStartingError(error: unknown): boolean {
+  return error instanceof ApiError && (error.kind === 'starting' || error.kind === 'offline')
+}
+
+function looksLikeHtml(text: string, contentType: string): boolean {
+  if (contentType.includes('text/html')) return true
+  return /^<(?:!doctype\s+html|html|head|body)/i.test(text.trimStart())
+}
+
+/** Explain a non-JSON answer instead of dumping the page source into the UI. */
+function describeNonJson(status: number, text: string, contentType: string): ApiError {
+  if (status === 0 || status >= 500) return new ApiError(STARTING_MESSAGE, status, 'starting')
+  if (looksLikeHtml(text, contentType)) return new ApiError('登录状态已失效，请刷新页面重新登录。', status, 'auth')
+  return new ApiError(text.slice(0, 300) || `HTTP ${String(status)}`, status)
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(path, {
-    credentials: 'same-origin',
-    ...init,
-    headers: {
-      accept: 'application/json',
-      ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
-      ...init.headers,
-    },
-  })
+  let response: Response
+  try {
+    response = await fetch(path, {
+      credentials: 'same-origin',
+      ...init,
+      headers: {
+        accept: 'application/json',
+        ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...init.headers,
+      },
+    })
+  } catch {
+    throw new ApiError(OFFLINE_MESSAGE, 0, 'offline')
+  }
   const text = await response.text()
+  const contentType = response.headers.get('content-type') ?? ''
   let body: unknown
   try {
     body = text === '' ? {} : JSON.parse(text)
   } catch {
-    throw new ApiError(text.slice(0, 300) || `HTTP ${String(response.status)}`, response.status)
+    throw describeNonJson(response.status, text, contentType)
   }
   if (!response.ok) {
-    const message = body !== null && typeof body === 'object' && 'error' in body
-      ? typeof body.error === 'string'
-        ? body.error
-        : (body.error as { message?: string }).message ?? JSON.stringify(body.error)
-      : `HTTP ${String(response.status)}`
+    const hasError = body !== null && typeof body === 'object' && 'error' in body
+    if (!hasError && (response.status >= 500 || response.status === 0)) {
+      throw new ApiError(STARTING_MESSAGE, response.status, 'starting')
+    }
+    const detail = hasError ? (body as { error: unknown }).error : undefined
+    const message = typeof detail === 'string'
+      ? detail
+      : (detail !== null && typeof detail === 'object' && typeof (detail as { message?: unknown }).message === 'string'
+        ? (detail as { message: string }).message
+        : `HTTP ${String(response.status)}`)
     throw new ApiError(message, response.status)
   }
   return body as T

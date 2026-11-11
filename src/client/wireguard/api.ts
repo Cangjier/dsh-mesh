@@ -1,5 +1,9 @@
 export const API_PREFIX = '/api/dsh-wireguard';
 
+/** Titles for failures the user cannot fix; the Host is simply not ready yet. */
+const SERVICE_STARTING = 'DeepSeek Harness 正在启动，请稍等几秒再试。';
+const SERVICE_OFFLINE = '无法连接到服务，可能正在重启或网络中断，请稍后刷新重试。';
+
 export interface Settings {
   controlPort: number;
   listenPort: number;
@@ -140,9 +144,9 @@ export async function requestPayload<T = any>(path: string, body?: unknown): Pro
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: 'no-store',
     });
-  } catch (error) {
+  } catch {
     throw new ApiError(
-      { code: 'backend_unavailable', message: error instanceof Error ? error.message : 'The WireGuard backend is unreachable.' },
+      { code: 'backend_unavailable', message: SERVICE_OFFLINE },
       0,
     );
   }
@@ -151,8 +155,13 @@ export async function requestPayload<T = any>(path: string, body?: unknown): Pro
   try {
     data = JSON.parse(text);
   } catch {
+    // While DSH boots the gate answers with an HTML page, so report startup
+    // instead of an "unexpected response" for every 5xx that is not JSON.
     throw new ApiError(
-      { code: 'backend_unavailable', message: 'The WireGuard backend returned an unexpected response.' },
+      {
+        code: 'backend_unavailable',
+        message: response.status >= 500 || response.status === 0 ? SERVICE_STARTING : 'The WireGuard backend returned an unexpected response.',
+      },
       response.status,
     );
   }

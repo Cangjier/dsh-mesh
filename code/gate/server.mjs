@@ -38,6 +38,7 @@ import { fileURLToPath } from 'node:url'
 import { loginPage, page, accountLoginPage, PAGE_CSP } from './pages.mjs'
 import { AccountLogin } from './account-login.mjs'
 import { CLUSTER_PREFIX, MemberService } from './members.mjs'
+import { deriveClusterSecret } from '../shared/cluster.mjs'
 import { TARGET_COOKIE } from '../shared/wireguard.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -189,8 +190,6 @@ const CONFIG = {
   },
   /** Browser used by the local account sign-in helper. */
   chromeBinary: resolveChrome(),
-  /** Shared secret every member gate uses to accept peer requests. Empty disables clustering. */
-  clusterKey: env('DSH_GATE_CLUSTER_KEY', ''),
   /** Port peers use to reach this gate; defaults to the public listener port. */
   memberPort: envInt('DSH_GATE_MEMBER_PORT', envInt('DSH_GATE_PORT', 80)),
   /** Extra ports probed on every peer (for custom member ports). */
@@ -210,6 +209,9 @@ const CONFIG = {
     .map(value => value.trim())
     .filter(value => value !== ''),
 }
+/** Peer requests are signed with a secret derived from the gateway password. */
+CONFIG.clusterKey = deriveClusterSecret(CONFIG.password)
+
 
 const COOKIE_NAME = 'dsh_gate'
 const PID_FILE = path.join(CONFIG.dataDir, 'gate.pid')
@@ -1487,9 +1489,7 @@ if (CONFIG.password.length < 8) {
 log(`package root ${PACKAGE_ROOT}`)
 log(`workdir ${CONFIG.workdir}`)
 log(`trusted authorities: ${trustedAuthorities().join(', ')}`)
-log(CONFIG.clusterKey === ''
-  ? 'member clustering disabled: set DSH_GATE_CLUSTER_KEY to enable it'
-  : `member clustering enabled; peers reach this gate on port ${String(CONFIG.memberPort)}`)
+log(`member clustering enabled (peer requests sign with a secret derived from the gateway password); peers reach this gate on port ${String(CONFIG.memberPort)}`)
 log(CONFIG.heapMb > 0
   ? `dsh web heap ceiling: ${String(CONFIG.heapMb)} MB (machine has ${String(Math.round(os.totalmem() / 1024 / 1024))} MB)`
   : 'dsh web heap ceiling: none (set DSH_WEB_HEAP_MB to cap it)')

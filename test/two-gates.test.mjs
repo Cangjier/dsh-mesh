@@ -135,7 +135,6 @@ async function startGate(options) {
       DSH_HOME: path.join(options.dir, 'home'),
       DSH_GATE_NO_SPAWN: '1',
       DSH_WEB_TOKEN_URL: `http://127.0.0.1:${String(options.upstreamPort)}/?token=${options.token}`,
-      DSH_GATE_CLUSTER_KEY: 'two-gate-secret',
       DSH_GATE_DISCOVERY_TIMEOUT_MS: '500',
       DSH_GATE_DISCOVERY_CACHE_MS: '1000',
     },

@@ -9,7 +9,23 @@
  * @module dsh-mesh/shared/cluster
  */
 
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+
+/**
+ * Derive the peer secret from the gateway password.
+ *
+ * Members share one gateway password, so there is no separate cluster secret to
+ * keep in sync: a gate signs peer requests with a secret derived from the
+ * password, and a peer that verifies the signature has proved it uses the same
+ * password.
+ *
+ * @param {string} password gateway password.
+ * @returns {string} hex secret (`sha256`), or an empty string when no password is configured.
+ */
+export function deriveClusterSecret(password) {
+  if (typeof password !== 'string' || password === '') return ''
+  return createHash('sha256').update('dsh-mesh/cluster/v1\0').update(password, 'utf8').digest('hex')
+}
 
 /** Header carrying the signed cluster assertion. */
 export const CLUSTER_HEADER = 'x-dsh-cluster'

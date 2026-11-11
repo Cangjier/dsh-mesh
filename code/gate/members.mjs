@@ -65,7 +65,7 @@ const HOP_BY_HOP = new Set([
 export class MemberService {
   /**
    * @param {object} options service dependencies.
-   * @param {string} options.clusterKey shared cluster secret; empty disables clustering.
+   * @param {string} options.clusterKey peer secret derived from the gateway password; empty disables clustering.
    * @param {number} options.memberPort port peers use to reach this gate.
    * @param {string} options.stateFile `$DSH_HOME/wireguard/state.json`.
    * @param {number} [options.discoveryTimeoutMs] per-probe timeout.
@@ -184,7 +184,7 @@ export class MemberService {
     const id = this.currentTarget(req)
     if (id === LOCAL_MEMBER_ID) return { kind: 'local' }
     if (this.clusterKey === '') {
-      return { kind: 'unavailable', id, reason: '本机没有配置 DSH_GATE_CLUSTER_KEY，无法代理到其他成员。' }
+      return { kind: 'unavailable', id, reason: '本机没有配置网关密码，无法代理到其他成员。' }
     }
     const snapshot = await this.snapshot()
     const member = snapshot.members.find(candidate => candidate.id === id)
@@ -338,8 +338,8 @@ export class MemberService {
     if (this.clusterKey === '') {
       return {
         status: 409,
-        code: 'cluster_not_configured',
-        message: '本机没有配置 DSH_GATE_CLUSTER_KEY，无法切换到其他成员。',
+        code: 'gate_password_missing',
+        message: '本机没有配置网关密码，无法切换到其他成员。',
       }
     }
     if (member.dsh !== true || member.port === null) {
@@ -392,8 +392,8 @@ export class MemberService {
     if (text.includes('cluster_request_refused')) {
       return {
         status: 409,
-        code: 'cluster_key_mismatch',
-        message: `「${name}」拒绝了本机的集群签名：两边的 DSH_GATE_CLUSTER_KEY 不一致。请把两边 gate.env 的 DSH_GATE_CLUSTER_KEY 改成同一个值并重启网关后再切换。`,
+        code: 'password_mismatch',
+        message: `「${name}」拒绝了本机的集群签名：两边的网关密码（DSH_GATE_PASSWORD）不一致。请把两边 gate.env 的密码改成同一个值并重启网关后再切换。`,
       }
     }
     return {

@@ -356,8 +356,8 @@ test('select refuses a peer whose gateway rejects the cluster signature', async 
     assert.equal(response.status, 409)
     const body = JSON.parse(response.body)
     assert.equal(body.ok, false)
-    assert.equal(body.code, 'cluster_key_mismatch')
-    assert.match(body.error, /DSH_GATE_CLUSTER_KEY/u)
+    assert.equal(body.code, 'password_mismatch')
+    assert.match(body.error, /DSH_GATE_PASSWORD/u)
     assert.equal(response.headers['set-cookie'], undefined)
   } finally {
     await fixture.close()

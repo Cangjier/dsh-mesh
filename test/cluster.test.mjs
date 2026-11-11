@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   ClusterReplayCache,
+  deriveClusterSecret,
   signClusterRequest,
   verifyClusterRequest,
 } from '../code/shared/cluster.mjs'
@@ -76,4 +77,19 @@ test('a missing or malformed header never verifies', () => {
     })
     assert.equal(verdict.ok, false, String(header))
   }
+})
+
+test('the peer secret derives from the shared gateway password', () => {
+  assert.equal(deriveClusterSecret(''), '')
+  assert.equal(deriveClusterSecret('same-password'), deriveClusterSecret('same-password'))
+  assert.notEqual(deriveClusterSecret('password-a'), deriveClusterSecret('password-b'))
+  const header = signClusterRequest(deriveClusterSecret('member-password'), { method: 'GET', path: '/__gate/cluster/__gate/health' })
+  assert.equal(verifyClusterRequest(deriveClusterSecret('member-password'), header, {
+    method: 'GET',
+    path: '/__gate/cluster/__gate/health',
+  }).ok, true)
+  assert.equal(verifyClusterRequest(deriveClusterSecret('other-password'), header, {
+    method: 'GET',
+    path: '/__gate/cluster/__gate/health',
+  }).ok, false)
 })

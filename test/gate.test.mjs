@@ -125,7 +125,6 @@ test('the gate serves member discovery and selection end to end', async () => {
       DSH_HOME: path.join(dir, 'home'),
       DSH_GATE_NO_SPAWN: '1',
       DSH_WEB_TOKEN_URL: `http://127.0.0.1:${String(upstream.port)}/?token=test-token`,
-      DSH_GATE_CLUSTER_KEY: 'test-cluster-key',
       DSH_GATE_DISCOVERY_TIMEOUT_MS: '100',
     },
     stdio: ['ignore', 'pipe', 'pipe'],

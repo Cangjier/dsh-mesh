@@ -82,7 +82,7 @@ Linux：
 ```bash
 ./install.sh                       # 生成 config/gate.env、systemd、密码
 # 编辑 config/gate.env：
-#   DSH_GATE_CLUSTER_KEY=<所有成员相同的 32+ 字节随机串>
+#   DSH_GATE_PASSWORD=<所有成员相同的密码；成员间切换靠它签名>
 #   DSH_TRUSTED_HOSTS=<外层入口域名或 IP>
 systemctl restart dsh-web
 ```
@@ -114,10 +114,10 @@ powershell -ExecutionPolicy Bypass -File .\code\windows-service\uninstall-servic
 
 要点：
 
-- 每个成员都必须跑**新版 gate**，并配置**同一个** `DSH_GATE_CLUSTER_KEY`。
+- 每个成员都必须跑**新版 gate**，并配置**同一个** `DSH_GATE_PASSWORD`；成员间签名用的密钥由密码派生，不再需要单独的 cluster key。
 - 成员只需要 gate；「DSH 成员」面板和 `build` / `deploy` 工具装在你想操作的那台 DSH（通常是入口）即可，包里的 `plugin/` 是同一份插件。
 - 每个成员的 `DSH_TRUSTED_HOSTS` 要包含外层入口的域名/IP，否则成员 DSH 的 Host 栅栏会 403。
-- 外层入口的网关负责密码门；成员 gate 通过 HMAC 接受外层请求，用户只输一次密码。
+- 外层入口的网关负责密码门；成员 gate 用「密码派生密钥」的 HMAC 接受外层请求，用户只输一次密码。
 - Windows 默认端口 8080（80 常需要管理员/URL ACL）；`DSH_GATE_MEMBER_PORT` 要与 peer 实际访问端口一致。
 - 自定义成员端口：入口网关设 `DSH_GATE_MEMBER_PORTS=8081,9000`；发现阶段会按这个列表探测。
 
@@ -235,7 +235,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 
 - 所有对 DSH 源码的修改都是**整文件覆盖层 + base SHA-256**；脚本幂等，失配即工作单，不猜锚点。
 - 覆盖层当前按 `deepseek-harness@master` 的 tree `fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159` 生成；上游变化后用 `learn` 更新。
-- 成员切换依赖 `DSH_GATE_CLUSTER_KEY`；没有配置时面板仍可发现成员，但切换会返回「本机没有配置 cluster key」。
+- 成员切换只依赖网关密码：入口用密码派生的密钥签名，成员用同样的密码验签；两边密码不一致时切换会被拒绝并给出原因，浏览器保持在本机。
 - 一个浏览器同时一个活动成员；不是每个标签页独立。需要标签页隔离时要改回路径前缀或子域名。
 - 目标掉线时网关返回 502 页面，链接 `/__gate/reset` 清掉目标 cookie 回本机；不会把浏览器困在错误页。
 - Windows 成员是 **Node web 包**，不是 Electron 桌面壳；桌面壳仍可作为访问端。

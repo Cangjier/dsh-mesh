@@ -203,12 +203,11 @@ test('a first install inherits the deployer gateway credentials', async () => {
       package: packagePath,
       appRoot: 'C:\\dsh-mesh',
       gatePassword: 'shared-gate-pw',
-      clusterKey: 'shared-cluster-key',
     })
     const final = await manager.wait(started.job.id)
     assert.equal(final.status, 'succeeded')
     assert.ok(scripts.some(script => script.includes("$password = 'shared-gate-pw'")))
-    assert.ok(scripts.some(script => script.includes("$clusterKey = 'shared-cluster-key'")))
+    assert.equal(scripts.some(script => script.includes('$clusterKey')), false, 'the retired cluster key secret is not generated')
     assert.ok(scripts.some(script => script.includes('copied from the deployer')))
     const state = JSON.parse(await readFile(path.join(root, 'jobs', started.job.id, 'job.json'), 'utf8'))
     assert.equal(JSON.stringify(state).includes('shared-gate-pw'), false, 'the job state never stores the secret')

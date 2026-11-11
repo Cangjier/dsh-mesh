@@ -71,7 +71,7 @@ dsh-wireguard 把若干台机器放进同一个 `10.66.66.0/24`。每台机器�
 
 ## cluster 认证
 
-所有成员共享 `DSH_GATE_CLUSTER_KEY`（`config/gate.env`）。入口 gate 对每个转发的请求加：
+所有成员共享同一个网关密码 `DSH_GATE_PASSWORD`（`config/gate.env`）。成员间签名用的密钥由密码派生（`sha256("dsh-mesh/cluster/v1\0" + 密码)`），因此不再需要单独的 cluster key；密码一致即可互相通行，密码不一致时验签失败。入口 gate 对每个转发的请求加：
 
 ```text
 x-dsh-cluster: v1.<timestamp>.<nonce>.<base64url HMAC-SHA256>
@@ -119,7 +119,7 @@ x-dsh-cluster: v1.<timestamp>.<nonce>.<base64url HMAC-SHA256>
 
 - [ ] 部署新版包（`gate/`、`shared/`、`app/`、`runtime/`）。
 - [ ] 成员只需要 gate；「DSH 成员」面板和 `dsh_mesh` 构建工具装在入口 DSH 即可，包里的 `plugin/` 是同一份插件。
-- [ ] `config/gate.env` 配同一个 `DSH_GATE_CLUSTER_KEY`。
+- [ ] `config/gate.env` 配同一个 `DSH_GATE_PASSWORD`（成员间签名密钥由它派生）。
 - [ ] `DSH_TRUSTED_HOSTS` 加外层入口域名/IP。
 - [ ] 成员端口：Linux 默认 80；Windows 默认 8080。`DSH_GATE_MEMBER_PORT` 要与 peer 实际访问端口一致。
 - [ ] 如果成员用非 80/8080 的自定义端口，入口网关的 `DSH_GATE_MEMBER_PORTS` 要列出这些端口（逗号分隔），否则发现阶段扫不到。

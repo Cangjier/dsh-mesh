@@ -217,6 +217,9 @@ export async function buildDeployPlan(options) {
   if (!/^\d{1,5}$/.test(gatePort) || Number(gatePort) > 65535) throw new Error('gatePort is invalid')
   const retention = Number.isSafeInteger(options.retention) ? options.retention : 3
   if (retention < 2) throw new Error('retention must be at least 2 (current plus previous)')
+  const serviceUser = typeof options.serviceUser === 'string' && /^[A-Za-z_][A-Za-z0-9_-]{0,31}$/u.test(options.serviceUser.trim())
+    ? options.serviceUser.trim()
+    : undefined
   return {
     host: options.host.trim(),
     user: typeof options.user === 'string' && options.user.trim() !== '' ? options.user.trim() : undefined,
@@ -228,6 +231,7 @@ export async function buildDeployPlan(options) {
     package: { path: packagePath, bytes: packageInfo?.size ?? 0, sha256 },
     release,
     appRoot,
+    serviceUser,
     shared: `${appRoot}${os === 'linux' ? '/shared' : '\\shared'}`,
     current: `${appRoot}${os === 'linux' ? '/current' : '\\current'}`,
     previous: `${appRoot}${os === 'linux' ? '/previous' : '\\previous'}`,
@@ -244,6 +248,93 @@ export async function buildDeployPlan(options) {
 }
 
 /**
+ * Read the member's existing install root and service user.
+ *
+ * A member may have been installed by root under `/root/.dsh`, by a normal
+ * user under `/home/<user>/.dsh`, or anywhere else. The systemd unit (or the
+ * Windows service) is the source of truth; only when it cannot be read does
+ * this fall back to the SSH user's home.
+ *
+ * @param {{host:string,user?:string,port?:number,identityFile?:string,os?:string}} options target.
+ * @returns {Promise<{appRoot:string,serviceUser:string|undefined}>} detected install.
+ */
+export async function probeTarget(options) {
+  if (typeof options.host !== 'string' || options.host.trim() === '') throw new Error('host is required')
+  const os = normalizeOs(options.os ?? 'linux')
+  const user = typeof options.user === 'string' && options.user.trim() !== '' ? options.user.trim() : undefined
+  const plan = {
+    host: options.host.trim(),
+    user,
+    port: Number.isSafeInteger(options.port) ? options.port : 22,
+    identityFile: typeof options.identityFile === 'string' && options.identityFile.trim() !== ''
+      ? path.resolve(options.identityFile)
+      : undefined,
+    os,
+  }
+  const runner = new SshRunner(plan)
+  if (os === 'windows') {
+    const script = [
+      "$ErrorActionPreference = 'SilentlyContinue'",
+      "$svc = Get-CimInstance Win32_Service -Filter \"Name='DSH-Person-Web'\"",
+      "$root = ''",
+      'if ($svc -and $svc.PathName) {',
+      '  if ($svc.PathName -match \'^"([^"]+)"\') { $exe = $matches[1] } else { $exe = ($svc.PathName -split \' \')[0] }',
+      '  $root = Split-Path -Parent $exe',
+      '}',
+      'if (-not $root) { $root = Join-Path $env:USERPROFILE \'.dsh\\dsh-person-web\' }',
+      '$root = $root -replace \'(?i)\\\\current$\', \'\'',
+      'Write-Output $root',
+      'Write-Output $env:USERNAME',
+    ].join('\n')
+    const encoded = Buffer.from(script, 'utf16le').toString('base64')
+    const { stdout } = await runner.runProcess('ssh', [
+      ...runner.sshOptions(),
+      runner.target(),
+      `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`,
+    ])
+    const [root = ''] = stdout.split(/\r?\n/u)
+    const appRoot = root.trim() !== ''
+      ? root.trim()
+      : `C:\\Users\\${user ?? 'Public'}\\.dsh\\dsh-person-web`
+    return { appRoot, serviceUser: undefined }
+  }
+  const script = `#!/usr/bin/env bash
+set -u
+root=''
+runuser=''
+for unit in dsh-web-gate.service dsh-web.service dsh-person-web.service; do
+  if command -v systemctl >/dev/null 2>&1; then
+    root=$(systemctl show "$unit" -p WorkingDirectory --value 2>/dev/null || true)
+  fi
+  if [ -n "$root" ]; then
+    runuser=$(systemctl show "$unit" -p User --value 2>/dev/null || true)
+    break
+  fi
+done
+if [ -z "$root" ]; then
+  root="$HOME/.dsh/dsh-person-web"
+fi
+case "$root" in
+  */current) root=$(dirname "$root") ;;
+esac
+printf '%s\\n%s\\n' "$root" "$runuser"
+`
+  const { stdout } = await runner.runProcess('ssh', [
+    ...runner.sshOptions(),
+    runner.target(),
+    'bash -s',
+  ], script)
+  const [root = '', serviceUser = ''] = stdout.split(/\r?\n/u)
+  const fallback = user !== undefined && user !== 'root'
+    ? `/home/${user}/.dsh/dsh-person-web`
+    : '/root/.dsh/dsh-person-web'
+  return {
+    appRoot: root.trim() !== '' ? root.trim() : fallback,
+    serviceUser: serviceUser.trim() !== '' ? serviceUser.trim() : undefined,
+  }
+}
+
+/**
  * Build the Linux prepare script.
  * @param {object} plan deployment plan.
  * @returns {string} shell script.
@@ -254,6 +345,11 @@ export function buildLinuxPrepareScript(plan) {
     const command = service.command.startsWith('/') ? service.command : `${plan.appRoot}/current/${service.command}`
     return `write_unit ${unit} ${sh(command)}`
   }).join('\n')
+  // Files created by the sudo prepare belong to the user the existing unit
+  // runs as; otherwise a per-user member gets a root-owned tree.
+  const chown = plan.serviceUser === undefined || plan.serviceUser === 'root'
+    ? ''
+    : `chown -R ${sh(`${plan.serviceUser}:`)} "$APP_ROOT" 2>/dev/null || true\n`
   return `#!/usr/bin/env bash
 set -euo pipefail
 APP_ROOT=${sh(plan.appRoot)}
@@ -283,7 +379,7 @@ for dir in config data home workspace; do
   rm -rf "$NEW/$dir"
   ln -s "$SHARED/$dir" "$NEW/$dir"
 done
-
+${chown}
 ENV_FILE="$SHARED/config/gate.env"
 if [ ! -f "$ENV_FILE" ]; then
   echo "missing $ENV_FILE; install this member once before the first SSH deploy" >&2
@@ -699,6 +795,15 @@ export class DeployManager {
 
   /** @returns {Promise<void>} no owned process. */
   async dispose() {}
+
+  /**
+   * Detect the member's existing install root without changing anything.
+   * @param {object} request SSH target.
+   * @returns {Promise<{appRoot:string,serviceUser:string|undefined}>} detected install.
+   */
+  async inspectTarget(request) {
+    return probeTarget({ ...request })
+  }
 
   /**
    * Plan only; no network.

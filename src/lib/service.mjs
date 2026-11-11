@@ -393,11 +393,31 @@ export class PersonWebService {
         if (existsSync(candidate)) identityFile = candidate
       }
     }
+    const os = selected.target === 'windows' ? 'windows' : 'linux'
+    // Deploy into the tree the member already runs, not a guessed system path:
+    // root installs live under /root/.dsh, normal users under /home/<user>/.dsh.
+    let appRoot
+    let serviceUser
+    try {
+      const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os })
+      appRoot = detected.appRoot
+      serviceUser = detected.serviceUser
+    } catch {
+      // Keep the SSH error for the deploy job; fall back to the user's home.
+    }
+    if (appRoot === undefined) {
+      const home = os === 'windows'
+        ? `C:\\Users\\${user}`
+        : user === 'root' ? '/root' : `/home/${user}`
+      appRoot = os === 'windows' ? `${home}\\.dsh\\dsh-person-web` : `${home}/.dsh/dsh-person-web`
+    }
     const result = await this.deploy.start({
       host: member.ip,
       user,
       identityFile,
-      os: selected.target === 'windows' ? 'windows' : 'linux',
+      os,
+      appRoot,
+      serviceUser,
       package: selected.path,
     })
     return { ok: true, job: result.job, member: { id: member.id, name: member.name, ip: member.ip }, packagesDir: this.packagesDir }

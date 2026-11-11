@@ -102,6 +102,30 @@ test('Linux prepare extracts and prepares but never restarts a service', async (
   }
 })
 
+test('deploy keeps a per-user install under that user and chowns it', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
+  try {
+    const packagePath = path.join(dir, 'pkg.tar.gz')
+    await writeFile(packagePath, 'fake')
+    const plan = await buildDeployPlan({
+      host: 'example', os: 'linux', package: packagePath, repositoryRoot: dir,
+      release: 'home1', appRoot: '/home/ubuntu/.dsh/dsh-person-web', serviceUser: 'ubuntu',
+      services: [
+        { name: 'dsh-web-app.service', role: 'dsh' },
+        { name: 'dsh-web-gate.service', role: 'gate' },
+      ],
+    })
+    assert.equal(plan.appRoot, '/home/ubuntu/.dsh/dsh-person-web')
+    assert.equal(plan.serviceUser, 'ubuntu')
+    assert.equal(plan.shared, '/home/ubuntu/.dsh/dsh-person-web/shared')
+    const script = buildLinuxPrepareScript(plan)
+    assert.match(script, /APP_ROOT='\/home\/ubuntu\/\.dsh\/dsh-person-web'/)
+    assert.match(script, /chown -R 'ubuntu:' "\$APP_ROOT"/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('Linux activation restarts services in order, health-checks and rolls back', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
   try {

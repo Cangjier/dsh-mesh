@@ -695,6 +695,15 @@ async function assembleWebPackage(options) {
   await copyIfExists(path2.join(options.repositoryRoot, "build"), path2.join(packageDir, "plugins", "dsh-person-web", "build"));
   await copyIfExists(path2.join(options.repositoryRoot, "code", "build"), path2.join(packageDir, "plugins", "dsh-person-web", "code", "build"));
   await copyIfExists(path2.join(options.repositoryRoot, "code", "shared"), path2.join(packageDir, "plugins", "dsh-person-web", "code", "shared"));
+  const wireguardRoot = path2.resolve(options.repositoryRoot, "..", "dsh-wireguard");
+  if (existsSync(path2.join(wireguardRoot, "package.json"))) {
+    await cp(wireguardRoot, path2.join(packageDir, "plugins", "dsh-wireguard"), {
+      recursive: true,
+      filter: (source) => !/[\\/](?:node_modules|\.git)(?:[\\/]|$)/u.test(source)
+    });
+  } else {
+    options.log?.(`warning: sibling dsh-wireguard not found at ${wireguardRoot}`);
+  }
   const manifest = {
     format: 1,
     name: "dsh-person-web",
@@ -1234,6 +1243,7 @@ async function buildDeployPlan(options) {
   if (!/^\d{1,5}$/.test(gatePort) || Number(gatePort) > 65535) throw new Error("gatePort is invalid");
   const retention = Number.isSafeInteger(options.retention) ? options.retention : 3;
   if (retention < 2) throw new Error("retention must be at least 2 (current plus previous)");
+  const serviceUser = typeof options.serviceUser === "string" && /^[A-Za-z_][A-Za-z0-9_-]{0,31}$/u.test(options.serviceUser.trim()) ? options.serviceUser.trim() : void 0;
   return {
     host: options.host.trim(),
     user: typeof options.user === "string" && options.user.trim() !== "" ? options.user.trim() : void 0,
@@ -1243,6 +1253,7 @@ async function buildDeployPlan(options) {
     package: { path: packagePath, bytes: packageInfo?.size ?? 0, sha256 },
     release,
     appRoot,
+    serviceUser,
     shared: `${appRoot}${os6 === "linux" ? "/shared" : "\\shared"}`,
     current: `${appRoot}${os6 === "linux" ? "/current" : "\\current"}`,
     previous: `${appRoot}${os6 === "linux" ? "/previous" : "\\previous"}`,
@@ -1255,12 +1266,83 @@ async function buildDeployPlan(options) {
     remotePackage: os6 === "linux" ? `/tmp/dsh-person-web-${release}${path4.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-person-web-${release}${path4.extname(packagePath)}`
   };
 }
+async function probeTarget(options) {
+  if (typeof options.host !== "string" || options.host.trim() === "") throw new Error("host is required");
+  const os6 = normalizeOs(options.os ?? "linux");
+  const user = typeof options.user === "string" && options.user.trim() !== "" ? options.user.trim() : void 0;
+  const plan = {
+    host: options.host.trim(),
+    user,
+    port: Number.isSafeInteger(options.port) ? options.port : 22,
+    identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path4.resolve(options.identityFile) : void 0,
+    os: os6
+  };
+  const runner = new SshRunner(plan);
+  if (os6 === "windows") {
+    const script2 = [
+      "$ErrorActionPreference = 'SilentlyContinue'",
+      `$svc = Get-CimInstance Win32_Service -Filter "Name='DSH-Person-Web'"`,
+      "$root = ''",
+      "if ($svc -and $svc.PathName) {",
+      `  if ($svc.PathName -match '^"([^"]+)"') { $exe = $matches[1] } else { $exe = ($svc.PathName -split ' ')[0] }`,
+      "  $root = Split-Path -Parent $exe",
+      "}",
+      "if (-not $root) { $root = Join-Path $env:USERPROFILE '.dsh\\dsh-person-web' }",
+      "$root = $root -replace '(?i)\\\\current$', ''",
+      "Write-Output $root",
+      "Write-Output $env:USERNAME"
+    ].join("\n");
+    const encoded = Buffer.from(script2, "utf16le").toString("base64");
+    const { stdout: stdout2 } = await runner.runProcess("ssh", [
+      ...runner.sshOptions(),
+      runner.target(),
+      `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
+    ]);
+    const [root2 = ""] = stdout2.split(/\r?\n/u);
+    const appRoot = root2.trim() !== "" ? root2.trim() : `C:\\Users\\${user ?? "Public"}\\.dsh\\dsh-person-web`;
+    return { appRoot, serviceUser: void 0 };
+  }
+  const script = `#!/usr/bin/env bash
+set -u
+root=''
+runuser=''
+for unit in dsh-web-gate.service dsh-web.service dsh-person-web.service; do
+  if command -v systemctl >/dev/null 2>&1; then
+    root=$(systemctl show "$unit" -p WorkingDirectory --value 2>/dev/null || true)
+  fi
+  if [ -n "$root" ]; then
+    runuser=$(systemctl show "$unit" -p User --value 2>/dev/null || true)
+    break
+  fi
+done
+if [ -z "$root" ]; then
+  root="$HOME/.dsh/dsh-person-web"
+fi
+case "$root" in
+  */current) root=$(dirname "$root") ;;
+esac
+printf '%s\\n%s\\n' "$root" "$runuser"
+`;
+  const { stdout } = await runner.runProcess("ssh", [
+    ...runner.sshOptions(),
+    runner.target(),
+    "bash -s"
+  ], script);
+  const [root = "", serviceUser = ""] = stdout.split(/\r?\n/u);
+  const fallback = user !== void 0 && user !== "root" ? `/home/${user}/.dsh/dsh-person-web` : "/root/.dsh/dsh-person-web";
+  return {
+    appRoot: root.trim() !== "" ? root.trim() : fallback,
+    serviceUser: serviceUser.trim() !== "" ? serviceUser.trim() : void 0
+  };
+}
 function buildLinuxPrepareScript(plan) {
   const serviceBlocks = plan.services.map((service) => {
     const unit = sh(service.name);
     const command = service.command.startsWith("/") ? service.command : `${plan.appRoot}/current/${service.command}`;
     return `write_unit ${unit} ${sh(command)}`;
   }).join("\n");
+  const chown = plan.serviceUser === void 0 || plan.serviceUser === "root" ? "" : `chown -R ${sh(`${plan.serviceUser}:`)} "$APP_ROOT" 2>/dev/null || true
+`;
   return `#!/usr/bin/env bash
 set -euo pipefail
 APP_ROOT=${sh(plan.appRoot)}
@@ -1290,7 +1372,7 @@ for dir in config data home workspace; do
   rm -rf "$NEW/$dir"
   ln -s "$SHARED/$dir" "$NEW/$dir"
 done
-
+${chown}
 ENV_FILE="$SHARED/config/gate.env"
 if [ ! -f "$ENV_FILE" ]; then
   echo "missing $ENV_FILE; install this member once before the first SSH deploy" >&2
@@ -1640,6 +1722,14 @@ var DeployManager = class {
   }
   /** @returns {Promise<void>} no owned process. */
   async dispose() {
+  }
+  /**
+   * Detect the member's existing install root without changing anything.
+   * @param {object} request SSH target.
+   * @returns {Promise<{appRoot:string,serviceUser:string|undefined}>} detected install.
+   */
+  async inspectTarget(request) {
+    return probeTarget({ ...request });
   }
   /**
    * Plan only; no network.
@@ -2202,11 +2292,26 @@ var PersonWebService = class {
         if (existsSync4(candidate)) identityFile = candidate;
       }
     }
+    const os6 = selected.target === "windows" ? "windows" : "linux";
+    let appRoot;
+    let serviceUser;
+    try {
+      const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os: os6 });
+      appRoot = detected.appRoot;
+      serviceUser = detected.serviceUser;
+    } catch {
+    }
+    if (appRoot === void 0) {
+      const home = os6 === "windows" ? `C:\\Users\\${user}` : user === "root" ? "/root" : `/home/${user}`;
+      appRoot = os6 === "windows" ? `${home}\\.dsh\\dsh-person-web` : `${home}/.dsh/dsh-person-web`;
+    }
     const result = await this.deploy.start({
       host: member.ip,
       user,
       identityFile,
-      os: selected.target === "windows" ? "windows" : "linux",
+      os: os6,
+      appRoot,
+      serviceUser,
       package: selected.path
     });
     return { ok: true, job: result.job, member: { id: member.id, name: member.name, ip: member.ip }, packagesDir: this.packagesDir };

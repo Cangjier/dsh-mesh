@@ -67,7 +67,7 @@ test('deploy job routes expose progress and the log tail', async () => {
   const detail = await call('GET', '/api/dsh-mesh/deploy/deploy-abc?lines=50')
   assert.equal(detail.status, 200)
   assert.deepEqual(detail.body.job, job)
-  assert.equal(detail.body.lines, 'one\ntwo')
+  assert.deepEqual(detail.body.lines, ['one', 'two'])
 
   const missing = await call('GET', '/api/dsh-mesh/deploy/deploy-nope')
   assert.equal(missing.status, 404)

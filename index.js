@@ -2882,10 +2882,12 @@ function registerApi(ctx, service) {
               writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown deploy job." } });
               return;
             }
+            const tail = await service.deployLogs(deployRead[1], Number.isSafeInteger(lines) ? Math.min(Math.max(lines, 1), 500) : 200);
             writeJson(response, 200, {
               ok: true,
               job,
-              lines: await service.deployLogs(deployRead[1], Number.isSafeInteger(lines) ? Math.min(Math.max(lines, 1), 500) : 200)
+              // Match the build log endpoint: the panel expects an array.
+              lines: tail.trimEnd() === "" ? [] : tail.trimEnd().split(/\r?\n/u)
             });
             return;
           }

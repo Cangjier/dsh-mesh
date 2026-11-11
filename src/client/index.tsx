@@ -178,6 +178,8 @@ function etaText(speed: number, remaining: number): string {
 
 /** Detail view for one deployment: upload meter, steps, and log tail. */
 function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] }) {
+  // Older hosts returned the log as one string; never assume the array shape.
+  const logLines = Array.isArray(lines) ? lines : String(lines ?? '').split(/\r?\n/u)
   const progress = job.progress
   const total = progress?.totalBytes ?? 0
   const bytes = progress?.bytes ?? 0
@@ -244,7 +246,7 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
       {job.status === 'succeeded' ? <Alert type="success" showIcon message="部署完成" description={`健康检查通过，发布 ${job.release}`} /> : null}
       <div>
         <Typography.Text strong>日志</Typography.Text>
-        <pre className="dsh-pw-deploy-log">{lines.length > 0 ? lines.slice(-200).join('\n') : '等待日志…'}</pre>
+        <pre className="dsh-pw-deploy-log">{logLines.length > 0 ? logLines.slice(-200).join('\n') : '等待日志…'}</pre>
       </div>
     </Space>
   )

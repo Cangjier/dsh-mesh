@@ -48,10 +48,11 @@ async function buildClient() {
   })
   const code = result.outputFiles?.[0]?.text
   if (!code) throw new Error('Client build produced no output')
-  const wrapped = `window.__ModuleLoader__.load({\n  id: '@local/dsh-mesh',\n  factory(require) {\n    var module = { exports: {} };\n    var exports = module.exports;\n${code
-    .split('\n')
-    .map((line) => (line.length > 0 ? `    ${line}` : line))
-    .join('\n')}\n    return module.exports;\n  },\n});\n`
+  // Do not re-indent the generated code: esbuild prints strings that contain a
+  // newline as multi-line template literals, and adding leading spaces to those
+  // lines would silently change the string value (for example `'\n'` became
+  // `'\n    '`). The wrapper needs no indentation to stay valid.
+  const wrapped = `window.__ModuleLoader__.load({\n  id: '@local/dsh-mesh',\n  factory(require) {\n    var module = { exports: {} };\n    var exports = module.exports;\n${code}\n    return module.exports;\n  },\n});\n`
   await writeFile(path.join(root, 'client.js'), wrapped, 'utf8')
 }
 

@@ -13,7 +13,6 @@ import { fileURLToPath } from 'node:url'
 import {
   createJob,
   defaultJobRoot,
-  learnJob,
   readLogTail,
   readState,
   runJob,
@@ -105,30 +104,16 @@ async function main() {
     process.stdout.write(`${tail.join('\n')}\n`)
     return
   }
-  if (command === 'learn') {
-    const dir = String(values.get('job') ?? '')
-    if (dir === '') throw new Error('learn needs --job <dir>')
-    const state = await learnJob(dir, { repositoryRoot: REPOSITORY_ROOT })
-    process.stdout.write(`${JSON.stringify(state, null, 2)}\n`)
-    return
-  }
   if (command === 'build' || command === 'plan') {
-    let job
-    const existing = values.get('job')
-    if (typeof existing === 'string' && existing !== '') {
-      job = { id: path.basename(existing), dir: existing, state: await readState(existing) }
-    } else {
-      job = await createJob({
-        root: typeof values.get('out') === 'string' ? values.get('out') : defaultJobRoot(),
-        source,
-        ref,
-        targets,
-      })
-    }
+    const job = await createJob({
+      root: typeof values.get('out') === 'string' ? values.get('out') : defaultJobRoot(),
+      source,
+      ref,
+      targets,
+    })
     const state = await runJob(job.dir, {
       repositoryRoot: REPOSITORY_ROOT,
       planOnly: command === 'plan',
-      reuseWorktree: values.get('resume') === true,
       full: values.get('web-only') === true ? false : undefined,
       install: values.get('no-install') === true ? null : undefined,
       build: commandArg(values.get('build-command')),
@@ -143,7 +128,6 @@ async function main() {
     'commands:',
     '  build   prepare, apply overlays, build the web app, package targets',
     '  plan    prepare and apply overlays only; write a work order on mismatch',
-    '  learn   copy corrected worktree files back into build/overlays',
     '  status  print one job state',
     '  logs    print one job log tail',
     '',
@@ -152,8 +136,6 @@ async function main() {
     '  --ref <branch|tag|sha>   default: master',
     '  --targets <list>         default: linux-x64,win-x64',
     '  --out <dir>              job root (default: ~/.dsh/mesh/build)',
-    '  --job <dir>              reuse an existing job directory',
-    '  --resume                 reuse the existing worktree',
     '  --web-only               package the web payload without app/node/runtime',
     '  --no-install             skip pnpm install',
     '  --build-command <cmd>    override the web build command',

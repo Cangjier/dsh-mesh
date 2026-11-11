@@ -10,6 +10,7 @@ import {
   buildLinuxRollbackScript,
   buildWindowsActivateScript,
   buildWindowsPrepareScript,
+  DeployManager,
   describePlan,
   normalizeServices,
 } from '../code/deploy/engine.mjs'
@@ -217,3 +218,32 @@ test('scope=dsh leaves the gateway out of the restart list', async () => {
   }
 })
 
+
+test('DeployManager.wait settles a deployment and leaves a log', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-deploy-wait-'))
+  const pkg = path.join(dir, 'package.tar.gz')
+  await writeFile(pkg, 'not-a-real-archive')
+  const manager = new DeployManager({
+    repositoryRoot: process.cwd(),
+    dataDir: path.join(dir, 'deploy'),
+    runnerFactory: () => ({
+      upload: async () => {},
+      script: async () => {},
+    }),
+  })
+  try {
+    const started = await manager.start({
+      host: '127.0.0.1',
+      package: pkg,
+      appRoot: path.join(dir, 'app'),
+      os: 'linux',
+      services: [{ name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' }],
+      gatePort: '80',
+    })
+    const job = await manager.wait(started.job.id)
+    assert.equal(job.status, 'succeeded')
+    assert.match(await manager.logs(started.job.id, 20), /deployment succeeded/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

@@ -367,4 +367,13 @@ export class MemberTaskService {
       return ''
     }
   }
+
+  /**
+   * Absolute path of one task's log file.
+   * @param {string} taskId task id.
+   * @returns {string} log path.
+   */
+  logPath(taskId) {
+    return path.join(this.taskRoot, `${String(taskId)}.log`)
+  }
 }

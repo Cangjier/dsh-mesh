@@ -1,5 +1,8 @@
 # Step 010 从源码构建多平台 Web 包
 
+> 工具名已收敛：当前模型工具是 `build`（同步执行，返回 `logFile` / `stateFile`），没有 `action`。
+> 本文保留当时的设计记录；现在 needs-fix 后再次调用 `build { jobId }` 会自动固化并继续，没有 learn/resume CLI。
+
 ## 背景
 
 Step 001 的离线包是「在开发机 `npm install @deepseek-ai/dsh`，按目标平台装配原生依赖」，它不能改 DSH 的 Web 源码。Step 003/005 的补丁脚本改的是**已安装客户端 bundle** 的压缩文本，DSH 升级后锚点很容易失效，而且只对当前安装目录生效。
@@ -102,23 +105,22 @@ node build/tools/make-overlays.mjs \
 DSH 的调用链：
 
 ```text
-dsh_mesh { action: "build" }
-  └─ 状态 needs-fix，返回 work-order/prompt 路径
+build
+  └─ 状态 needs-fix，返回 jobId、work-order/prompt 路径
        └─ DSH 用 subagent 按 work-order 修改工作树
-            └─ dsh_mesh { action: "build_learn", jobId }
+            └─ build { jobId }
                  └─ 把工作树里的修改写成新覆盖层，并把 mismatch 的 baseSha256 更新为当时 pristine 文件的实际哈希
-                      └─ dsh_mesh { action: "build_resume", jobId }
-                           └─ 复用工作树，重新应用覆盖层并构建
+                      └─ 复用工作树，重新应用覆盖层并构建
 ```
 
-`learn` 会把覆盖层写成工作树里的修改，并把发生 mismatch 的 `baseSha256` 更新为当时 pristine 文件的实际哈希。这样下一份同版本的新鲜 checkout 能直接应用学习后的覆盖层；上游再变时仍会重新产生工作单，这是有意的。
+自动固化会把覆盖层写成工作树里的修改，并把发生 mismatch 的 `baseSha256` 更新为当时 pristine 文件的实际哈希。这样下一份同版本的新鲜 checkout 能直接应用固化后的覆盖层；上游再变时仍会重新产生工作单，这是有意的。
 
-命令行等价：
+命令行只用于手工构建和查看：
 
 ```bash
 node code/build/cli.mjs build
-node code/build/cli.mjs learn --job <job-dir>
-node code/build/cli.mjs build --job <job-dir> --resume
+node code/build/cli.mjs status --job <job-dir>
+node code/build/cli.mjs logs --job <job-dir>
 ```
 
 ## Web 构建
@@ -223,28 +225,25 @@ created → running(prepare → apply → build → package) → done
                 └─ build-failed / failed
 ```
 
-`dsh_mesh` 动作：
+`build` 参数：
 
-| action | 作用 |
+| 参数 | 说明 |
 |---|---|
-| `status` | 本机 / WireGuard 状态 |
-| `members` | 成员发现 |
-| `recipes` | 覆盖层清单 |
-| `build` | 启动后台构建，立即返回 job id |
-| `build_status` | 读状态、工作单路径、日志尾 |
-| `build_logs` | 读日志 |
-| `build_learn` | 从工作树学习覆盖层 |
-| `build_resume` | 复用工作树继续构建 |
-| `jobs` | 最近任务列表 |
+| `source` | 源码 URL 或本地目录 |
+| `ref` | 分支 / tag / commit |
+| `targets` | 目标平台列表 |
+| `planOnly` | 只应用覆盖层并写工作单 |
+| `jobId` | needs-fix 后固化工作树并继续 |
+| `keepDist` | 清理旧 build 时保留 dist |
 
-面板「构建」页提供同样的入口；`needs-fix` 时显示「学习覆盖层」「继续构建」。
+面板「成员」页只负责成员/组网，不再有构建页。
 
 ## 失败模式
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `cannot find ref` | 分支/tag 不存在，或 codeload 不可达 | 显式给 `--ref <sha>` 或 `--source <local>`；代理环境设 `NODE_USE_ENV_PROXY=1` 与 `HTTPS_PROXY` |
-| `baseSha256` mismatch | 上游源码变了 | 按工作单修工作树，`learn` 后 `resume` |
+| `baseSha256` mismatch | 上游源码变了 | 按工作单修工作树，再调用 `build { jobId }` |
 | `pnpm install` 失败 | 网络/磁盘/锁文件 | 看日志；必要时 `--no-install` 复用已有依赖 |
 | `npm install @deepseek-ai/dsh` 失败 | 版本不存在 / 目标原生包缺失 | 检查 `dshVersion` 与目标矩阵 |
 | Node 运行时 404 | 该版本没有对应平台包 | 显式 `nodeVersion`，或换目标 |

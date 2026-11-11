@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path7 from "node:path";
 
 // src/lib/service.mjs
-import { mkdir as mkdir4, readFile as readFile5, readdir as readdir3, stat as stat4, writeFile as writeFile4 } from "node:fs/promises";
+import { mkdir as mkdir4, readFile as readFile5, readdir as readdir3, rm as rm3, stat as stat4, writeFile as writeFile4 } from "node:fs/promises";
 import { readFileSync as readFileSync2, existsSync as existsSync4 } from "node:fs";
 import { createHash as createHash3 } from "node:crypto";
 import os5 from "node:os";
@@ -544,7 +544,7 @@ async function writeWorkOrder(options) {
     `\u4F60\u5728\u4E3A dsh-mesh \u6784\u5EFA ${options.source}@${options.ref} \u7684\u4FEE\u6539\u7248 Web \u5305\u3002`,
     "\u786E\u5B9A\u6027\u6784\u5EFA\u5728\u5E94\u7528\u6E90\u7801\u8986\u76D6\u5C42\u65F6\u5931\u8D25\u3002\u8BF7\u53EA\u4FEE\u590D\u5DE5\u4F5C\u6811\u91CC\u7684\u6E90\u7801\uFF0C\u4E0D\u8981\u653E\u5BBD\u8986\u76D6\u5C42\u6821\u9A8C\u3002",
     "\u5148\u8BFB work-order.md \u4E0E\u5BF9\u5E94\u7684 Step \u6587\u6863\uFF0C\u518D\u4FEE\u6539\u4E0B\u5217\u6587\u4EF6\uFF0C\u4F7F\u6BCF\u4E2A\u6587\u4EF6\u7684\u8986\u76D6\u5C42 marker \u5B58\u5728\uFF0C\u5E76\u8BA9 pnpm run build:web \u901A\u8FC7\u3002",
-    `\u4FEE\u5B8C\u540E\u8FD0\u884C \`node code/build/cli.mjs learn --job ${jobDir}\` \u628A\u4FEE\u6539\u6536\u6210\u65B0\u7684\u8986\u76D6\u5C42\uFF0C\u7136\u540E \`node code/build/cli.mjs build --job ${jobDir} --resume\`\u3002`,
+    `\u4FEE\u5B8C\u540E\u8C03\u7528 dsh-mesh \u7684 build \u5DE5\u5177\uFF0C\u5E76\u4F20 jobId="${path2.basename(jobDir)}"\uFF1B\u5B83\u4F1A\u81EA\u52A8\u628A\u4FEE\u6539\u56FA\u5316\u6210\u8986\u76D6\u5C42\u5E76\u7EE7\u7EED\u540C\u4E00\u4E2A job\u3002`,
     "",
     ...options.result.mismatches.map((item) => `- ${item.path}\uFF08${item.step}\uFF1B${item.doc}\uFF09\uFF1A${item.reason}`)
   ].join("\n");
@@ -566,8 +566,8 @@ async function writeWorkOrder(options) {
     "",
     "1. \u6253\u5F00\u6E90\u7801\u6811\u91CC\u7684\u76EE\u6807\u6587\u4EF6\uFF0C\u6309\u5BF9\u5E94 Step \u6587\u6863\u628A\u754C\u9762\u6539\u597D\u3002",
     "2. \u4FDD\u6301\u8986\u76D6\u5C42 marker \u6CE8\u91CA\u5B58\u5728\uFF1Apicker \u662F `dsh-mesh overlay: picker`\uFF0Clogin \u662F `dsh-mesh overlay: login`\u3002",
-    `3. \u8FD0\u884C \`node code/build/cli.mjs learn --job ${jobDir}\`\uFF1B\u5B83\u4F1A\u628A\u6539\u597D\u7684\u6587\u4EF6\u5199\u56DE \`build/overlays/\`\u3002`,
-    `4. \u8FD0\u884C \`node code/build/cli.mjs build --job ${jobDir} --resume\`\uFF1B\u4E0B\u4E00\u6B21\u540C\u4E00 ref \u4F1A\u5148\u5E94\u7528\u8FD9\u4EFD\u65B0\u8986\u76D6\u5C42\u3002`,
+    `3. \u8C03\u7528 build \u5DE5\u5177\uFF0C\u53C2\u6570 \`jobId="${path2.basename(jobDir)}"\`\uFF1B\u5B83\u4F1A\u628A\u6539\u597D\u7684\u6587\u4EF6\u5199\u56DE \`build/overlays/\`\u3002`,
+    "4. \u540C\u4E00\u6B21 build \u8C03\u7528\u4F1A\u590D\u7528\u5DE5\u4F5C\u6811\u7EE7\u7EED install/build/package\uFF1B\u4E0B\u4E00\u6B21\u540C\u4E00 ref \u4F1A\u76F4\u63A5\u5E94\u7528\u65B0\u8986\u76D6\u5C42\u3002",
     "",
     "## \u5EFA\u8BAE\u7684\u5B50\u4EE3\u7406\u63D0\u793A\u8BCD",
     "",
@@ -1823,6 +1823,16 @@ var DeployManager = class {
 `, "utf8");
   }
   /**
+   * Wait for one running deployment or rollback job to settle.
+   * @param {string} id job id.
+   * @returns {Promise<object|null>} final job state.
+   */
+  async wait(id) {
+    const running = this.running.get(id);
+    if (running !== void 0) await running;
+    return this.status(id);
+  }
+  /**
    * Read a job.
    * @param {string} id job id.
    * @returns {Promise<object|null>} state.
@@ -2139,8 +2149,40 @@ var MeshService = class {
     return { ok: true, tags };
   }
   /**
+   * Remove the files left by earlier builds.
+   *
+   * Called after a build finishes, with the just-finished job id as `keep`, so
+   * the new `src/`, `work-order/` and `dist/` survive. All older jobs lose
+   * their worktree, work order and (unless `keepDist`) their package.
+   * `state.json` and `build.log` are always kept for postmortem.
+   * @param {{keep?: string, keepDist?: boolean}} [options] job to preserve and whether to retain old packages.
+   * @returns {Promise<string[]>} ids whose outputs were removed.
+   */
+  async cleanupBuilds(options = {}) {
+    if (!existsSync4(this.jobRoot)) return [];
+    const entries = await readdir3(this.jobRoot, { withFileTypes: true });
+    const removed = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const dir = path5.join(this.jobRoot, entry.name);
+      let state;
+      try {
+        state = await readState(dir);
+      } catch {
+        continue;
+      }
+      if (this.running.has(state.id)) continue;
+      if (state.id === options.keep) continue;
+      await rm3(path5.join(dir, "src"), { recursive: true, force: true });
+      await rm3(path5.join(dir, "work-order"), { recursive: true, force: true });
+      if (options.keepDist !== true) await rm3(path5.join(dir, "dist"), { recursive: true, force: true });
+      removed.push(state.id);
+    }
+    return removed;
+  }
+  /**
    * Start one build job in the background.
-   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string}} request build request.
+   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean}} request build request.
    * @returns {Promise<object>} the initial job state.
    */
   async startBuild(request = {}) {
@@ -2168,9 +2210,39 @@ var MeshService = class {
     return { ...job.state, dir: job.dir, running: true };
   }
   /**
-   * Continue a job from its corrected worktree. This is what follows
-   * `build_learn`: the overlays have been updated, and the worktree already
-   * contains the fix, so nothing is downloaded again.
+   * Run one build to completion.
+   *
+   * Without `jobId` this starts a fresh build. With `jobId` it treats the
+   * job's worktree as the DSH-adapted result: if the job stopped at
+   * `needs-fix`, it learns the corrected files into the overlay set first,
+   * then resumes the same job. There is no separate learn/resume command.
+   * Older jobs are cleaned only after the current job finishes, so a running
+   * build never loses its own worktree or package.
+   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean, jobId?: string}} request build request.
+   * @returns {Promise<object>} final job with log tail.
+   */
+  async build(request = {}) {
+    if (typeof request.jobId === "string" && request.jobId !== "") {
+      const state = await this.job(request.jobId);
+      if (state.status === "needs-fix") await this.learn(request.jobId);
+      const resumed = await this.resumeBuild(request.jobId);
+      const running2 = this.running.get(resumed.id);
+      if (running2 !== void 0) await running2;
+      const final2 = await this.job(resumed.id);
+      await this.cleanupBuilds({ keep: resumed.id, keepDist: request.keepDist === true });
+      return final2;
+    }
+    const job = await this.startBuild(request);
+    const running = this.running.get(job.id);
+    if (running !== void 0) await running;
+    const final = await this.job(job.id);
+    await this.cleanupBuilds({ keep: job.id, keepDist: request.keepDist === true });
+    return final;
+  }
+  /**
+   * Continue a job from its corrected worktree. This is what follows the
+   * automatic learn step: the overlays have been updated, and the worktree
+   * already contains the fix, so nothing is downloaded again.
    * @param {string} id job id.
    * @returns {Promise<object>} the job state, running in the background.
    */
@@ -2205,6 +2277,8 @@ var MeshService = class {
     const state = await readState(dir);
     return {
       ...state,
+      logFile: path5.join(dir, "build.log"),
+      stateFile: path5.join(dir, "state.json"),
       logTail: await readLogTail(dir, 60),
       running: this.running.has(id),
       workOrderMarkdown: state.workOrder?.markdown ?? null,
@@ -2301,22 +2375,98 @@ var MeshService = class {
     return { ok: true, dir: this.packagesDir, packages };
   }
   /**
-   * Deploy one local package to a discovered member over SSH.
+   * Resolve a package path from an absolute path, `~/.dsh/packages/<name>`,
+   * or the repository `dist/<name>`.
+   * @param {string} input package path or filename.
+   * @returns {Promise<string>} absolute package path.
+   */
+  async resolvePackage(input) {
+    const raw = typeof input === "string" ? input.trim() : "";
+    if (raw === "") throw new Error("package is required");
+    const candidates = path5.isAbsolute(raw) ? [raw] : [path5.join(this.packagesDir, raw), path5.join(this.repositoryRoot, "dist", raw)];
+    for (const file of candidates) {
+      const info = await stat4(file).catch(() => null);
+      if (info?.isFile()) return file;
+    }
+    throw new Error(`package not found: ${raw}`);
+  }
+  /**
+   * Resolve a target and start a deployment job.
+   *
+   * This is the single entry point used by both the panel API and the model
+   * tool. The caller decides whether to wait by calling `deployPackage()`;
+   * the panel keeps the historical non-blocking `deployMember()` wrapper.
+   * @param {{host?: string, member?: string, package?: string}} request target and package.
+   * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string}>} started job.
+   */
+  async startDeploy(request) {
+    const host = typeof request.host === "string" ? request.host.trim() : "";
+    const memberId = typeof request.member === "string" ? request.member.trim() : "";
+    const packagePath = await this.resolvePackage(request.package);
+    const snapshot = await this.members();
+    const all = [snapshot.local, ...snapshot.members].filter(Boolean);
+    const member = memberId !== "" ? all.find((candidate) => candidate.id === memberId) : all.find((candidate) => candidate.id === host || candidate.name === host || candidate.ip === host);
+    if (memberId !== "" && member === void 0) throw new Error(`member not found: ${memberId}`);
+    if (member !== void 0) {
+      const os7 = /win(?:dows)?/iu.test(path5.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+      const deployRequest = await this.#memberDeployRequest(member, packagePath, os7);
+      const started2 = await this.deploy.start(deployRequest);
+      return {
+        ok: true,
+        job: started2.job,
+        member: { id: member.id, name: member.name, ip: member.ip },
+        packagePath
+      };
+    }
+    if (host === "") throw new Error("host is required");
+    const os6 = /win(?:dows)?/iu.test(path5.basename(packagePath)) ? "windows" : "linux";
+    const appRoot = os6 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
+    const started = await this.deploy.start({ host, package: packagePath, os: os6, appRoot });
+    return { ok: true, job: started.job, member: null, packagePath };
+  }
+  /**
+   * Deploy one local package to a discovered member, without waiting.
+   * Kept for the panel API, which returns a job id immediately.
    * @param {{member?: string, package?: string}} request member id/ip and package filename.
-   * @returns {Promise<object>} deploy job.
+   * @returns {Promise<object>} started deploy job.
    */
   async deployMember(request) {
-    const memberId = typeof request.member === "string" ? request.member.trim() : "";
-    const packageName = typeof request.package === "string" ? request.package.trim() : "";
-    if (memberId === "") throw new Error("member is required");
-    if (packageName === "" || path5.basename(packageName) !== packageName) throw new Error("package must be a filename");
-    const listed = await this.packages();
-    const selected = listed.packages.find((entry) => entry.name === packageName);
-    if (selected === void 0) throw new Error(`package not found in ${this.packagesDir}`);
-    const snapshot = await this.members();
-    const member = [snapshot.local, ...snapshot.members].find((candidate) => candidate.id === memberId);
-    if (member === void 0) throw new Error(`member not found: ${memberId}`);
-    if (member.ip === "") throw new Error(`member ${memberId} has no VPN address`);
+    const result = await this.startDeploy({ member: request.member, package: request.package });
+    return {
+      ok: true,
+      job: result.job,
+      member: result.member,
+      packagesDir: this.packagesDir
+    };
+  }
+  /**
+   * Deploy one package to an SSH host, synchronously.
+   *
+   * The host may be a discovered member id/name/IP, in which case the member's
+   * OS, install root and WireGuard SSH metadata are used; otherwise the host is
+   * treated as a plain SSH target and the package platform decides the OS.
+   * @param {{host?: string, package?: string}} request target host and package.
+   * @returns {Promise<{job: object|null, logFile: string, log: string, member?: object}>} final result.
+   */
+  async deployPackage(request) {
+    const started = await this.startDeploy({ host: request.host, package: request.package });
+    const job = await this.deploy.wait(started.job.id);
+    return {
+      job,
+      member: started.member,
+      logFile: path5.join(this.deployRoot, started.job.id, "deploy.log"),
+      log: await this.deployLogs(started.job.id, 80)
+    };
+  }
+  /**
+   * Build the deployment request for a discovered member.
+   * @param {object} member member snapshot.
+   * @param {string} packagePath package file.
+   * @param {'linux'|'windows'} os target OS.
+   * @returns {Promise<object>} deploy request.
+   */
+  async #memberDeployRequest(member, packagePath, os6) {
+    if (member.ip === "") throw new Error(`member ${member.id} has no VPN address`);
     let user = "root";
     let identityFile;
     const { state } = await readWireGuardState({ file: path5.join(this.home, "wireguard", "state.json") });
@@ -2329,7 +2479,6 @@ var MeshService = class {
         if (existsSync4(candidate)) identityFile = candidate;
       }
     }
-    const os6 = selected.target === "windows" ? "windows" : "linux";
     const system = member.system;
     let appRoot = typeof system?.appRoot === "string" && system.appRoot.trim() !== "" ? system.appRoot.trim() : void 0;
     let serviceUser = typeof system?.user === "string" && system.user.trim() !== "" ? system.user.trim() : void 0;
@@ -2349,16 +2498,15 @@ var MeshService = class {
       const home = os6 === "windows" ? `C:\\Users\\${user}` : user === "root" ? "/root" : `/home/${user}`;
       appRoot = os6 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
     }
-    const result = await this.deploy.start({
+    return {
       host: member.ip,
       user,
       identityFile,
       os: os6,
       appRoot,
       serviceUser,
-      package: selected.path
-    });
-    return { ok: true, job: result.job, member: { id: member.id, name: member.name, ip: member.ip }, packagesDir: this.packagesDir };
+      package: packagePath
+    };
   }
   /**
    * Plan an SSH blue-green deployment without touching the network.
@@ -2947,61 +3095,65 @@ var MemberTaskService = class {
       return "";
     }
   }
+  /**
+   * Absolute path of one task's log file.
+   * @param {string} taskId task id.
+   * @returns {string} log path.
+   */
+  logPath(taskId) {
+    return path6.join(this.taskRoot, `${String(taskId)}.log`);
+  }
 };
 
 // src/lib/tools.mjs
 function registerTools(ctx, toolsCtx, service) {
-  const definition = {
-    name: "dsh_mesh",
+  const buildDefinition = {
+    name: "build",
     description: [
-      "\u7BA1\u7406\u4E2A\u4EBA\u7248 DSH Web \u7684\u6210\u5458\u4E0E\u6784\u5EFA\u3002",
+      "\u4ECE\u56FA\u5B9A DSH \u6E90\u7801\u6784\u5EFA Web \u79BB\u7EBF\u5305\uFF0C\u5E76\u7B49\u5F85\u6784\u5EFA\u7ED3\u675F\u3002",
       "",
-      "\u6210\u5458\uFF1A`members` \u8BFB\u53D6 WireGuard \u6210\u5458\u5E76\u63A2\u6D4B\u6BCF\u4E2A\u6210\u5458\u7684 DSH \u7F51\u5173\uFF1B`status` \u8BFB\u53D6\u672C\u673A\u4E0E WireGuard \u72B6\u6001\u3002",
-      "\u6784\u5EFA\uFF1A`build` \u4ECE\u56FA\u5B9A GitHub \u6E90\u7801\uFF08\u9ED8\u8BA4 master\uFF09clone \u4E00\u4EFD\u5DE5\u4F5C\u6811\uFF0C\u5E94\u7528\u6E90\u7801\u8986\u76D6\u5C42\uFF0C\u6784\u5EFA Web \u524D\u7AEF\uFF0C\u5E76\u6309 linux-x64/win-x64 \u6253\u5305\u3002\u5DE5\u5177\u7ACB\u5373\u8FD4\u56DE job id\uFF1B\u7528 `build_status` \u770B\u8FDB\u5EA6\uFF0C`build_logs` \u770B\u65E5\u5FD7\u3002",
-      "\u5982\u679C\u8986\u76D6\u5C42\u4E0E\u4E0A\u6E38\u6E90\u7801\u4E0D\u518D\u5339\u914D\uFF0C\u6784\u5EFA\u8FD4\u56DE needs-fix \u5DE5\u4F5C\u5355\uFF1B\u628A\u5DE5\u4F5C\u5355\u4EA4\u7ED9 subagent \u4FEE\u597D\u5DE5\u4F5C\u6811\u540E\uFF0C\u8C03\u7528 `build_learn` \u628A\u4FEE\u6539\u6536\u6210\u65B0\u7684\u8986\u76D6\u5C42\uFF0C\u518D\u7528\u540C\u4E00\u4E2A job `build` \u7EE7\u7EED\u3002",
-      "`recipes` \u5217\u51FA\u5F53\u524D\u8986\u76D6\u5C42\u548C\u5B83\u4EEC\u5BF9\u5E94\u7684 Step \u6587\u6863\u3002",
-      "",
-      "\u6CE8\u610F\uFF1A\u6784\u5EFA\u4F1A\u8FD0\u884C pnpm install \u4E0E\u6E90\u7801\u4ED3\u5E93\u7684 build \u811A\u672C\uFF0C\u8017\u65F6\u6570\u5206\u949F\u5E76\u5360\u7528\u78C1\u76D8\uFF1B\u53EA\u5BF9\u53EF\u4FE1\u6E90\u7801\u4F7F\u7528\uFF0C\u4E00\u6B21\u53EA\u8DD1\u4E00\u4E2A\u6784\u5EFA\u66F4\u7A33\u59A5\u3002"
+      "\u9ED8\u8BA4\u6E90\u7801\u662F https://github.com/deepseek-ai/deepseek-harness@master\uFF0C\u9ED8\u8BA4\u76EE\u6807 linux-x64 + win-x64\u3002",
+      "\u6784\u5EFA\u4F1A\u4E0B\u8F7D\u6E90\u7801 tarball\u3001\u5E94\u7528 build/recipes.json \u7684\u8986\u76D6\u5C42\u3001\u8FD0\u884C pnpm install \u4E0E pnpm run build:web\uFF0C\u6700\u540E\u6253\u5305\uFF1B\u8017\u65F6\u6570\u5206\u949F\u5E76\u5360\u7528\u78C1\u76D8\u3002",
+      "`planOnly` \u53EA\u5E94\u7528\u8986\u76D6\u5C42\u5E76\u5199\u5DE5\u4F5C\u5355\uFF0C\u4E0D\u5B89\u88C5\u3001\u4E0D\u6784\u5EFA\u3001\u4E0D\u6253\u5305\u3002",
+      "\u5982\u679C\u8986\u76D6\u5C42\u4E0E\u4E0A\u6E38\u6E90\u7801\u4E0D\u5339\u914D\uFF0C\u6784\u5EFA\u505C\u5728 needs-fix \u5E76\u8FD4\u56DE job id\u3001\u5DE5\u4F5C\u5355\u548C\u5DE5\u4F5C\u6811\u3002",
+      "\u8BA9 DSH \u4FEE\u597D\u5DE5\u4F5C\u6811\u540E\uFF0C\u518D\u6B21\u8C03\u7528 build \u5E76\u4F20\u5165\u540C\u4E00\u4E2A jobId\uFF1A\u8FD9\u6B21\u8C03\u7528\u4F1A\u81EA\u52A8\u628A\u4FEE\u6539\u56FA\u5316\u6210\u8986\u76D6\u5C42\uFF08\u66F4\u65B0 recipes\uFF09\uFF0C\u7136\u540E\u590D\u7528\u5DE5\u4F5C\u6811\u7EE7\u7EED\u6784\u5EFA\uFF1B\u4E0D\u9700\u8981 learn/resume \u547D\u4EE4\u3002",
+      "\u6B63\u5E38\u7684\u4E0B\u4E00\u6B21 build \u4F1A\u76F4\u63A5\u4F7F\u7528\u56FA\u5316\u540E\u7684\u8986\u76D6\u5C42\u3002",
+      "\u6784\u5EFA\u5B8C\u6210\u540E\u4F1A\u6E05\u7406\u66F4\u65E9 build \u7684 src/\u3001work-order/ \u548C dist/\uFF1B\u5F53\u524D job \u7684\u4EA7\u7269\u4FDD\u7559\u3002\u4F20 keepDist=true \u53EF\u4EE5\u4FDD\u7559\u65E7\u7684 dist/\u3002",
+      "\u6CE8\u610F\uFF1A\u53EA\u5BF9\u53EF\u4FE1\u6E90\u7801\u4F7F\u7528\uFF1B\u8FD9\u4E2A\u5DE5\u5177\u662F\u540C\u6B65\u7684\uFF0C\u8C03\u7528\u4F1A\u4E00\u76F4\u7B49\u5230 done / planned / needs-fix / failed\uFF0C\u5E76\u5728 text \u548C data.logFile \u4E2D\u8FD4\u56DE\u65E5\u5FD7\u8DEF\u5F84\u3002"
     ].join("\n"),
     parameters: {
       type: "object",
       properties: {
-        action: {
-          type: "string",
-          enum: ["status", "members", "jobs", "build", "build_status", "build_logs", "build_learn", "build_resume", "recipes"],
-          description: "\u8981\u6267\u884C\u7684\u52A8\u4F5C\u3002"
-        },
         source: {
           type: "string",
-          description: "build\uFF1A\u6E90\u7801 URL \u6216\u672C\u5730\u76EE\u5F55\u3002\u7701\u7565\u65F6\u7528\u914D\u7F6E/recipes \u7684\u56FA\u5B9A\u6E90\u3002"
+          description: "\u6E90\u7801 URL \u6216\u672C\u5730\u76EE\u5F55\u3002\u7701\u7565\u65F6\u7528\u914D\u7F6E\uFF0C\u518D\u9ED8\u8BA4\u56FA\u5B9A GitHub \u6E90\u3002"
         },
         ref: {
           type: "string",
-          description: "build\uFF1A\u5206\u652F\u3001tag \u6216 commit\u3002\u7701\u7565\u65F6\u7528 master\u3002"
+          description: "\u5206\u652F\u3001tag \u6216 commit\u3002\u7701\u7565\u65F6\u7528 master\u3002"
         },
         targets: {
           type: "array",
           items: { type: "string" },
-          description: 'build\uFF1A\u76EE\u6807\u5217\u8868\uFF0C\u4F8B\u5982 ["linux-x64","win-x64"]\u3002\u7701\u7565\u65F6\u7528\u914D\u7F6E\u3002'
+          description: '\u76EE\u6807\u5217\u8868\uFF0C\u4F8B\u5982 ["linux-x64","win-x64"]\u3002\u7701\u7565\u65F6\u7528\u914D\u7F6E\u3002'
         },
         planOnly: {
           type: "boolean",
-          description: "build\uFF1A\u53EA\u5E94\u7528\u8986\u76D6\u5C42\u5E76\u5199\u5DE5\u4F5C\u5355\uFF0C\u4E0D\u8FD0\u884C pnpm install/build\u3002"
+          description: "\u53EA\u5E94\u7528\u8986\u76D6\u5C42\u5E76\u5199\u5DE5\u4F5C\u5355\uFF0C\u4E0D\u8FD0\u884C pnpm install/build\u3002"
         },
         version: {
           type: "string",
-          description: "build\uFF1A\u8986\u76D6\u5305\u7248\u672C\u53F7\u3002"
+          description: "\u8986\u76D6\u5305\u7248\u672C\u53F7\u3002"
         },
         jobId: {
           type: "string",
-          description: "build_status / build_logs / build_learn\uFF1A\u4EFB\u52A1 id\u3002"
+          description: "needs-fix \u7684 job id\uFF1A\u5148\u56FA\u5316\u5DE5\u4F5C\u6811\u91CC\u7684\u4FEE\u6539\uFF0C\u518D\u7EE7\u7EED\u540C\u4E00\u4E2A job\u3002"
         },
-        lines: {
-          type: "number",
-          description: "build_logs\uFF1A\u8FD4\u56DE\u6700\u540E\u591A\u5C11\u884C\uFF0C\u9ED8\u8BA4 80\u3002"
+        keepDist: {
+          type: "boolean",
+          description: "build \u5B8C\u6210\u540E\u6E05\u7406\u66F4\u65E9 job \u65F6\u4FDD\u7559 dist/\uFF1B\u9ED8\u8BA4\u5220\u9664\u3002"
         }
       },
-      required: ["action"],
       additionalProperties: false
     },
     output: {
@@ -3019,139 +3171,44 @@ function registerTools(ctx, toolsCtx, service) {
         text: typeof value.text === "string" ? value.text : JSON.stringify(value)
       }]
     },
-    isConcurrencySafe: () => true,
+    isConcurrencySafe: () => false,
     async execute(args) {
-      const action = String(args.action);
-      if (action === "status") {
-        const data = await service.status();
-        return { ok: true, text: formatStatus(data), data };
-      }
-      if (action === "members") {
-        const data = await service.members();
-        return { ok: true, text: formatMembers(data), data };
-      }
-      if (action === "jobs") {
-        const jobs = await service.jobs();
-        return { ok: true, text: jobs.length === 0 ? "\u8FD8\u6CA1\u6709\u6784\u5EFA\u4EFB\u52A1\u3002" : jobs.map((job) => `${job.id}  ${job.status}  ${job.phase}  ${job.ref}`).join("\n"), data: { jobs } };
-      }
-      if (action === "recipes") {
-        const data = await service.recipes();
-        return {
-          ok: true,
-          text: [
-            `\u6E90\u7801\uFF1A${data.source}@${data.ref}`,
-            `tree\uFF1A${data.tree ?? "\u2014"}`,
-            ...data.steps.map((step) => `- ${step.id}\uFF08${step.title}\uFF09\uFF1A${step.files.map((file) => file.path).join(", ")}\uFF1B\u6587\u6863\uFF1A${step.doc}`)
-          ].join("\n"),
-          data
-        };
-      }
-      if (action === "build") {
-        const job = await service.startBuild({
-          source: typeof args.source === "string" ? args.source : void 0,
-          ref: typeof args.ref === "string" ? args.ref : void 0,
-          targets: Array.isArray(args.targets) ? args.targets : void 0,
-          planOnly: args.planOnly === true,
-          version: typeof args.version === "string" ? args.version : void 0
-        });
-        return {
-          ok: true,
-          text: [
-            `\u5DF2\u542F\u52A8\u6784\u5EFA\u4EFB\u52A1 ${job.id}\uFF08${job.source}@${job.ref} -> ${job.targets.join(", ")}\uFF09\u3002`,
-            "\u7528 build_status \u67E5\u770B\u8FDB\u5EA6\uFF0Cbuild_logs \u67E5\u770B\u65E5\u5FD7\u3002",
-            `\u4EFB\u52A1\u76EE\u5F55\uFF1A${job.dir}`
-          ].join("\n"),
-          data: job
-        };
-      }
-      if (action === "build_status") {
-        const job = await service.job(requireJobId(args));
-        return {
-          ok: true,
-          text: [
-            `${job.id}  ${job.status}  ${job.phase}`,
-            `\u6E90\u7801\uFF1A${job.source}@${job.ref}`,
-            job.error ? `\u9519\u8BEF\uFF1A${job.error}` : "",
-            job.workOrderMarkdown ? `\u5DE5\u4F5C\u5355\uFF1A${job.workOrderMarkdown}` : "",
-            job.running ? "\u4EFB\u52A1\u4ECD\u5728\u8FD0\u884C\u3002" : "\u4EFB\u52A1\u5DF2\u505C\u6B62\u3002"
-          ].filter(Boolean).join("\n"),
-          data: job
-        };
-      }
-      if (action === "build_logs") {
-        const jobId = requireJobId(args);
-        const lines = await service.log(jobId, typeof args.lines === "number" ? args.lines : 80);
-        return { ok: true, text: lines.join("\n"), data: { jobId, lines } };
-      }
-      if (action === "build_learn") {
-        const job = await service.learn(requireJobId(args));
-        return {
-          ok: true,
-          text: `\u5DF2\u628A\u5DE5\u4F5C\u6811\u91CC\u7684\u4FEE\u6539\u6536\u6210\u8986\u76D6\u5C42\uFF1B\u73B0\u5728\u53EF\u4EE5\u7528 build_resume \u7EE7\u7EED\u540C\u4E00\u4E2A\u4EFB\u52A1\u3002
-${job.worktree ?? ""}`,
-          data: job
-        };
-      }
-      if (action === "build_resume") {
-        const job = await service.resumeBuild(requireJobId(args));
-        return {
-          ok: true,
-          text: `\u5DF2\u7EE7\u7EED\u4EFB\u52A1 ${job.id}\uFF0C\u590D\u7528\u73B0\u6709\u5DE5\u4F5C\u6811\uFF1B\u7528 build_status \u67E5\u770B\u8FDB\u5EA6\u3002`,
-          data: job
-        };
-      }
-      throw new Error(`unknown action: ${action}`);
+      const data = await service.build({
+        source: typeof args.source === "string" ? args.source : void 0,
+        ref: typeof args.ref === "string" ? args.ref : void 0,
+        targets: Array.isArray(args.targets) ? args.targets : void 0,
+        planOnly: args.planOnly === true,
+        version: typeof args.version === "string" ? args.version : void 0,
+        jobId: typeof args.jobId === "string" ? args.jobId : void 0,
+        keepDist: args.keepDist === true
+      });
+      return {
+        ok: data.status === "done" || data.status === "planned",
+        text: formatBuild(data),
+        data
+      };
     }
   };
   const deployDefinition = {
-    name: "dsh_mesh_deploy",
+    name: "deploy",
     description: [
-      "\u901A\u8FC7 SSH \u84DD\u7EFF\u90E8\u7F72 dsh-mesh \u6210\u5458\u3002",
+      "\u901A\u8FC7 SSH \u628A dsh-mesh \u79BB\u7EBF\u5305\u90E8\u7F72\u5230\u76EE\u6807\u4E3B\u673A\uFF0C\u5E76\u7B49\u5F85\u90E8\u7F72\u7ED3\u675F\u3002",
       "",
-      "`plan` \u53EA\u8BA1\u7B97\u53D1\u5E03\u8BA1\u5212\uFF0C\u4E0D\u8054\u7F51\uFF1B`deploy` \u4E0A\u4F20\u5305\u5230\u76EE\u6807\uFF0C\u5148\u89E3\u538B\u5230\u65B0\u7684 releases/<release> \u76EE\u5F55\u5E76\u51C6\u5907\u597D\u5171\u4EAB config/data/home/workspace \u4E0E\u670D\u52A1\u5B9A\u4E49\uFF0C\u786E\u8BA4\u5168\u90E8\u5C31\u7EEA\u540E\u624D\u5207\u6362 current\uFF1B\u968F\u540E\u6309 control \u2192 dsh \u2192 gate \u7684\u987A\u5E8F\u91CD\u542F\u670D\u52A1\uFF0Cgateway \u6C38\u8FDC\u6700\u540E\u3002\u5065\u5EB7\u68C0\u67E5\u5931\u8D25\u4F1A\u81EA\u52A8\u5207\u56DE previous\u3002",
-      "`status` / `logs` \u67E5\u770B\u90E8\u7F72 job\uFF1B`rollback` \u5207\u56DE\u4E0A\u4E00\u4E2A release\u3002",
-      "\u76EE\u6807\u5FC5\u987B\u5DF2\u5B89\u88C5\u8FC7\u4E00\u6B21\uFF08\u5171\u4EAB config/gate.env \u5B58\u5728\uFF09\uFF0C\u5E76\u4E14 SSH \u4F7F\u7528\u5BC6\u94A5\u3001BatchMode \u53EF\u7528\uFF1BLinux \u9ED8\u8BA4 sudo -n\uFF0CWindows \u9700\u8981\u7BA1\u7406\u5458 SSH\u3002",
-      "\u670D\u52A1\u6E05\u5355\u53EF\u4EE5\u7528 services \u6307\u5B9A\uFF1B\u987A\u5E8F\u7531\u5DE5\u5177\u5F3A\u5236\u4E3A control \u2192 dsh \u2192 gate\uFF0C\u6700\u540E\u4E00\u9879\u5FC5\u987B\u662F gateway\u3002"
+      "\u8F93\u5165\u53EA\u6709 package \u548C\u76EE\u6807 host\u3002",
+      "host \u662F\u5DF2\u53D1\u73B0\u7684\u6210\u5458\u65F6\uFF0C\u81EA\u52A8\u89E3\u6790\u6210\u5458 IP\u3001SSH \u7528\u6237/\u79C1\u94A5\u3001OS \u548C\u5B89\u88C5\u76EE\u5F55\uFF1B",
+      "\u5426\u5219\u6309\u666E\u901A SSH \u4E3B\u673A\u5904\u7406\uFF0C\u76EE\u6807 OS \u7531\u5305\u540D\uFF08win / linux\uFF09\u51B3\u5B9A\uFF0C\u5B89\u88C5\u76EE\u5F55\u7528\u9ED8\u8BA4\u503C\u3002",
+      "\u56FA\u5B9A\u6D41\u7A0B\uFF1A\u4E0A\u4F20\u5305 \u2192 prepare \u5230\u65B0\u7684 release \u2192 \u5207\u6362 current \u2192 control \u2192 dsh \u2192 gate \u91CD\u542F \u2192 \u5065\u5EB7\u68C0\u67E5\uFF1B",
+      "\u5065\u5EB7\u68C0\u67E5\u5931\u8D25\u4F1A\u81EA\u52A8\u5207\u56DE previous\u3002",
+      "\u540C\u6B65\u8FD4\u56DE\u6700\u7EC8 job\uFF0C\u4EE5\u53CA text \u548C data.logFile \u4E2D\u7684\u65E5\u5FD7\u8DEF\u5F84\u3002",
+      "\u76EE\u6807\u5FC5\u987B\u5DF2\u7ECF\u5B89\u88C5\u8FC7\u4E00\u6B21\uFF08\u5171\u4EAB config/gate.env \u5B58\u5728\uFF09\uFF0CSSH \u9700\u975E\u4EA4\u4E92\u53EF\u7528\u3002"
     ].join("\n"),
     parameters: {
       type: "object",
       properties: {
-        action: {
-          type: "string",
-          enum: ["plan", "deploy", "status", "logs", "rollback"],
-          description: "\u8981\u6267\u884C\u7684\u52A8\u4F5C\u3002"
-        },
-        host: { type: "string", description: "\u76EE\u6807 SSH \u4E3B\u673A\u540D\u6216 IP\u3002" },
-        user: { type: "string", description: "SSH \u7528\u6237\uFF1B\u9ED8\u8BA4\u5F53\u524D\u7528\u6237\u3002" },
-        port: { type: "number", description: "SSH \u7AEF\u53E3\uFF0C\u9ED8\u8BA4 22\u3002" },
-        identityFile: { type: "string", description: "SSH \u79C1\u94A5\u8DEF\u5F84\u3002" },
-        os: { type: "string", enum: ["linux", "windows"], description: "\u76EE\u6807\u7CFB\u7EDF\uFF0C\u9ED8\u8BA4 linux\u3002" },
-        package: { type: "string", description: "\u672C\u5730\u79BB\u7EBF\u5305\u8DEF\u5F84\uFF1B\u7701\u7565\u65F6\u53D6 dist \u4E0B\u6700\u65B0\u7684\u5BF9\u5E94\u5E73\u53F0\u5305\u3002" },
-        appRoot: { type: "string", description: "\u76EE\u6807\u7A33\u5B9A\u6839\u76EE\u5F55\uFF0C\u9ED8\u8BA4 /opt/dsh-mesh \u6216 C:\\dsh-mesh\u3002" },
-        release: { type: "string", description: "\u53D1\u5E03 id\uFF0C\u9ED8\u8BA4\u65F6\u95F4\u6233+\u5305\u54C8\u5E0C\u3002" },
-        services: {
-          type: "array",
-          description: "\u670D\u52A1\u6E05\u5355\uFF1Brole \u5FC5\u987B\u542B\u4E00\u4E2A gate\uFF0C\u5DE5\u5177\u4F1A\u628A gate \u653E\u5230\u6700\u540E\u3002",
-          items: {
-            type: "object",
-            properties: {
-              name: { type: "string" },
-              role: { type: "string", enum: ["control", "dsh", "gate"] },
-              command: { type: "string", description: "\u76F8\u5BF9 current \u7684\u542F\u52A8\u547D\u4EE4\uFF0C\u9ED8\u8BA4 start.sh / dsh-mesh-service.exe\u3002" }
-            },
-            required: ["name"],
-            additionalProperties: false
-          }
-        },
-        scope: { type: "string", enum: ["all", "dsh"], description: "all \u91CD\u542F\u5168\u90E8\u670D\u52A1\uFF1Bdsh \u53EA\u91CD\u542F control/dsh\uFF0C\u4E0D\u52A8 gateway\u3002" },
-        gatePort: { type: "string", description: "\u5065\u5EB7\u68C0\u67E5\u7AEF\u53E3\uFF0C\u9ED8\u8BA4 80\u3002" },
-        retention: { type: "number", description: "\u4FDD\u7559\u6700\u8FD1\u51E0\u4E2A release\uFF0C\u9ED8\u8BA4 3\uFF1B\u81F3\u5C11 2\uFF08current + previous\uFF09\u3002" },
-        sudo: { type: "boolean", description: "Linux \u4F7F\u7528 sudo -n \u6267\u884C\u8FDC\u7A0B\u811A\u672C\uFF0C\u9ED8\u8BA4 true\u3002" },
-        includeScripts: { type: "boolean", description: "plan \u65F6\u540C\u65F6\u8FD4\u56DE prepare/activate/rollback \u811A\u672C\u5168\u6587\u3002" },
-        jobId: { type: "string", description: "status / logs \u7684 job id\u3002" },
-        lines: { type: "number", description: "logs \u8FD4\u56DE\u6700\u540E\u591A\u5C11\u884C\uFF0C\u9ED8\u8BA4 80\u3002" }
+        host: { type: "string", description: "\u76EE\u6807 SSH \u4E3B\u673A\u540D/IP\uFF0C\u4E5F\u53EF\u4EE5\u662F\u6210\u5458 id\u3001\u540D\u79F0\u6216 VPN IP\u3002" },
+        package: { type: "string", description: "\u672C\u5730\u79BB\u7EBF\u5305\u7684\u7EDD\u5BF9\u8DEF\u5F84\uFF0C\u6216 ~/.dsh/packages\u3001dist \u4E0B\u7684\u6587\u4EF6\u540D\u3002" }
       },
-      required: ["action"],
+      required: ["host", "package"],
       additionalProperties: false
     },
     output: {
@@ -3163,37 +3220,15 @@ ${job.worktree ?? ""}`,
     },
     isConcurrencySafe: () => false,
     async execute(args) {
-      const action = String(args.action);
-      if (action === "status") {
-        const job = await service.deployStatus(requireJobId(args));
-        return { ok: Boolean(job), text: job ? JSON.stringify(job, null, 2) : "\u672A\u627E\u5230\u8BE5\u90E8\u7F72 job", data: job };
-      }
-      if (action === "logs") {
-        const text = await service.deployLogs(requireJobId(args), typeof args.lines === "number" ? args.lines : 80);
-        return { ok: true, text: text || "(no log yet)" };
-      }
-      const request = deployRequest(args);
-      if (action === "plan") {
-        const result = await service.deployPlan(request);
-        return { ok: true, text: formatDeployPlan(result.plan), data: result };
-      }
-      if (action === "deploy") {
-        const result = await service.deployStart(request);
-        return {
-          ok: true,
-          text: `\u90E8\u7F72 job ${result.job.id} \u5DF2\u542F\u52A8\uFF1B\u76EE\u6807 ${result.job.target.host}\uFF0Crelease ${result.job.release}\u3002\u7528 dsh_mesh_deploy action="status" jobId="${result.job.id}" \u67E5\u770B\u8FDB\u5EA6\u3002`,
-          data: result
-        };
-      }
-      if (action === "rollback") {
-        const result = await service.deployRollback(request);
-        return {
-          ok: true,
-          text: `\u56DE\u6EDA job ${result.job.id} \u5DF2\u542F\u52A8\uFF1B\u7528 status/logs \u67E5\u770B\u7ED3\u679C\u3002`,
-          data: result
-        };
-      }
-      throw new Error(`unknown action: ${action}`);
+      const data = await service.deployPackage({
+        host: args.host,
+        package: args.package
+      });
+      return {
+        ok: data.job?.status === "succeeded",
+        text: formatDeployResult(data),
+        data
+      };
     }
   };
   const memberTasks = new MemberTaskService({
@@ -3206,33 +3241,31 @@ ${job.worktree ?? ""}`,
     ctx.effect(() => () => memberTasks.dispose(), "mesh member tasks");
   } catch {
   }
-  const memberTaskDefinition = {
-    name: "dsh_member_task",
+  const callMemberDefinition = {
+    name: "call_member",
     description: [
-      "\u628A\u4EFB\u52A1\u4EA4\u7ED9\u53E6\u4E00\u4E2A WireGuard \u6210\u5458\u4E0A\u7684 DSH \u5BF9\u8BDD\uFF0C\u5E76\u5728\u5B83\u5B8C\u6210\u65F6\u901A\u77E5\u5F53\u524D\u4E3B\u5BF9\u8BDD\u3002",
+      "\u628A\u4EFB\u52A1\u4EA4\u7ED9\u53E6\u4E00\u4E2A WireGuard \u6210\u5458\u4E0A\u7684 DSH \u5BF9\u8BDD\u3002",
       "",
-      "`delegate`\uFF1A\u5728\u6210\u5458 B \u4E0A\u521B\u5EFA\u5BF9\u8BDD\u5E76\u5F02\u6B65\u6267\u884C\uFF1B\u5DE5\u5177\u7ACB\u5373\u8FD4\u56DE taskId\u3002B \u5B8C\u6210\u540E\uFF0C\u7ED3\u679C\u4F1A\u4F5C\u4E3A\u4E00\u6761\u65B0\u7684\u7528\u6237\u6D88\u606F\u5199\u56DE\u5F53\u524D A \u7684\u5BF9\u8BDD\uFF0C\u7C7B\u4F3C\u5B50\u4EE3\u7406\u5B8C\u6210\u901A\u77E5\u3002",
-      "`run`\uFF1A\u540C\u6B65\u7B49\u5F85 B \u5B8C\u6210\u5E76\u76F4\u63A5\u8FD4\u56DE\u6700\u7EC8\u6587\u672C\u3002",
+      "`delegate`\uFF1A\u5728\u6210\u5458 B \u4E0A\u521B\u5EFA\u5BF9\u8BDD\u5E76\u5F02\u6B65\u6267\u884C\uFF0C\u7ACB\u5373\u8FD4\u56DE taskId\uFF1BB \u5B8C\u6210\u540E\u7ED3\u679C\u4F1A\u4F5C\u4E3A\u4E00\u6761\u65B0\u7684\u7528\u6237\u6D88\u606F\u5199\u56DE\u5F53\u524D A \u7684\u5BF9\u8BDD\u3002",
+      "`run`\uFF1A\u540C\u6B65\u7B49\u5F85 B \u5B8C\u6210\uFF0C\u76F4\u63A5\u8FD4\u56DE\u6700\u7EC8\u6587\u672C\u3002",
       "`send`\uFF1A\u5411\u5DF2\u7ECF\u521B\u5EFA\u7684\u6210\u5458\u4EFB\u52A1\u5BF9\u8BDD\u7EE7\u7EED\u53D1\u6D88\u606F\uFF0C\u5E76\u7EE7\u7EED\u7B49\u5F85/\u901A\u77E5\u3002",
-      "`status` / `list` / `logs`\uFF1A\u67E5\u770B\u4EFB\u52A1\u3002",
-      "`system`\uFF1A\u8BFB\u53D6\u6210\u5458 B \u7684 CPU/\u5185\u5B58/\u78C1\u76D8/\u7F51\u7EDC/\u8FDB\u7A0B\u57FA\u7840\u4FE1\u606F\u3002",
+      "\u8FD4\u56DE\u503C\u5E26 data.logFile\uFF0C\u6307\u5411\u8BE5\u4EFB\u52A1\u7684\u65E5\u5FD7\u6587\u4EF6\u3002",
       "",
-      "\u6210\u5458\u901A\u8FC7 WireGuard \u6210\u5458\u53D1\u73B0\u89E3\u6790\uFF08id/name/IP \u5747\u53EF\uFF09\uFF1B\u76EE\u6807 B \u7684 8765 interop \u670D\u52A1\u5FC5\u987B\u53EF\u8FBE\uFF0Ctoken \u9ED8\u8BA4\u590D\u7528\u7F51\u5173\u5BC6\u7801\uFF0C\u53EF\u7528 interopToken \u8986\u76D6\u3002"
+      "\u6210\u5458\u901A\u8FC7 WireGuard \u6210\u5458\u53D1\u73B0\u89E3\u6790\uFF08id/name/IP \u5747\u53EF\uFF09\uFF1B\u76EE\u6807 B \u7684 8765 interop \u670D\u52A1\u5FC5\u987B\u53EF\u8FBE\uFF0Ctoken \u9ED8\u8BA4\u590D\u7528\u7F51\u5173\u5BC6\u7801\u3002"
     ].join("\n"),
     parameters: {
       type: "object",
       properties: {
         action: {
           type: "string",
-          enum: ["delegate", "run", "send", "status", "list", "logs", "system"],
+          enum: ["delegate", "run", "send"],
           description: "\u8981\u6267\u884C\u7684\u52A8\u4F5C\u3002"
         },
         member: { type: "string", description: "\u6210\u5458 id\u3001\u540D\u79F0\u3001VPN IP \u6216 http(s) URL\u3002" },
         prompt: { type: "string", description: "delegate/run\uFF1A\u4EA4\u7ED9\u6210\u5458 B \u7684\u4EFB\u52A1\u3002" },
         content: { type: "string", description: "send\uFF1A\u7EE7\u7EED\u53D1\u7ED9\u6210\u5458 B \u5BF9\u8BDD\u7684\u6D88\u606F\u3002" },
-        taskId: { type: "string", description: "send/status/logs \u7684\u4EFB\u52A1 id\u3002" },
-        cwd: { type: "string", description: "delegate/run\uFF1A\u6210\u5458 B \u4E0A\u7684\u5DE5\u4F5C\u76EE\u5F55\u3002" },
-        lines: { type: "number", description: "logs \u8FD4\u56DE\u6700\u540E\u591A\u5C11\u884C\uFF0C\u9ED8\u8BA4 80\u3002" }
+        taskId: { type: "string", description: "send \u7684\u4EFB\u52A1 id\u3002" },
+        cwd: { type: "string", description: "delegate/run\uFF1A\u6210\u5458 B \u4E0A\u7684\u5DE5\u4F5C\u76EE\u5F55\u3002" }
       },
       required: ["action"],
       additionalProperties: false
@@ -3250,40 +3283,21 @@ ${job.worktree ?? ""}`,
       if (action === "delegate" || action === "run") {
         if (typeof args.prompt !== "string" || args.prompt.trim() === "") throw new Error("this action needs prompt");
         const task = action === "delegate" ? await memberTasks.start({ member: args.member, prompt: args.prompt, cwd: args.cwd, agent: exec.agent, notify: true }) : await memberTasks.run({ member: args.member, prompt: args.prompt, cwd: args.cwd, agent: exec.agent });
+        const data = { ...task, logFile: memberTasks.logPath(task.id) };
         return {
           ok: task.status !== "failed",
-          text: action === "delegate" ? `\u5DF2\u4EA4\u7ED9\u6210\u5458 ${task.member}\uFF08${task.memberIp}\uFF09\uFF0CtaskId ${task.id}\uFF0C\u5BF9\u8BDD ${task.conversationId}\u3002\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u901A\u77E5\u5F53\u524D\u5BF9\u8BDD\u3002` : formatMemberTask(task),
-          data: task
+          text: action === "delegate" ? `\u5DF2\u4EA4\u7ED9\u6210\u5458 ${task.member}\uFF08${task.memberIp}\uFF09\uFF0CtaskId ${task.id}\uFF0C\u5BF9\u8BDD ${task.conversationId}\u3002\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u901A\u77E5\u5F53\u524D\u5BF9\u8BDD\u3002
+\u65E5\u5FD7\uFF1A${data.logFile}` : formatMemberTask(data),
+          data
         };
       }
       if (action === "send") {
         if (typeof args.taskId !== "string" || args.taskId === "") throw new Error("send needs taskId");
         if (typeof args.content !== "string" || args.content.trim() === "") throw new Error("send needs content");
         const task = await memberTasks.send(args.taskId, args.content);
-        return { ok: true, text: `\u5DF2\u53D1\u9001\u5230 ${task.member} \u7684\u5BF9\u8BDD ${task.conversationId}\uFF1B\u5B8C\u6210\u540E\u4F1A\u7EE7\u7EED\u901A\u77E5\u5F53\u524D\u5BF9\u8BDD\u3002`, data: task };
-      }
-      if (action === "status") {
-        if (typeof args.taskId !== "string" || args.taskId === "") throw new Error("status needs taskId");
-        const task = await memberTasks.status(args.taskId);
-        return task === null ? { ok: false, text: "\u672A\u627E\u5230\u8BE5\u6210\u5458\u4EFB\u52A1\u3002" } : { ok: true, text: formatMemberTask(task), data: task };
-      }
-      if (action === "list") {
-        const tasks = await memberTasks.list();
-        return {
-          ok: true,
-          text: tasks.length === 0 ? "\u6CA1\u6709\u6210\u5458\u4EFB\u52A1\u3002" : tasks.map((task) => `- ${task.id}  ${task.member}  ${task.status}  ${task.lastText ? String(task.lastText).slice(0, 80) : task.error ?? ""}`).join("\n"),
-          data: tasks
-        };
-      }
-      if (action === "system") {
-        if (typeof args.member !== "string" || args.member === "") throw new Error("system needs member");
-        const info = await memberTasks.system(args.member);
-        return { ok: true, text: formatMemberSystem(info), data: info };
-      }
-      if (action === "logs") {
-        if (typeof args.taskId !== "string" || args.taskId === "") throw new Error("logs needs taskId");
-        const text = await memberTasks.logs(args.taskId, typeof args.lines === "number" ? args.lines : 80);
-        return { ok: true, text: text || "(no log yet)" };
+        const data = { ...task, logFile: memberTasks.logPath(task.id) };
+        return { ok: true, text: `\u5DF2\u53D1\u9001\u5230 ${task.member} \u7684\u5BF9\u8BDD ${task.conversationId}\uFF1B\u5B8C\u6210\u540E\u4F1A\u7EE7\u7EED\u901A\u77E5\u5F53\u524D\u5BF9\u8BDD\u3002
+\u65E5\u5FD7\uFF1A${data.logFile}`, data };
       }
       throw new Error(`unknown action: ${action}`);
     }
@@ -3294,7 +3308,7 @@ ${job.worktree ?? ""}`,
       "\u53D1\u73B0\u5F53\u524D WireGuard \u7F51\u7EDC\u91CC\u7684\u6240\u6709 DSH \u6210\u5458\u3002",
       "",
       "\u8FD4\u56DE\u6BCF\u4E2A\u6210\u5458\u7684 id\u3001\u540D\u79F0\u3001VPN IP\u3001\u5728\u7EBF\u72B6\u6001\u3001DSH \u7AEF\u53E3\u3001\u5EF6\u8FDF\u3001\u7CFB\u7EDF\u4FE1\u606F\uFF08CPU/\u5185\u5B58/\u78C1\u76D8/home/\u90E8\u7F72\u76EE\u5F55/\u8FD0\u884C\u7528\u6237\uFF09\u548C\u7528\u6237\u6807\u7B7E\u3002",
-      "\u6570\u636E\u4E0E\u9762\u677F\u201C\u6210\u5458\u201D\u9875\u4E00\u81F4\uFF1B\u672C\u673A\u4F5C\u4E3A id=local \u7684\u4E00\u884C\u8FD4\u56DE\u3002"
+      "\u6570\u636E\u4E0E\u9762\u677F\u300C\u6210\u5458\u300D\u9875\u4E00\u81F4\uFF1B\u672C\u673A\u4F5C\u4E3A id=local \u7684\u4E00\u884C\u8FD4\u56DE\u3002"
     ].join("\n"),
     parameters: {
       type: "object",
@@ -3314,7 +3328,7 @@ ${job.worktree ?? ""}`,
       return { ok: true, text: formatMembers(data), data };
     }
   };
-  for (const tool of [definition, deployDefinition, memberTaskDefinition, membersDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, membersDefinition]) {
     try {
       toolsCtx.tools.register(tool);
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`);
@@ -3323,38 +3337,43 @@ ${job.worktree ?? ""}`,
     }
   }
 }
-function deployRequest(args) {
-  const request = {};
-  for (const key of ["host", "user", "port", "identityFile", "os", "package", "appRoot", "release", "scope", "gatePort", "retention", "sudo", "includeScripts"]) {
-    if (args[key] !== void 0) request[key] = args[key];
-  }
-  if (Array.isArray(args.services)) request.services = args.services;
-  return request;
-}
-function formatDeployPlan(plan) {
-  const target = plan.target;
-  return [
-    `\u76EE\u6807\uFF1A${target.user ? `${target.user}@` : ""}${target.host}:${target.port}\uFF08${target.os}\uFF09`,
-    `\u5B89\u88C5\u6839\uFF1A${target.appRoot}`,
-    `\u53D1\u5E03\uFF1A${plan.release}`,
-    `\u5305\uFF1A${plan.package.path}\uFF08${plan.package.bytes} bytes\uFF0Csha256 ${plan.package.sha256.slice(0, 12)}\u2026\uFF09`,
-    `\u670D\u52A1\u987A\u5E8F\uFF1A${plan.services.map((service) => `${service.name}(${service.role})`).join(" \u2192 ")}`,
-    `\u8303\u56F4\uFF1A${plan.scope === "dsh" ? "\u53EA\u91CD\u542F DSH/\u63A7\u5236\u9762\u677F\uFF0C\u7F51\u5173\u4E0D\u52A8" : "\u5168\u90E8\u91CD\u542F\uFF0C\u7F51\u5173\u6700\u540E"}`,
-    "\u6B65\u9AA4\uFF1A",
-    ...plan.steps.map((step, index) => `  ${index + 1}. ${step}`)
-  ].join("\n");
-}
-function formatMemberSystem(info) {
-  const gb = (bytes) => `${(Number(bytes) / 1024 / 1024 / 1024).toFixed(1)} GiB`;
+function formatBuild(job) {
   const lines = [
-    `\u6210\u5458 ${info.member}\uFF08${info.memberIp}\uFF09`,
-    `\u4E3B\u673A\uFF1A${info.hostname}  ${info.platform}-${info.arch}  uptime ${String(info.uptimeSeconds)}s`,
-    `CPU\uFF1A${info.cpu?.model ?? "unknown"}\uFF0C${String(info.cpu?.cores ?? 0)} \u6838\uFF0C\u4F7F\u7528\u7387 ${String(info.cpu?.usagePercent ?? 0)}%`,
-    `\u5185\u5B58\uFF1A${gb(info.memory?.usedBytes ?? 0)} / ${gb(info.memory?.totalBytes ?? 0)}\uFF08${String(info.memory?.usedPercent ?? 0)}%\uFF09`
+    `${job.id}  ${job.status}  ${job.phase}`,
+    `\u6E90\u7801\uFF1A${job.source}@${job.ref}`,
+    `\u76EE\u6807\uFF1A${Array.isArray(job.targets) ? job.targets.join(", ") : "\u2014"}`
   ];
-  for (const disk of info.disks ?? []) {
-    lines.push(`\u78C1\u76D8 ${disk.mount}\uFF1A${gb(disk.usedBytes)} / ${gb(disk.totalBytes)}\uFF08${String(disk.usedPercent)}%\uFF09`);
+  if (job.logFile) lines.push(`\u65E5\u5FD7\uFF1A${job.logFile}`);
+  if (job.stateFile) lines.push(`\u72B6\u6001\uFF1A${job.stateFile}`);
+  if (job.error) lines.push(`\u9519\u8BEF\uFF1A${job.error}`);
+  if (job.status === "needs-fix") {
+    lines.push(`\u8986\u76D6\u5C42\u4E0E\u4E0A\u6E38\u6E90\u7801\u4E0D\u5339\u914D\uFF0C\u6784\u5EFA\u505C\u5728 apply\uFF1B\u4FEE\u590D\u5DE5\u4F5C\u6811\u540E\u8C03\u7528 build { "jobId": "${job.id}" }\uFF0C\u4F1A\u81EA\u52A8\u56FA\u5316\u8986\u76D6\u5C42\u5E76\u7EE7\u7EED\u3002`);
   }
+  if (job.workOrder) {
+    lines.push(`\u5DE5\u4F5C\u5355\uFF1A${job.workOrder.markdown}`);
+    lines.push(`\u5B50\u4EE3\u7406\u63D0\u793A\uFF1A${job.workOrder.prompt}`);
+  }
+  for (const artifact of job.artifacts ?? []) {
+    lines.push(`\u4EA7\u7269 ${artifact.target}\uFF1A${artifact.archive}\uFF08${formatBytes(artifact.bytes)}\uFF09`);
+  }
+  const tail = Array.isArray(job.logTail) ? job.logTail.slice(-15) : [];
+  if (tail.length > 0) lines.push("\u6700\u8FD1\u65E5\u5FD7\uFF1A", ...tail);
+  return lines.join("\n");
+}
+function formatDeployResult(result) {
+  const job = result.job ?? {};
+  const lines = [`${job.id ?? "deploy"}  ${job.status ?? "unknown"}  ${job.phase ?? ""}`];
+  if (result.member) lines.push(`\u6210\u5458\uFF1A${result.member.name}\uFF08${result.member.ip}\uFF09`);
+  if (job.target) {
+    const target = job.target;
+    lines.push(`\u76EE\u6807\uFF1A${target.user ? `${target.user}@` : ""}${target.host}:${target.port}\uFF08${target.os}\uFF09`);
+    lines.push(`\u5B89\u88C5\u6839\uFF1A${target.appRoot}`);
+  }
+  if (job.release) lines.push(`\u53D1\u5E03\uFF1A${job.release}`);
+  if (job.error) lines.push(`\u9519\u8BEF\uFF1A${job.error}`);
+  if (result.logFile) lines.push(`\u65E5\u5FD7\uFF1A${result.logFile}`);
+  const log = String(result.log ?? "").trimEnd();
+  if (log !== "") lines.push("\u6700\u8FD1\u65E5\u5FD7\uFF1A", ...log.split(/\r?\n/u).slice(-25));
   return lines.join("\n");
 }
 function formatMemberTask(task) {
@@ -3362,24 +3381,12 @@ function formatMemberTask(task) {
     `\u4EFB\u52A1 ${task.id}\uFF1A${task.member}\uFF08${task.memberIp}\uFF09\uFF0C\u5BF9\u8BDD ${task.conversationId}`,
     `\u72B6\u6001\uFF1A${task.status}${task.notified ? "\uFF0C\u5DF2\u901A\u77E5\u4E3B\u5BF9\u8BDD" : ""}`
   ];
+  if (task.logFile) lines.push(`\u65E5\u5FD7\uFF1A${task.logFile}`);
   if (task.error) lines.push(`\u9519\u8BEF\uFF1A${task.error}`);
   if (task.lastText) lines.push(`\u7ED3\u679C\uFF1A
 ${task.lastText}`);
   if (task.notifyError) lines.push(`\u901A\u77E5\u5931\u8D25\uFF1A${task.notifyError}`);
   return lines.join("\n");
-}
-function requireJobId(args) {
-  if (typeof args.jobId !== "string" || args.jobId === "") throw new Error("this action needs jobId");
-  return args.jobId;
-}
-function formatStatus(status) {
-  const wireguard = status.wireguard;
-  return [
-    `\u4E3B\u673A\uFF1A${status.host.hostname}\uFF08${status.host.platform}-${status.host.arch}\uFF09`,
-    wireguard.available ? `WireGuard\uFF1A${wireguard.role}\uFF0C${wireguard.connected ? "\u5DF2\u8FDE\u63A5" : "\u672A\u8FDE\u63A5"}\uFF0C\u672C\u673A ${wireguard.selfIp || "\u2014"}\uFF0C\u670D\u52A1\u5668 ${wireguard.serverIp}` : `WireGuard\uFF1A\u4E0D\u53EF\u7528\uFF08${wireguard.error ?? "unknown"}\uFF09`,
-    `\u6784\u5EFA\u9ED8\u8BA4\uFF1A${status.build.source || "(recipes)"}@${status.build.ref} -> ${status.build.targets.join(", ")}`,
-    status.wireguard.warnings?.length ? `\u8B66\u544A\uFF1A${status.wireguard.warnings.join("\uFF1B")}` : ""
-  ].filter(Boolean).join("\n");
 }
 function formatMembers(snapshot) {
   const lines = [`\u66F4\u65B0\u4E8E ${snapshot.updatedAt}\uFF0C\u5171 ${snapshot.members.length} \u4E2A\u6210\u5458`];
@@ -3391,6 +3398,18 @@ function formatMembers(snapshot) {
   }
   if (snapshot.warnings?.length) lines.push(`\u8B66\u544A\uFF1A${snapshot.warnings.join("\uFF1B")}`);
   return lines.join("\n");
+}
+function formatBytes(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB"];
+  let size = amount;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? String(Math.round(size)) : size.toFixed(1)} ${units[unit]}`;
 }
 
 // src/index.ts

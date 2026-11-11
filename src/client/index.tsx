@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   ConfigProvider,
+  Descriptions,
   Empty,
   Grid,
   Input,
@@ -24,6 +25,7 @@ import {
   ApartmentOutlined,
   CloudDownloadOutlined,
   EditOutlined,
+  InfoCircleOutlined,
   ReloadOutlined,
   SwapOutlined,
   WarningOutlined,
@@ -37,6 +39,13 @@ import { EN as WIREGUARD_EN, dictionary as wireguardDictionary } from './wiregua
 
 const NS = 'dsh-mesh'
 const PANEL_ID = 'mesh'
+const MEMBER_NAME_LIMIT = 12
+
+/** Members show a short label in the table; the full name lives in the detail modal. */
+function shortMemberName(name: string): string {
+  const chars = Array.from(name)
+  return chars.length > MEMBER_NAME_LIMIT ? `${chars.slice(0, MEMBER_NAME_LIMIT).join('')}…` : name
+}
 
 function useThemeMode(ctx: any): 'light' | 'dark' {
   const [snapshot, setSnapshot] = useState<any>(() => ctx.theme.getTheme())
@@ -152,6 +161,7 @@ function Panel({ ctx }: { ctx: any }) {
   const [panelTab, setPanelTab] = useState<'members' | 'network'>('members')
   const [tags, setTags] = useState<Record<string, string>>({})
   const [tagTarget, setTagTarget] = useState<Member | null>(null)
+  const [detailTarget, setDetailTarget] = useState<Member | null>(null)
   const [tagText, setTagText] = useState('')
   const [tagSaving, setTagSaving] = useState(false)
   const [messageApi, contextHolder] = message.useMessage()
@@ -275,7 +285,7 @@ function Panel({ ctx }: { ctx: any }) {
     const actionColumn: ColumnsType<Member>[number] = {
       title: '操作',
       key: 'action',
-      width: 150,
+      width: screens.lg === true ? '11%' : 120,
       align: 'right',
       render: (_value, member) => {
         if (member.id === currentTarget) return <Tag color="blue">当前</Tag>
@@ -309,26 +319,30 @@ function Panel({ ctx }: { ctx: any }) {
       {
         title: '成员',
         key: 'member',
-        width: 260,
+        width: screens.lg === true ? '15%' : 200,
         render: (_value, member) => (
-          <Space direction="vertical" size={0}>
-            <Space size={6} wrap>
-              <Typography.Text strong>{member.name}</Typography.Text>
-              {member.kind === 'self' ? <Tag>本机</Tag> : null}
-              {screens.sm !== true ? (
-                <Tag color={member.online ? 'green' : 'default'}>{member.online ? '在线' : '离线'}</Tag>
-              ) : null}
-            </Space>
-            <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-              {member.gate?.hostname !== undefined ? String(member.gate.hostname) : member.id}
-            </Typography.Text>
-          </Space>
+          <span className="dsh-pw-member">
+            <Tooltip title={member.name}>
+              <Typography.Text strong className="dsh-pw-member-name">
+                {shortMemberName(member.name)}
+              </Typography.Text>
+            </Tooltip>
+            <Button
+              type="text"
+              size="small"
+              className="dsh-pw-member-detail"
+              icon={<InfoCircleOutlined />}
+              title="成员详情"
+              aria-label={`查看 ${member.name} 的详情`}
+              onClick={() => setDetailTarget(member)}
+            />
+          </span>
         ),
       },
       {
         title: '地址',
         key: 'address',
-        width: 150,
+        width: screens.lg === true ? '10%' : 110,
         responsive: ['lg'],
         render: (_value, member) => (
           <Typography.Text className="dsh-pw-mono" style={{ fontSize: 12 }}>
@@ -339,7 +353,7 @@ function Panel({ ctx }: { ctx: any }) {
       {
         title: '标签',
         key: 'tag',
-        width: 150,
+        width: screens.lg === true ? '9%' : 120,
         responsive: ['md'],
         render: (_value, member) => (
           <Space size={4} wrap>
@@ -357,14 +371,16 @@ function Panel({ ctx }: { ctx: any }) {
       {
         title: '状态',
         key: 'status',
-        width: 190,
+        width: screens.lg === true ? '16%' : 190,
         responsive: ['sm'],
         render: (_value, member) => (
           <Space size={6} wrap>
             <Tag color={member.online ? 'green' : 'default'}>{member.online ? '在线' : '离线'}</Tag>
-            {member.dsh
-              ? <Tag color="cyan">DSH :{String(member.port ?? '?')}</Tag>
-              : <Tag>未部署</Tag>}
+            {member.kind === 'self'
+              ? <Tag color="blue">本机</Tag>
+              : member.dsh
+                ? <Tag color="cyan">DSH :{String(member.port ?? '?')}</Tag>
+                : <Tag>未部署</Tag>}
             {member.latencyMs > 0 ? <Typography.Text type="secondary" style={{ fontSize: 11 }}>{String(member.latencyMs)} ms</Typography.Text> : null}
           </Space>
         ),
@@ -372,7 +388,7 @@ function Panel({ ctx }: { ctx: any }) {
       {
         title: '系统',
         key: 'system',
-        width: 260,
+        width: screens.lg === true ? '39%' : 260,
         responsive: ['lg'],
         render: (_value, member) => (
           <Tooltip title={<pre style={{ margin: 0, fontFamily: 'inherit', whiteSpace: 'pre-wrap' }}>{systemDetails(member)}</pre>}>
@@ -448,7 +464,10 @@ function Panel({ ctx }: { ctx: any }) {
                 size="middle"
                 dataSource={memberRows}
                 columns={columns}
-                scroll={{ x: screens.lg === true ? 1000 : undefined, y: 'max(240px, calc(100vh - 320px))' }}
+                scroll={{
+                  x: screens.lg === true ? 900 : undefined,
+                  ...(memberRows.length > 8 ? { y: 'max(240px, calc(100vh - 320px))' } : {}),
+                }}
                 pagination={{
                   pageSize: 10,
                   showSizeChanger: true,
@@ -490,6 +509,74 @@ function Panel({ ctx }: { ctx: any }) {
           onChange={event => setTagText(event.target.value)}
           onPressEnter={() => { void saveTag() }}
         />
+      </Modal>
+
+      <Modal
+        open={detailTarget !== null}
+        title={detailTarget !== null ? `${detailTarget.name} · 详情` : '成员详情'}
+        width={560}
+        footer={<Button onClick={() => setDetailTarget(null)}>关闭</Button>}
+        onCancel={() => setDetailTarget(null)}
+        destroyOnHidden
+      >
+        {detailTarget !== null ? (
+          <Descriptions
+            size="small"
+            bordered
+            column={1}
+            styles={{
+              label: { width: 80, whiteSpace: 'nowrap' },
+              content: { minWidth: 0 },
+            }}
+            items={[
+              { key: 'name', label: '名称', children: detailTarget.name },
+              { key: 'id', label: 'ID', children: <span className="dsh-pw-mono">{detailTarget.id}</span> },
+              { key: 'address', label: '地址', children: <span className="dsh-pw-mono">{detailTarget.ip || '—'}</span> },
+              {
+                key: 'tag',
+                label: '标签',
+                children: tags[detailTarget.id] !== undefined ? <Tag color="blue">{tags[detailTarget.id]}</Tag> : '—',
+              },
+              {
+                key: 'status',
+                label: '状态',
+                children: (
+                  <Space size={6} wrap>
+                    <Tag color={detailTarget.online ? 'green' : 'default'}>{detailTarget.online ? '在线' : '离线'}</Tag>
+                    <Typography.Text type="secondary">
+                      {detailTarget.kind === 'self' ? '本机' : '成员'}
+                    </Typography.Text>
+                  </Space>
+                ),
+              },
+              {
+                key: 'dsh',
+                label: 'DSH',
+                children: detailTarget.kind === 'self'
+                  ? '本机'
+                  : detailTarget.dsh ? `:${String(detailTarget.port ?? '?')}` : '未部署',
+              },
+              {
+                key: 'latency',
+                label: '延迟',
+                children: detailTarget.latencyMs > 0 ? `${String(detailTarget.latencyMs)} ms` : '—',
+              },
+              {
+                key: 'host',
+                label: '主机',
+                children: detailTarget.gate?.hostname !== undefined ? String(detailTarget.gate.hostname) : '—',
+              },
+              {
+                key: 'system',
+                label: '系统',
+                children: <pre className="dsh-pw-detail-pre">{systemDetails(detailTarget)}</pre>,
+              },
+              ...(detailTarget.error !== null && detailTarget.error !== undefined
+                ? [{ key: 'error', label: '错误', children: <Typography.Text type="danger">{detailTarget.error}</Typography.Text> }]
+                : []),
+            ]}
+          />
+        ) : null}
       </Modal>
 
       <Modal

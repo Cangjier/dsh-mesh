@@ -8,7 +8,7 @@
  * @module @local/dsh-mesh/service
  */
 
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { readFileSync, existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import os from 'node:os'
@@ -231,8 +231,41 @@ export class MeshService {
   }
 
   /**
+   * Remove the files left by earlier builds.
+   *
+   * Called after a build finishes, with the just-finished job id as `keep`, so
+   * the new `src/`, `work-order/` and `dist/` survive. All older jobs lose
+   * their worktree, work order and (unless `keepDist`) their package.
+   * `state.json` and `build.log` are always kept for postmortem.
+   * @param {{keep?: string, keepDist?: boolean}} [options] job to preserve and whether to retain old packages.
+   * @returns {Promise<string[]>} ids whose outputs were removed.
+   */
+  async cleanupBuilds(options = {}) {
+    if (!existsSync(this.jobRoot)) return []
+    const entries = await readdir(this.jobRoot, { withFileTypes: true })
+    const removed = []
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const dir = path.join(this.jobRoot, entry.name)
+      let state
+      try {
+        state = await readState(dir)
+      } catch {
+        continue
+      }
+      if (this.running.has(state.id)) continue
+      if (state.id === options.keep) continue
+      await rm(path.join(dir, 'src'), { recursive: true, force: true })
+      await rm(path.join(dir, 'work-order'), { recursive: true, force: true })
+      if (options.keepDist !== true) await rm(path.join(dir, 'dist'), { recursive: true, force: true })
+      removed.push(state.id)
+    }
+    return removed
+  }
+
+  /**
    * Start one build job in the background.
-   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string}} request build request.
+   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean}} request build request.
    * @returns {Promise<object>} the initial job state.
    */
   async startBuild(request = {}) {
@@ -267,9 +300,40 @@ export class MeshService {
   }
 
   /**
-   * Continue a job from its corrected worktree. This is what follows
-   * `build_learn`: the overlays have been updated, and the worktree already
-   * contains the fix, so nothing is downloaded again.
+   * Run one build to completion.
+   *
+   * Without `jobId` this starts a fresh build. With `jobId` it treats the
+   * job's worktree as the DSH-adapted result: if the job stopped at
+   * `needs-fix`, it learns the corrected files into the overlay set first,
+   * then resumes the same job. There is no separate learn/resume command.
+   * Older jobs are cleaned only after the current job finishes, so a running
+   * build never loses its own worktree or package.
+   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean, jobId?: string}} request build request.
+   * @returns {Promise<object>} final job with log tail.
+   */
+  async build(request = {}) {
+    if (typeof request.jobId === 'string' && request.jobId !== '') {
+      const state = await this.job(request.jobId)
+      if (state.status === 'needs-fix') await this.learn(request.jobId)
+      const resumed = await this.resumeBuild(request.jobId)
+      const running = this.running.get(resumed.id)
+      if (running !== undefined) await running
+      const final = await this.job(resumed.id)
+      await this.cleanupBuilds({ keep: resumed.id, keepDist: request.keepDist === true })
+      return final
+    }
+    const job = await this.startBuild(request)
+    const running = this.running.get(job.id)
+    if (running !== undefined) await running
+    const final = await this.job(job.id)
+    await this.cleanupBuilds({ keep: job.id, keepDist: request.keepDist === true })
+    return final
+  }
+
+  /**
+   * Continue a job from its corrected worktree. This is what follows the
+   * automatic learn step: the overlays have been updated, and the worktree
+   * already contains the fix, so nothing is downloaded again.
    * @param {string} id job id.
    * @returns {Promise<object>} the job state, running in the background.
    */
@@ -305,6 +369,8 @@ export class MeshService {
     const state = await readState(dir)
     return {
       ...state,
+      logFile: path.join(dir, 'build.log'),
+      stateFile: path.join(dir, 'state.json'),
       logTail: await readLogTail(dir, 60),
       running: this.running.has(id),
       workOrderMarkdown: state.workOrder?.markdown ?? null,
@@ -408,22 +474,108 @@ export class MeshService {
   }
 
   /**
-   * Deploy one local package to a discovered member over SSH.
+   * Resolve a package path from an absolute path, `~/.dsh/packages/<name>`,
+   * or the repository `dist/<name>`.
+   * @param {string} input package path or filename.
+   * @returns {Promise<string>} absolute package path.
+   */
+  async resolvePackage(input) {
+    const raw = typeof input === 'string' ? input.trim() : ''
+    if (raw === '') throw new Error('package is required')
+    const candidates = path.isAbsolute(raw)
+      ? [raw]
+      : [path.join(this.packagesDir, raw), path.join(this.repositoryRoot, 'dist', raw)]
+    for (const file of candidates) {
+      const info = await stat(file).catch(() => null)
+      if (info?.isFile()) return file
+    }
+    throw new Error(`package not found: ${raw}`)
+  }
+
+  /**
+   * Resolve a target and start a deployment job.
+   *
+   * This is the single entry point used by both the panel API and the model
+   * tool. The caller decides whether to wait by calling `deployPackage()`;
+   * the panel keeps the historical non-blocking `deployMember()` wrapper.
+   * @param {{host?: string, member?: string, package?: string}} request target and package.
+   * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string}>} started job.
+   */
+  async startDeploy(request) {
+    const host = typeof request.host === 'string' ? request.host.trim() : ''
+    const memberId = typeof request.member === 'string' ? request.member.trim() : ''
+    const packagePath = await this.resolvePackage(request.package)
+    const snapshot = await this.members()
+    const all = [snapshot.local, ...snapshot.members].filter(Boolean)
+    const member = memberId !== ''
+      ? all.find(candidate => candidate.id === memberId)
+      : all.find(candidate => candidate.id === host || candidate.name === host || candidate.ip === host)
+    if (memberId !== '' && member === undefined) throw new Error(`member not found: ${memberId}`)
+    if (member !== undefined) {
+      const os = /win(?:dows)?/iu.test(path.basename(packagePath))
+        ? 'windows'
+        : member.system?.platform?.toLowerCase().startsWith('win') ? 'windows' : 'linux'
+      const deployRequest = await this.#memberDeployRequest(member, packagePath, os)
+      const started = await this.deploy.start(deployRequest)
+      return {
+        ok: true,
+        job: started.job,
+        member: { id: member.id, name: member.name, ip: member.ip },
+        packagePath,
+      }
+    }
+    if (host === '') throw new Error('host is required')
+    const os = /win(?:dows)?/iu.test(path.basename(packagePath)) ? 'windows' : 'linux'
+    const appRoot = os === 'windows' ? 'C:\\dsh-mesh' : '/opt/dsh-mesh'
+    const started = await this.deploy.start({ host, package: packagePath, os, appRoot })
+    return { ok: true, job: started.job, member: null, packagePath }
+  }
+
+  /**
+   * Deploy one local package to a discovered member, without waiting.
+   * Kept for the panel API, which returns a job id immediately.
    * @param {{member?: string, package?: string}} request member id/ip and package filename.
-   * @returns {Promise<object>} deploy job.
+   * @returns {Promise<object>} started deploy job.
    */
   async deployMember(request) {
-    const memberId = typeof request.member === 'string' ? request.member.trim() : ''
-    const packageName = typeof request.package === 'string' ? request.package.trim() : ''
-    if (memberId === '') throw new Error('member is required')
-    if (packageName === '' || path.basename(packageName) !== packageName) throw new Error('package must be a filename')
-    const listed = await this.packages()
-    const selected = listed.packages.find(entry => entry.name === packageName)
-    if (selected === undefined) throw new Error(`package not found in ${this.packagesDir}`)
-    const snapshot = await this.members()
-    const member = [snapshot.local, ...snapshot.members].find(candidate => candidate.id === memberId)
-    if (member === undefined) throw new Error(`member not found: ${memberId}`)
-    if (member.ip === '') throw new Error(`member ${memberId} has no VPN address`)
+    const result = await this.startDeploy({ member: request.member, package: request.package })
+    return {
+      ok: true,
+      job: result.job,
+      member: result.member,
+      packagesDir: this.packagesDir,
+    }
+  }
+
+  /**
+   * Deploy one package to an SSH host, synchronously.
+   *
+   * The host may be a discovered member id/name/IP, in which case the member's
+   * OS, install root and WireGuard SSH metadata are used; otherwise the host is
+   * treated as a plain SSH target and the package platform decides the OS.
+   * @param {{host?: string, package?: string}} request target host and package.
+   * @returns {Promise<{job: object|null, logFile: string, log: string, member?: object}>} final result.
+   */
+  async deployPackage(request) {
+    const started = await this.startDeploy({ host: request.host, package: request.package })
+    const job = await this.deploy.wait(started.job.id)
+    return {
+      job,
+      member: started.member,
+      logFile: path.join(this.deployRoot, started.job.id, 'deploy.log'),
+      log: await this.deployLogs(started.job.id, 80),
+    }
+  }
+
+  /**
+   * Build the deployment request for a discovered member.
+   * @param {object} member member snapshot.
+   * @param {string} packagePath package file.
+   * @param {'linux'|'windows'} os target OS.
+   * @returns {Promise<object>} deploy request.
+   */
+  async #memberDeployRequest(member, packagePath, os) {
+    if (member.ip === '') throw new Error(`member ${member.id} has no VPN address`)
     let user = 'root'
     let identityFile
     const { state } = await readWireGuardState({ file: path.join(this.home, 'wireguard', 'state.json') })
@@ -436,7 +588,6 @@ export class MeshService {
         if (existsSync(candidate)) identityFile = candidate
       }
     }
-    const os = selected.target === 'windows' ? 'windows' : 'linux'
     // The gate reports its own install root, home and run user, so a healthy
     // member needs no SSH round-trip just to learn where it lives.
     const system = member.system
@@ -465,16 +616,15 @@ export class MeshService {
         : user === 'root' ? '/root' : `/home/${user}`
       appRoot = os === 'windows' ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`
     }
-    const result = await this.deploy.start({
+    return {
       host: member.ip,
       user,
       identityFile,
       os,
       appRoot,
       serviceUser,
-      package: selected.path,
-    })
-    return { ok: true, job: result.job, member: { id: member.id, name: member.name, ip: member.ip }, packagesDir: this.packagesDir }
+      package: packagePath,
+    }
   }
 
   /**

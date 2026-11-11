@@ -904,6 +904,17 @@ export class DeployManager {
   }
 
   /**
+   * Wait for one running deployment or rollback job to settle.
+   * @param {string} id job id.
+   * @returns {Promise<object|null>} final job state.
+   */
+  async wait(id) {
+    const running = this.running.get(id)
+    if (running !== undefined) await running
+    return this.status(id)
+  }
+
+  /**
    * Read a job.
    * @param {string} id job id.
    * @returns {Promise<object|null>} state.

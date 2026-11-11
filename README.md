@@ -4,7 +4,7 @@
 
 这个仓库现在同时是：
 
-- **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `dsh_mesh` 构建工具。
+- **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `build` / `deploy` / `members` / `call_member` 工具。
 - **网关**：`code/gate/`，负责密码门、反向代理、成员 cluster 认证、目标 cookie。
 - **构建引擎**：`code/build/`，从 DSH GitHub 源码确定性地应用覆盖层、构建 Web 前端、按目标系统和架构打包。
 - **文档集**：Step 001–010，记录每个坑和对应检查。
@@ -23,7 +23,8 @@
 - 默认源码固定在 `https://github.com/deepseek-ai/deepseek-harness`，默认 `master`；也可以覆盖。
 - 下载 codeload tarball（不依赖 `git clone`，GitHub 的 git 端点被墙时 HTTPS 仍可用），解压到任务工作树。
 - 按 `build/recipes.json` 应用源码覆盖层；每个覆盖层记录 pristine 文件的 SHA-256。
-- 覆盖层失配时**不继续构建**，写出 `work-order.md` / `subagent-prompt.txt`；DSH 用 subagent 修好工作树后，`build_learn` 把修改收成新覆盖层，`build_resume` 继续同一个任务。
+- 覆盖层失配时**不继续构建**，写出 `work-order.md` / `subagent-prompt.txt`；DSH 用 subagent 修好工作树后，再次调用 `build { jobId }`，由构建自动固化覆盖层并复用工作树继续。
+- build 完成后清理更早 job 的 `src/`、`work-order/` 和 `dist/`，保留当前 job 的产物以及所有 job 的 `state.json` / `build.log`；`keepDist: true` 可保留更早 job 的 `dist/`。
 - Web 构建成功后按目标打包：
   - **完整包**（默认）：`app/`（`@deepseek-ai/dsh` + 目标原生依赖）、`runtime/node/`、`gate/`、`shared/`、`plugin/`、安装脚本。
   - **只 Web 包**（`--web-only`）：只含 `web/` 前端产物，便于覆盖已有安装。
@@ -39,7 +40,7 @@
 
 ### 4. 通过 SSH 蓝绿部署成员
 
-- `dsh_mesh_deploy` 从 A 通过 SSH 部署 B：先把包解压到新的 `releases/<release>`，建立 `shared/config|data|home|workspace` 链接，更新服务定义，全部准备好后才切换 `current`。
+- `deploy` 从 A 通过 SSH 部署 B：先把包解压到新的 `releases/<release>`，建立 `shared/config|data|home|workspace` 链接，更新服务定义，全部准备好后才切换 `current`。
 - 重启顺序强制为 `control → dsh → gate`；**网关永远最后**，因为用户可能正通过 B 的网关操作 A，B 的网关先重启会切断这条路径。
 - 支持 `scope=dsh`：只重启 DSH/控制面板，不重启网关。
 - 健康检查失败自动切回 `previous` 并重启；`rollback` 可手动回滚。
@@ -56,8 +57,8 @@
 
 ### 6. 成员任务：A 操作 B 的对话并回调主对话
 
-- 新工具 `dsh_member_task`：`delegate`/`run`/`send`/`status`/`list`/`logs`/`system`。
-- A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话并后台等待；`system` 可直接读取 B 的 CPU/内存/磁盘信息。
+- 新工具 `call_member`：`delegate` / `run` / `send`。
+- A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话并等待；`run` 可直接同步等待最终结果。
 - B 完成后，A 的插件用 `agent.followup()` 把结果写回 **A 的同一个会话**；A 正忙就排到下一轮，空闲就唤醒一个 turn，类似子代理完成通知。
 - 不需要 B 主动访问 A；A 轮询 B，避免回调端口/NAT 问题。
 
@@ -112,7 +113,7 @@ powershell -ExecutionPolicy Bypass -File .\code\windows-service\uninstall-servic
 要点：
 
 - 每个成员都必须跑**新版 gate**，并配置**同一个** `DSH_GATE_CLUSTER_KEY`。
-- 成员只需要 gate；「DSH 成员」面板和 `dsh_mesh` 构建工具装在你想操作的那台 DSH（通常是入口）即可，包里的 `plugin/` 是同一份插件。
+- 成员只需要 gate；「DSH 成员」面板和 `build` / `deploy` 工具装在你想操作的那台 DSH（通常是入口）即可，包里的 `plugin/` 是同一份插件。
 - 每个成员的 `DSH_TRUSTED_HOSTS` 要包含外层入口的域名/IP，否则成员 DSH 的 Host 栅栏会 403。
 - 外层入口的网关负责密码门；成员 gate 通过 HMAC 接受外层请求，用户只输一次密码。
 - Windows 默认端口 8080（80 常需要管理员/URL ACL）；`DSH_GATE_MEMBER_PORT` 要与 peer 实际访问端口一致。
@@ -123,21 +124,28 @@ powershell -ExecutionPolicy Bypass -File .\code\windows-service\uninstall-servic
 面板「构建」页，或模型工具：
 
 ```text
-dsh_mesh { action: "build" }                       # 默认 linux-x64 + win-x64
-dsh_mesh { action: "build", planOnly: true }       # 只检查覆盖层
-dsh_mesh { action: "build_status", jobId: "..." }
-dsh_mesh { action: "build_logs", jobId: "..." }
-dsh_mesh { action: "build_learn", jobId: "..." }   # 修好工作树后固化覆盖层
-dsh_mesh { action: "build_resume", jobId: "..." }  # 复用工作树继续构建
+build { }                                          # 默认 linux-x64 + win-x64，同步等到结束
+build { "planOnly": true }                         # 只检查覆盖层
+build { "ref": "master", "targets": ["linux-x64"] }
+build { "jobId": "<needs-fix-job-id>" }            # 固化工作树修改并继续
+build { "keepDist": true }                         # 保留更早 build 的 dist
 ```
 
-命令行等价：
+构建是同步的：结束后返回 `data.logFile` / `data.stateFile`。build 完成后默认清理更早 job 的
+`src/`、`work-order/` 和 `dist/`，当前 job 的产物保留；所有 job 的 `state.json` / `build.log` 保留。
+`keepDist: true` 可保留更早 job 的旧产物。
+
+覆盖层失配时状态为 `needs-fix`，返回 job id、工作单和工作树。让 DSH 修好工作树后，再次调用
+`build { jobId }`：它会自动把修改固化成覆盖层（更新 `recipes.json`）并复用工作树继续构建，不需要
+单独的 learn/resume 命令。
+
+命令行：
 
 ```bash
 node code/build/cli.mjs build
 node code/build/cli.mjs plan
-node code/build/cli.mjs learn --job <job-dir>
-node code/build/cli.mjs build --job <job-dir> --resume
+node code/build/cli.mjs status --job <job-dir>
+node code/build/cli.mjs logs --job <job-dir>
 ```
 
 首次真实构建需要网络、`pnpm`、`npm` 和足够磁盘（完整包每个目标约 0.7–1 GB 依赖 + Node 运行时）。如果上游源码已经变了，第一次会按设计返回 needs-fix 工作单，而不是假装成功。构建会执行源码仓库的 `pnpm install` / build 脚本；只对可信源码使用。
@@ -153,14 +161,11 @@ node build/tools/package-prebuilt.mjs --targets linux-x64,win-x64
 ### 通过 SSH 部署/更新成员
 
 ```text
-dsh_mesh_deploy { action: "plan", host: "10.66.66.3", user: "root", os: "linux" }
-dsh_mesh_deploy { action: "deploy", host: "10.66.66.3", user: "root", os: "linux", identityFile: "C:\\Users\\Admin\\.ssh\\id_ed25519" }
-dsh_mesh_deploy { action: "status", jobId: "deploy-..." }
-dsh_mesh_deploy { action: "logs", jobId: "deploy-...", lines: 120 }
-dsh_mesh_deploy { action: "rollback", host: "10.66.66.3", user: "root", os: "linux" }
+deploy { "host": "10.66.66.3", "package": "dsh-mesh-0.2.2-rc.1-linux-x64.tar.gz" }
+deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-linux-x64.tar.gz" }
 ```
 
-服务清单可以通过 `services` 指定；工具会按 `control → dsh → gate` 排序，并拒绝没有 gateway 或 gateway 不在最后的清单。目标必须已经安装过一次（`shared/config/gate.env` 存在），SSH 使用密钥和 `BatchMode=yes`。详见 [Step 011](docs/Step%20011%20通过%20SSH%20蓝绿部署.md)。
+`deploy` 只有 `host` 和 `package` 两个输入。`host` 命中成员时自动解析成员 IP、SSH 用户/私钥、OS 和安装目录；不是成员时按普通 SSH 主机处理，OS 由包名决定。部署同步等待结束并返回 `data.logFile`；健康检查失败会自动切回 `previous`。目标必须已经安装过一次（`shared/config/gate.env` 存在），SSH 使用密钥和 `BatchMode=yes`。详见 [Step 011](docs/Step%20011%20通过%20SSH%20蓝绿部署.md)。
 
 ### 安装独立 DSH 交互 HTTP 服务
 
@@ -191,25 +196,25 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 007 升级适配清单](docs/Step%20007%20升级适配清单.md) | DSH 升级后逐项重打的检查表 |
 | [Step 008 测试与验证](docs/Step%20008%20测试与验证.md) | 端到端脚本、浏览器断言、请求数断言、失败模式对照 |
 | [Step 009 成员发现与切换](docs/Step%20009%20成员发现与切换.md) | peer 发现、`dsh_gate_target` cookie、cluster HMAC、cookie 命名空间 |
-| [Step 010 从源码构建多平台 Web 包](docs/Step%20010%20从源码构建多平台Web包.md) | 固定源/ref、源码覆盖层、工作单、learn/resume、目标打包 |
+| [Step 010 从源码构建多平台 Web 包](docs/Step%20010%20从源码构建多平台Web包.md) | 固定源/ref、源码覆盖层、工作单、自动固化/继续、目标打包 |
 | [Step 011 通过 SSH 蓝绿部署成员](docs/Step%20011%20通过%20SSH%20蓝绿部署.md) | releases/current/shared、prepare/activate、gateway 最后、回滚 |
 | [Step 012 独立服务与WireGuard控制面板](docs/Step%20012%20独立服务与WireGuard控制面板.md) | 网关/DSH/51821 三个独立服务、token 文件、内置面板代理 |
 | [Step 013 独立DSH交互HTTP服务](docs/Step%20013%20独立DSH交互HTTP服务.md) | 独立 8765、SDK stdio、创建/等待/通知/事件/回调 |
-| [Step 014 成员任务插件与主对话回调](docs/Step%20014%20成员任务插件与主对话回调.md) | `dsh_member_task`、成员发现、后台等待、agent.followup 通知 |
+| [Step 014 成员任务插件与主对话回调](docs/Step%20014%20成员任务插件与主对话回调.md) | `call_member`、成员发现、后台等待、agent.followup 通知 |
 
 ## 代码位置
 
 | 文件 | 作用 |
 |---|---|
 | `index.js` / `client.js` | 构建产物：Host 插件与 React 面板 |
-| `src/index.ts` | 插件入口：注册 Host API 与 `dsh_mesh` 工具 |
-| `src/lib/service.mjs` | 成员发现、构建任务、learn/resume、部署 job |
+| `src/index.ts` | 插件入口：注册 Host API 与模型工具 |
+| `src/lib/service.mjs` | 成员发现、同步构建、部署 job、日志路径 |
 | `code/deploy/engine.mjs` | SSH 蓝绿部署：prepare/activate/rollback、服务顺序、健康检查 |
 | `code/interop-service/server.mjs` | 独立 HTTP 服务：SDK stdio、创建/等待/通知/事件/回调 |
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
-| `src/lib/tools.mjs` | 模型可见的 `dsh_mesh` 工具 |
+| `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` 工具 |
 | `src/client/index.tsx` | 侧边栏「DSH 成员」面板 |
 | `code/gate/server.mjs` | 网关：密码门、目标路由、反向代理、WebSocket |
 | `code/gate/members.mjs` | 成员发现、`/__gate/select`、cluster 代理、cookie 隔离 |
@@ -219,7 +224,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `code/shared/cluster.mjs` | cluster HMAC 签名/验证、nonce 防重放 |
 | `code/shared/cookies.mjs` | 成员 cookie 命名空间 |
 | `code/build/engine.mjs` | 源码准备、覆盖层、构建、打包、Node 运行时 |
-| `code/build/job.mjs` | 构建任务状态、日志、learn/resume |
+| `code/build/job.mjs` | 构建任务状态、日志、覆盖层固化/工作树复用 |
 | `code/build/cli.mjs` | 命令行入口 |
 | `build/recipes.json` | 源码覆盖层清单（picker / login） |
 | `build/overlays/` | 对 DSH 源码的整文件覆盖层 |

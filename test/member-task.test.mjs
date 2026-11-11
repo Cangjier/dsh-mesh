@@ -143,9 +143,49 @@ test('delegation requires a live DSH conversation', async () => {
   }
 })
 
-test('registerTools exposes dsh_member_task alongside the existing tools', async () => {
+test('build tool returns the final job and its log path', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-build-tool-'))
+  const tools = []
+  const service = {
+    config: {},
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'a', ip: '127.0.0.1' }, members: [] }),
+    build: async () => ({
+      id: 'build-test',
+      status: 'done',
+      phase: 'done',
+      source: 'local',
+      ref: 'master',
+      targets: ['linux-x64'],
+      logFile: path.join(dataDir, 'build', 'build-test', 'build.log'),
+      stateFile: path.join(dataDir, 'build', 'build-test', 'state.json'),
+      logTail: ['job created', 'build complete'],
+      artifacts: [],
+    }),
+  }
+  const ctx = {
+    logger: { info: () => {}, error: () => {} },
+    effect: () => () => {},
+    get: () => undefined,
+  }
+  try {
+    registerTools(ctx, { tools: { register: tool => { tools.push(tool) } } }, service)
+    const build = tools.find(tool => tool.name === 'build')
+    const result = await build.execute({ planOnly: true }, {})
+    assert.equal(result.ok, true)
+    assert.match(result.text, /build-test/)
+    assert.match(result.text, /build\.log/)
+    assert.match(result.text, /job created/)
+  } finally {
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('registerTools exposes build, deploy, members and call_member', async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-tools-'))
   const names = []
+  const tools = []
   const service = {
     config: {},
     dataDir,
@@ -157,10 +197,18 @@ test('registerTools exposes dsh_member_task alongside the existing tools', async
     effect: () => () => {},
     get: () => undefined,
   }
-  const toolsCtx = { tools: { register: tool => { names.push(tool.name) } } }
+  const toolsCtx = { tools: { register: tool => { names.push(tool.name); tools.push(tool) } } }
   try {
     registerTools(ctx, toolsCtx, service)
-    assert.deepEqual(names.sort(), ['dsh_member_task', 'dsh_mesh_deploy', 'dsh_mesh', 'members'].sort())
+    assert.deepEqual(names.sort(), ['build', 'call_member', 'deploy', 'members'].sort())
+    for (const name of ['build', 'deploy', 'members']) {
+      const tool = tools.find(candidate => candidate.name === name)
+      assert.equal(tool.parameters.properties.action, undefined)
+    }
+    const deploy = tools.find(candidate => candidate.name === 'deploy')
+    assert.deepEqual(deploy.parameters.required, ['host', 'package'])
+    const call = tools.find(candidate => candidate.name === 'call_member')
+    assert.deepEqual(call.parameters.properties.action.enum, ['delegate', 'run', 'send'])
   } finally {
     await rm(dataDir, { recursive: true, force: true })
   }

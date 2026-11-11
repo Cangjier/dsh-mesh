@@ -1,5 +1,8 @@
 # Step 011 通过 SSH 蓝绿部署成员
 
+> 工具名已收敛：当前模型工具是 `deploy`（同步执行，返回 `logFile`），没有 `action`。
+> `planOnly` / `rollback` 是参数。本文保留当时的设计记录。
+
 这个步骤给 `dsh-mesh` 增加第二个模型工具 `dsh_mesh_deploy`：从 A 通过 SSH 部署成员 B，不覆盖正在运行的目录；先解压到新的 `releases/<release>` 并完成全部准备，最后才切换 `current` 并重启服务。**gateway 永远是最后一个重启的服务**。
 
 ## 目标目录

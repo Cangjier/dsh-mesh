@@ -6,7 +6,7 @@ import path7 from "node:path";
 import { mkdir as mkdir4, readFile as readFile5, readdir as readdir3, rm as rm4, stat as stat4, writeFile as writeFile4 } from "node:fs/promises";
 import { readFileSync as readFileSync2, existsSync as existsSync4 } from "node:fs";
 import { createHash as createHash3 } from "node:crypto";
-import os6 from "node:os";
+import os5 from "node:os";
 import path5 from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -324,10 +324,10 @@ function sha256Text(text) {
   return createHash("sha256").update(text).digest("hex");
 }
 function parseTarget(target) {
-  const [os7, arch] = String(target).split("-");
-  if (!["linux", "win", "darwin"].includes(os7)) throw new Error(`unsupported target OS: ${target}`);
+  const [os6, arch] = String(target).split("-");
+  if (!["linux", "win", "darwin"].includes(os6)) throw new Error(`unsupported target OS: ${target}`);
   if (!["x64", "arm64"].includes(arch)) throw new Error(`unsupported target architecture: ${target}`);
-  return { os: os7, arch, libc: os7 === "linux" ? "glibc" : "" };
+  return { os: os6, arch, libc: os6 === "linux" ? "glibc" : "" };
 }
 function classifySource(source) {
   const value = String(source).trim().replace(/^git\+/u, "").replace(/\.git$/u, "").replace(/\/+$/u, "");
@@ -1117,7 +1117,7 @@ import { createHash as createHash2 } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { spawn as spawn2 } from "node:child_process";
 import { copyFile, link, mkdir as mkdir3, mkdtemp, readFile as readFile4, readdir as readdir2, rm as rm3, stat as stat3, writeFile as writeFile3 } from "node:fs/promises";
-import os4 from "node:os";
+import { tmpdir } from "node:os";
 import path4 from "node:path";
 var DEFAULT_APP_ROOT = {
   linux: "/opt/dsh-mesh",
@@ -1188,8 +1188,8 @@ function inferRole(name) {
   if (text.includes("gate")) return "gate";
   return "dsh";
 }
-function normalizeServices(input, os7) {
-  const source = input === void 0 ? DEFAULT_SERVICES[os7] : input;
+function normalizeServices(input, os6) {
+  const source = input === void 0 ? DEFAULT_SERVICES[os6] : input;
   if (!Array.isArray(source) || source.length === 0) {
     throw new Error("at least one service is required");
   }
@@ -1204,7 +1204,7 @@ function normalizeServices(input, os7) {
     seen.add(name);
     const role = raw.role ?? inferRole(name);
     if (!(role in ROLE_ORDER)) throw new Error(`service ${name} has unknown role ${String(role)}`);
-    const command = typeof raw.command === "string" && raw.command.trim() !== "" ? raw.command.trim() : os7 === "linux" ? "start.sh" : "dsh-mesh-service.exe";
+    const command = typeof raw.command === "string" && raw.command.trim() !== "" ? raw.command.trim() : os6 === "linux" ? "start.sh" : "dsh-mesh-service.exe";
     return { name, role, command };
   });
   if (!services.some((service) => service.role === "gate")) {
@@ -1219,11 +1219,11 @@ function normalizeServices(input, os7) {
   }
   return services;
 }
-async function findLatestPackage(repositoryRoot, os7) {
+async function findLatestPackage(repositoryRoot, os6) {
   const dist = path4.join(repositoryRoot, "dist");
-  const suffix = os7 === "linux" ? ".tar.gz" : ".zip";
+  const suffix = os6 === "linux" ? ".tar.gz" : ".zip";
   const prefix = `dsh-mesh-`;
-  const marker = `-${os7 === "linux" ? "linux" : "win"}-x64`;
+  const marker = `-${os6 === "linux" ? "linux" : "win"}-x64`;
   const entries = await readdir2(dist).catch(() => []);
   const candidates = [];
   for (const entry of entries) {
@@ -1234,19 +1234,19 @@ async function findLatestPackage(repositoryRoot, os7) {
   }
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   if (candidates.length === 0) {
-    throw new Error(`no ${os7} package found in ${dist}; build one or pass --package`);
+    throw new Error(`no ${os6} package found in ${dist}; build one or pass --package`);
   }
   return candidates[0].file;
 }
 async function buildDeployPlan(options) {
   if (typeof options.host !== "string" || options.host.trim() === "") throw new Error("host is required");
-  const os7 = normalizeOs(options.os ?? "linux");
+  const os6 = normalizeOs(options.os ?? "linux");
   const repositoryRoot = options.repositoryRoot ?? process.cwd();
   let packagePath = "";
   let packageInfo = null;
   let sha256 = "";
   if (options.skipPackage !== true) {
-    packagePath = options.package ? path4.resolve(options.package) : await findLatestPackage(repositoryRoot, os7);
+    packagePath = options.package ? path4.resolve(options.package) : await findLatestPackage(repositoryRoot, os6);
     packageInfo = await stat3(packagePath);
     if (!packageInfo.isFile()) throw new Error(`package is not a file: ${packagePath}`);
     sha256 = await hashFile(packagePath);
@@ -1255,8 +1255,8 @@ async function buildDeployPlan(options) {
   if (!/^[A-Za-z0-9._-]{3,80}$/.test(release)) {
     throw new Error("release must be 3-80 chars of letters, digits, dot, underscore or dash");
   }
-  const appRoot = typeof options.appRoot === "string" && options.appRoot.trim() !== "" ? options.appRoot.trim() : DEFAULT_APP_ROOT[os7];
-  const services = normalizeServices(options.services, os7);
+  const appRoot = typeof options.appRoot === "string" && options.appRoot.trim() !== "" ? options.appRoot.trim() : DEFAULT_APP_ROOT[os6];
+  const services = normalizeServices(options.services, os6);
   const scope = options.scope === "dsh" ? "dsh" : "all";
   const gatePort = String(options.gatePort ?? "80");
   if (!/^\d{1,5}$/.test(gatePort) || Number(gatePort) > 65535) throw new Error("gatePort is invalid");
@@ -1268,36 +1268,38 @@ async function buildDeployPlan(options) {
     user: typeof options.user === "string" && options.user.trim() !== "" ? options.user.trim() : void 0,
     port: Number.isSafeInteger(options.port) ? options.port : 22,
     identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path4.resolve(options.identityFile) : void 0,
-    os: os7,
+    os: os6,
     package: { path: packagePath, bytes: packageInfo?.size ?? 0, sha256 },
     release,
     appRoot,
     serviceUser,
-    shared: `${appRoot}${os7 === "linux" ? "/shared" : "\\shared"}`,
-    current: `${appRoot}${os7 === "linux" ? "/current" : "\\current"}`,
-    previous: `${appRoot}${os7 === "linux" ? "/previous" : "\\previous"}`,
-    releases: `${appRoot}${os7 === "linux" ? "/releases" : "\\releases"}`,
+    shared: `${appRoot}${os6 === "linux" ? "/shared" : "\\shared"}`,
+    current: `${appRoot}${os6 === "linux" ? "/current" : "\\current"}`,
+    previous: `${appRoot}${os6 === "linux" ? "/previous" : "\\previous"}`,
+    releases: `${appRoot}${os6 === "linux" ? "/releases" : "\\releases"}`,
     services,
     scope,
     gatePort,
     retention,
     sudo: options.sudo !== false,
-    remotePackage: os7 === "linux" ? `/tmp/dsh-mesh-${release}${path4.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${release}${path4.extname(packagePath)}`
+    // Named by content, not by release, so a retried deploy of the same package
+    // reuses the upload instead of pushing hundreds of megabytes again.
+    remotePackage: os6 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path4.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path4.extname(packagePath)}`
   };
 }
 async function probeTarget(options) {
   if (typeof options.host !== "string" || options.host.trim() === "") throw new Error("host is required");
-  const os7 = normalizeOs(options.os ?? "linux");
+  const os6 = normalizeOs(options.os ?? "linux");
   const user = typeof options.user === "string" && options.user.trim() !== "" ? options.user.trim() : void 0;
   const plan = {
     host: options.host.trim(),
     user,
     port: Number.isSafeInteger(options.port) ? options.port : 22,
     identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path4.resolve(options.identityFile) : void 0,
-    os: os7
+    os: os6
   };
   const runner = new SshRunner(plan);
-  if (os7 === "windows") {
+  if (os6 === "windows") {
     const script2 = [
       "$ErrorActionPreference = 'SilentlyContinue'",
       `$svc = Get-CimInstance Win32_Service -Filter "Name='DSH-Mesh'"`,
@@ -1698,6 +1700,28 @@ var SshRunner = class {
     }
   }
   /**
+   * Read a remote file's size, or null when it cannot be read.
+   * @param {string} remote remote path.
+   * @returns {Promise<number|null>} size in bytes.
+   */
+  async remoteSize(remote) {
+    try {
+      const args = [...this.sshOptions(), this.target()];
+      let command;
+      if (this.plan.os === "windows") {
+        const encoded = Buffer.from(`(Get-Item -LiteralPath ${ps(remote)}).Length`, "utf16le").toString("base64");
+        command = `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
+      } else {
+        command = `stat -c %s -- ${sh(remote)}`;
+      }
+      const { stdout } = await this.runProcess("ssh", [...args, command]);
+      const size = Number.parseInt(String(stdout).trim(), 10);
+      return Number.isSafeInteger(size) ? size : null;
+    } catch {
+      return null;
+    }
+  }
+  /**
    * Stream one file to the remote path through `ssh` stdin.
    * @param {string} local local path.
    * @param {string} remote remote path.
@@ -1713,7 +1737,7 @@ var SshRunner = class {
     let tarName = null;
     if (windows) {
       tarName = path4.win32.basename(remote);
-      tarDir = await mkdtemp(path4.join(os4.tmpdir(), "dsh-mesh-upload-"));
+      tarDir = await mkdtemp(path4.join(tmpdir(), "dsh-mesh-upload-"));
       const staged = path4.join(tarDir, tarName);
       try {
         try {
@@ -1853,20 +1877,31 @@ var SshRunner = class {
    * @param {'linux'|'windows'} os target OS.
    * @returns {Promise<void>}
    */
-  async script(script, os7, onLine) {
+  async script(script, os6, onLine) {
     const base = this.sshOptions();
-    if (os7 === "linux") {
+    if (os6 === "linux") {
       const remote = this.plan.sudo ? "sudo -n bash -s" : "bash -s";
       await this.runProcess("ssh", [...base, this.target(), remote], script, onLine);
       return;
     }
-    const encoded = Buffer.from(script, "utf16le").toString("base64");
-    await this.runProcess(
-      "ssh",
-      [...base, this.target(), `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`],
-      void 0,
-      onLine
-    );
+    const name = `dsh-deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.ps1`;
+    const remotePath = `C:\\Windows\\Temp\\${name}`;
+    const localPath = path4.join(tmpdir(), name);
+    await writeFile3(localPath, `\uFEFF${script}`, "utf8");
+    try {
+      await this.upload(localPath, remotePath);
+      await this.runProcess(
+        "ssh",
+        [...base, this.target(), `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${remotePath}"`],
+        void 0,
+        onLine
+      );
+    } finally {
+      await rm3(localPath, { force: true }).catch(() => {
+      });
+      await this.runProcess("ssh", [...base, this.target(), `cmd /c del /f "${remotePath}"`]).catch(() => {
+      });
+    }
   }
 };
 var DeployManager = class {
@@ -1996,27 +2031,34 @@ var DeployManager = class {
       await log(`uploading to ${plan.remotePackage}`);
       await mark("upload", "running");
       const uploadStarted = Date.now();
-      await runner.upload(plan.package.path, plan.remotePackage, (progress) => {
-        const totalBytes = progress.totalBytes ?? plan.package.bytes;
+      const existingBytes = typeof runner.remoteSize === "function" ? await runner.remoteSize(plan.remotePackage).catch(() => null) : null;
+      if (existingBytes === plan.package.bytes) {
+        await log(`package already present on the target (${formatBytes(existingBytes)}), skipping upload`);
+        state.progress = { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100, speed: 0, indeterminate: false };
+        await mark("upload", "succeeded", `${formatBytes(existingBytes)} \xB7 \u5DF2\u5B58\u5728\uFF0C\u8DF3\u8FC7\u4E0A\u4F20`);
+      } else {
+        await runner.upload(plan.package.path, plan.remotePackage, (progress) => {
+          const totalBytes = progress.totalBytes ?? plan.package.bytes;
+          state.progress = {
+            bytes: progress.bytes ?? 0,
+            totalBytes,
+            percent: progress.percent ?? (totalBytes > 0 ? Math.min(100, Math.round((progress.bytes ?? 0) / totalBytes * 100)) : 0),
+            speed: progress.speed ?? 0,
+            indeterminate: progress.indeterminate === true
+          };
+          state.updatedAt = stamp();
+          this.#saveThrottled(stateFile, state);
+        });
+        const uploadSeconds = Math.max(0.1, (Date.now() - uploadStarted) / 1e3);
         state.progress = {
-          bytes: progress.bytes ?? 0,
-          totalBytes,
-          percent: progress.percent ?? (totalBytes > 0 ? Math.min(100, Math.round((progress.bytes ?? 0) / totalBytes * 100)) : 0),
-          speed: progress.speed ?? 0,
-          indeterminate: progress.indeterminate === true
+          bytes: plan.package.bytes,
+          totalBytes: plan.package.bytes,
+          percent: 100,
+          speed: plan.package.bytes / uploadSeconds,
+          indeterminate: false
         };
-        state.updatedAt = stamp();
-        this.#saveThrottled(stateFile, state);
-      });
-      const uploadSeconds = Math.max(0.1, (Date.now() - uploadStarted) / 1e3);
-      state.progress = {
-        bytes: plan.package.bytes,
-        totalBytes: plan.package.bytes,
-        percent: 100,
-        speed: plan.package.bytes / uploadSeconds,
-        indeterminate: false
-      };
-      await mark("upload", "succeeded", `${formatBytes(plan.package.bytes)} \xB7 ${uploadSeconds.toFixed(1)}s \xB7 ${formatBytes(plan.package.bytes / uploadSeconds)}/s`);
+        await mark("upload", "succeeded", `${formatBytes(plan.package.bytes)} \xB7 ${uploadSeconds.toFixed(1)}s \xB7 ${formatBytes(plan.package.bytes / uploadSeconds)}/s`);
+      }
       const scripts = this.scripts(plan);
       state.phase = "prepare";
       await mark("prepare", "running");
@@ -2188,7 +2230,7 @@ var DeployManager = class {
 // code/shared/system-info.mjs
 import { execFile } from "node:child_process";
 import { existsSync as existsSync3, readFileSync, statfsSync } from "node:fs";
-import os5 from "node:os";
+import os4 from "node:os";
 import { promisify } from "node:util";
 var execFileAsync = promisify(execFile);
 function round(value, digits = 1) {
@@ -2199,9 +2241,9 @@ function safeNumber(value) {
   return Number.isFinite(value) ? value : 0;
 }
 function quickSystemInfo(options = {}) {
-  const cpus = os5.cpus();
-  const total = os5.totalmem();
-  const free = os5.freemem();
+  const cpus = os4.cpus();
+  const total = os4.totalmem();
+  const free = os4.freemem();
   const used = Math.max(0, total - free);
   let cpuTotal = 0;
   let cpuIdle = 0;
@@ -2232,12 +2274,12 @@ function quickSystemInfo(options = {}) {
   }
   return {
     sampledAt: (/* @__PURE__ */ new Date()).toISOString(),
-    hostname: os5.hostname(),
+    hostname: os4.hostname(),
     platform: process.platform,
     arch: process.arch,
-    home: options.home ?? os5.homedir(),
+    home: options.home ?? os4.homedir(),
     appRoot: options.appRoot ?? process.env.DSH_PACKAGE_ROOT ?? process.cwd(),
-    user: os5.userInfo().username,
+    user: os4.userInfo().username,
     cpu: { model: cpus[0]?.model ?? "unknown", cores: cpus.length, usagePercent: cpuUsage },
     memory: {
       totalBytes: total,
@@ -2290,7 +2332,7 @@ var MeshService = class {
     this.home = path5.dirname(this.dataDir);
     this.deployRoot = path5.join(this.dataDir, "deploy");
     this.memberTagsFile = path5.join(this.dataDir, "member-tags.json");
-    this.packagesDir = path5.join(os6.homedir(), ".dsh", "packages");
+    this.packagesDir = path5.join(os5.homedir(), ".dsh", "packages");
     this.deploy = new DeployManager({
       repositoryRoot: REPOSITORY_ROOT,
       dataDir: this.deployRoot,
@@ -2321,7 +2363,7 @@ var MeshService = class {
     return {
       ok: true,
       host: {
-        hostname: os6.hostname(),
+        hostname: os5.hostname(),
         platform: process.platform,
         arch: process.arch,
         version: this.version,
@@ -2363,7 +2405,7 @@ var MeshService = class {
     const self = {
       id: "local",
       kind: "self",
-      name: identity?.selfName ?? os6.hostname(),
+      name: identity?.selfName ?? os5.hostname(),
       ip: identity?.selfIp ?? "",
       online: true,
       dsh: true,
@@ -2682,8 +2724,8 @@ var MeshService = class {
     const member = memberId !== "" ? all.find((candidate) => candidate.id === memberId) : all.find((candidate) => candidate.id === host || candidate.name === host || candidate.ip === host);
     if (memberId !== "" && member === void 0) throw new Error(`member not found: ${memberId}`);
     if (member !== void 0) {
-      const os8 = /win(?:dows)?/iu.test(path5.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
-      const deployRequest = await this.#memberDeployRequest(member, packagePath, os8);
+      const os7 = /win(?:dows)?/iu.test(path5.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+      const deployRequest = await this.#memberDeployRequest(member, packagePath, os7);
       const started2 = await this.deploy.start({ ...deployRequest, member: member.id });
       return {
         ok: true,
@@ -2693,9 +2735,9 @@ var MeshService = class {
       };
     }
     if (host === "") throw new Error("host is required");
-    const os7 = /win(?:dows)?/iu.test(path5.basename(packagePath)) ? "windows" : "linux";
-    const appRoot = os7 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
-    const started = await this.deploy.start({ host, package: packagePath, os: os7, appRoot });
+    const os6 = /win(?:dows)?/iu.test(path5.basename(packagePath)) ? "windows" : "linux";
+    const appRoot = os6 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
+    const started = await this.deploy.start({ host, package: packagePath, os: os6, appRoot });
     return { ok: true, job: started.job, member: null, packagePath };
   }
   /**
@@ -2739,7 +2781,7 @@ var MeshService = class {
    * @param {'linux'|'windows'} os target OS.
    * @returns {Promise<object>} deploy request.
    */
-  async #memberDeployRequest(member, packagePath, os7) {
+  async #memberDeployRequest(member, packagePath, os6) {
     if (member.ip === "") throw new Error(`member ${member.id} has no VPN address`);
     let user = "root";
     let identityFile;
@@ -2758,7 +2800,7 @@ var MeshService = class {
     let serviceUser = typeof system?.user === "string" && system.user.trim() !== "" ? system.user.trim() : void 0;
     if (appRoot === void 0) {
       try {
-        const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os: os7 });
+        const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os: os6 });
         appRoot = detected.appRoot;
         serviceUser = serviceUser ?? detected.serviceUser;
       } catch {
@@ -2766,17 +2808,17 @@ var MeshService = class {
     }
     if (appRoot === void 0 && typeof system?.home === "string" && system.home.trim() !== "") {
       const home = system.home.trim().replace(/[\\/]+$/u, "");
-      appRoot = os7 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
+      appRoot = os6 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
     }
     if (appRoot === void 0) {
-      const home = os7 === "windows" ? `C:\\Users\\${user}` : user === "root" ? "/root" : `/home/${user}`;
-      appRoot = os7 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
+      const home = os6 === "windows" ? `C:\\Users\\${user}` : user === "root" ? "/root" : `/home/${user}`;
+      appRoot = os6 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
     }
     return {
       host: member.ip,
       user,
       identityFile,
-      os: os7,
+      os: os6,
       appRoot,
       serviceUser,
       package: packagePath

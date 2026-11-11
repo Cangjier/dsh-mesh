@@ -22,7 +22,7 @@ import { createReadStream } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { copyFile, link, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import os from 'node:os'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 const DEFAULT_APP_ROOT = {
@@ -283,9 +283,11 @@ export async function buildDeployPlan(options) {
     gatePort,
     retention,
     sudo: options.sudo !== false,
+    // Named by content, not by release, so a retried deploy of the same package
+    // reuses the upload instead of pushing hundreds of megabytes again.
     remotePackage: os === 'linux'
-      ? `/tmp/dsh-mesh-${release}${path.extname(packagePath)}`
-      : `C:\\Windows\\Temp\\dsh-mesh-${release}${path.extname(packagePath)}`,
+      ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path.extname(packagePath)}`
+      : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path.extname(packagePath)}`,
   }
 }
 
@@ -792,6 +794,29 @@ export class SshRunner {
   }
 
   /**
+   * Read a remote file's size, or null when it cannot be read.
+   * @param {string} remote remote path.
+   * @returns {Promise<number|null>} size in bytes.
+   */
+  async remoteSize(remote) {
+    try {
+      const args = [...this.sshOptions(), this.target()]
+      let command
+      if (this.plan.os === 'windows') {
+        const encoded = Buffer.from(`(Get-Item -LiteralPath ${ps(remote)}).Length`, 'utf16le').toString('base64')
+        command = `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
+      } else {
+        command = `stat -c %s -- ${sh(remote)}`
+      }
+      const { stdout } = await this.runProcess('ssh', [...args, command])
+      const size = Number.parseInt(String(stdout).trim(), 10)
+      return Number.isSafeInteger(size) ? size : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * Stream one file to the remote path through `ssh` stdin.
    * @param {string} local local path.
    * @param {string} remote remote path.
@@ -815,7 +840,7 @@ export class SshRunner {
     let tarName = null
     if (windows) {
       tarName = path.win32.basename(remote)
-      tarDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-upload-'))
+      tarDir = await mkdtemp(path.join(tmpdir(), 'dsh-mesh-upload-'))
       const staged = path.join(tarDir, tarName)
       try {
         try {
@@ -963,13 +988,25 @@ export class SshRunner {
       await this.runProcess('ssh', [...base, this.target(), remote], script, onLine)
       return
     }
-    const encoded = Buffer.from(script, 'utf16le').toString('base64')
-    await this.runProcess(
-      'ssh',
-      [...base, this.target(), `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`],
-      undefined,
-      onLine,
-    )
+    // -EncodedCommand is UTF-16LE base64 (2.7x the source) and cmd.exe rejects
+    // command lines over 8191 characters, which the prepare script exceeds.
+    // Ship it as a temp .ps1 and run it with -File instead.
+    const name = `dsh-deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.ps1`
+    const remotePath = `C:\\Windows\\Temp\\${name}`
+    const localPath = path.join(tmpdir(), name)
+    await writeFile(localPath, `\uFEFF${script}`, 'utf8')
+    try {
+      await this.upload(localPath, remotePath)
+      await this.runProcess(
+        'ssh',
+        [...base, this.target(), `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${remotePath}"`],
+        undefined,
+        onLine,
+      )
+    } finally {
+      await rm(localPath, { force: true }).catch(() => {})
+      await this.runProcess('ssh', [...base, this.target(), `cmd /c del /f "${remotePath}"`]).catch(() => {})
+    }
   }
 }
 
@@ -1106,27 +1143,36 @@ export class DeployManager {
       await log(`uploading to ${plan.remotePackage}`)
       await mark('upload', 'running')
       const uploadStarted = Date.now()
-      await runner.upload(plan.package.path, plan.remotePackage, progress => {
-        const totalBytes = progress.totalBytes ?? plan.package.bytes
+      const existingBytes = typeof runner.remoteSize === 'function'
+        ? await runner.remoteSize(plan.remotePackage).catch(() => null)
+        : null
+      if (existingBytes === plan.package.bytes) {
+        await log(`package already present on the target (${formatBytes(existingBytes)}), skipping upload`)
+        state.progress = { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100, speed: 0, indeterminate: false }
+        await mark('upload', 'succeeded', `${formatBytes(existingBytes)} · 已存在，跳过上传`)
+      } else {
+        await runner.upload(plan.package.path, plan.remotePackage, progress => {
+          const totalBytes = progress.totalBytes ?? plan.package.bytes
+          state.progress = {
+            bytes: progress.bytes ?? 0,
+            totalBytes,
+            percent: progress.percent ?? (totalBytes > 0 ? Math.min(100, Math.round(((progress.bytes ?? 0) / totalBytes) * 100)) : 0),
+            speed: progress.speed ?? 0,
+            indeterminate: progress.indeterminate === true,
+          }
+          state.updatedAt = stamp()
+          this.#saveThrottled(stateFile, state)
+        })
+        const uploadSeconds = Math.max(0.1, (Date.now() - uploadStarted) / 1000)
         state.progress = {
-          bytes: progress.bytes ?? 0,
-          totalBytes,
-          percent: progress.percent ?? (totalBytes > 0 ? Math.min(100, Math.round(((progress.bytes ?? 0) / totalBytes) * 100)) : 0),
-          speed: progress.speed ?? 0,
-          indeterminate: progress.indeterminate === true,
+          bytes: plan.package.bytes,
+          totalBytes: plan.package.bytes,
+          percent: 100,
+          speed: plan.package.bytes / uploadSeconds,
+          indeterminate: false,
         }
-        state.updatedAt = stamp()
-        this.#saveThrottled(stateFile, state)
-      })
-      const uploadSeconds = Math.max(0.1, (Date.now() - uploadStarted) / 1000)
-      state.progress = {
-        bytes: plan.package.bytes,
-        totalBytes: plan.package.bytes,
-        percent: 100,
-        speed: plan.package.bytes / uploadSeconds,
-        indeterminate: false,
+        await mark('upload', 'succeeded', `${formatBytes(plan.package.bytes)} · ${uploadSeconds.toFixed(1)}s · ${formatBytes(plan.package.bytes / uploadSeconds)}/s`)
       }
-      await mark('upload', 'succeeded', `${formatBytes(plan.package.bytes)} · ${uploadSeconds.toFixed(1)}s · ${formatBytes(plan.package.bytes / uploadSeconds)}/s`)
       const scripts = this.scripts(plan)
       state.phase = 'prepare'
       await mark('prepare', 'running')

@@ -114,3 +114,32 @@ test('a changed host key adds an actionable hint to the failure', async () => {
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('an already uploaded package is reused instead of transferred again', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mesh-deploy-'))
+  const packagePath = path.join(root, 'package.tar.gz')
+  await writeFile(packagePath, 'not really a tarball')
+  const { stat } = await import('node:fs/promises')
+  const bytes = (await stat(packagePath)).size
+  let uploads = 0
+  const manager = managerWith(() => ({
+    async remoteSize() {
+      return bytes
+    },
+    async upload() {
+      uploads += 1
+    },
+    async script() {},
+  }), path.join(root, 'jobs'))
+
+  try {
+    const started = await manager.start({ host: '10.66.66.4', os: 'windows', package: packagePath, appRoot: 'C:\\dsh-mesh' })
+    const final = await manager.wait(started.job.id)
+    assert.equal(final.status, 'succeeded')
+    assert.equal(uploads, 0, 'the package transfer must be skipped')
+    assert.equal(final.progress.percent, 100)
+    assert.match(final.steps[0].detail, /跳过上传/u)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

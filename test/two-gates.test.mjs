@@ -146,7 +146,7 @@ async function startGate(options) {
 }
 
 test('two gates: discover, select by cookie, proxy, namespace cookies, and return local', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-person-web-two-gates-'))
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-two-gates-'))
   const upstreamA = await fakeUpstream('A')
   const upstreamB = await fakeUpstream('B', true)
   const portA = await freePort('127.0.0.1')

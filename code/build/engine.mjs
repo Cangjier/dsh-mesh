@@ -7,7 +7,7 @@
  * to hand to a subagent; `learn` turns the corrected worktree back into an
  * overlay for the next run.
  *
- * @module dsh-person-web/build/engine
+ * @module dsh-mesh/build/engine
  */
 
 import { spawn } from 'node:child_process'
@@ -234,7 +234,7 @@ export async function prepareSource(options) {
     log(`using local source ${classified.dir}`)
     return { dir: classified.dir, source, ref, local: true }
   }
-  const cacheDir = options.cacheDir ?? path.join(os.homedir(), '.dsh', 'person-web', 'cache')
+  const cacheDir = options.cacheDir ?? path.join(os.homedir(), '.dsh', 'mesh', 'cache')
   const urls = tarballUrls(classified, ref)
   const archive = path.join(cacheDir, 'sources', `${sha256Text(`${classified.owner}/${classified.repo}@${ref}`).slice(0, 16)}.tar.gz`)
   // A branch or tag can move. Keep the download for a while, but do not reuse
@@ -344,7 +344,7 @@ export async function writeWorkOrder(options) {
   const markdownPath = path.join(options.dir, 'work-order.md')
   const promptPath = path.join(options.dir, 'subagent-prompt.txt')
   const prompt = [
-    `你在为 dsh-person-web 构建 ${options.source}@${options.ref} 的修改版 Web 包。`,
+    `你在为 dsh-mesh 构建 ${options.source}@${options.ref} 的修改版 Web 包。`,
     '确定性构建在应用源码覆盖层时失败。请只修复工作树里的源码，不要放宽覆盖层校验。',
     '先读 work-order.md 与对应的 Step 文档，再修改下列文件，使每个文件的覆盖层 marker 存在，并让 pnpm run build:web 通过。',
     `修完后运行 \`node code/build/cli.mjs learn --job ${jobDir}\` 把修改收成新的覆盖层，然后 \`node code/build/cli.mjs build --job ${jobDir} --resume\`。`,
@@ -368,7 +368,7 @@ export async function writeWorkOrder(options) {
     '## 修复方式',
     '',
     '1. 打开源码树里的目标文件，按对应 Step 文档把界面改好。',
-    '2. 保持覆盖层 marker 注释存在：picker 是 `dsh-person-web overlay: picker`，login 是 `dsh-person-web overlay: login`。',
+    '2. 保持覆盖层 marker 注释存在：picker 是 `dsh-mesh overlay: picker`，login 是 `dsh-mesh overlay: login`。',
     `3. 运行 \`node code/build/cli.mjs learn --job ${jobDir}\`；它会把改好的文件写回 \`build/overlays/\`。`,
     `4. 运行 \`node code/build/cli.mjs build --job ${jobDir} --resume\`；下一次同一 ref 会先应用这份新覆盖层。`,
     '',
@@ -514,7 +514,7 @@ export async function listFiles(dir) {
  */
 export async function assembleWebPackage(options) {
   const { os: targetOs, arch, libc } = parseTarget(options.target)
-  const packageDir = path.join(options.outputDir, `dsh-person-web-${options.version}-${targetOs}-${arch}`)
+  const packageDir = path.join(options.outputDir, `dsh-mesh-${options.version}-${targetOs}-${arch}`)
   await rm(packageDir, { recursive: true, force: true })
   await mkdir(path.join(packageDir, 'web'), { recursive: true })
   await cp(options.dist, path.join(packageDir, 'web'), { recursive: true })
@@ -532,17 +532,17 @@ export async function assembleWebPackage(options) {
     await copyIfExists(path.join(options.repositoryRoot, file), path.join(packageDir, file))
   }
   for (const file of ['index.js', 'client.js', 'cordis.patch.yml', 'package.json']) {
-    await copyIfExists(path.join(options.repositoryRoot, file), path.join(packageDir, 'plugins', 'dsh-person-web', file))
+    await copyIfExists(path.join(options.repositoryRoot, file), path.join(packageDir, 'plugins', 'dsh-mesh', file))
   }
-  await copyIfExists(path.join(options.repositoryRoot, 'locale'), path.join(packageDir, 'plugins', 'dsh-person-web', 'locale'))
+  await copyIfExists(path.join(options.repositoryRoot, 'locale'), path.join(packageDir, 'plugins', 'dsh-mesh', 'locale'))
   // The packaged plugin must be able to run `build_learn`/`build_resume` on a
   // deployed member, so its recipes, overlays, and build modules travel with it.
-  await copyIfExists(path.join(options.repositoryRoot, 'build'), path.join(packageDir, 'plugins', 'dsh-person-web', 'build'))
-  await copyIfExists(path.join(options.repositoryRoot, 'code', 'build'), path.join(packageDir, 'plugins', 'dsh-person-web', 'code', 'build'))
-  await copyIfExists(path.join(options.repositoryRoot, 'code', 'shared'), path.join(packageDir, 'plugins', 'dsh-person-web', 'code', 'shared'))
+  await copyIfExists(path.join(options.repositoryRoot, 'build'), path.join(packageDir, 'plugins', 'dsh-mesh', 'build'))
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'build'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'build'))
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'shared'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'shared'))
   const manifest = {
     format: 1,
-    name: 'dsh-person-web',
+    name: 'dsh-mesh',
     version: options.version,
     target: { os: targetOs, arch, libc },
     builtAt: new Date().toISOString(),
@@ -804,7 +804,7 @@ export async function assembleRuntimePackage(options) {
   for (const file of ['install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd']) {
     await copyIfExists(path.join(options.repositoryRoot, 'code', file), path.join(packageDir, file))
   }
-  await writeFile(path.join(packageDir, '.offline-payload'), 'dsh-person-web\n', 'utf8')
+  await writeFile(path.join(packageDir, '.offline-payload'), 'dsh-mesh\n', 'utf8')
   await writeFile(path.join(packageDir, 'VERSION'), `${options.dshVersion}\n`, 'utf8')
   const updated = {
     ...manifest,

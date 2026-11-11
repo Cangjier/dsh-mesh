@@ -160,7 +160,7 @@ test('registerTools exposes dsh_member_task alongside the existing tools', async
   const toolsCtx = { tools: { register: tool => { names.push(tool.name) } } }
   try {
     registerTools(ctx, toolsCtx, service)
-    assert.deepEqual(names.sort(), ['dsh_member_task', 'dsh_person_deploy', 'dsh_person_web'].sort())
+    assert.deepEqual(names.sort(), ['dsh_member_task', 'dsh_person_deploy', 'dsh_mesh', 'members'].sort())
   } finally {
     await rm(dataDir, { recursive: true, force: true })
   }

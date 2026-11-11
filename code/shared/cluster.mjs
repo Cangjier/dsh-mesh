@@ -6,7 +6,7 @@
  * a captured header cannot be replayed for a different request and an old
  * header stops working after a minute.
  *
- * @module dsh-person-web/shared/cluster
+ * @module dsh-mesh/shared/cluster
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'

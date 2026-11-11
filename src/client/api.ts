@@ -1,4 +1,4 @@
-/** Browser API for the person-web panel. */
+/** Browser API for the mesh panel. */
 
 export interface SystemInfo {
   hostname?: string
@@ -178,68 +178,68 @@ export const api = {
   },
 
   hostStatus(): Promise<HostStatus> {
-    return request<HostStatus>('/api/dsh-person-web/status')
+    return request<HostStatus>('/api/dsh-mesh/status')
   },
 
   hostMembers(): Promise<Snapshot> {
-    return request<Snapshot>('/api/dsh-person-web/members')
+    return request<Snapshot>('/api/dsh-mesh/members')
   },
 
   memberTags(): Promise<MemberTags> {
-    return request<MemberTags>('/api/dsh-person-web/member-tags')
+    return request<MemberTags>('/api/dsh-mesh/member-tags')
   },
 
   setMemberTag(id: string, tag: string): Promise<MemberTags> {
-    return request<MemberTags>('/api/dsh-person-web/member-tags', {
+    return request<MemberTags>('/api/dsh-mesh/member-tags', {
       method: 'POST',
-      headers: { 'x-dsh-person-web': '1' },
+      headers: { 'x-dsh-mesh': '1' },
       body: JSON.stringify({ id, tag }),
     })
   },
 
   packages(): Promise<PackagesResponse> {
-    return request<PackagesResponse>('/api/dsh-person-web/packages')
+    return request<PackagesResponse>('/api/dsh-mesh/packages')
   },
 
   deploy(member: string, packageName: string): Promise<DeployResponse> {
-    return request<DeployResponse>('/api/dsh-person-web/deploy', {
+    return request<DeployResponse>('/api/dsh-mesh/deploy', {
       method: 'POST',
-      headers: { 'x-dsh-person-web': '1' },
+      headers: { 'x-dsh-mesh': '1' },
       body: JSON.stringify({ member, package: packageName }),
     })
   },
 
   jobs(): Promise<{ jobs: BuildJob[] }> {
-    return request<{ jobs: BuildJob[] }>('/api/dsh-person-web/jobs')
+    return request<{ jobs: BuildJob[] }>('/api/dsh-mesh/jobs')
   },
 
   startBuild(body: { source?: string; ref?: string; targets?: string[]; planOnly?: boolean }): Promise<{ job: BuildJob }> {
-    return request<{ job: BuildJob }>('/api/dsh-person-web/build', {
+    return request<{ job: BuildJob }>('/api/dsh-mesh/build', {
       method: 'POST',
-      headers: { 'x-dsh-person-web': '1' },
+      headers: { 'x-dsh-mesh': '1' },
       body: JSON.stringify(body),
     })
   },
 
   job(id: string): Promise<{ job: BuildJob }> {
-    return request<{ job: BuildJob }>(`/api/dsh-person-web/build/${encodeURIComponent(id)}`)
+    return request<{ job: BuildJob }>(`/api/dsh-mesh/build/${encodeURIComponent(id)}`)
   },
 
   log(id: string, lines = 120): Promise<{ lines: string[] }> {
-    return request<{ lines: string[] }>(`/api/dsh-person-web/build/${encodeURIComponent(id)}/log?lines=${String(lines)}`)
+    return request<{ lines: string[] }>(`/api/dsh-mesh/build/${encodeURIComponent(id)}/log?lines=${String(lines)}`)
   },
 
   learn(id: string): Promise<{ job: BuildJob }> {
-    return request<{ job: BuildJob }>(`/api/dsh-person-web/build/${encodeURIComponent(id)}/learn`, {
+    return request<{ job: BuildJob }>(`/api/dsh-mesh/build/${encodeURIComponent(id)}/learn`, {
       method: 'POST',
-      headers: { 'x-dsh-person-web': '1' },
+      headers: { 'x-dsh-mesh': '1' },
     })
   },
 
   resume(id: string): Promise<{ job: BuildJob }> {
-    return request<{ job: BuildJob }>(`/api/dsh-person-web/build/${encodeURIComponent(id)}/resume`, {
+    return request<{ job: BuildJob }>(`/api/dsh-mesh/build/${encodeURIComponent(id)}/resume`, {
       method: 'POST',
-      headers: { 'x-dsh-person-web': '1' },
+      headers: { 'x-dsh-mesh': '1' },
     })
   },
 }

@@ -1,11 +1,11 @@
 # Step 014 成员任务插件：A 操作 B 的对话并回调主对话
 
-`dsh-person-web` 新增模型工具 `dsh_member_task`。成员 A 的 DSH 可以把任务交给成员 B 的独立 DSH 交互服务，并在 B 完成后自动把结果写回 A 的 **原对话**，就像子代理完成通知。
+`dsh-mesh` 新增模型工具 `dsh_member_task`。成员 A 的 DSH 可以把任务交给成员 B 的独立 DSH 交互服务，并在 B 完成后自动把结果写回 A 的 **原对话**，就像子代理完成通知。
 
 ## 数据路径
 
 ```text
-A 的 DSH（插件 dsh-person-web）
+A 的 DSH（插件 dsh-mesh）
   │ dsh_member_task action=delegate member=10.66.66.3 prompt="..."
   │
   ├─ 解析 WireGuard 成员 B，得到 http://10.66.66.3:8765
@@ -95,7 +95,7 @@ agent.followup({
 
 ## 配置
 
-A 侧 `dsh-person-web` 插件配置：
+A 侧 `dsh-mesh` 插件配置：
 
 ```yaml
 interopPort: 8765

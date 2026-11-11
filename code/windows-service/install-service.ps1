@@ -1,6 +1,6 @@
 param(
   [string]$Root = '',
-  [string]$ServiceName = 'DSH-Person-Web'
+  [string]$ServiceName = 'DSH-Mesh'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -8,8 +8,8 @@ if ([string]::IsNullOrWhiteSpace($Root)) {
   $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 }
 $Root = (Resolve-Path $Root).Path
-$exe = Join-Path $Root 'dsh-person-web-service.exe'
-$source = Join-Path $PSScriptRoot 'DshPersonWebService.cs'
+$exe = Join-Path $Root 'dsh-mesh-service.exe'
+$source = Join-Path $PSScriptRoot 'DshMeshService.cs'
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path $csc)) { $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe' }
 if (-not (Test-Path $csc)) { throw 'Cannot find the .NET Framework C# compiler (csc.exe).' }

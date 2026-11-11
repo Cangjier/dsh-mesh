@@ -109,7 +109,7 @@ function request(port, options = {}) {
 }
 
 test('the gate serves member discovery and selection end to end', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-person-web-gate-'))
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-gate-'))
   const upstream = await fakeUpstream()
   const port = await freePort()
   const password = 'test-password-123'
@@ -140,7 +140,7 @@ test('the gate serves member discovery and selection end to end', async () => {
     const member = await request(port, { path: '/__gate/member' })
     assert.equal(member.status, 200)
     const memberInfo = JSON.parse(member.body)
-    assert.equal(memberInfo.service, 'dsh-person-web')
+    assert.equal(memberInfo.service, 'dsh-mesh')
     assert.equal(memberInfo.cluster.configured, true)
 
     const login = await request(port, {

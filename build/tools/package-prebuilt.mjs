@@ -11,7 +11,7 @@
  * Usage:
  *   node build/tools/package-prebuilt.mjs --targets linux-x64,win-x64
  *
- * @module dsh-person-web/build/tools/package-prebuilt
+ * @module dsh-mesh/build/tools/package-prebuilt
  */
 
 import { createHash } from 'node:crypto'
@@ -49,7 +49,7 @@ const asar = path.resolve(value('app-asar', path.join(
   'app.asar',
 )))
 const nodeVersion = value('node-version', process.versions.node)
-const cacheDir = path.join(os.homedir(), '.dsh', 'person-web', 'cache')
+const cacheDir = path.join(os.homedir(), '.dsh', 'mesh', 'cache')
 const frontendCache = path.join(cacheDir, 'prebuilt-frontend', dshVersion)
 
 /**

@@ -128,7 +128,7 @@ test('discoverMembers merges self, the server, and every peer', async () => {
         ok: true,
         status: 200,
         async json() {
-          return { ok: true, service: 'dsh-person-web', name: 'VM-0-2-ubuntu' }
+          return { ok: true, service: 'dsh-mesh', name: 'VM-0-2-ubuntu' }
         },
       }
     }
@@ -161,7 +161,7 @@ test('probeMember accepts only the member service marker', async () => {
   })
   const probe = await probeMember('10.66.66.2', { fetchImpl, ports: [80], timeoutMs: 50 })
   assert.equal(probe.ok, false)
-  assert.match(probe.error, /not dsh-person-web/u)
+  assert.match(probe.error, /not dsh-mesh/u)
 })
 
 test('member ids and target cookies are validated', () => {

@@ -4,7 +4,7 @@
  * The plugin tool uses the same functions from `job.mjs`; this entry exists so
  * a human (or a work order) can run and inspect a build without DSH.
  *
- * @module dsh-person-web/build/cli
+ * @module dsh-mesh/build/cli
  */
 
 import { readFile } from 'node:fs/promises'
@@ -151,7 +151,7 @@ async function main() {
     '  --source <url|dir>       default: build/recipes.json source',
     '  --ref <branch|tag|sha>   default: master',
     '  --targets <list>         default: linux-x64,win-x64',
-    '  --out <dir>              job root (default: ~/.dsh/person-web/build)',
+    '  --out <dir>              job root (default: ~/.dsh/mesh/build)',
     '  --job <dir>              reuse an existing job directory',
     '  --resume                 reuse the existing worktree',
     '  --web-only               package the web payload without app/node/runtime',

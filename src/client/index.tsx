@@ -35,8 +35,8 @@ import { api, ApiError, type Member, type PackageInfo, type Snapshot, type Syste
 import { WireGuardPanel } from './wireguard'
 import { EN as WIREGUARD_EN, dictionary as wireguardDictionary } from './wireguard/i18n'
 
-const NS = 'dsh-person-web'
-const PANEL_ID = 'person-web'
+const NS = 'dsh-mesh'
+const PANEL_ID = 'mesh'
 
 function useThemeMode(ctx: any): 'light' | 'dark' {
   const [snapshot, setSnapshot] = useState<any>(() => ctx.theme.getTheme())
@@ -85,7 +85,7 @@ function memberAppRoot(member: Member | null): string {
   const home = system?.home?.trim() ?? ''
   if (home === '') return ''
   const base = home.replace(/[\\/]+$/u, '')
-  return system?.platform === 'win32' ? `${base}\\.dsh\\dsh-person-web` : `${base}/.dsh/dsh-person-web`
+  return system?.platform === 'win32' ? `${base}\\.dsh\\dsh-mesh` : `${base}/.dsh/dsh-mesh`
 }
 
 function formatGb(value: number): string {
@@ -553,15 +553,15 @@ export const inject = ['slots', 'locale', 'theme']
 export function apply(ctx: any) {
   ctx.effect(() => {
     const tag = document.createElement('style')
-    tag.setAttribute('data-dsh-person-web', 'hide-preview-badge')
+    tag.setAttribute('data-dsh-mesh', 'hide-preview-badge')
     tag.textContent = '[class*="previewBadge"]{display:none!important}'
     document.head.appendChild(tag)
     return () => tag.remove()
-  }, 'person-web: hide preview badge')
+  }, 'mesh: hide preview badge')
   ctx.effect(() => ctx.locale.register(NS, {
     en: { 'panel.label': 'Mesh' },
     zh: { 'panel.label': 'Mesh' },
-  }), 'person-web dictionaries')
+  }), 'mesh dictionaries')
   ctx.effect(() => ctx.locale.register('dsh-wireguard', {
     en: WIREGUARD_EN,
     zh: wireguardDictionary('zh'),

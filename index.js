@@ -16,7 +16,7 @@ import { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
 var DEFAULT_MEMBER_PORTS = Object.freeze([80, 8080]);
-var MEMBER_SERVICE = "dsh-person-web";
+var MEMBER_SERVICE = "dsh-mesh";
 function dshHome(env = process.env) {
   const configured = env.DSH_HOME?.trim();
   return configured && configured.length > 0 ? configured : path.join(os.homedir(), ".dsh");
@@ -451,7 +451,7 @@ async function prepareSource(options) {
     log(`using local source ${classified.dir}`);
     return { dir: classified.dir, source, ref, local: true };
   }
-  const cacheDir = options.cacheDir ?? path2.join(os2.homedir(), ".dsh", "person-web", "cache");
+  const cacheDir = options.cacheDir ?? path2.join(os2.homedir(), ".dsh", "mesh", "cache");
   const urls = tarballUrls(classified, ref);
   const archive = path2.join(cacheDir, "sources", `${sha256Text(`${classified.owner}/${classified.repo}@${ref}`).slice(0, 16)}.tar.gz`);
   const immutable = /^[0-9a-f]{40}$/iu.test(ref);
@@ -541,7 +541,7 @@ async function writeWorkOrder(options) {
   const markdownPath = path2.join(options.dir, "work-order.md");
   const promptPath = path2.join(options.dir, "subagent-prompt.txt");
   const prompt = [
-    `\u4F60\u5728\u4E3A dsh-person-web \u6784\u5EFA ${options.source}@${options.ref} \u7684\u4FEE\u6539\u7248 Web \u5305\u3002`,
+    `\u4F60\u5728\u4E3A dsh-mesh \u6784\u5EFA ${options.source}@${options.ref} \u7684\u4FEE\u6539\u7248 Web \u5305\u3002`,
     "\u786E\u5B9A\u6027\u6784\u5EFA\u5728\u5E94\u7528\u6E90\u7801\u8986\u76D6\u5C42\u65F6\u5931\u8D25\u3002\u8BF7\u53EA\u4FEE\u590D\u5DE5\u4F5C\u6811\u91CC\u7684\u6E90\u7801\uFF0C\u4E0D\u8981\u653E\u5BBD\u8986\u76D6\u5C42\u6821\u9A8C\u3002",
     "\u5148\u8BFB work-order.md \u4E0E\u5BF9\u5E94\u7684 Step \u6587\u6863\uFF0C\u518D\u4FEE\u6539\u4E0B\u5217\u6587\u4EF6\uFF0C\u4F7F\u6BCF\u4E2A\u6587\u4EF6\u7684\u8986\u76D6\u5C42 marker \u5B58\u5728\uFF0C\u5E76\u8BA9 pnpm run build:web \u901A\u8FC7\u3002",
     `\u4FEE\u5B8C\u540E\u8FD0\u884C \`node code/build/cli.mjs learn --job ${jobDir}\` \u628A\u4FEE\u6539\u6536\u6210\u65B0\u7684\u8986\u76D6\u5C42\uFF0C\u7136\u540E \`node code/build/cli.mjs build --job ${jobDir} --resume\`\u3002`,
@@ -565,7 +565,7 @@ async function writeWorkOrder(options) {
     "## \u4FEE\u590D\u65B9\u5F0F",
     "",
     "1. \u6253\u5F00\u6E90\u7801\u6811\u91CC\u7684\u76EE\u6807\u6587\u4EF6\uFF0C\u6309\u5BF9\u5E94 Step \u6587\u6863\u628A\u754C\u9762\u6539\u597D\u3002",
-    "2. \u4FDD\u6301\u8986\u76D6\u5C42 marker \u6CE8\u91CA\u5B58\u5728\uFF1Apicker \u662F `dsh-person-web overlay: picker`\uFF0Clogin \u662F `dsh-person-web overlay: login`\u3002",
+    "2. \u4FDD\u6301\u8986\u76D6\u5C42 marker \u6CE8\u91CA\u5B58\u5728\uFF1Apicker \u662F `dsh-mesh overlay: picker`\uFF0Clogin \u662F `dsh-mesh overlay: login`\u3002",
     `3. \u8FD0\u884C \`node code/build/cli.mjs learn --job ${jobDir}\`\uFF1B\u5B83\u4F1A\u628A\u6539\u597D\u7684\u6587\u4EF6\u5199\u56DE \`build/overlays/\`\u3002`,
     `4. \u8FD0\u884C \`node code/build/cli.mjs build --job ${jobDir} --resume\`\uFF1B\u4E0B\u4E00\u6B21\u540C\u4E00 ref \u4F1A\u5148\u5E94\u7528\u8FD9\u4EFD\u65B0\u8986\u76D6\u5C42\u3002`,
     "",
@@ -672,7 +672,7 @@ async function listFiles(dir) {
 }
 async function assembleWebPackage(options) {
   const { os: targetOs, arch, libc } = parseTarget(options.target);
-  const packageDir = path2.join(options.outputDir, `dsh-person-web-${options.version}-${targetOs}-${arch}`);
+  const packageDir = path2.join(options.outputDir, `dsh-mesh-${options.version}-${targetOs}-${arch}`);
   await rm(packageDir, { recursive: true, force: true });
   await mkdir(path2.join(packageDir, "web"), { recursive: true });
   await cp(options.dist, path2.join(packageDir, "web"), { recursive: true });
@@ -690,15 +690,15 @@ async function assembleWebPackage(options) {
     await copyIfExists(path2.join(options.repositoryRoot, file), path2.join(packageDir, file));
   }
   for (const file of ["index.js", "client.js", "cordis.patch.yml", "package.json"]) {
-    await copyIfExists(path2.join(options.repositoryRoot, file), path2.join(packageDir, "plugins", "dsh-person-web", file));
+    await copyIfExists(path2.join(options.repositoryRoot, file), path2.join(packageDir, "plugins", "dsh-mesh", file));
   }
-  await copyIfExists(path2.join(options.repositoryRoot, "locale"), path2.join(packageDir, "plugins", "dsh-person-web", "locale"));
-  await copyIfExists(path2.join(options.repositoryRoot, "build"), path2.join(packageDir, "plugins", "dsh-person-web", "build"));
-  await copyIfExists(path2.join(options.repositoryRoot, "code", "build"), path2.join(packageDir, "plugins", "dsh-person-web", "code", "build"));
-  await copyIfExists(path2.join(options.repositoryRoot, "code", "shared"), path2.join(packageDir, "plugins", "dsh-person-web", "code", "shared"));
+  await copyIfExists(path2.join(options.repositoryRoot, "locale"), path2.join(packageDir, "plugins", "dsh-mesh", "locale"));
+  await copyIfExists(path2.join(options.repositoryRoot, "build"), path2.join(packageDir, "plugins", "dsh-mesh", "build"));
+  await copyIfExists(path2.join(options.repositoryRoot, "code", "build"), path2.join(packageDir, "plugins", "dsh-mesh", "code", "build"));
+  await copyIfExists(path2.join(options.repositoryRoot, "code", "shared"), path2.join(packageDir, "plugins", "dsh-mesh", "code", "shared"));
   const manifest = {
     format: 1,
-    name: "dsh-person-web",
+    name: "dsh-mesh",
     version: options.version,
     target: { os: targetOs, arch, libc },
     builtAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -897,7 +897,7 @@ async function assembleRuntimePackage(options) {
   for (const file of ["install.ps1", "start.ps1", "stop.ps1", "start.cmd", "stop.cmd"]) {
     await copyIfExists(path2.join(options.repositoryRoot, "code", file), path2.join(packageDir, file));
   }
-  await writeFile(path2.join(packageDir, ".offline-payload"), "dsh-person-web\n", "utf8");
+  await writeFile(path2.join(packageDir, ".offline-payload"), "dsh-mesh\n", "utf8");
   await writeFile(path2.join(packageDir, "VERSION"), `${options.dshVersion}
 `, "utf8");
   const updated = {
@@ -913,10 +913,10 @@ async function assembleRuntimePackage(options) {
 
 // code/build/job.mjs
 function defaultJobRoot() {
-  return path3.join(os3.homedir(), ".dsh", "person-web", "build");
+  return path3.join(os3.homedir(), ".dsh", "mesh", "build");
 }
 function defaultCacheDir() {
-  return path3.join(os3.homedir(), ".dsh", "person-web", "cache");
+  return path3.join(os3.homedir(), ".dsh", "mesh", "cache");
 }
 async function createJob(options = {}) {
   const root = options.root ?? defaultJobRoot();
@@ -1119,8 +1119,8 @@ import { spawn as spawn2 } from "node:child_process";
 import { mkdir as mkdir3, readFile as readFile4, readdir as readdir2, stat as stat3, writeFile as writeFile3 } from "node:fs/promises";
 import path4 from "node:path";
 var DEFAULT_APP_ROOT = {
-  linux: "/opt/dsh-person-web",
-  windows: "C:\\dsh-person-web"
+  linux: "/opt/dsh-mesh",
+  windows: "C:\\dsh-mesh"
 };
 var DEFAULT_SERVICES = {
   linux: [
@@ -1129,7 +1129,7 @@ var DEFAULT_SERVICES = {
   ],
   windows: [
     { name: "DSH-Web-App", role: "dsh", command: "dsh-web-app-service.exe" },
-    { name: "DSH-Person-Web", role: "gate", command: "dsh-person-web-service.exe" }
+    { name: "DSH-Mesh", role: "gate", command: "dsh-mesh-service.exe" }
   ]
 };
 var ROLE_ORDER = { control: 0, dsh: 1, gate: 2 };
@@ -1177,7 +1177,7 @@ function normalizeServices(input, os6) {
     seen.add(name);
     const role = raw.role ?? inferRole(name);
     if (!(role in ROLE_ORDER)) throw new Error(`service ${name} has unknown role ${String(role)}`);
-    const command = typeof raw.command === "string" && raw.command.trim() !== "" ? raw.command.trim() : os6 === "linux" ? "start.sh" : "dsh-person-web-service.exe";
+    const command = typeof raw.command === "string" && raw.command.trim() !== "" ? raw.command.trim() : os6 === "linux" ? "start.sh" : "dsh-mesh-service.exe";
     return { name, role, command };
   });
   if (!services.some((service) => service.role === "gate")) {
@@ -1195,7 +1195,7 @@ function normalizeServices(input, os6) {
 async function findLatestPackage(repositoryRoot, os6) {
   const dist = path4.join(repositoryRoot, "dist");
   const suffix = os6 === "linux" ? ".tar.gz" : ".zip";
-  const prefix = `dsh-person-web-`;
+  const prefix = `dsh-mesh-`;
   const marker = `-${os6 === "linux" ? "linux" : "win"}-x64`;
   const entries = await readdir2(dist).catch(() => []);
   const candidates = [];
@@ -1255,7 +1255,7 @@ async function buildDeployPlan(options) {
     gatePort,
     retention,
     sudo: options.sudo !== false,
-    remotePackage: os6 === "linux" ? `/tmp/dsh-person-web-${release}${path4.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-person-web-${release}${path4.extname(packagePath)}`
+    remotePackage: os6 === "linux" ? `/tmp/dsh-mesh-${release}${path4.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${release}${path4.extname(packagePath)}`
   };
 }
 async function probeTarget(options) {
@@ -1273,13 +1273,13 @@ async function probeTarget(options) {
   if (os6 === "windows") {
     const script2 = [
       "$ErrorActionPreference = 'SilentlyContinue'",
-      `$svc = Get-CimInstance Win32_Service -Filter "Name='DSH-Person-Web'"`,
+      `$svc = Get-CimInstance Win32_Service -Filter "Name='DSH-Mesh'"`,
       "$root = ''",
       "if ($svc -and $svc.PathName) {",
       `  if ($svc.PathName -match '^"([^"]+)"') { $exe = $matches[1] } else { $exe = ($svc.PathName -split ' ')[0] }`,
       "  $root = Split-Path -Parent $exe",
       "}",
-      "if (-not $root) { $root = Join-Path $env:USERPROFILE '.dsh\\dsh-person-web' }",
+      "if (-not $root) { $root = Join-Path $env:USERPROFILE '.dsh\\dsh-mesh' }",
       "$root = $root -replace '(?i)\\\\current$', ''",
       "Write-Output $root",
       "Write-Output $env:USERNAME"
@@ -1291,14 +1291,14 @@ async function probeTarget(options) {
       `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
     ]);
     const [root2 = ""] = stdout2.split(/\r?\n/u);
-    const appRoot = root2.trim() !== "" ? root2.trim() : `C:\\Users\\${user ?? "Public"}\\.dsh\\dsh-person-web`;
+    const appRoot = root2.trim() !== "" ? root2.trim() : `C:\\Users\\${user ?? "Public"}\\.dsh\\dsh-mesh`;
     return { appRoot, serviceUser: void 0 };
   }
   const script = `#!/usr/bin/env bash
 set -u
 root=''
 runuser=''
-for unit in dsh-web-gate.service dsh-web.service dsh-person-web.service; do
+for unit in dsh-web-gate.service dsh-web.service dsh-mesh.service; do
   if command -v systemctl >/dev/null 2>&1; then
     root=$(systemctl show "$unit" -p WorkingDirectory --value 2>/dev/null || true)
   fi
@@ -1308,7 +1308,7 @@ for unit in dsh-web-gate.service dsh-web.service dsh-person-web.service; do
   fi
 done
 if [ -z "$root" ]; then
-  root="$HOME/.dsh/dsh-person-web"
+  root="$HOME/.dsh/dsh-mesh"
 fi
 case "$root" in
   */current) root=$(dirname "$root") ;;
@@ -1321,7 +1321,7 @@ printf '%s\\n%s\\n' "$root" "$runuser"
     "bash -s"
   ], script);
   const [root = "", serviceUser = ""] = stdout.split(/\r?\n/u);
-  const fallback = user !== void 0 && user !== "root" ? `/home/${user}/.dsh/dsh-person-web` : "/root/.dsh/dsh-person-web";
+  const fallback = user !== void 0 && user !== "root" ? `/home/${user}/.dsh/dsh-mesh` : "/root/.dsh/dsh-mesh";
   return {
     appRoot: root.trim() !== "" ? root.trim() : fallback,
     serviceUser: serviceUser.trim() !== "" ? serviceUser.trim() : void 0
@@ -1988,7 +1988,7 @@ function packageVersion() {
     return "0.0.0";
   }
 }
-var PersonWebService = class {
+var MeshService = class {
   /**
    * @param {{dataDir: string, config?: object, log?: (line: string) => void}} options service input.
    */
@@ -2149,7 +2149,7 @@ var PersonWebService = class {
     const ref = (typeof request.ref === "string" && request.ref !== "" ? request.ref : defaults.build.ref) || DEFAULT_REF;
     const targets = Array.isArray(request.targets) && request.targets.length > 0 ? request.targets : defaults.build.targets;
     const job = await createJob({ root: this.jobRoot, source, ref, targets });
-    this.logLine(`person-web build job ${job.id} created`);
+    this.logLine(`mesh build job ${job.id} created`);
     const promise = runJob(job.dir, {
       repositoryRoot: this.repositoryRoot,
       recipesPath: this.recipesPath,
@@ -2160,7 +2160,7 @@ var PersonWebService = class {
       full: this.config.build?.full !== false,
       nodeVersion: typeof this.config.build?.nodeVersion === "string" && this.config.build.nodeVersion !== "" ? this.config.build.nodeVersion : void 0
     }).catch((error) => {
-      this.logLine(`person-web build job ${job.id} crashed: ${error instanceof Error ? error.message : String(error)}`);
+      this.logLine(`mesh build job ${job.id} crashed: ${error instanceof Error ? error.message : String(error)}`);
     }).finally(() => {
       this.running.delete(job.id);
     });
@@ -2178,7 +2178,7 @@ var PersonWebService = class {
     const dir = this._jobDir(id);
     if (this.running.has(id)) throw new Error("this job is already running");
     const state = await readState(dir);
-    this.logLine(`person-web build job ${id} resumed`);
+    this.logLine(`mesh build job ${id} resumed`);
     const promise = runJob(dir, {
       repositoryRoot: this.repositoryRoot,
       recipesPath: this.recipesPath,
@@ -2188,7 +2188,7 @@ var PersonWebService = class {
       full: this.config.build?.full !== false,
       nodeVersion: typeof this.config.build?.nodeVersion === "string" && this.config.build.nodeVersion !== "" ? this.config.build.nodeVersion : void 0
     }).catch((error) => {
-      this.logLine(`person-web build job ${id} crashed: ${error instanceof Error ? error.message : String(error)}`);
+      this.logLine(`mesh build job ${id} crashed: ${error instanceof Error ? error.message : String(error)}`);
     }).finally(() => {
       this.running.delete(id);
     });
@@ -2343,11 +2343,11 @@ var PersonWebService = class {
     }
     if (appRoot === void 0 && typeof system?.home === "string" && system.home.trim() !== "") {
       const home = system.home.trim().replace(/[\\/]+$/u, "");
-      appRoot = os6 === "windows" ? `${home}\\.dsh\\dsh-person-web` : `${home}/.dsh/dsh-person-web`;
+      appRoot = os6 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
     }
     if (appRoot === void 0) {
       const home = os6 === "windows" ? `C:\\Users\\${user}` : user === "root" ? "/root" : `/home/${user}`;
-      appRoot = os6 === "windows" ? `${home}\\.dsh\\dsh-person-web` : `${home}/.dsh/dsh-person-web`;
+      appRoot = os6 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
     }
     const result = await this.deploy.start({
       host: member.ip,
@@ -2415,8 +2415,8 @@ var PersonWebService = class {
 };
 
 // src/lib/http-api.mjs
-var API_PREFIX = "/api/dsh-person-web";
-var AGENT_HEADER = "x-dsh-person-web";
+var API_PREFIX = "/api/dsh-mesh";
+var AGENT_HEADER = "x-dsh-mesh";
 var MAX_BODY_BYTES = 64 * 1024;
 function writeJson(response, status, value) {
   const body = JSON.stringify(value);
@@ -2533,7 +2533,7 @@ function registerApi(ctx, service) {
           writeJson(response, 200, { ok: true, job: await service.learn(match[1]) });
           return;
         }
-        writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown person-web endpoint." } });
+        writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown mesh endpoint." } });
       } catch (error) {
         writeJson(response, 400, {
           ok: false,
@@ -2544,7 +2544,7 @@ function registerApi(ctx, service) {
         });
       }
     }
-  }), "person-web local api");
+  }), "mesh local api");
 }
 
 // src/lib/wireguard-api.mjs
@@ -2590,7 +2590,7 @@ function registerWireGuardApi(ctx) {
     kind: "prefix",
     path: API_PREFIX2,
     handler: proxy
-  }), "person-web wireguard api");
+  }), "mesh wireguard api");
 }
 
 // src/lib/member-tasks.mjs
@@ -2952,7 +2952,7 @@ var MemberTaskService = class {
 // src/lib/tools.mjs
 function registerTools(ctx, toolsCtx, service) {
   const definition = {
-    name: "dsh_person_web",
+    name: "dsh_mesh",
     description: [
       "\u7BA1\u7406\u4E2A\u4EBA\u7248 DSH Web \u7684\u6210\u5458\u4E0E\u6784\u5EFA\u3002",
       "",
@@ -3106,7 +3106,7 @@ ${job.worktree ?? ""}`,
   const deployDefinition = {
     name: "dsh_person_deploy",
     description: [
-      "\u901A\u8FC7 SSH \u84DD\u7EFF\u90E8\u7F72 dsh-person-web \u6210\u5458\u3002",
+      "\u901A\u8FC7 SSH \u84DD\u7EFF\u90E8\u7F72 dsh-mesh \u6210\u5458\u3002",
       "",
       "`plan` \u53EA\u8BA1\u7B97\u53D1\u5E03\u8BA1\u5212\uFF0C\u4E0D\u8054\u7F51\uFF1B`deploy` \u4E0A\u4F20\u5305\u5230\u76EE\u6807\uFF0C\u5148\u89E3\u538B\u5230\u65B0\u7684 releases/<release> \u76EE\u5F55\u5E76\u51C6\u5907\u597D\u5171\u4EAB config/data/home/workspace \u4E0E\u670D\u52A1\u5B9A\u4E49\uFF0C\u786E\u8BA4\u5168\u90E8\u5C31\u7EEA\u540E\u624D\u5207\u6362 current\uFF1B\u968F\u540E\u6309 control \u2192 dsh \u2192 gate \u7684\u987A\u5E8F\u91CD\u542F\u670D\u52A1\uFF0Cgateway \u6C38\u8FDC\u6700\u540E\u3002\u5065\u5EB7\u68C0\u67E5\u5931\u8D25\u4F1A\u81EA\u52A8\u5207\u56DE previous\u3002",
       "`status` / `logs` \u67E5\u770B\u90E8\u7F72 job\uFF1B`rollback` \u5207\u56DE\u4E0A\u4E00\u4E2A release\u3002",
@@ -3127,7 +3127,7 @@ ${job.worktree ?? ""}`,
         identityFile: { type: "string", description: "SSH \u79C1\u94A5\u8DEF\u5F84\u3002" },
         os: { type: "string", enum: ["linux", "windows"], description: "\u76EE\u6807\u7CFB\u7EDF\uFF0C\u9ED8\u8BA4 linux\u3002" },
         package: { type: "string", description: "\u672C\u5730\u79BB\u7EBF\u5305\u8DEF\u5F84\uFF1B\u7701\u7565\u65F6\u53D6 dist \u4E0B\u6700\u65B0\u7684\u5BF9\u5E94\u5E73\u53F0\u5305\u3002" },
-        appRoot: { type: "string", description: "\u76EE\u6807\u7A33\u5B9A\u6839\u76EE\u5F55\uFF0C\u9ED8\u8BA4 /opt/dsh-person-web \u6216 C:\\dsh-person-web\u3002" },
+        appRoot: { type: "string", description: "\u76EE\u6807\u7A33\u5B9A\u6839\u76EE\u5F55\uFF0C\u9ED8\u8BA4 /opt/dsh-mesh \u6216 C:\\dsh-mesh\u3002" },
         release: { type: "string", description: "\u53D1\u5E03 id\uFF0C\u9ED8\u8BA4\u65F6\u95F4\u6233+\u5305\u54C8\u5E0C\u3002" },
         services: {
           type: "array",
@@ -3137,7 +3137,7 @@ ${job.worktree ?? ""}`,
             properties: {
               name: { type: "string" },
               role: { type: "string", enum: ["control", "dsh", "gate"] },
-              command: { type: "string", description: "\u76F8\u5BF9 current \u7684\u542F\u52A8\u547D\u4EE4\uFF0C\u9ED8\u8BA4 start.sh / dsh-person-web-service.exe\u3002" }
+              command: { type: "string", description: "\u76F8\u5BF9 current \u7684\u542F\u52A8\u547D\u4EE4\uFF0C\u9ED8\u8BA4 start.sh / dsh-mesh-service.exe\u3002" }
             },
             required: ["name"],
             additionalProperties: false
@@ -3200,10 +3200,10 @@ ${job.worktree ?? ""}`,
     ctx,
     service,
     dataDir: service.dataDir,
-    log: (line) => ctx.logger?.info?.(`person-web: ${line}`)
+    log: (line) => ctx.logger?.info?.(`mesh: ${line}`)
   });
   try {
-    ctx.effect(() => () => memberTasks.dispose(), "person-web member tasks");
+    ctx.effect(() => () => memberTasks.dispose(), "mesh member tasks");
   } catch {
   }
   const memberTaskDefinition = {
@@ -3317,9 +3317,9 @@ ${job.worktree ?? ""}`,
   for (const tool of [definition, deployDefinition, memberTaskDefinition, membersDefinition]) {
     try {
       toolsCtx.tools.register(tool);
-      ctx.logger?.info?.(`person-web: registered tool ${tool.name}`);
+      ctx.logger?.info?.(`mesh: registered tool ${tool.name}`);
     } catch (error) {
-      ctx.logger?.error?.(`person-web: cannot register tool ${tool.name}: ${error instanceof Error ? error.message : String(error)}`);
+      ctx.logger?.error?.(`mesh: cannot register tool ${tool.name}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }
@@ -3397,17 +3397,17 @@ function formatMembers(snapshot) {
 var inject = ["webServer"];
 function dataDirectory() {
   const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path7.join(homedir(), ".dsh");
-  return path7.join(home, "person-web");
+  return path7.join(home, "mesh");
 }
 async function apply(ctx, config = {}) {
-  const service = new PersonWebService({
+  const service = new MeshService({
     dataDir: dataDirectory(),
     config,
     log: (line) => console.log(line)
   });
   ctx.effect(() => () => {
     void service.dispose();
-  }, "person-web service lifetime");
+  }, "mesh service lifetime");
   registerApi(ctx, service);
   registerWireGuardApi(ctx);
   try {
@@ -3415,7 +3415,7 @@ async function apply(ctx, config = {}) {
       registerTools(ctx, toolsCtx, service);
     });
   } catch (error) {
-    console.error(`person-web: tools service is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`mesh: tools service is unavailable: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 export {

@@ -31,7 +31,7 @@ test('default service manifest is the split DSH/gate pair', () => {
   assert.equal(linux[1].name, 'dsh-web-gate.service')
   const windows = normalizeServices(undefined, 'windows')
   assert.deepEqual(windows.map(service => service.role), ['dsh', 'gate'])
-  assert.equal(windows[1].name, 'DSH-Person-Web')
+  assert.equal(windows[1].name, 'DSH-Mesh')
 })
 
 test('normalizeServices refuses a manifest without a gateway', () => {
@@ -48,14 +48,14 @@ test('normalizeServices refuses two gateways', () => {
 test('plan separates prepare from activation and starts the gateway last', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
   try {
-    const packagePath = path.join(dir, 'dsh-person-web-test-linux-x64.tar.gz')
+    const packagePath = path.join(dir, 'dsh-mesh-test-linux-x64.tar.gz')
     await writeFile(packagePath, 'fake package')
     const plan = await buildDeployPlan({
       host: '10.66.66.3',
       user: 'root',
       os: 'linux',
       package: packagePath,
-      appRoot: '/opt/dsh-person-web',
+      appRoot: '/opt/dsh-mesh',
       repositoryRoot: dir,
       services: [
         { name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' },
@@ -65,7 +65,7 @@ test('plan separates prepare from activation and starts the gateway last', async
     })
     assert.equal(plan.release, '20261110-test')
     assert.equal(plan.services.at(-1).role, 'gate')
-    assert.equal(plan.shared, '/opt/dsh-person-web/shared')
+    assert.equal(plan.shared, '/opt/dsh-mesh/shared')
     const summary = describePlan(plan)
     assert.ok(summary.steps.some(step => step.includes('no service switch')))
     assert.ok(summary.steps.some(step => step.includes('newest 3 releases')))
@@ -109,17 +109,17 @@ test('deploy keeps a per-user install under that user and chowns it', async () =
     await writeFile(packagePath, 'fake')
     const plan = await buildDeployPlan({
       host: 'example', os: 'linux', package: packagePath, repositoryRoot: dir,
-      release: 'home1', appRoot: '/home/ubuntu/.dsh/dsh-person-web', serviceUser: 'ubuntu',
+      release: 'home1', appRoot: '/home/ubuntu/.dsh/dsh-mesh', serviceUser: 'ubuntu',
       services: [
         { name: 'dsh-web-app.service', role: 'dsh' },
         { name: 'dsh-web-gate.service', role: 'gate' },
       ],
     })
-    assert.equal(plan.appRoot, '/home/ubuntu/.dsh/dsh-person-web')
+    assert.equal(plan.appRoot, '/home/ubuntu/.dsh/dsh-mesh')
     assert.equal(plan.serviceUser, 'ubuntu')
-    assert.equal(plan.shared, '/home/ubuntu/.dsh/dsh-person-web/shared')
+    assert.equal(plan.shared, '/home/ubuntu/.dsh/dsh-mesh/shared')
     const script = buildLinuxPrepareScript(plan)
-    assert.match(script, /APP_ROOT='\/home\/ubuntu\/\.dsh\/dsh-person-web'/)
+    assert.match(script, /APP_ROOT='\/home\/ubuntu\/\.dsh\/dsh-mesh'/)
     assert.match(script, /chown -R 'ubuntu:' "\$APP_ROOT"/)
   } finally {
     await rm(dir, { recursive: true, force: true })
@@ -164,8 +164,8 @@ test('Windows scripts use a junction and sc.exe config without early restarts', 
       host: 'win.example', os: 'windows', package: packagePath, repositoryRoot: dir,
       release: 'r3x',
       services: [
-        { name: 'DSH-Web-App', role: 'dsh', command: 'dsh-person-web-service.exe' },
-        { name: 'DSH-Person-Web', role: 'gate', command: 'dsh-person-web-service.exe' },
+        { name: 'DSH-Web-App', role: 'dsh', command: 'dsh-mesh-service.exe' },
+        { name: 'DSH-Mesh', role: 'gate', command: 'dsh-mesh-service.exe' },
       ],
     })
     const prepare = buildWindowsPrepareScript(plan)
@@ -174,7 +174,7 @@ test('Windows scripts use a junction and sc.exe config without early restarts', 
     assert.match(prepare, /sc\.exe config/)
     assert.doesNotMatch(prepare, /Restart-Service/)
     const activate = buildWindowsActivateScript(plan)
-    assert.ok(activate.indexOf('Restart-Service -Name \'DSH-Web-App\'') < activate.indexOf('Restart-Service -Name \'DSH-Person-Web\''))
+    assert.ok(activate.indexOf('Restart-Service -Name \'DSH-Web-App\'') < activate.indexOf('Restart-Service -Name \'DSH-Mesh\''))
     assert.match(activate, /__gate\/health/)
     assert.match(activate, /Select-Object -Skip \$keep/)
   } finally {
@@ -186,7 +186,7 @@ test('rollback needs no package and switches current back to previous', async ()
   const plan = await buildDeployPlan({
     host: 'example', os: 'linux', skipPackage: true,
     release: 'rollback',
-    appRoot: '/opt/dsh-person-web',
+    appRoot: '/opt/dsh-mesh',
     services: [{ name: 'dsh-web.service', role: 'gate', command: 'start.sh' }],
   })
   assert.equal(plan.package.path, '')

@@ -3,12 +3,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { PersonWebService } from '../src/lib/service.mjs'
+import { MeshService } from '../src/lib/service.mjs'
 import { sha256Text } from '../code/build/engine.mjs'
 
 /**
  * Wait for a job to leave the running phase.
- * @param {PersonWebService} service service.
+ * @param {MeshService} service service.
  * @param {string} id job id.
  * @returns {Promise<object>} final job.
  */
@@ -23,13 +23,13 @@ async function waitForJob(service, id) {
 }
 
 test('service exposes status, recipes, members, and a plan job', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-person-web-service-'))
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-service-'))
   const source = path.join(dir, 'source')
   try {
     await mkdir(source, { recursive: true })
     await writeFile(path.join(source, 'package.json'), JSON.stringify({ version: '9.9.9' }), 'utf8')
-    const picker = '/* dsh-person-web overlay: picker */\n// picker\n'
-    const account = '/* dsh-person-web overlay: login */\n// account\n'
+    const picker = '/* dsh-mesh overlay: picker */\n// picker\n'
+    const account = '/* dsh-mesh overlay: login */\n// account\n'
     const overlay = 'export function openGateLoginOverlay() {}\n'
     await mkdir(path.join(source, 'packages/client/ui-directory-picker-browse/src/client'), { recursive: true })
     await mkdir(path.join(source, 'packages/client/ui-settings-account/src/client'), { recursive: true })
@@ -37,8 +37,8 @@ test('service exposes status, recipes, members, and a plan job', async () => {
     await writeFile(path.join(source, 'packages/client/ui-settings-account/src/client/index.ts'), account, 'utf8')
     await writeFile(path.join(source, 'packages/client/ui-settings-account/src/client/gate-login-overlay.ts'), overlay, 'utf8')
 
-    const service = new PersonWebService({
-      dataDir: path.join(dir, 'person-web'),
+    const service = new MeshService({
+      dataDir: path.join(dir, 'mesh'),
       config: {
         build: { source, ref: 'master', targets: ['linux-x64'] },
       },

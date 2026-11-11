@@ -1,6 +1,6 @@
 - insert:
-    - id: dsh-person-web
-      name: '@local/dsh-person-web'
+    - id: dsh-mesh
+      name: '@local/dsh-mesh'
       config:
         # Optional: the public gate URL. Empty means "same origin".
         gateUrl: ''

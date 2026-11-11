@@ -1,5 +1,5 @@
 param(
-  [string]$ServiceName = 'DSH-Person-Web'
+  [string]$ServiceName = 'DSH-Mesh'
 )
 
 $ErrorActionPreference = 'Stop'

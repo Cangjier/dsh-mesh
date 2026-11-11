@@ -1,5 +1,5 @@
 /**
- * Blue-green SSH deployment for dsh-person-web.
+ * Blue-green SSH deployment for dsh-mesh.
  *
  * The deployment is deliberately split into two remote phases:
  *
@@ -14,7 +14,7 @@
  * member A through member B's gateway, so B's gateway must survive the deploy
  * for as long as possible.
  *
- * @module @local/dsh-person-web/deploy
+ * @module @local/dsh-mesh/deploy
  */
 
 import { createHash } from 'node:crypto'
@@ -25,8 +25,8 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 const DEFAULT_APP_ROOT = {
-  linux: '/opt/dsh-person-web',
-  windows: 'C:\\dsh-person-web',
+  linux: '/opt/dsh-mesh',
+  windows: 'C:\\dsh-mesh',
 }
 
 /** Services used by the split package: DSH first, gateway last. */
@@ -37,7 +37,7 @@ const DEFAULT_SERVICES = {
   ],
   windows: [
     { name: 'DSH-Web-App', role: 'dsh', command: 'dsh-web-app-service.exe' },
-    { name: 'DSH-Person-Web', role: 'gate', command: 'dsh-person-web-service.exe' },
+    { name: 'DSH-Mesh', role: 'gate', command: 'dsh-mesh-service.exe' },
   ],
 }
 
@@ -125,7 +125,7 @@ export function normalizeServices(input, os) {
     if (!(role in ROLE_ORDER)) throw new Error(`service ${name} has unknown role ${String(role)}`)
     const command = typeof raw.command === 'string' && raw.command.trim() !== ''
       ? raw.command.trim()
-      : os === 'linux' ? 'start.sh' : 'dsh-person-web-service.exe'
+      : os === 'linux' ? 'start.sh' : 'dsh-mesh-service.exe'
     return { name, role, command }
   })
   if (!services.some(service => service.role === 'gate')) {
@@ -150,7 +150,7 @@ export function normalizeServices(input, os) {
 export async function findLatestPackage(repositoryRoot, os) {
   const dist = path.join(repositoryRoot, 'dist')
   const suffix = os === 'linux' ? '.tar.gz' : '.zip'
-  const prefix = `dsh-person-web-`
+  const prefix = `dsh-mesh-`
   const marker = `-${os === 'linux' ? 'linux' : 'win'}-x64`
   const entries = await readdir(dist).catch(() => [])
   const candidates = []
@@ -242,8 +242,8 @@ export async function buildDeployPlan(options) {
     retention,
     sudo: options.sudo !== false,
     remotePackage: os === 'linux'
-      ? `/tmp/dsh-person-web-${release}${path.extname(packagePath)}`
-      : `C:\\Windows\\Temp\\dsh-person-web-${release}${path.extname(packagePath)}`,
+      ? `/tmp/dsh-mesh-${release}${path.extname(packagePath)}`
+      : `C:\\Windows\\Temp\\dsh-mesh-${release}${path.extname(packagePath)}`,
   }
 }
 
@@ -275,13 +275,13 @@ export async function probeTarget(options) {
   if (os === 'windows') {
     const script = [
       "$ErrorActionPreference = 'SilentlyContinue'",
-      "$svc = Get-CimInstance Win32_Service -Filter \"Name='DSH-Person-Web'\"",
+      "$svc = Get-CimInstance Win32_Service -Filter \"Name='DSH-Mesh'\"",
       "$root = ''",
       'if ($svc -and $svc.PathName) {',
       '  if ($svc.PathName -match \'^"([^"]+)"\') { $exe = $matches[1] } else { $exe = ($svc.PathName -split \' \')[0] }',
       '  $root = Split-Path -Parent $exe',
       '}',
-      'if (-not $root) { $root = Join-Path $env:USERPROFILE \'.dsh\\dsh-person-web\' }',
+      'if (-not $root) { $root = Join-Path $env:USERPROFILE \'.dsh\\dsh-mesh\' }',
       '$root = $root -replace \'(?i)\\\\current$\', \'\'',
       'Write-Output $root',
       'Write-Output $env:USERNAME',
@@ -295,14 +295,14 @@ export async function probeTarget(options) {
     const [root = ''] = stdout.split(/\r?\n/u)
     const appRoot = root.trim() !== ''
       ? root.trim()
-      : `C:\\Users\\${user ?? 'Public'}\\.dsh\\dsh-person-web`
+      : `C:\\Users\\${user ?? 'Public'}\\.dsh\\dsh-mesh`
     return { appRoot, serviceUser: undefined }
   }
   const script = `#!/usr/bin/env bash
 set -u
 root=''
 runuser=''
-for unit in dsh-web-gate.service dsh-web.service dsh-person-web.service; do
+for unit in dsh-web-gate.service dsh-web.service dsh-mesh.service; do
   if command -v systemctl >/dev/null 2>&1; then
     root=$(systemctl show "$unit" -p WorkingDirectory --value 2>/dev/null || true)
   fi
@@ -312,7 +312,7 @@ for unit in dsh-web-gate.service dsh-web.service dsh-person-web.service; do
   fi
 done
 if [ -z "$root" ]; then
-  root="$HOME/.dsh/dsh-person-web"
+  root="$HOME/.dsh/dsh-mesh"
 fi
 case "$root" in
   */current) root=$(dirname "$root") ;;
@@ -326,8 +326,8 @@ printf '%s\\n%s\\n' "$root" "$runuser"
   ], script)
   const [root = '', serviceUser = ''] = stdout.split(/\r?\n/u)
   const fallback = user !== undefined && user !== 'root'
-    ? `/home/${user}/.dsh/dsh-person-web`
-    : '/root/.dsh/dsh-person-web'
+    ? `/home/${user}/.dsh/dsh-mesh`
+    : '/root/.dsh/dsh-mesh'
   return {
     appRoot: root.trim() !== '' ? root.trim() : fallback,
     serviceUser: serviceUser.trim() !== '' ? serviceUser.trim() : undefined,

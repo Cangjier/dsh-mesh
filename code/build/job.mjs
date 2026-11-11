@@ -4,7 +4,7 @@
  * A job is deliberately boring: every phase writes `state.json`, so the plugin
  * tool, the CLI, and a human reading the directory all see the same truth.
  *
- * @module dsh-person-web/build/job
+ * @module dsh-mesh/build/job
  */
 
 import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
@@ -32,7 +32,7 @@ import {
  * @returns {string} absolute directory.
  */
 export function defaultJobRoot() {
-  return path.join(os.homedir(), '.dsh', 'person-web', 'build')
+  return path.join(os.homedir(), '.dsh', 'mesh', 'build')
 }
 
 /**
@@ -40,7 +40,7 @@ export function defaultJobRoot() {
  * @returns {string} absolute directory.
  */
 export function defaultCacheDir() {
-  return path.join(os.homedir(), '.dsh', 'person-web', 'cache')
+  return path.join(os.homedir(), '.dsh', 'mesh', 'cache')
 }
 
 /**

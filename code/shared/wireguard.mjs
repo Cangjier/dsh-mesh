@@ -7,7 +7,7 @@
  * Host plugin both call it so that "who is on the VPN" is answered in one
  * place.
  *
- * @module dsh-person-web/shared/wireguard
+ * @module dsh-mesh/shared/wireguard
  */
 
 import { readFile } from 'node:fs/promises'
@@ -19,7 +19,7 @@ import path from 'node:path'
 export const DEFAULT_MEMBER_PORTS = Object.freeze([80, 8080])
 
 /** Service marker returned by `GET /__gate/member`. */
-export const MEMBER_SERVICE = 'dsh-person-web'
+export const MEMBER_SERVICE = 'dsh-mesh'
 
 /**
  * Resolve the DSH home the same way the installed harness does.

@@ -1,6 +1,6 @@
 # Step 013 独立 DSH 交互 HTTP 服务
 
-`dsh-person-web` 里新增一个完全独立的 HTTP 服务，用 DSH 原生 SDK（`dsh --profile sdk` 的 stdio JSON-RPC）在成员 B 上创建、驱动和观察对话。它不依赖 DSH Web、网关或 WireGuard 控制面板；任何一个重启都不影响它。
+`dsh-mesh` 里新增一个完全独立的 HTTP 服务，用 DSH 原生 SDK（`dsh --profile sdk` 的 stdio JSON-RPC）在成员 B 上创建、驱动和观察对话。它不依赖 DSH Web、网关或 WireGuard 控制面板；任何一个重启都不影响它。
 
 ## 进程拓扑
 
@@ -9,7 +9,7 @@ DSH-Interop / dsh-interop.service
   └─ HTTP :8765（默认只绑 127.0.0.1）
       └─ child: dsh --profile sdk（stdio JSON-RPC）
 
-DSH-Person-Web :80
+DSH-Mesh :80
 DSH-Web-App    127.0.0.1:<随机>
 DSH-WireGuard-Control :51821
 ```

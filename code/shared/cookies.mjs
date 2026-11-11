@@ -7,7 +7,7 @@
  * `dsh_gate` from one member would be read by another member's gate, and
  * switching members would log the browser out of both.
  *
- * @module dsh-person-web/shared/cookies
+ * @module dsh-mesh/shared/cookies
  */
 
 /** Prefix for every cookie that belongs to a member upstream. */

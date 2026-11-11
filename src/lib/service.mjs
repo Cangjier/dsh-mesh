@@ -1,11 +1,11 @@
 /**
- * Host-side service for the person-web plugin.
+ * Host-side service for the mesh plugin.
  *
  * It owns two things the model can call: member discovery (the same shared
  * module the gate uses) and build jobs (the deterministic engine in
  * `code/build`). It does not proxy traffic; that is the gate's job.
  *
- * @module @local/dsh-person-web/service
+ * @module @local/dsh-mesh/service
  */
 
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
@@ -69,7 +69,7 @@ function packageVersion() {
 /**
  * One host service instance.
  */
-export class PersonWebService {
+export class MeshService {
   /**
    * @param {{dataDir: string, config?: object, log?: (line: string) => void}} options service input.
    */
@@ -247,7 +247,7 @@ export class PersonWebService {
       ? request.targets
       : defaults.build.targets
     const job = await createJob({ root: this.jobRoot, source, ref, targets })
-    this.logLine(`person-web build job ${job.id} created`)
+    this.logLine(`mesh build job ${job.id} created`)
     const promise = runJob(job.dir, {
       repositoryRoot: this.repositoryRoot,
       recipesPath: this.recipesPath,
@@ -258,7 +258,7 @@ export class PersonWebService {
       full: this.config.build?.full !== false,
       nodeVersion: typeof this.config.build?.nodeVersion === 'string' && this.config.build.nodeVersion !== '' ? this.config.build.nodeVersion : undefined,
     }).catch((error) => {
-      this.logLine(`person-web build job ${job.id} crashed: ${error instanceof Error ? error.message : String(error)}`)
+      this.logLine(`mesh build job ${job.id} crashed: ${error instanceof Error ? error.message : String(error)}`)
     }).finally(() => {
       this.running.delete(job.id)
     })
@@ -277,7 +277,7 @@ export class PersonWebService {
     const dir = this._jobDir(id)
     if (this.running.has(id)) throw new Error('this job is already running')
     const state = await readState(dir)
-    this.logLine(`person-web build job ${id} resumed`)
+    this.logLine(`mesh build job ${id} resumed`)
     const promise = runJob(dir, {
       repositoryRoot: this.repositoryRoot,
       recipesPath: this.recipesPath,
@@ -287,7 +287,7 @@ export class PersonWebService {
       full: this.config.build?.full !== false,
       nodeVersion: typeof this.config.build?.nodeVersion === 'string' && this.config.build.nodeVersion !== '' ? this.config.build.nodeVersion : undefined,
     }).catch((error) => {
-      this.logLine(`person-web build job ${id} crashed: ${error instanceof Error ? error.message : String(error)}`)
+      this.logLine(`mesh build job ${id} crashed: ${error instanceof Error ? error.message : String(error)}`)
     }).finally(() => {
       this.running.delete(id)
     })
@@ -457,13 +457,13 @@ export class PersonWebService {
     }
     if (appRoot === undefined && typeof system?.home === 'string' && system.home.trim() !== '') {
       const home = system.home.trim().replace(/[\\/]+$/u, '')
-      appRoot = os === 'windows' ? `${home}\\.dsh\\dsh-person-web` : `${home}/.dsh/dsh-person-web`
+      appRoot = os === 'windows' ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`
     }
     if (appRoot === undefined) {
       const home = os === 'windows'
         ? `C:\\Users\\${user}`
         : user === 'root' ? '/root' : `/home/${user}`
-      appRoot = os === 'windows' ? `${home}\\.dsh\\dsh-person-web` : `${home}/.dsh/dsh-person-web`
+      appRoot = os === 'windows' ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`
     }
     const result = await this.deploy.start({
       host: member.ip,

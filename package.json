@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-person-web",
+  "name": "@local/dsh-mesh",
   "version": "0.2.0",
   "private": true,
   "description": "个人版 DSH Web：WireGuard 成员发现、成员切换（gate cookie）、源码级多平台离线构建。",

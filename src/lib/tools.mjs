@@ -1,13 +1,13 @@
 /**
- * Model-visible tool for the person-web plugin.
+ * Model-visible tool for the mesh plugin.
  *
- * The tool is a thin, typed surface over `PersonWebService`: discovery is a
+ * The tool is a thin, typed surface over `MeshService`: discovery is a
  * read; a build starts a background job and returns its id. The deterministic
  * engine never calls a model. When an overlay no longer matches upstream the
  * job returns a work order; the calling DSH can hand that to a subagent, then
  * call `build_learn` and resume.
  *
- * @module @local/dsh-person-web/tools
+ * @module @local/dsh-mesh/tools
  */
 
 import { MemberTaskService } from './member-tasks.mjs'
@@ -16,12 +16,12 @@ import { MemberTaskService } from './member-tasks.mjs'
  * Register the tool on an injected `tools` context.
  * @param {import('@deepseek-ai/cordis').Context} ctx host context.
  * @param {{tools: {register: (definition: object) => () => void}}} toolsCtx tools context.
- * @param {import('./service.mjs').PersonWebService} service service.
+ * @param {import('./service.mjs').MeshService} service service.
  * @returns {void}
  */
 export function registerTools(ctx, toolsCtx, service) {
   const definition = {
-    name: 'dsh_person_web',
+    name: 'dsh_mesh',
     description: [
       '管理个人版 DSH Web 的成员与构建。',
       '',
@@ -174,7 +174,7 @@ export function registerTools(ctx, toolsCtx, service) {
   const deployDefinition = {
     name: 'dsh_person_deploy',
     description: [
-      '通过 SSH 蓝绿部署 dsh-person-web 成员。',
+      '通过 SSH 蓝绿部署 dsh-mesh 成员。',
       '',
       '`plan` 只计算发布计划，不联网；`deploy` 上传包到目标，先解压到新的 releases/<release> 目录并准备好共享 config/data/home/workspace 与服务定义，确认全部就绪后才切换 current；随后按 control → dsh → gate 的顺序重启服务，gateway 永远最后。健康检查失败会自动切回 previous。',
       '`status` / `logs` 查看部署 job；`rollback` 切回上一个 release。',
@@ -195,7 +195,7 @@ export function registerTools(ctx, toolsCtx, service) {
         identityFile: { type: 'string', description: 'SSH 私钥路径。' },
         os: { type: 'string', enum: ['linux', 'windows'], description: '目标系统，默认 linux。' },
         package: { type: 'string', description: '本地离线包路径；省略时取 dist 下最新的对应平台包。' },
-        appRoot: { type: 'string', description: '目标稳定根目录，默认 /opt/dsh-person-web 或 C:\\dsh-person-web。' },
+        appRoot: { type: 'string', description: '目标稳定根目录，默认 /opt/dsh-mesh 或 C:\\dsh-mesh。' },
         release: { type: 'string', description: '发布 id，默认时间戳+包哈希。' },
         services: {
           type: 'array',
@@ -205,7 +205,7 @@ export function registerTools(ctx, toolsCtx, service) {
             properties: {
               name: { type: 'string' },
               role: { type: 'string', enum: ['control', 'dsh', 'gate'] },
-              command: { type: 'string', description: '相对 current 的启动命令，默认 start.sh / dsh-person-web-service.exe。' },
+              command: { type: 'string', description: '相对 current 的启动命令，默认 start.sh / dsh-mesh-service.exe。' },
             },
             required: ['name'],
             additionalProperties: false,
@@ -268,10 +268,10 @@ export function registerTools(ctx, toolsCtx, service) {
     ctx,
     service,
     dataDir: service.dataDir,
-    log: line => ctx.logger?.info?.(`person-web: ${line}`),
+    log: line => ctx.logger?.info?.(`mesh: ${line}`),
   })
   try {
-    ctx.effect(() => () => memberTasks.dispose(), 'person-web member tasks')
+    ctx.effect(() => () => memberTasks.dispose(), 'mesh member tasks')
   } catch { }
 
   const memberTaskDefinition = {
@@ -393,9 +393,9 @@ export function registerTools(ctx, toolsCtx, service) {
   for (const tool of [definition, deployDefinition, memberTaskDefinition, membersDefinition]) {
     try {
       toolsCtx.tools.register(tool)
-      ctx.logger?.info?.(`person-web: registered tool ${tool.name}`)
+      ctx.logger?.info?.(`mesh: registered tool ${tool.name}`)
     } catch (error) {
-      ctx.logger?.error?.(`person-web: cannot register tool ${tool.name}: ${error instanceof Error ? error.message : String(error)}`)
+      ctx.logger?.error?.(`mesh: cannot register tool ${tool.name}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 }

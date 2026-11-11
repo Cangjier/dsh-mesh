@@ -1,4 +1,4 @@
-/** Same-origin proxy from the person-web panel to the WireGuard control service. */
+/** Same-origin proxy from the mesh panel to the WireGuard control service. */
 
 import { request as httpRequest } from 'node:http'
 
@@ -56,5 +56,5 @@ export function registerWireGuardApi(ctx) {
     kind: 'prefix',
     path: API_PREFIX,
     handler: proxy,
-  }), 'person-web wireguard api')
+  }), 'mesh wireguard api')
 }

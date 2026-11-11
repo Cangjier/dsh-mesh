@@ -73,13 +73,13 @@ test('isPrivateAddress covers loopback, RFC1918, CGNAT, and IPv6 local ranges', 
 })
 
 test('member service discovers a peer, proxies headers, and handles cluster requests', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-person-web-test-'))
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-test-'))
   const stateFile = path.join(dir, 'state.json')
   const clusterKey = 'test-cluster-key'
   const member = await listen((req, res) => {
     if (req.url === '/__gate/member') {
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, service: 'dsh-person-web', name: 'peer', gatePort: member.port }))
+      res.end(JSON.stringify({ ok: true, service: 'dsh-mesh', name: 'peer', gatePort: member.port }))
       return
     }
     res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'dsh_gate=inner; Path=/; HttpOnly' })
@@ -175,7 +175,7 @@ test('member service discovers a peer, proxies headers, and handles cluster requ
 })
 
 test('select sets the target cookie and status reports it', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-person-web-test-'))
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-test-'))
   const stateFile = path.join(dir, 'state.json')
   await writeFile(stateFile, JSON.stringify({
     role: 'server',

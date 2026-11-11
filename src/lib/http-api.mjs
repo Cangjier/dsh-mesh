@@ -1,15 +1,15 @@
 /**
  * Same-origin Host API consumed by the panel and by direct HTTP clients.
  *
- * Mutating calls require the `x-dsh-person-web: 1` header, matching the
+ * Mutating calls require the `x-dsh-mesh: 1` header, matching the
  * plugin's other local APIs: the header is not a secret, it is a CSRF guard a
  * cross-site form cannot set.
  *
- * @module @local/dsh-person-web/http-api
+ * @module @local/dsh-mesh/http-api
  */
 
-const API_PREFIX = '/api/dsh-person-web'
-const AGENT_HEADER = 'x-dsh-person-web'
+const API_PREFIX = '/api/dsh-mesh'
+const AGENT_HEADER = 'x-dsh-mesh'
 const MAX_BODY_BYTES = 64 * 1024
 
 /**
@@ -53,7 +53,7 @@ async function readJson(request) {
 /**
  * Register the local API on the Harness web server.
  * @param {import('@deepseek-ai/cordis').Context} ctx Host context.
- * @param {import('./service.mjs').PersonWebService} service service.
+ * @param {import('./service.mjs').MeshService} service service.
  * @returns {void}
  */
 export function registerApi(ctx, service) {
@@ -147,7 +147,7 @@ export function registerApi(ctx, service) {
           writeJson(response, 200, { ok: true, job: await service.learn(match[1]) })
           return
         }
-        writeJson(response, 404, { ok: false, error: { code: 'not_found', message: 'Unknown person-web endpoint.' } })
+        writeJson(response, 404, { ok: false, error: { code: 'not_found', message: 'Unknown mesh endpoint.' } })
       } catch (error) {
         writeJson(response, 400, {
           ok: false,
@@ -158,5 +158,5 @@ export function registerApi(ctx, service) {
         })
       }
     },
-  }), 'person-web local api')
+  }), 'mesh local api')
 }

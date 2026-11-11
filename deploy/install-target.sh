@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy the packaged dsh-person-web + dsh-wireguard onto an existing member
+# Deploy the packaged dsh-mesh + dsh-wireguard onto an existing member
 # host. The old dsh-web service is stopped without running the old plugin's
 # dispose path, so the live WireGuard interface and state survive the switch.
 set -euo pipefail
@@ -99,32 +99,32 @@ const [file, root] = process.argv.slice(2)
 const pkg = JSON.parse(fs.readFileSync(file, 'utf8'))
 pkg.dependencies ||= {}
 for (const key of Object.keys(pkg.dependencies)) {
-  if (key === '@local/dsh-person-web' || key === '@local/dsh-wireguard') delete pkg.dependencies[key]
-  if (/Cangjier\/dsh-(person-web|wireguard)/i.test(String(pkg.dependencies[key]))) delete pkg.dependencies[key]
+  if (key === '@local/dsh-mesh' || key === '@local/dsh-wireguard') delete pkg.dependencies[key]
+  if (/Cangjier\/dsh-(mesh|wireguard)/i.test(String(pkg.dependencies[key]))) delete pkg.dependencies[key]
 }
-pkg.dependencies['@local/dsh-person-web'] = `link:${root}/plugins/dsh-person-web`
+pkg.dependencies['@local/dsh-mesh'] = `link:${root}/plugins/dsh-mesh`
 delete pkg.dependencies['@local/dsh-wireguard']
 pkg.dsh ||= { profile: {} }
 pkg.dsh.profile ||= {}
 pkg.dsh.profile.bundles ||= []
-pkg.dsh.profile.bundles = pkg.dsh.profile.bundles.filter(name => name !== '@local/dsh-person-web' && name !== '@local/dsh-wireguard')
-pkg.dsh.profile.bundles.push('@local/dsh-person-web')
+pkg.dsh.profile.bundles = pkg.dsh.profile.bundles.filter(name => name !== '@local/dsh-mesh' && name !== '@local/dsh-wireguard')
+pkg.dsh.profile.bundles.push('@local/dsh-mesh')
 fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`)
 NODE
 mkdir -p "$PROFILE/node_modules/@local"
-rm -rf "$PROFILE/node_modules/@local/dsh-person-web" "$PROFILE/node_modules/@local/dsh-wireguard"
-ln -s "$ROOT/plugins/dsh-person-web" "$PROFILE/node_modules/@local/dsh-person-web"
-say 'profile plugin replaced: dsh-person-web'
+rm -rf "$PROFILE/node_modules/@local/dsh-mesh" "$PROFILE/node_modules/@local/dsh-wireguard"
+ln -s "$ROOT/plugins/dsh-mesh" "$PROFILE/node_modules/@local/dsh-mesh"
+say 'profile plugin replaced: dsh-mesh'
 
 # Add deploy-owned patch rows without touching unrelated user patch entries.
 "$NODE" - "$PROFILE/cordis.patch.yml" "$INTEROP_TOKEN" <<'NODE'
 const fs = require('node:fs')
 const [file, token] = process.argv.slice(2)
 let text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '[]\n'
-text = text.replace(/# BEGIN dsh-person-web deploy[\s\S]*?# END dsh-person-web deploy\n?/g, '')
+text = text.replace(/# BEGIN dsh-mesh deploy[\s\S]*?# END dsh-mesh deploy\n?/g, '')
 const block = [
-  '# BEGIN dsh-person-web deploy',
-  '- id: dsh-person-web',
+  '# BEGIN dsh-mesh deploy',
+  '- id: dsh-mesh',
   '  config:',
   `    interopToken: '${token.replace(/'/g, "''")}'`,
   '    interopPort: 8765',
@@ -132,7 +132,7 @@ const block = [
   '- id: ui-settings-general',
   '  config:',
   '    welcomeNoticeVersion: "2026-09-28.1"',
-  '# END dsh-person-web deploy',
+  '# END dsh-mesh deploy',
   '',
 ].join('\n')
 fs.writeFileSync(file, `${text.trimEnd()}\n${block}`)

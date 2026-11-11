@@ -11,7 +11,7 @@ dsh-wireguard 把若干台机器放进同一个 `10.66.66.0/24`。每台机器�
 当前实测环境（2026-11-10）：
 
 ```text
-10.66.66.1  server   dsh-person-web gate :80 / :443，DSH 在 127.0.0.1:42089
+10.66.66.1  server   dsh-mesh gate :80 / :443，DSH 在 127.0.0.1:42089
 10.66.66.2  peer     VM-0-2-ubuntu，没有对外 HTTP
 10.66.66.3  peer     ecs-92994806，只有 :22
 10.66.66.4  peer     本机 Windows，DSH 在 127.0.0.1:65330
@@ -118,14 +118,14 @@ x-dsh-cluster: v1.<timestamp>.<nonce>.<base64url HMAC-SHA256>
 每个成员：
 
 - [ ] 部署新版包（`gate/`、`shared/`、`app/`、`runtime/`）。
-- [ ] 成员只需要 gate；「DSH 成员」面板和 `dsh_person_web` 构建工具装在入口 DSH 即可，包里的 `plugin/` 是同一份插件。
+- [ ] 成员只需要 gate；「DSH 成员」面板和 `dsh_mesh` 构建工具装在入口 DSH 即可，包里的 `plugin/` 是同一份插件。
 - [ ] `config/gate.env` 配同一个 `DSH_GATE_CLUSTER_KEY`。
 - [ ] `DSH_TRUSTED_HOSTS` 加外层入口域名/IP。
 - [ ] 成员端口：Linux 默认 80；Windows 默认 8080。`DSH_GATE_MEMBER_PORT` 要与 peer 实际访问端口一致。
 - [ ] 如果成员用非 80/8080 的自定义端口，入口网关的 `DSH_GATE_MEMBER_PORTS` 要列出这些端口（逗号分隔），否则发现阶段扫不到。
 - [ ] 防火墙放行该 TCP 端口（只对 VPN 网段更好）。
 - [ ] dsh-wireguard 已加入同一网络，peer 能 ping 通。
-- [ ] 启动后 `curl http://<vpn-ip>:<port>/__gate/member` 返回 `service":"dsh-person-web"`。
+- [ ] 启动后 `curl http://<vpn-ip>:<port>/__gate/member` 返回 `service":"dsh-mesh"`。
 
 入口网关额外：
 

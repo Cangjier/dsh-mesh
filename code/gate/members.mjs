@@ -11,7 +11,7 @@
  * the gate and already answers that. This module only answers "which member"
  * and "how do I reach it".
  *
- * @module dsh-person-web/gate/members
+ * @module dsh-mesh/gate/members
  */
 
 import http from 'node:http'
@@ -118,7 +118,7 @@ export class MemberService {
     const vpnIp = identity?.selfIp ?? ''
     return {
       ok: true,
-      service: 'dsh-person-web',
+      service: 'dsh-mesh',
       version: this.version,
       id: vpnIp !== '' ? vpnIp : os.hostname(),
       name,

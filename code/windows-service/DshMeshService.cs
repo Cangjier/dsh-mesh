@@ -4,10 +4,10 @@ using System.IO;
 using System.ServiceProcess;
 using System.Threading;
 
-namespace DshPersonWeb
+namespace DshMesh
 {
     /// <summary>
-    /// Windows service wrapper for the dsh-person-web gate.
+    /// Windows service wrapper for the dsh-mesh gate.
     ///
     /// The service starts start.ps1 (which loads config/gate.env and runs the
     /// packaged Node gate) and restarts it if it exits. Stopping the service
@@ -26,7 +26,7 @@ namespace DshPersonWeb
 
         public GatewayService()
         {
-            ServiceName = "DSH-Person-Web";
+            ServiceName = "DSH-Mesh";
             CanStop = true;
             CanShutdown = true;
             AutoLog = true;

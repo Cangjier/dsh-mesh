@@ -1,13 +1,13 @@
 # Step 011 通过 SSH 蓝绿部署成员
 
-这个步骤给 `dsh-person-web` 增加第二个模型工具 `dsh_person_deploy`：从 A 通过 SSH 部署成员 B，不覆盖正在运行的目录；先解压到新的 `releases/<release>` 并完成全部准备，最后才切换 `current` 并重启服务。**gateway 永远是最后一个重启的服务**。
+这个步骤给 `dsh-mesh` 增加第二个模型工具 `dsh_person_deploy`：从 A 通过 SSH 部署成员 B，不覆盖正在运行的目录；先解压到新的 `releases/<release>` 并完成全部准备，最后才切换 `current` 并重启服务。**gateway 永远是最后一个重启的服务**。
 
 ## 目标目录
 
 Linux：
 
 ```text
-/opt/dsh-person-web/
+/opt/dsh-mesh/
   releases/20261110-120000-abcdef12/
   current -> releases/20261110-120000-abcdef12
   previous -> releases/20261109-...
@@ -21,7 +21,7 @@ Linux：
 Windows：
 
 ```text
-C:\dsh-person-web\
+C:\dsh-mesh\
   releases\<release>\
   current       (junction)
   previous      (junction)
@@ -78,7 +78,7 @@ gate      网关，必须最后
   "windows": [
     { "name": "DSH-WireGuard-Control", "role": "control", "command": "dsh-wg-control-service.exe" },
     { "name": "DSH-Web-App", "role": "dsh", "command": "dsh-web-app-service.exe" },
-    { "name": "DSH-Person-Web", "role": "gate", "command": "dsh-person-web-service.exe" }
+    { "name": "DSH-Mesh", "role": "gate", "command": "dsh-mesh-service.exe" }
   ]
 }
 ```
@@ -89,7 +89,7 @@ gate      网关，必须最后
 
 ```text
 dsh_person_deploy action="plan" host="10.66.66.3" user="root" os="linux" \
-  package="dist/dsh-person-web-0.2.2-rc.1-linux-x64.tar.gz"
+  package="dist/dsh-mesh-0.2.2-rc.1-linux-x64.tar.gz"
 ```
 
 先看计划，再执行：
@@ -118,7 +118,7 @@ dsh_person_deploy action="rollback" host="10.66.66.3" user="root" os="linux" \
 ## SSH 前提
 
 - 密钥登录，`BatchMode=yes`；工具不会交互式询问密码。
-- Linux 默认 `sudo -n bash -s`；要么 SSH 用户是 root，要么配置免密 sudo。传 `sudo=false` 可直接以当前用户执行（要求该用户拥有 `/opt/dsh-person-web`）。
+- Linux 默认 `sudo -n bash -s`；要么 SSH 用户是 root，要么配置免密 sudo。传 `sudo=false` 可直接以当前用户执行（要求该用户拥有 `/opt/dsh-mesh`）。
 - Windows 目标需要 OpenSSH Server，SSH 用户有管理员权限；服务切换用 `sc.exe` / `Restart-Service`。
 - 目标必须已经安装过一次，`shared/config/gate.env` 存在；第一次部署不从零生成密码/集群密钥。
 - 服务定义必须能被 systemd/SCM 找到；`prepare` 会写 systemd drop-in 或 `sc.exe config`，但不会创建服务本身。
@@ -133,5 +133,5 @@ dsh_person_deploy action="rollback" host="10.66.66.3" user="root" os="linux" \
 ## 当前边界
 
 - 当前离线包还是**一个网关服务**（DSH 是它的子进程），所以清单里只有一个 gate；服务拆分、独立 WireGuard 控制面板是部署前要完成的架构步骤。工具已经按 `control → dsh → gate` 的清单工作，拆分后只需要改清单和启动命令。
-- Windows 的 `dsh-person-web-service.exe` 不在离线包里，`prepare` 会从当前 release 复制；首次部署前必须先安装一次服务。
+- Windows 的 `dsh-mesh-service.exe` 不在离线包里，`prepare` 会从当前 release 复制；首次部署前必须先安装一次服务。
 - 还没有做远端 systemd/SCM 的服务创建，只做“切换 + 重启 + 回滚”。

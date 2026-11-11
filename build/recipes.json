@@ -14,7 +14,7 @@
           "path": "packages/client/ui-directory-picker-browse/src/client/DirectoryBrowser.tsx",
           "baseSha256": "656af2c5e143d92acbd1e2204db6a1ce781bd139348fc4442e12c7d951ee482c",
           "overlay": "packages/client/ui-directory-picker-browse/src/client/DirectoryBrowser.tsx",
-          "marker": "dsh-person-web overlay: picker"
+          "marker": "dsh-mesh overlay: picker"
         }
       ]
     },
@@ -27,7 +27,7 @@
           "path": "packages/client/ui-settings-account/src/client/index.ts",
           "baseSha256": "40d8c63acf8e7d24bde89dcab0870049b83baf9c36bb2805679ff3866dee4ff3",
           "overlay": "packages/client/ui-settings-account/src/client/index.ts",
-          "marker": "dsh-person-web overlay: login"
+          "marker": "dsh-mesh overlay: login"
         },
         {
           "path": "packages/client/ui-settings-account/src/client/gate-login-overlay.ts",

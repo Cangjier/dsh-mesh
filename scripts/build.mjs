@@ -48,7 +48,7 @@ async function buildClient() {
   })
   const code = result.outputFiles?.[0]?.text
   if (!code) throw new Error('Client build produced no output')
-  const wrapped = `window.__ModuleLoader__.load({\n  id: '@local/dsh-person-web',\n  factory(require) {\n    var module = { exports: {} };\n    var exports = module.exports;\n${code
+  const wrapped = `window.__ModuleLoader__.load({\n  id: '@local/dsh-mesh',\n  factory(require) {\n    var module = { exports: {} };\n    var exports = module.exports;\n${code
     .split('\n')
     .map((line) => (line.length > 0 ? `    ${line}` : line))
     .join('\n')}\n    return module.exports;\n  },\n});\n`

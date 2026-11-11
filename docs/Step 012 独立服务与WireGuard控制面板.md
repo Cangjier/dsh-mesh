@@ -7,7 +7,7 @@
 ```text
 DSH-WireGuard-Control   51821   独立控制面板（server 成员）
 DSH-Web-App             127.0.0.1:<随机端口>   独立 DSH Web
-DSH-Person-Web          0.0.0.0:80            网关，最后重启
+DSH-Mesh          0.0.0.0:80            网关，最后重启
 ```
 
 三者都是独立进程，没有 SCM/systemd 的 `Requires`/`After` 依赖关系：
@@ -31,7 +31,7 @@ DSH-Person-Web          0.0.0.0:80            网关，最后重启
 
 ```text
 DSH-Web-App            Automatic
-DSH-Person-Web         Automatic（external-DSH 模式）
+DSH-Mesh         Automatic（external-DSH 模式）
 ```
 
 控制面板单独安装（dsh-wireguard 包）：
@@ -42,7 +42,7 @@ DSH-Person-Web         Automatic（external-DSH 模式）
 
 服务名 `DSH-WireGuard-Control`；日志 `control-service.log`。
 
-不要给 `DSH-Person-Web` 配 SCM 依赖 `DSH-Web-App`：Windows 在停止被依赖服务时会连网关一起停掉，这与“网关独立”相反。
+不要给 `DSH-Mesh` 配 SCM 依赖 `DSH-Web-App`：Windows 在停止被依赖服务时会连网关一起停掉，这与“网关独立”相反。
 
 ## Linux
 
@@ -87,7 +87,7 @@ sudo ./install-control-service.sh --dsh-home /root/.dsh --node /usr/bin/node
 ]
 ```
 
-Windows 对应 `DSH-Web-App` / `DSH-Person-Web`。控制面板不属于 dsh-person-web 的 release，由 dsh-wireguard 自己更新，不放进 dsh-person-web 的切换清单。
+Windows 对应 `DSH-Web-App` / `DSH-Mesh`。控制面板不属于 dsh-mesh 的 release，由 dsh-wireguard 自己更新，不放进 dsh-mesh 的切换清单。
 
 ## WireGuard 内置面板
 

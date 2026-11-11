@@ -1,10 +1,10 @@
-# dsh-person-web — 个人版 Web 的成员发现、切换与构建
+# dsh-mesh — 个人版 Web 的成员发现、切换与构建
 
 把 DeepSeek Harness 部署成「Linux/Windows + 网关 + 密码门 + 微信扫码登录」的个人版 Web 服务，并把它扩展成一组可互相切换的成员。
 
 这个仓库现在同时是：
 
-- **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `dsh_person_web` 构建工具。
+- **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `dsh_mesh` 构建工具。
 - **网关**：`code/gate/`，负责密码门、反向代理、成员 cluster 认证、目标 cookie。
 - **构建引擎**：`code/build/`，从 DSH GitHub 源码确定性地应用覆盖层、构建 Web 前端、按目标系统和架构打包。
 - **文档集**：Step 001–010，记录每个坑和对应检查。
@@ -99,20 +99,20 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Port 80 -ClusterKey <sam
 powershell -ExecutionPolicy Bypass -File .\code\windows-service\install-service.ps1
 ```
 
-服务名 `DSH-Person-Web`，启动类型 Automatic，账号 LocalSystem，日志在 `data\service.log`；停止/删除：
+服务名 `DSH-Mesh`，启动类型 Automatic，账号 LocalSystem，日志在 `data\service.log`；停止/删除：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\code\windows-service\uninstall-service.ps1
 ```
 
-服务由 `dsh-person-web-service.exe` 包住 `start.ps1`；子进程异常退出会 5 秒后自动重启，服务停止时会杀掉整个 PowerShell → gate 进程树，确保 80 端口释放。它和桌面版 DSH 是两个独立进程树，桌面 DSH 退出不会影响这个服务。
+服务由 `dsh-mesh-service.exe` 包住 `start.ps1`；子进程异常退出会 5 秒后自动重启，服务停止时会杀掉整个 PowerShell → gate 进程树，确保 80 端口释放。它和桌面版 DSH 是两个独立进程树，桌面 DSH 退出不会影响这个服务。
 
 `-InstallService` 现在会继续调用 `install-split-services.ps1`，把 DSH 也拆成独立的 `DSH-Web-App` 服务；网关进入 external-DSH 模式，只监听 `data/dsh-web.json`，不再 spawn DSH。网关、DSH、WireGuard 控制面板三者互不依赖，详见 [Step 012](docs/Step%20012%20独立服务与WireGuard控制面板.md)。
 
 要点：
 
 - 每个成员都必须跑**新版 gate**，并配置**同一个** `DSH_GATE_CLUSTER_KEY`。
-- 成员只需要 gate；「DSH 成员」面板和 `dsh_person_web` 构建工具装在你想操作的那台 DSH（通常是入口）即可，包里的 `plugin/` 是同一份插件。
+- 成员只需要 gate；「DSH 成员」面板和 `dsh_mesh` 构建工具装在你想操作的那台 DSH（通常是入口）即可，包里的 `plugin/` 是同一份插件。
 - 每个成员的 `DSH_TRUSTED_HOSTS` 要包含外层入口的域名/IP，否则成员 DSH 的 Host 栅栏会 403。
 - 外层入口的网关负责密码门；成员 gate 通过 HMAC 接受外层请求，用户只输一次密码。
 - Windows 默认端口 8080（80 常需要管理员/URL ACL）；`DSH_GATE_MEMBER_PORT` 要与 peer 实际访问端口一致。
@@ -123,12 +123,12 @@ powershell -ExecutionPolicy Bypass -File .\code\windows-service\uninstall-servic
 面板「构建」页，或模型工具：
 
 ```text
-dsh_person_web { action: "build" }                       # 默认 linux-x64 + win-x64
-dsh_person_web { action: "build", planOnly: true }       # 只检查覆盖层
-dsh_person_web { action: "build_status", jobId: "..." }
-dsh_person_web { action: "build_logs", jobId: "..." }
-dsh_person_web { action: "build_learn", jobId: "..." }   # 修好工作树后固化覆盖层
-dsh_person_web { action: "build_resume", jobId: "..." }  # 复用工作树继续构建
+dsh_mesh { action: "build" }                       # 默认 linux-x64 + win-x64
+dsh_mesh { action: "build", planOnly: true }       # 只检查覆盖层
+dsh_mesh { action: "build_status", jobId: "..." }
+dsh_mesh { action: "build_logs", jobId: "..." }
+dsh_mesh { action: "build_learn", jobId: "..." }   # 修好工作树后固化覆盖层
+dsh_mesh { action: "build_resume", jobId: "..." }  # 复用工作树继续构建
 ```
 
 命令行等价：
@@ -202,14 +202,14 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | 文件 | 作用 |
 |---|---|
 | `index.js` / `client.js` | 构建产物：Host 插件与 React 面板 |
-| `src/index.ts` | 插件入口：注册 Host API 与 `dsh_person_web` 工具 |
+| `src/index.ts` | 插件入口：注册 Host API 与 `dsh_mesh` 工具 |
 | `src/lib/service.mjs` | 成员发现、构建任务、learn/resume、部署 job |
 | `code/deploy/engine.mjs` | SSH 蓝绿部署：prepare/activate/rollback、服务顺序、健康检查 |
 | `code/interop-service/server.mjs` | 独立 HTTP 服务：SDK stdio、创建/等待/通知/事件/回调 |
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
-| `src/lib/http-api.mjs` | 面板 API `/api/dsh-person-web/*` |
-| `src/lib/tools.mjs` | 模型可见的 `dsh_person_web` 工具 |
+| `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
+| `src/lib/tools.mjs` | 模型可见的 `dsh_mesh` 工具 |
 | `src/client/index.tsx` | 侧边栏「DSH 成员」面板 |
 | `code/gate/server.mjs` | 网关：密码门、目标路由、反向代理、WebSocket |
 | `code/gate/members.mjs` | 成员发现、`/__gate/select`、cluster 代理、cookie 隔离 |

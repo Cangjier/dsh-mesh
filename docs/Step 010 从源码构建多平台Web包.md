@@ -38,7 +38,7 @@ https://codeload.github.com/<owner>/<repo>/tar.gz/refs/tags/<ref>
 https://codeload.github.com/<owner>/<repo>/tar.gz/<40-hex-commit>
 ```
 
-分支和 tag 依次尝试；40 位 commit 直接下载。tarball 缓存在 `~/.dsh/person-web/cache/sources/`，按 `owner/repo@ref` 哈希命名。
+分支和 tag 依次尝试；40 位 commit 直接下载。tarball 缓存在 `~/.dsh/mesh/cache/sources/`，按 `owner/repo@ref` 哈希命名。
 
 ## 覆盖层（overlay）
 
@@ -58,7 +58,7 @@ https://codeload.github.com/<owner>/<repo>/tar.gz/<40-hex-commit>
           "path": "packages/client/ui-directory-picker-browse/src/client/DirectoryBrowser.tsx",
           "baseSha256": "656af2...",
           "overlay": "packages/client/ui-directory-picker-browse/src/client/DirectoryBrowser.tsx",
-          "marker": "dsh-person-web overlay: picker"
+          "marker": "dsh-mesh overlay: picker"
         }
       ]
     }
@@ -102,12 +102,12 @@ node build/tools/make-overlays.mjs \
 DSH 的调用链：
 
 ```text
-dsh_person_web { action: "build" }
+dsh_mesh { action: "build" }
   └─ 状态 needs-fix，返回 work-order/prompt 路径
        └─ DSH 用 subagent 按 work-order 修改工作树
-            └─ dsh_person_web { action: "build_learn", jobId }
+            └─ dsh_mesh { action: "build_learn", jobId }
                  └─ 把工作树里的修改写成新覆盖层，并把 mismatch 的 baseSha256 更新为当时 pristine 文件的实际哈希
-                      └─ dsh_person_web { action: "build_resume", jobId }
+                      └─ dsh_mesh { action: "build_resume", jobId }
                            └─ 复用工作树，重新应用覆盖层并构建
 ```
 
@@ -155,7 +155,7 @@ linux-arm64  可选
 ### 完整包（默认）
 
 ```text
-dsh-person-web-<ver>-<os>-<arch>/
+dsh-mesh-<ver>-<os>-<arch>/
 ├── app/                    # npm install @deepseek-ai/dsh@<ver> --os/--cpu/--libc
 │   └── node_modules/@deepseek-ai/dsh-web-frontend/dist/  # 被新构建覆盖
 ├── runtime/node/           # 官方 Node 运行时，校验 SHASUMS256
@@ -205,9 +205,9 @@ node build/tools/package-prebuilt.mjs --targets linux-x64,win-x64
 
 | 缓存 | 位置 |
 |---|---|
-| 源码 tarball | `~/.dsh/person-web/cache/sources/` |
-| Node 运行时 | `~/.dsh/person-web/cache/node/` |
-| 任务工作树 / 依赖 / 产物 | `~/.dsh/person-web/build/<job>/` |
+| 源码 tarball | `~/.dsh/mesh/cache/sources/` |
+| Node 运行时 | `~/.dsh/mesh/cache/node/` |
+| 任务工作树 / 依赖 / 产物 | `~/.dsh/mesh/build/<job>/` |
 
 - 完整包每个目标需要约 0.7–1 GB 依赖 + 约 40–80 MB Node 运行时；构建机至少留几 GB。
 - 源码 tarball 和 Node 运行时会复用；分支/tag 的 tarball 缓存 6 小时后自动刷新，40 位 commit 永久缓存。
@@ -223,7 +223,7 @@ created → running(prepare → apply → build → package) → done
                 └─ build-failed / failed
 ```
 
-`dsh_person_web` 动作：
+`dsh_mesh` 动作：
 
 | action | 作用 |
 |---|---|

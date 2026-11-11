@@ -1,7 +1,7 @@
 param(
   [string]$Root = '',
   [string]$AppServiceName = 'DSH-Web-App',
-  [string]$GateServiceName = 'DSH-Person-Web'
+  [string]$GateServiceName = 'DSH-Mesh'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -79,4 +79,4 @@ if (-not $healthy) {
   Get-Content (Join-Path $Root 'data\service.log') -Tail 80 -ErrorAction SilentlyContinue
   throw 'Gateway did not become healthy after the split.'
 }
-Write-Host 'Split complete: DSH-Web-App and DSH-Person-Web are independent services.'
+Write-Host 'Split complete: DSH-Web-App and DSH-Mesh are independent services.'

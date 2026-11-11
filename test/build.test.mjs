@@ -23,7 +23,7 @@ import {
  * @returns {Promise<string>} directory.
  */
 async function tempDir() {
-  return mkdtemp(path.join(os.tmpdir(), 'dsh-person-web-build-'))
+  return mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-build-'))
 }
 
 /**
@@ -230,11 +230,11 @@ test('assembleWebPackage copies the web payload, gate, and plugin', async () => 
       source: 'https://github.com/deepseek-ai/deepseek-harness',
       ref: 'master',
     })
-    assert.match(result.packageDir, /dsh-person-web-1\.2\.3-linux-x64$/u)
+    assert.match(result.packageDir, /dsh-mesh-1\.2\.3-linux-x64$/u)
     assert.match(await readFile(path.join(result.packageDir, 'manifest.json'), 'utf8'), /linux/u)
     assert.match(await readFile(path.join(result.packageDir, 'web', 'index.html'), 'utf8'), /doctype/u)
     assert.match(await readFile(path.join(result.packageDir, 'gate', 'server.mjs'), 'utf8'), /gate/u)
-    assert.match(await readFile(path.join(result.packageDir, 'plugins', 'dsh-person-web', 'client.js'), 'utf8'), /client/u)
+    assert.match(await readFile(path.join(result.packageDir, 'plugins', 'dsh-mesh', 'client.js'), 'utf8'), /client/u)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

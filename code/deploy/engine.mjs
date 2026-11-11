@@ -21,7 +21,8 @@ import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { copyFile, link, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 
 const DEFAULT_APP_ROOT = {
@@ -798,27 +799,67 @@ export class SshRunner {
    * @param {Function} [onProgress] progress callback.
    * @returns {Promise<void>}
    */
-  #uploadStream(local, remote, totalBytes, onProgress) {
-    const remoteCommand = this.plan.os === 'windows'
-      ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${windowsStdinWriter(remote)}`
+  async #uploadStream(local, remote, totalBytes, onProgress) {
+    // PowerShell cannot drain a piped stdin reliably over Windows OpenSSH (it
+    // blocks after a few hundred KiB), so Windows uses the tar that ships with
+    // Windows 10+ as the remote writer: `tar -xf -` reads the archive from
+    // stdin and writes the exact file bytes.
+    const windows = this.plan.os === 'windows'
+    const remoteCommand = windows
+      ? `tar -xf - -C "${path.win32.dirname(remote)}"`
       : `cat > ${sh(remote)}`
     const args = [...this.sshOptions(), this.target(), remoteCommand]
+    // tar extracts under the archive's own entry name, so stage a hard link
+    // named like the remote file instead of the local package name.
+    let tarDir = null
+    let tarName = null
+    if (windows) {
+      tarName = path.win32.basename(remote)
+      tarDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-upload-'))
+      const staged = path.join(tarDir, tarName)
+      try {
+        try {
+          await link(local, staged)
+        } catch {
+          await copyFile(local, staged)
+        }
+      } catch (error) {
+        await rm(tarDir, { recursive: true, force: true }).catch(() => {})
+        throw error
+      }
+    }
     return new Promise((resolve, reject) => {
-      const child = spawn('ssh', args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
-      const source = createReadStream(local)
+      const ssh = spawn('ssh', args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+      const tar = windows
+        ? spawn('tar', ['-cf', '-', '-C', tarDir, tarName], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+        : null
+      const source = tar !== null ? tar.stdout : createReadStream(local)
       let sent = 0
       let stderr = ''
       let settled = false
       let lastAt = Date.now()
       let lastBytes = 0
+      let lastDataAt = Date.now()
       let speed = 0
       const finish = error => {
         if (settled) return
         settled = true
+        clearInterval(watchdog)
         source.destroy()
+        tar?.kill('SIGKILL')
+        ssh.kill('SIGKILL')
+        if (tarDir !== null) void rm(tarDir, { recursive: true, force: true }).catch(() => {})
         if (error) reject(error)
         else resolve()
       }
+      // A remote that stops reading leaves the pipe full and the socket idle;
+      // fail instead of waiting forever.
+      const watchdog = setInterval(() => {
+        if (Date.now() - lastDataAt > 30_000) {
+          finish(new Error('upload stalled: the remote stopped reading stdin (30s without progress)'))
+        }
+      }, 5_000)
+      watchdog.unref?.()
       const report = (force = false) => {
         const now = Date.now()
         if (!force && now - lastAt < 200) return
@@ -826,23 +867,21 @@ export class SshRunner {
         speed = Math.max(0, (sent - lastBytes) / seconds)
         lastAt = now
         lastBytes = sent
-        onProgress?.({
-          bytes: sent,
-          totalBytes,
-          percent: totalBytes > 0 ? Math.min(100, Math.round((sent / totalBytes) * 100)) : 0,
-          speed,
-          indeterminate: false,
-        })
+        const percent = totalBytes > 0
+          ? Math.min(windows ? 99 : 100, Math.round((sent / totalBytes) * 100))
+          : 0
+        onProgress?.({ bytes: sent, totalBytes, percent, speed, indeterminate: false })
       }
       source.on('data', chunk => {
         sent += chunk.length
+        lastDataAt = Date.now()
         report()
       })
       source.once('error', error => finish(error))
-      child.stdout.resume()
-      child.stderr.on('data', chunk => { stderr += String(chunk) })
-      child.once('error', error => finish(error))
-      child.once('exit', code => {
+      ssh.stdout.resume()
+      ssh.stderr.on('data', chunk => { stderr += String(chunk) })
+      ssh.once('error', error => finish(error))
+      ssh.once('exit', code => {
         if (code === 0) {
           report(true)
           finish()
@@ -850,8 +889,16 @@ export class SshRunner {
           finish(new Error(`ssh upload exited with ${String(code)}: ${stderr.trim()}`))
         }
       })
-      child.stdin.once('error', () => {})
-      source.pipe(child.stdin)
+      ssh.stdin.once('error', () => {})
+      if (tar !== null) {
+        let tarError = ''
+        tar.stderr.on('data', chunk => { tarError += String(chunk) })
+        tar.once('error', error => finish(error))
+        tar.once('exit', code => {
+          if (code !== 0) finish(new Error(`local tar exited with ${String(code)}: ${tarError.trim()}`))
+        })
+      }
+      source.pipe(ssh.stdin)
     })
   }
 

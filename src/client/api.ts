@@ -114,6 +114,7 @@ export interface DeployStep {
   startedAt: string | null
   finishedAt: string | null
   detail: string
+  progress?: { done: number; total: number; percent: number } | null
 }
 
 export interface DeployProgress {

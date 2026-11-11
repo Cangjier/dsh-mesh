@@ -143,3 +143,37 @@ test('an already uploaded package is reused instead of transferred again', async
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('Windows extraction reports entry progress and skips Expand-Archive', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mesh-deploy-'))
+  const packagePath = path.join(root, 'package.zip')
+  await writeFile(packagePath, 'zip placeholder')
+  const seenScripts = []
+  const manager = managerWith(() => ({
+    async upload(_l, _r, onProgress) {
+      onProgress?.({ bytes: 10, totalBytes: 10, percent: 100, speed: 5, indeterminate: false })
+    },
+    async archiveEntries() {
+      return 4
+    },
+    async extractArchive(_remote, _target, onEntry) {
+      for (let index = 0; index < 4; index += 1) onEntry?.('')
+    },
+    async script(script) {
+      seenScripts.push(script)
+    },
+  }), path.join(root, 'jobs'))
+
+  try {
+    const started = await manager.start({ host: '10.66.66.4', os: 'windows', package: packagePath, appRoot: 'C:\\dsh-mesh' })
+    const final = await manager.wait(started.job.id)
+    assert.equal(final.status, 'succeeded')
+    const prepare = final.steps.find(step => step.key === 'prepare')
+    assert.deepEqual(prepare.progress, { done: 4, total: 4, percent: 100 })
+    assert.ok(seenScripts.length >= 2)
+    assert.ok(seenScripts.every(script => !script.includes('Expand-Archive')), 'the slow extractor must be skipped')
+    assert.ok(seenScripts.some(script => script.includes('release directory missing')))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

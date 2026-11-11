@@ -234,10 +234,20 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
             title: step.label,
             status: stepStatus(step.status),
             description: (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {duration}
-                {step.detail !== '' ? `${duration === '' ? '' : ' · '}${step.detail}` : ''}
-              </Typography.Text>
+              <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {duration}
+                  {step.detail !== '' ? `${duration === '' ? '' : ' · '}${step.detail}` : ''}
+                </Typography.Text>
+                {step.progress !== undefined && step.progress !== null ? (
+                  <Space size={8} style={{ width: '100%' }}>
+                    <Progress percent={step.progress.percent} size="small" showInfo={false} style={{ width: 160 }} />
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {step.progress.done} / {step.progress.total}
+                    </Typography.Text>
+                  </Space>
+                ) : null}
+              </Space>
             ),
           }
         })}

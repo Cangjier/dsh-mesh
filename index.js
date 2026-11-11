@@ -1161,9 +1161,9 @@ SSH \u4E3B\u673A\u5BC6\u94A5\u4E0E known_hosts \u4E2D\u7684\u8BB0\u5F55\u4E0D\u4
 }
 function initialDeploySteps() {
   return [
-    { key: "upload", label: "\u4E0A\u4F20\u5B89\u88C5\u5305", status: "pending", startedAt: null, finishedAt: null, detail: "" },
-    { key: "prepare", label: "\u89E3\u538B\u5E76\u51C6\u5907\u65B0\u7248\u672C", status: "pending", startedAt: null, finishedAt: null, detail: "" },
-    { key: "activate", label: "\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", status: "pending", startedAt: null, finishedAt: null, detail: "" }
+    { key: "upload", label: "\u4E0A\u4F20\u5B89\u88C5\u5305", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null },
+    { key: "prepare", label: "\u89E3\u538B\u5E76\u51C6\u5907\u65B0\u7248\u672C", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null },
+    { key: "activate", label: "\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null }
   ];
 }
 function hashFile(file) {
@@ -1514,9 +1514,9 @@ $Shared = Join-Path $AppRoot 'shared'
 $Current = Join-Path $AppRoot 'current'
 New-Item -ItemType Directory -Force -Path (Join-Path $AppRoot 'releases') | Out-Null
 New-Item -ItemType Directory -Force -Path $Shared | Out-Null
-if (Test-Path $New) { throw "release already exists: $New" }
+${plan.preExtracted ? 'if (-not (Test-Path $New)) { throw "release directory missing: $New" }' : 'if (Test-Path $New) { throw "release already exists: $New" }'}
 New-Item -ItemType Directory -Force -Path $New | Out-Null
-Expand-Archive -LiteralPath $Package -DestinationPath $New -Force
+${plan.preExtracted ? "" : "Expand-Archive -LiteralPath $Package -DestinationPath $New -Force"}
 $inner = Get-ChildItem -LiteralPath $New -Directory | Select-Object -First 1
 if ($inner -and (Test-Path (Join-Path $inner.FullName 'manifest.json'))) {
   Get-ChildItem -LiteralPath $inner.FullName -Force | Move-Item -Destination $New -Force
@@ -1700,6 +1700,27 @@ var SshRunner = class {
     }
   }
   /**
+   * Count the entries in a remote archive.
+   * @param {string} remote remote archive path.
+   * @returns {Promise<number>} entry count.
+   */
+  async archiveEntries(remote) {
+    const { stdout } = await this.runProcess("ssh", [...this.sshOptions(), this.target(), `tar -tf "${remote}"`]);
+    return String(stdout).split(/\r?\n/u).filter((line) => line.trim() !== "").length;
+  }
+  /**
+   * Extract a remote archive with the tar that ships with Windows, reporting
+   * one callback per extracted entry.
+   * @param {string} remote remote archive path.
+   * @param {string} target remote directory.
+   * @param {() => void} [onEntry] called for every extracted entry.
+   * @returns {Promise<void>}
+   */
+  async extractArchive(remote, target, onEntry) {
+    await this.runProcess("ssh", [...this.sshOptions(), this.target(), `cmd /c if not exist "${target}" mkdir "${target}"`]);
+    await this.runProcess("ssh", [...this.sshOptions(), this.target(), `tar -xf "${remote}" -C "${target}" -v`], void 0, onEntry, { countOnly: true });
+  }
+  /**
    * Read a remote file's size, or null when it cannot be read.
    * @param {string} remote remote path.
    * @returns {Promise<number|null>} size in bytes.
@@ -1831,7 +1852,7 @@ var SshRunner = class {
    * @param {string} [input] stdin.
    * @returns {Promise<{stdout:string,stderr:string}>} output.
    */
-  runProcess(command, args, input, onLine) {
+  runProcess(command, args, input, onLine, options = {}) {
     return new Promise((resolve, reject) => {
       const child = spawn2(command, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
       let stdout = "";
@@ -1843,7 +1864,7 @@ var SshRunner = class {
         buffers[key] = lines.pop() ?? "";
         for (const line of lines) {
           const trimmed = line.trim();
-          if (trimmed !== "") onLine?.(trimmed);
+          if (trimmed !== "") onLine?.(options.countOnly === true ? "" : trimmed);
         }
       };
       const flush = () => {
@@ -2059,10 +2080,32 @@ var DeployManager = class {
         };
         await mark("upload", "succeeded", `${formatBytes(plan.package.bytes)} \xB7 ${uploadSeconds.toFixed(1)}s \xB7 ${formatBytes(plan.package.bytes / uploadSeconds)}/s`);
       }
-      const scripts = this.scripts(plan);
       state.phase = "prepare";
       await mark("prepare", "running");
       await log("prepare: extract, shared dirs, service definitions (no switch)");
+      let preExtracted = false;
+      if (plan.os === "windows" && typeof runner.archiveEntries === "function" && typeof runner.extractArchive === "function") {
+        const newDir = `${plan.releases}\\${plan.release}`;
+        const total = await runner.archiveEntries(plan.remotePackage).catch(() => 0);
+        if (total > 0) {
+          await log(`extracting ${total} archive entries with tar`);
+          const prepareStep = state.steps.find((item) => item.key === "prepare");
+          let done = 0;
+          await runner.extractArchive(plan.remotePackage, newDir, () => {
+            done += 1;
+            if (done % 500 === 0 || done === total) {
+              if (prepareStep !== void 0) {
+                prepareStep.progress = { done, total, percent: Math.min(99, Math.round(done / total * 100)) };
+              }
+              state.updatedAt = stamp();
+              this.#saveThrottled(stateFile, state);
+            }
+          });
+          if (prepareStep !== void 0) prepareStep.progress = { done: total, total, percent: 100 };
+          preExtracted = true;
+        }
+      }
+      const scripts = this.scripts({ ...plan, preExtracted });
       await runner.script(scripts.prepare, plan.os, (line) => note("prepare", line));
       await mark("prepare", "succeeded");
       state.phase = "activate";

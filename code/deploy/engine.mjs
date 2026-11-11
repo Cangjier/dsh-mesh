@@ -72,6 +72,56 @@ function sedReplacement(value) {
   return String(value).replace(/[\\|&]/g, match => `\\${match}`)
 }
 
+/**
+ * Wire the packaged dsh-mesh plugin into the DSH profile so the member's own
+ * DSH loads the panel. Runs on the target with its bundled Node: it copies the
+ * release plugin into the profile and appends the bundle, creating the profile
+ * manifest when DSH has not booted on this member yet.
+ *
+ * Idempotent: a second deploy replaces the copy and keeps the bundle entry.
+ */
+export const PROFILE_WIRE_SCRIPT = `
+import fs from 'node:fs'
+import path from 'node:path'
+const [profileDir, pluginDir] = process.argv.slice(2)
+if (typeof profileDir !== 'string' || profileDir === '' || typeof pluginDir !== 'string' || pluginDir === '') {
+  console.error('profile-wire: expected <profileDir> <pluginDir>')
+  process.exit(2)
+}
+if (!fs.existsSync(pluginDir)) {
+  console.log('profile-wire: the release has no plugins/dsh-mesh; profile left untouched')
+  process.exit(0)
+}
+const manifestFile = path.join(profileDir, 'package.json')
+let manifest = {
+  name: 'dsh-profile-' + path.basename(profileDir),
+  private: true,
+  dependencies: {},
+  dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
+}
+if (fs.existsSync(manifestFile)) {
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'))
+  } catch {
+    console.error('profile-wire: ' + manifestFile + ' is not valid JSON; left untouched')
+    process.exit(1)
+  }
+}
+manifest.dependencies = manifest.dependencies && typeof manifest.dependencies === 'object' ? manifest.dependencies : {}
+manifest.dsh = manifest.dsh && typeof manifest.dsh === 'object' ? manifest.dsh : {}
+manifest.dsh.profile = manifest.dsh.profile && typeof manifest.dsh.profile === 'object' ? manifest.dsh.profile : {}
+const bundles = Array.isArray(manifest.dsh.profile.bundles) ? manifest.dsh.profile.bundles : []
+if (!bundles.includes('@local/dsh-mesh')) bundles.push('@local/dsh-mesh')
+manifest.dsh.profile.bundles = bundles
+manifest.dependencies['@local/dsh-mesh'] = 'link:./node_modules/@local/dsh-mesh'
+const target = path.join(profileDir, 'node_modules', '@local', 'dsh-mesh')
+fs.mkdirSync(path.dirname(target), { recursive: true })
+fs.rmSync(target, { recursive: true, force: true })
+fs.cpSync(pluginDir, target, { recursive: true })
+fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\\n')
+console.log('profile-wire: dsh loads @local/dsh-mesh from ' + target)
+`
+
 /** Human-readable byte count for progress details. */
 export function formatBytes(value) {
   const bytes = Number(value)
@@ -454,6 +504,9 @@ echo 'gateway password synced from the deployer'
 ` : ''}sed -i '/^DSH_GATE_CLUSTER_KEY=/d' "$ENV_FILE"
 test -x "$NEW/runtime/node/node"
 "$NEW/runtime/node/node" --check "$NEW/gate/server.mjs"
+"$NEW/runtime/node/node" - "$SHARED/home/profiles/web" "$NEW/plugins/dsh-mesh" <<'DSH_MESH_PROFILE_WIRE'
+${PROFILE_WIRE_SCRIPT}
+DSH_MESH_PROFILE_WIRE
 test -f "$NEW/manifest.json"
 
 write_unit() {
@@ -667,6 +720,11 @@ $node = Join-Path $New 'runtime\\node\\node.exe'
 if (-not (Test-Path $node)) { throw "missing $node" }
 & $node --check (Join-Path $New 'gate\\server.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'gate syntax check failed' }
+$wireScript = Join-Path $env:TEMP 'dsh-mesh-profile-wire.mjs'
+[IO.File]::WriteAllText($wireScript, ${ps(PROFILE_WIRE_SCRIPT)}, [Text.UTF8Encoding]::new($false))
+& $node $wireScript (Join-Path $Shared 'home\\profiles\\web') (Join-Path $New 'plugins\\dsh-mesh')
+if ($LASTEXITCODE -ne 0) { throw 'could not wire the dsh-mesh plugin into the DSH profile' }
+Remove-Item $wireScript -Force -ErrorAction SilentlyContinue
 ${serviceLines}
 Write-Output "prepared $Release at $New"
 `

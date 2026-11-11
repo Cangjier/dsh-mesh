@@ -125,11 +125,25 @@ export class ChromeSession {
     })
 
     const portFile = path.join(session.#profileDir, 'DevToolsActivePort')
+    // A browser that exits early (a service-account restriction, a missing
+    // runtime DLL, a policy) would otherwise look like a slow start for the
+    // full 20 s and report only "timed out".
+    const exitedEarly = new Promise((_resolve, reject) => {
+      session.#child.once('error', (error) => {
+        reject(new Error(`cannot run ${binary}: ${error.message}`))
+      })
+      session.#child.once('exit', (code, signal) => {
+        const detail = stderr.trim() === '' ? '' : `: ${stderr.trim().slice(-300)}`
+        reject(new Error(`exited before writing a debug port (${signal ?? String(code)})${detail}`))
+      })
+    })
     try {
-      await waitForFile(portFile, 20_000)
+      await Promise.race([waitForFile(portFile, 20_000), exitedEarly])
     } catch (error) {
       session.kill()
-      throw new Error(`chrome did not start: ${error.message}${stderr === '' ? '' : ` (${stderr.slice(-300)})`}`)
+      const reason = error instanceof Error ? error.message : String(error)
+      const hint = process.platform === 'win32' ? '; on Windows a service running as LocalSystem may not be allowed to start Edge — run the gate as a regular user or set DSH_GATE_CHROME' : ''
+      throw new Error(`chrome did not start: ${reason}${hint}`)
     }
     const [port, wsPath] = (await readFile(portFile, 'utf8')).split('\n')
     if (port === undefined || wsPath === undefined) throw new Error('chrome wrote no debug port')

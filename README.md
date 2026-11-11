@@ -39,7 +39,7 @@
 
 ### 4. 通过 SSH 蓝绿部署成员
 
-- `dsh_person_deploy` 从 A 通过 SSH 部署 B：先把包解压到新的 `releases/<release>`，建立 `shared/config|data|home|workspace` 链接，更新服务定义，全部准备好后才切换 `current`。
+- `dsh_mesh_deploy` 从 A 通过 SSH 部署 B：先把包解压到新的 `releases/<release>`，建立 `shared/config|data|home|workspace` 链接，更新服务定义，全部准备好后才切换 `current`。
 - 重启顺序强制为 `control → dsh → gate`；**网关永远最后**，因为用户可能正通过 B 的网关操作 A，B 的网关先重启会切断这条路径。
 - 支持 `scope=dsh`：只重启 DSH/控制面板，不重启网关。
 - 健康检查失败自动切回 `previous` 并重启；`rollback` 可手动回滚。
@@ -153,11 +153,11 @@ node build/tools/package-prebuilt.mjs --targets linux-x64,win-x64
 ### 通过 SSH 部署/更新成员
 
 ```text
-dsh_person_deploy { action: "plan", host: "10.66.66.3", user: "root", os: "linux" }
-dsh_person_deploy { action: "deploy", host: "10.66.66.3", user: "root", os: "linux", identityFile: "C:\\Users\\Admin\\.ssh\\id_ed25519" }
-dsh_person_deploy { action: "status", jobId: "deploy-..." }
-dsh_person_deploy { action: "logs", jobId: "deploy-...", lines: 120 }
-dsh_person_deploy { action: "rollback", host: "10.66.66.3", user: "root", os: "linux" }
+dsh_mesh_deploy { action: "plan", host: "10.66.66.3", user: "root", os: "linux" }
+dsh_mesh_deploy { action: "deploy", host: "10.66.66.3", user: "root", os: "linux", identityFile: "C:\\Users\\Admin\\.ssh\\id_ed25519" }
+dsh_mesh_deploy { action: "status", jobId: "deploy-..." }
+dsh_mesh_deploy { action: "logs", jobId: "deploy-...", lines: 120 }
+dsh_mesh_deploy { action: "rollback", host: "10.66.66.3", user: "root", os: "linux" }
 ```
 
 服务清单可以通过 `services` 指定；工具会按 `control → dsh → gate` 排序，并拒绝没有 gateway 或 gateway 不在最后的清单。目标必须已经安装过一次（`shared/config/gate.env` 存在），SSH 使用密钥和 `BatchMode=yes`。详见 [Step 011](docs/Step%20011%20通过%20SSH%20蓝绿部署.md)。

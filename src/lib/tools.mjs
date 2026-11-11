@@ -172,7 +172,7 @@ export function registerTools(ctx, toolsCtx, service) {
     },
   }
   const deployDefinition = {
-    name: 'dsh_person_deploy',
+    name: 'dsh_mesh_deploy',
     description: [
       '通过 SSH 蓝绿部署 dsh-mesh 成员。',
       '',
@@ -249,7 +249,7 @@ export function registerTools(ctx, toolsCtx, service) {
         const result = await service.deployStart(request)
         return {
           ok: true,
-          text: `部署 job ${result.job.id} 已启动；目标 ${result.job.target.host}，release ${result.job.release}。用 dsh_person_deploy action="status" jobId="${result.job.id}" 查看进度。`,
+          text: `部署 job ${result.job.id} 已启动；目标 ${result.job.target.host}，release ${result.job.release}。用 dsh_mesh_deploy action="status" jobId="${result.job.id}" 查看进度。`,
           data: result,
         }
       }

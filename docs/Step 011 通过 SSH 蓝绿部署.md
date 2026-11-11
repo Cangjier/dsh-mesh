@@ -1,6 +1,6 @@
 # Step 011 通过 SSH 蓝绿部署成员
 
-这个步骤给 `dsh-mesh` 增加第二个模型工具 `dsh_person_deploy`：从 A 通过 SSH 部署成员 B，不覆盖正在运行的目录；先解压到新的 `releases/<release>` 并完成全部准备，最后才切换 `current` 并重启服务。**gateway 永远是最后一个重启的服务**。
+这个步骤给 `dsh-mesh` 增加第二个模型工具 `dsh_mesh_deploy`：从 A 通过 SSH 部署成员 B，不覆盖正在运行的目录；先解压到新的 `releases/<release>` 并完成全部准备，最后才切换 `current` 并重启服务。**gateway 永远是最后一个重启的服务**。
 
 ## 目标目录
 
@@ -88,14 +88,14 @@ gate      网关，必须最后
 ## 用法
 
 ```text
-dsh_person_deploy action="plan" host="10.66.66.3" user="root" os="linux" \
+dsh_mesh_deploy action="plan" host="10.66.66.3" user="root" os="linux" \
   package="dist/dsh-mesh-0.2.2-rc.1-linux-x64.tar.gz"
 ```
 
 先看计划，再执行：
 
 ```text
-dsh_person_deploy action="deploy" host="10.66.66.3" user="root" os="linux" \
+dsh_mesh_deploy action="deploy" host="10.66.66.3" user="root" os="linux" \
   identityFile="C:\Users\Admin\.ssh\id_ed25519" \
   retention=3 \
   services=[{"name":"dsh-web.service","role":"gate","command":"start.sh"}]
@@ -104,14 +104,14 @@ dsh_person_deploy action="deploy" host="10.66.66.3" user="root" os="linux" \
 返回 deploy job id；查看进度：
 
 ```text
-dsh_person_deploy action="status" jobId="deploy-..."
-dsh_person_deploy action="logs" jobId="deploy-..." lines=120
+dsh_mesh_deploy action="status" jobId="deploy-..."
+dsh_mesh_deploy action="logs" jobId="deploy-..." lines=120
 ```
 
 回滚：
 
 ```text
-dsh_person_deploy action="rollback" host="10.66.66.3" user="root" os="linux" \
+dsh_mesh_deploy action="rollback" host="10.66.66.3" user="root" os="linux" \
   identityFile="C:\Users\Admin\.ssh\id_ed25519"
 ```
 

@@ -3104,7 +3104,7 @@ ${job.worktree ?? ""}`,
     }
   };
   const deployDefinition = {
-    name: "dsh_person_deploy",
+    name: "dsh_mesh_deploy",
     description: [
       "\u901A\u8FC7 SSH \u84DD\u7EFF\u90E8\u7F72 dsh-mesh \u6210\u5458\u3002",
       "",
@@ -3181,7 +3181,7 @@ ${job.worktree ?? ""}`,
         const result = await service.deployStart(request);
         return {
           ok: true,
-          text: `\u90E8\u7F72 job ${result.job.id} \u5DF2\u542F\u52A8\uFF1B\u76EE\u6807 ${result.job.target.host}\uFF0Crelease ${result.job.release}\u3002\u7528 dsh_person_deploy action="status" jobId="${result.job.id}" \u67E5\u770B\u8FDB\u5EA6\u3002`,
+          text: `\u90E8\u7F72 job ${result.job.id} \u5DF2\u542F\u52A8\uFF1B\u76EE\u6807 ${result.job.target.host}\uFF0Crelease ${result.job.release}\u3002\u7528 dsh_mesh_deploy action="status" jobId="${result.job.id}" \u67E5\u770B\u8FDB\u5EA6\u3002`,
           data: result
         };
       }

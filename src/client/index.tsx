@@ -347,7 +347,7 @@ function Panel({ ctx }: { ctx: any }) {
       >
         <style>{styles}</style>
         <div className="dsh-pw-boot">
-          <Typography.Title level={3} style={{ margin: 0 }}>DSH 成员</Typography.Title>
+          <Typography.Title level={3} style={{ margin: 0 }}>Mesh</Typography.Title>
           <Spin size="large" />
         </div>
       </ConfigProvider>
@@ -363,7 +363,7 @@ function Panel({ ctx }: { ctx: any }) {
       <div className="dsh-pw-page">
         <div className="dsh-pw-header">
           <div>
-            <h1 className="dsh-pw-title">DSH 成员</h1>
+            <h1 className="dsh-pw-title">Mesh</h1>
           </div>
           <div className="dsh-pw-toolbar">
             <Tag icon={gateAvailable ? <ApartmentOutlined /> : <WarningOutlined />} color={gateAvailable ? 'green' : 'default'}>
@@ -494,8 +494,8 @@ export function apply(ctx: any) {
     return () => tag.remove()
   }, 'person-web: hide preview badge')
   ctx.effect(() => ctx.locale.register(NS, {
-    en: { 'panel.label': 'DSH Members' },
-    zh: { 'panel.label': 'DSH 成员' },
+    en: { 'panel.label': 'Mesh' },
+    zh: { 'panel.label': 'Mesh' },
   }), 'person-web dictionaries')
   ctx.effect(() => ctx.locale.register('dsh-wireguard', {
     en: WIREGUARD_EN,

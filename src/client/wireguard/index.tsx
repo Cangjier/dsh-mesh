@@ -922,10 +922,7 @@ function ClientForm({
     <Card
       className="dsh-wg-card"
       title={(
-        <Space direction="vertical" size={0}>
-          <Typography.Text strong>{t('client.title')}</Typography.Text>
-          <Typography.Text type="secondary" style={{ fontWeight: 400, fontSize: 12 }}>{t('client.subtitle')}</Typography.Text>
-        </Space>
+        <Typography.Text strong>{t('client.title')}</Typography.Text>
       )}
       extra={<Tag icon={<LaptopOutlined />}>{t('status.idle')}</Tag>}
     >
@@ -951,7 +948,6 @@ function ClientForm({
         <Form.Item
           name="joinCode"
           label={t('client.joinCode')}
-          extra={t('client.joinCodeHelp')}
         >
           <Input className="dsh-wg-mono" placeholder={t('client.joinCodePlaceholder')} />
         </Form.Item>
@@ -972,14 +968,6 @@ function ClientForm({
           </Button>
           <Button icon={<ReloadOutlined />} onClick={onRecheck}>{t('tools.recheck')}</Button>
         </Space>
-
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginTop: 16 }}
-          message={t('client.formHint', { cidr: state.settings.vpnCidr })}
-          description={`${t('client.deviceName')}: ${state.hostname}`}
-        />
       </Form>
     </Card>
   );

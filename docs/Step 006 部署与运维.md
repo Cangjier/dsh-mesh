@@ -11,6 +11,10 @@
 
 **工作进程**：服务的实现进程。它可能是 systemd 单元、SCM 服务，也可能是守护服务的子进程。
 
+**Windows 与 Linux 的唯一区别是：Windows 多一个守护服务；两者都有 `gate`、`dsh-web`、
+`dsh-interop`（以及 interop 自己拉起的 `dsh-sdk`）。** 区别只在“谁拉起、注册在哪”，
+不在“有哪些服务”。
+
 按这个口径，一台成员的完整组成是：
 
 | 名称 | 类别 | Linux | Windows |

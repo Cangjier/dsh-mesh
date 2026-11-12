@@ -480,6 +480,7 @@ function MemberConversations({ active }: { active: boolean }) {
   const { token } = antdTheme.useToken()
   const chatColors = {
     '--chat-pane-bg': token.colorBgLayout,
+    '--chat-surface': token.colorBgContainer,
     '--chat-list-bg': token.colorFillQuaternary,
     '--chat-list-hover': token.colorFillSecondary,
     '--chat-list-active': token.colorFill,
@@ -500,17 +501,17 @@ function MemberConversations({ active }: { active: boolean }) {
   const online = groups.filter(group => group.online).length
   const busy = groups.reduce((sum, group) => sum + group.conversations.filter(row => row.status === 'running').length, 0)
 
-  // A chat opens at the newest message, like every messenger.
+  // A chat opens at the newest message, like every messenger. The tab content
+  // itself is the scroller, so bring the sentinel at the end into view.
   useEffect(() => {
-    const node = messagesRef.current
-    if (node !== null) node.scrollTop = node.scrollHeight
+    messagesRef.current?.scrollIntoView({ block: 'end' })
   }, [messages])
 
   return (
-    <div className="dsh-pw-tabbody">
+    <div className="dsh-pw-tabbody" style={chatColors}>
       <div className="chat-toolbar">
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {`群聊 · ${String(groups.length)} 个成员（${String(online)} 在线）· ${String(messages.length)} 条消息${busy > 0 ? ` · ${String(busy)} 个进行中` : ''}`}
+          {`群聊 · ${String(groups.length)} 个成员（${String(online)} 在线）· ${String(messages.length)} 条消息${busy > 0 ? ` · ${String(busy)} 个进行中` : ''} · 成员用组网 IP 最后一段，长文本点「详细」`}
         </Typography.Text>
         <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => { void load() }}>
           刷新
@@ -519,32 +520,14 @@ function MemberConversations({ active }: { active: boolean }) {
       {error !== '' ? <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} /> : null}
       {groups.length === 0 && !loading && error === '' ? <Empty description="还没有成员" /> : null}
       {groups.length > 0 ? (
-        <div className="chat-shell" style={chatColors}>
-          <div className="chat-pane">
-            <div className="chat-pane-head">
-              <Space size={8}>
-                <Typography.Text strong>群聊</Typography.Text>
-                <Typography.Text type="secondary">{`${String(groups.length)} 个成员`}</Typography.Text>
-                {groups.filter(group => group.dsh === false).length > 0 ? (
-                  <Tag color="orange">{`${String(groups.filter(group => group.dsh === false).length)} 个无交互服务`}</Tag>
-                ) : null}
-              </Space>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {`本机 ${selfNumber}`}
-              </Typography.Text>
-            </div>
-            <div className="chat-messages" ref={messagesRef}>
-              {messages.length === 0 ? <Empty description="还没有对话" /> : null}
-              {messages.map(entry => (
-                <ChatBubble key={entry.key} message={entry} onDetail={setDetail} />
-              ))}
-            </div>
-          </div>
+        <div className="chat-stream">
+          {messages.length === 0 ? <Empty description="还没有对话" /> : null}
+          {messages.map(entry => (
+            <ChatBubble key={entry.key} message={entry} onDetail={setDetail} />
+          ))}
+          <div ref={messagesRef} />
         </div>
       ) : null}
-      <Typography.Paragraph type="secondary" style={{ marginTop: 10, marginBottom: 0, fontSize: 12 }}>
-        成员用组网 IP 的最后一段表示；点「刷新」拉取最新，内容较长时截断显示，点「详细」看全文。
-      </Typography.Paragraph>
       <Modal
         open={detail !== null}
         title={detail === null ? '' : detail.mention}

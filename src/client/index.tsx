@@ -26,6 +26,7 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import {
   ApartmentOutlined,
+  ArrowLeftOutlined,
   CloudDownloadOutlined,
   EditOutlined,
   InfoCircleOutlined,
@@ -407,7 +408,6 @@ function ChatBubble({ message, onDetail }: {
   message: ChatMessage
   onDetail: (message: ChatMessage) => void
 }) {
-  const [expanded, setExpanded] = useState(false)
   const truncatable = chatNeedsDetail(message.text)
   const pending = message.status === 'running' && message.out === false && message.text === '正在处理…'
   return (
@@ -422,20 +422,20 @@ function ChatBubble({ message, onDetail }: {
       <div className="chat-body">
         <div className={`chat-bubble ${message.out ? 'chat-bubble-out' : 'chat-bubble-in'}`}>
           <span className="chat-mention">{message.mention}</span>
-          <span className={`chat-text ${truncatable && !expanded ? 'chat-text-clamped' : ''}`}>
+          <span className={`chat-text ${truncatable ? 'chat-text-clamped' : ''}`}>
             {message.text}
           </span>
           {pending ? <Spin size="small" style={{ marginLeft: 8 }} /> : null}
         </div>
         <div className={`chat-foot ${message.out ? 'chat-foot-out' : ''}`}>
-          {truncatable && !expanded ? (
-            <Button type="link" size="small" style={{ height: 'auto', padding: 0 }} onClick={() => setExpanded(true)}>
+          {truncatable ? (
+            <Button
+              type="link"
+              size="small"
+              style={{ height: 'auto', padding: 0 }}
+              onClick={() => onDetail(message)}
+            >
               详细
-            </Button>
-          ) : null}
-          {truncatable && expanded ? (
-            <Button type="link" size="small" style={{ height: 'auto', padding: 0 }} onClick={() => setExpanded(false)}>
-              收起
             </Button>
           ) : null}
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>{message.time}</Typography.Text>
@@ -574,6 +574,22 @@ function MemberConversations({ active }: { active: boolean }) {
     .flatMap(group => group.conversations.flatMap(row => conversationMessages(row, group, selfNumber)))
     .sort((left, right) => left.sortKey.localeCompare(right.sortKey)), [groups, selfNumber])
 
+  // 详细 swaps the tab content for the full text. Both views stay mounted and
+  // only their display changes, so returning lands where the reader left off.
+  const transcriptScroll = useRef<number | null>(null)
+  const scroller = (): HTMLElement | null =>
+    (messagesRef.current?.closest<HTMLElement>('.ant-tabs-content-holder') ?? null)
+  const openDetail = (message: ChatMessage) => {
+    transcriptScroll.current = scroller()?.scrollTop ?? null
+    setDetail(message)
+  }
+  const closeDetail = () => {
+    setDetail(null)
+    const holder = scroller()
+    if (holder !== null && transcriptScroll.current !== null) holder.scrollTop = transcriptScroll.current
+    transcriptScroll.current = null
+  }
+
   // A chat opens at the newest message, like every messenger. The tab content
   // itself is the scroller, so bring the sentinel at the end into view.
   useEffect(() => {
@@ -581,15 +597,15 @@ function MemberConversations({ active }: { active: boolean }) {
   }, [messages])
 
   return (
-    <div
-      className={`dsh-pw-tabbody ${pull > 0 ? 'chat-pulling' : ''}`}
-      style={chatColors}
-      onWheel={onWheel}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={endDrag}
-      onPointerLeave={endDrag}
-    >
+    <div className={`dsh-pw-tabbody ${pull > 0 ? 'chat-pulling' : ''}`} style={chatColors}>
+      <div
+        style={{ display: detail === null ? undefined : 'none' }}
+        onWheel={onWheel}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerLeave={endDrag}
+      >
       <div className={`chat-pull ${pull > 0 ? 'chat-pull-active' : ''}`} style={{ height: pull }}>
         {pull > 0 ? (
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -603,27 +619,30 @@ function MemberConversations({ active }: { active: boolean }) {
         <div className="chat-stream">
           {messages.length === 0 ? <Empty description="还没有对话" /> : null}
           {messages.map(entry => (
-            <ChatBubble key={entry.key} message={entry} onDetail={setDetail} />
+            <ChatBubble key={entry.key} message={entry} onDetail={openDetail} />
           ))}
           <div ref={messagesRef} />
         </div>
       ) : null}
-      <Modal
-        open={detail !== null}
-        title={detail === null ? '' : detail.mention}
-        footer={null}
-        width={720}
-        onCancel={() => setDetail(null)}
-      >
+      </div>
+      <div style={{ display: detail === null ? 'none' : undefined }}>
         {detail === null ? null : (
-          <Space direction="vertical" size={10} style={{ width: '100%' }}>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {[detail.time, detail.detailMeta].filter(part => part !== '').join(' · ')}
-            </Typography.Text>
+          <div className="chat-detail">
+            <div className="chat-detail-bar">
+              <Button icon={<ArrowLeftOutlined />} size="small" onClick={closeDetail}>
+                返回
+              </Button>
+              <Space size={8} wrap>
+                <Typography.Text strong>{detail.mention}</Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {[detail.time, detail.detailMeta].filter(part => part !== '').join(' · ')}
+                </Typography.Text>
+              </Space>
+            </div>
             <pre className="chat-detail-text">{detail.text}</pre>
-          </Space>
+          </div>
         )}
-      </Modal>
+      </div>
     </div>
   )
 }

@@ -368,15 +368,26 @@
   flex-direction: row-reverse;
 }
 
+.chat-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: calc(100vh - 240px);
+}
+
+.chat-detail-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .chat-detail-text {
   margin: 0;
-  max-height: 60vh;
-  overflow: auto;
-  padding: 12px;
-  border-radius: 6px;
-  background: var(--chat-pane-bg, #f5f5f5);
-  font-size: 13px;
-  line-height: 1.6;
+  padding: 0;
+  color: var(--chat-text, inherit);
+  font-size: 14px;
+  line-height: 1.75;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: inherit;

@@ -16,6 +16,17 @@ import path from 'node:path'
 const DEFAULT_INTEROP_PORT = 8765
 const WAIT_TIMEOUT_MS = 60_000
 const MAX_ATTEMPTS = 30
+/**
+ * Errors that say the conversation itself is gone: the member's interop knows no
+ * such conversation any more, or its runtime lost the session behind it (which
+ * happens when the member's DSH restarts mid-conversation). Retrying cannot fix
+ * either, so the task fails at once with the reason instead of burning attempts.
+ */
+const LOST_CONVERSATION = /conversation not found|unknown SDK session|session "?[\w-]+"? already exists|SDK session is already open or opening|session agent was disposed/iu
+/** Text a message that starts a member conversation carries when nothing ran. */
+const EMPTY_TURN = '目标的 DSH 在任务执行期间重启了：对话没有产生任何输出，这一轮已中断'
+/** How many empty idle answers are tolerated before a task counts as cut short. */
+const EMPTY_WAIT_RETRIES = 3
 
 function envFile(file) {
   const values = {}
@@ -190,6 +201,30 @@ export class MemberTaskService {
     return parsed
   }
 
+  /**
+   * Wait out a member runtime that is still booting.
+   *
+   * A member's interop answers 503 while its SDK child starts, which is exactly
+   * the window right after that machine's DSH restarted. A tool call made in
+   * that window should wait for it instead of failing outright.
+   * @param {() => Promise<any>} attempt one request.
+   * @param {number} [budgetMs] how long to keep waiting.
+   * @returns {Promise<any>} the request result.
+   */
+  async #waitForRuntime(attempt, budgetMs = 90_000) {
+    const deadline = Date.now() + budgetMs
+    for (;;) {
+      try {
+        return await attempt()
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const starting = /SDK runtime is not ready|sdk_unavailable|SDK runtime is still starting/iu.test(message)
+        if (!starting || Date.now() >= deadline) throw error
+        await new Promise(resolve => setTimeout(resolve, 2_000))
+      }
+    }
+  }
+
   async start({ member, prompt, cwd, agent, notify = true }) {
     await this.#ensureLoaded()
     if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('prompt is required')
@@ -202,7 +237,9 @@ export class MemberTaskService {
       initiator: { ...(this.identity ?? { id: 'local' }), source: 'call_member' },
       ...(typeof cwd === 'string' && cwd !== '' ? { cwd } : {}),
     }
-    const created = await this.#request(target.baseUrl, 'POST', '/v1/conversations', payload, 60_000)
+    const created = await this.#waitForRuntime(
+      () => this.#request(target.baseUrl, 'POST', '/v1/conversations', payload, 60_000),
+    )
     const conversation = created.conversation
     if (conversation === undefined || typeof conversation.id !== 'string') throw new Error('member interop did not return a conversation id')
     const task = {
@@ -217,6 +254,7 @@ export class MemberTaskService {
       updatedAt: new Date().toISOString(),
       lastText: '',
       error: null,
+      interrupted: false,
       attempts: 0,
       turns: 0,
       notify,
@@ -246,9 +284,14 @@ export class MemberTaskService {
     const task = this.tasks.get(String(taskId))
     if (task === undefined) throw new Error('member task not found')
     if (typeof content !== 'string' || content.trim() === '') throw new Error('content is required')
-    const result = await this.#request(task.baseUrl, 'POST', `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content }, 30_000)
+    const result = await this.#waitForRuntime(
+      () => this.#request(task.baseUrl, 'POST', `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content }, 30_000),
+    )
     task.status = 'running'
     task.error = null
+    task.interrupted = false
+    task.attempts = 0
+    task.emptyWaits = 0
     task.notified = false
     task.notifiedAt = null
     task.notifyError = null
@@ -368,6 +411,31 @@ export class MemberTaskService {
         const conversation = result.conversation ?? {}
         task.lastText = typeof conversation.lastText === 'string' ? conversation.lastText : ''
         if (conversation.error) task.error = String(conversation.error)
+        const status = String(conversation.status ?? '')
+        if (status === 'interrupted' || status === 'unavailable') {
+          // The member's DSH restarted (or its runtime died) before the turn
+          // finished. `send` can resume this conversation; the task cannot.
+          task.status = 'failed'
+          task.interrupted = true
+          task.error = String(conversation.error ?? EMPTY_TURN)
+          break
+        }
+        if (status === 'idle' && !this.#turnAdvanced(task, conversation) && String(task.lastText ?? '') === '') {
+          // An idle answer without a finished turn is not a finished turn: the
+          // target answered while its runtime was shutting down, or the prompt
+          // never started. Give it a couple of chances, then say it was cut.
+          task.emptyWaits = (task.emptyWaits ?? 0) + 1
+          if (task.emptyWaits < EMPTY_WAIT_RETRIES) {
+            await new Promise(resolve => setTimeout(resolve, 1_000))
+            continue
+          }
+          task.status = 'failed'
+          task.interrupted = true
+          task.error = EMPTY_TURN
+          break
+        }
+        task.emptyWaits = 0
+        if (Number.isSafeInteger(conversation.turns)) task.turns = conversation.turns
         task.status = conversation.status === 'idle'
           ? (conversation.error ? 'failed' : 'completed')
           : 'running'
@@ -375,6 +443,11 @@ export class MemberTaskService {
       } catch (error) {
         task.error = error instanceof Error ? error.message : String(error)
         await this.#log(task, `wait failed: ${task.error}`)
+        if (LOST_CONVERSATION.test(task.error)) {
+          task.status = 'failed'
+          task.interrupted = true
+          break
+        }
         if (task.attempts >= MAX_ATTEMPTS) {
           task.status = 'failed'
           break
@@ -392,6 +465,20 @@ export class MemberTaskService {
       if (task.notify) await this.#notify(task)
     }
     return task
+  }
+
+  /**
+   * True when a wait result proves a turn finished on the member.
+   *
+   * Members that report a turn counter let this be exact: the count has to grow.
+   * An older member returns no counter, so its answer text is the only evidence.
+   * @param {object} task the tracked task.
+   * @param {object} conversation the member's conversation summary.
+   * @returns {boolean} whether the conversation moved past the previous turn.
+   */
+  #turnAdvanced(task, conversation) {
+    if (!Number.isSafeInteger(conversation.turns)) return String(conversation.lastText ?? '') !== ''
+    return conversation.turns > (Number.isSafeInteger(task.turns) ? task.turns : 0)
   }
 
   async #notify(task) {
@@ -416,6 +503,9 @@ export class MemberTaskService {
         `[成员任务失败] ${task.member} (${task.memberIp}) 的对话 ${task.conversationId} 失败。`,
         `任务：${truncate(task.prompt, 300)}`,
         `错误：${task.error ?? 'unknown'}`,
+        ...(task.interrupted === true
+          ? ['', '目标的 DSH 重启（或运行时退出）打断了这一轮。对话和上下文还在：用 call_member send 同一个 taskId 继续，或重新 delegate 一个新任务。']
+          : []),
         '',
         `taskId: ${task.id}`,
       ].join('\n')

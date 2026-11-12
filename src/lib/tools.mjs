@@ -361,6 +361,9 @@ function formatMemberTask(task) {
   if (task.logFile) lines.push(`日志：${task.logFile}`)
   if (task.error) lines.push(`错误：${task.error}`)
   if (task.lastText) lines.push(`结果：\n${task.lastText}`)
+  if (task.interrupted === true) {
+    lines.push('目标成员的 DSH 重启（或运行时退出）打断了这一轮；对话还在，可以用 send 同一个 taskId 继续，或重新 delegate。')
+  }
   if (task.notifyError) lines.push(`通知失败：${task.notifyError}`)
   return lines.join('\n')
 }

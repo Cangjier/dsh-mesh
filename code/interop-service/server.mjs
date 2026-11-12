@@ -33,7 +33,7 @@ async function sharedModule(name) {
   throw new Error(`missing the shared module ${name}`)
 }
 const { collectSystemInfo } = await sharedModule('system-info.mjs')
-const { conversationRecord, normalizeInitiator, normalizeTitle, titleFromPrompt } = await sharedModule('conversation-meta.mjs')
+const { conversationRecord, normalizeInitiator, normalizeTitle, restoredConversation, titleFromPrompt } = await sharedModule('conversation-meta.mjs')
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..', '..')
@@ -72,6 +72,8 @@ const PROVIDER = setting('DSH_INTEROP_PROVIDER', 'deepseek-official')
 const MODEL = setting('DSH_INTEROP_MODEL', 'deepseek-flash')
 const APPROVE = setting('DSH_INTEROP_APPROVE', '0') === '1'
 const REQUEST_TIMEOUT_MS = Number.parseInt(setting('DSH_INTEROP_REQUEST_TIMEOUT_MS', '180000'), 10)
+/** Reopening a persisted session after a restart replays its history: be patient. */
+const RESUME_TIMEOUT_MS = 120_000
 const MAX_EVENTS = Number.parseInt(setting('DSH_INTEROP_MAX_EVENTS', '5000'), 10)
 const MAX_BODY = 1024 * 1024
 
@@ -191,6 +193,14 @@ let sdkStarting = null
 let restartTimer = null
 let stopping = false
 let restartDelayMs = 2000
+/**
+ * Which SDK child opened each conversation's session.
+ *
+ * The HTTP listener outlives the child: a restarted runtime owns no sessions at
+ * all. Bumping this counter makes every restored conversation look stale, so the
+ * next request can resume its persisted session instead of guessing.
+ */
+let generation = 0
 
 function publicConversation(conversation) {
   return {
@@ -265,23 +275,13 @@ function loadState() {
     for (const record of records) {
       if (typeof record?.id !== 'string' || conversations.has(record.id)) continue
       const conversation = {
-        id: record.id,
-        sessionId: typeof record.sessionId === 'string' ? record.sessionId : record.id,
-        cwd: typeof record.cwd === 'string' ? record.cwd : WORKDIR,
-        // A turn that was running when the service stopped is not running now:
-        // the SDK child that owned it died with the service.
-        status: record.status === 'running' ? 'idle' : typeof record.status === 'string' ? record.status : 'idle',
-        title: typeof record.title === 'string' ? record.title : '',
-        initiator: normalizeInitiator(record.initiator),
-        createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
-        updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date().toISOString(),
-        lastText: typeof record.lastText === 'string' ? record.lastText : '',
-        error: null,
+        ...restoredConversation(record, WORKDIR),
         events: [],
         clients: new Set(),
         callbackUrl: '',
         notifiedAt: null,
-        turns: Number.isSafeInteger(record.turns) ? record.turns : 0,
+        // No session exists in the new child yet; the next request resumes one.
+        generation: -1,
       }
       conversations.set(conversation.id, conversation)
       bySession.set(conversation.sessionId, conversation)
@@ -328,6 +328,39 @@ async function sdkRequest(method, params, timeoutMs = REQUEST_TIMEOUT_MS) {
     return await transport.request(method, params, controller.signal)
   } finally {
     clearTimeout(timer)
+  }
+}
+
+/**
+ * Make sure the current SDK child owns this conversation's session.
+ *
+ * The listener and its child have independent lifetimes: after the child
+ * restarts, restored conversation records point at sessions the new runtime has
+ * never opened. Resuming brings the persisted transcript back, while a plain
+ * `session/query` would either start an empty session or be refused because the
+ * session id already exists on disk.
+ * @param {object} conversation restored or live conversation record.
+ * @returns {Promise<boolean>} whether a session is now open for it.
+ */
+async function ensureSessionOpen(conversation) {
+  if (conversation.generation === generation) return true
+  try {
+    await sdkRequest('session/resume', { sessionId: conversation.sessionId }, RESUME_TIMEOUT_MS)
+    conversation.generation = generation
+    // The turn that was cut short cannot come back, but the conversation can.
+    if (conversation.status === 'interrupted') updateConversation(conversation, { status: 'idle', error: null })
+    log(`resumed session ${conversation.sessionId}`)
+    return true
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/already open/i.test(message)) {
+      conversation.generation = generation
+      return true
+    }
+    // Nothing was ever persisted (a blank conversation): the first message
+    // creates the session, exactly as before this restart.
+    log(`could not resume ${conversation.id}: ${message}`)
+    return false
   }
 }
 
@@ -388,6 +421,7 @@ async function notifyCallback(conversation) {
 
 function startChild() {
   if (stopping) return
+  generation += 1
   if (!existsSync(DSH_ENTRY)) {
     log(`missing ${DSH_ENTRY}`)
     scheduleRestart()
@@ -480,6 +514,7 @@ async function createConversation(request) {
   scheduleSave()
   try {
     await sdkRequest('session/working-directory/set', { sessionId, path: cwd })
+    conversation.generation = generation
     if (request.prompt !== undefined) {
       const blocks = contentBlocks(request.prompt)
       const result = await sdkRequest('session/query', { sessionId, contentBlocks: blocks })
@@ -496,6 +531,9 @@ async function createConversation(request) {
 
 async function sendMessage(conversation, request) {
   const blocks = contentBlocks(request.content ?? request.message ?? request.prompt)
+  // A conversation that survived a restart keeps its transcript only if its
+  // persisted session is resumed first.
+  await ensureSessionOpen(conversation)
   const result = await sdkRequest('session/query', { sessionId: conversation.sessionId, contentBlocks: blocks })
   updateConversation(conversation, { status: 'running', error: null })
   conversation.notifiedAt = null
@@ -505,6 +543,12 @@ async function sendMessage(conversation, request) {
 }
 
 async function waitConversation(conversation, timeoutMs) {
+  if (conversation.status === 'interrupted' && conversation.error !== null) {
+    // The restart ended this turn before it could finish; there is no live
+    // session to wait for, and the caller must hear about it right away.
+    return { timedOut: false }
+  }
+  await ensureSessionOpen(conversation)
   try {
     await sdkRequest('session/wait', { sessionId: conversation.sessionId }, timeoutMs)
     updateConversation(conversation, { status: 'idle' })

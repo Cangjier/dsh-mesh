@@ -92,3 +92,41 @@ export function conversationRecord(conversation) {
     turns: Number.isSafeInteger(conversation.turns) ? conversation.turns : 0,
   }
 }
+
+/** Status of a conversation whose turn died with the service that owned it. */
+export const INTERRUPTED_STATUS = 'interrupted'
+
+/** Why a restored conversation is no longer running. */
+export const INTERRUPTED_ERROR = 'interrupted by a DSH restart; send a message to resume this conversation'
+
+/** Persisted statuses that mean a turn was in flight when the service stopped. */
+const ABANDONED_STATUSES = new Set(['running', 'starting', 'unavailable'])
+
+/**
+ * Turn one persisted record back into a conversation after a restart.
+ *
+ * A turn that was in flight when the service stopped cannot resume: the SDK
+ * child that owned it died with the service. Such a conversation comes back as
+ * `interrupted` with a reason, so the panel and any waiting member see an
+ * interruption instead of an empty, falsely idle conversation.
+ * @param {object} record persisted record written by {@link conversationRecord}.
+ * @param {string} workdir fallback working directory.
+ * @returns {object} conversation without its runtime-only fields.
+ */
+export function restoredConversation(record, workdir) {
+  const status = typeof record?.status === 'string' ? record.status : 'idle'
+  const abandoned = ABANDONED_STATUSES.has(status)
+  return {
+    id: String(record.id),
+    sessionId: typeof record.sessionId === 'string' ? record.sessionId : String(record.id),
+    cwd: typeof record.cwd === 'string' ? record.cwd : workdir,
+    status: abandoned ? INTERRUPTED_STATUS : status,
+    title: typeof record.title === 'string' ? record.title : '',
+    initiator: normalizeInitiator(record.initiator),
+    createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
+    updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date().toISOString(),
+    lastText: typeof record.lastText === 'string' ? record.lastText : '',
+    error: abandoned ? INTERRUPTED_ERROR : null,
+    turns: Number.isSafeInteger(record.turns) ? record.turns : 0,
+  }
+}

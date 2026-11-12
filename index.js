@@ -3889,6 +3889,9 @@ import path7 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
+var LOST_CONVERSATION = /conversation not found|unknown SDK session|session "?[\w-]+"? already exists|SDK session is already open or opening|session agent was disposed/iu;
+var EMPTY_TURN = "\u76EE\u6807\u7684 DSH \u5728\u4EFB\u52A1\u6267\u884C\u671F\u95F4\u91CD\u542F\u4E86\uFF1A\u5BF9\u8BDD\u6CA1\u6709\u4EA7\u751F\u4EFB\u4F55\u8F93\u51FA\uFF0C\u8FD9\u4E00\u8F6E\u5DF2\u4E2D\u65AD";
+var EMPTY_WAIT_RETRIES = 3;
 function envFile(file) {
   const values = {};
   if (!existsSync7(file)) return values;
@@ -4066,6 +4069,29 @@ var MemberTaskService = class {
     if (parsed === null) throw new Error("member interop returned a non-JSON response");
     return parsed;
   }
+  /**
+   * Wait out a member runtime that is still booting.
+   *
+   * A member's interop answers 503 while its SDK child starts, which is exactly
+   * the window right after that machine's DSH restarted. A tool call made in
+   * that window should wait for it instead of failing outright.
+   * @param {() => Promise<any>} attempt one request.
+   * @param {number} [budgetMs] how long to keep waiting.
+   * @returns {Promise<any>} the request result.
+   */
+  async #waitForRuntime(attempt, budgetMs = 9e4) {
+    const deadline = Date.now() + budgetMs;
+    for (; ; ) {
+      try {
+        return await attempt();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const starting = /SDK runtime is not ready|sdk_unavailable|SDK runtime is still starting/iu.test(message);
+        if (!starting || Date.now() >= deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 2e3));
+      }
+    }
+  }
   async start({ member, prompt, cwd, agent, notify = true }) {
     await this.#ensureLoaded();
     if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("prompt is required");
@@ -4078,7 +4104,9 @@ var MemberTaskService = class {
       initiator: { ...this.identity ?? { id: "local" }, source: "call_member" },
       ...typeof cwd === "string" && cwd !== "" ? { cwd } : {}
     };
-    const created = await this.#request(target.baseUrl, "POST", "/v1/conversations", payload, 6e4);
+    const created = await this.#waitForRuntime(
+      () => this.#request(target.baseUrl, "POST", "/v1/conversations", payload, 6e4)
+    );
     const conversation = created.conversation;
     if (conversation === void 0 || typeof conversation.id !== "string") throw new Error("member interop did not return a conversation id");
     const task = {
@@ -4093,6 +4121,7 @@ var MemberTaskService = class {
       updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
       lastText: "",
       error: null,
+      interrupted: false,
       attempts: 0,
       turns: 0,
       notify,
@@ -4121,9 +4150,14 @@ var MemberTaskService = class {
     const task = this.tasks.get(String(taskId));
     if (task === void 0) throw new Error("member task not found");
     if (typeof content !== "string" || content.trim() === "") throw new Error("content is required");
-    const result = await this.#request(task.baseUrl, "POST", `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content }, 3e4);
+    const result = await this.#waitForRuntime(
+      () => this.#request(task.baseUrl, "POST", `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content }, 3e4)
+    );
     task.status = "running";
     task.error = null;
+    task.interrupted = false;
+    task.attempts = 0;
+    task.emptyWaits = 0;
     task.notified = false;
     task.notifiedAt = null;
     task.notifyError = null;
@@ -4235,11 +4269,36 @@ var MemberTaskService = class {
         const conversation = result.conversation ?? {};
         task.lastText = typeof conversation.lastText === "string" ? conversation.lastText : "";
         if (conversation.error) task.error = String(conversation.error);
+        const status = String(conversation.status ?? "");
+        if (status === "interrupted" || status === "unavailable") {
+          task.status = "failed";
+          task.interrupted = true;
+          task.error = String(conversation.error ?? EMPTY_TURN);
+          break;
+        }
+        if (status === "idle" && !this.#turnAdvanced(task, conversation) && String(task.lastText ?? "") === "") {
+          task.emptyWaits = (task.emptyWaits ?? 0) + 1;
+          if (task.emptyWaits < EMPTY_WAIT_RETRIES) {
+            await new Promise((resolve) => setTimeout(resolve, 1e3));
+            continue;
+          }
+          task.status = "failed";
+          task.interrupted = true;
+          task.error = EMPTY_TURN;
+          break;
+        }
+        task.emptyWaits = 0;
+        if (Number.isSafeInteger(conversation.turns)) task.turns = conversation.turns;
         task.status = conversation.status === "idle" ? conversation.error ? "failed" : "completed" : "running";
         if (task.status === "completed" || task.status === "failed") break;
       } catch (error) {
         task.error = error instanceof Error ? error.message : String(error);
         await this.#log(task, `wait failed: ${task.error}`);
+        if (LOST_CONVERSATION.test(task.error)) {
+          task.status = "failed";
+          task.interrupted = true;
+          break;
+        }
         if (task.attempts >= MAX_ATTEMPTS) {
           task.status = "failed";
           break;
@@ -4257,6 +4316,19 @@ var MemberTaskService = class {
       if (task.notify) await this.#notify(task);
     }
     return task;
+  }
+  /**
+   * True when a wait result proves a turn finished on the member.
+   *
+   * Members that report a turn counter let this be exact: the count has to grow.
+   * An older member returns no counter, so its answer text is the only evidence.
+   * @param {object} task the tracked task.
+   * @param {object} conversation the member's conversation summary.
+   * @returns {boolean} whether the conversation moved past the previous turn.
+   */
+  #turnAdvanced(task, conversation) {
+    if (!Number.isSafeInteger(conversation.turns)) return String(conversation.lastText ?? "") !== "";
+    return conversation.turns > (Number.isSafeInteger(task.turns) ? task.turns : 0);
   }
   async #notify(task) {
     const agents = typeof this.ctx.get === "function" ? this.ctx.get("agents") : this.ctx.agents;
@@ -4278,6 +4350,7 @@ var MemberTaskService = class {
       `[\u6210\u5458\u4EFB\u52A1\u5931\u8D25] ${task.member} (${task.memberIp}) \u7684\u5BF9\u8BDD ${task.conversationId} \u5931\u8D25\u3002`,
       `\u4EFB\u52A1\uFF1A${truncate(task.prompt, 300)}`,
       `\u9519\u8BEF\uFF1A${task.error ?? "unknown"}`,
+      ...task.interrupted === true ? ["", "\u76EE\u6807\u7684 DSH \u91CD\u542F\uFF08\u6216\u8FD0\u884C\u65F6\u9000\u51FA\uFF09\u6253\u65AD\u4E86\u8FD9\u4E00\u8F6E\u3002\u5BF9\u8BDD\u548C\u4E0A\u4E0B\u6587\u8FD8\u5728\uFF1A\u7528 call_member send \u540C\u4E00\u4E2A taskId \u7EE7\u7EED\uFF0C\u6216\u91CD\u65B0 delegate \u4E00\u4E2A\u65B0\u4EFB\u52A1\u3002"] : [],
       "",
       `taskId: ${task.id}`
     ].join("\n");
@@ -4726,6 +4799,9 @@ function formatMemberTask(task) {
   if (task.error) lines.push(`\u9519\u8BEF\uFF1A${task.error}`);
   if (task.lastText) lines.push(`\u7ED3\u679C\uFF1A
 ${task.lastText}`);
+  if (task.interrupted === true) {
+    lines.push("\u76EE\u6807\u6210\u5458\u7684 DSH \u91CD\u542F\uFF08\u6216\u8FD0\u884C\u65F6\u9000\u51FA\uFF09\u6253\u65AD\u4E86\u8FD9\u4E00\u8F6E\uFF1B\u5BF9\u8BDD\u8FD8\u5728\uFF0C\u53EF\u4EE5\u7528 send \u540C\u4E00\u4E2A taskId \u7EE7\u7EED\uFF0C\u6216\u91CD\u65B0 delegate\u3002");
+  }
   if (task.notifyError) lines.push(`\u901A\u77E5\u5931\u8D25\uFF1A${task.notifyError}`);
   return lines.join("\n");
 }

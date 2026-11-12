@@ -324,6 +324,7 @@ function conversationStatusColor(status: string | undefined): string {
     case 'idle': return 'success'
     case 'error':
     case 'unavailable': return 'error'
+    case 'interrupted': return 'warning'
     case 'blank': return 'default'
     default: return 'default'
   }
@@ -435,6 +436,9 @@ function conversationMessages(
   })
   if (answer !== '') return [sent, reply(answer)]
   if (status === 'running') return [sent, reply('正在处理…')]
+  // The member's DSH restarted before the turn finished: the conversation is
+  // still there, but this round produced nothing.
+  if (status === 'interrupted') return [sent, reply('对话被中断（目标的 DSH 重启了），这一轮没有结果')]
   if (row.error !== null && row.error !== undefined && String(row.error) !== '') {
     return [sent, reply(String(row.error))]
   }

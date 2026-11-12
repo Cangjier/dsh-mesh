@@ -287,3 +287,149 @@ test('the conversation list is grouped per member and survives one failing peer'
     await rm(dataDir, { recursive: true, force: true })
   }
 })
+
+/**
+ * Start a member interop that creates one conversation and then answers its
+ * waits with the supplied handler, so a single failure mode can be exercised.
+ * @param {(response: import('node:http').ServerResponse, body: string) => void} onWait wait handler.
+ * @returns {Promise<{server: import('node:http').Server, port: number}>} endpoint.
+ */
+async function memberThatFails(onWait, id) {
+  const server = http.createServer(async (request, response) => {
+    let body = ''
+    for await (const chunk of request) body += String(chunk)
+    if (request.method === 'POST' && request.url === '/v1/conversations') {
+      response.writeHead(201, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: true, conversation: { id, status: 'running' } }))
+      return
+    }
+    if (request.method === 'POST' && request.url === `/v1/conversations/${id}/wait`) {
+      onWait(response, body)
+      return
+    }
+    response.writeHead(404, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ ok: false, error: { code: 'not_found', message: 'unknown' } }))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  return { server, port: server.address().port }
+}
+
+test('a member conversation the restart erased fails at once instead of retrying', async () => {
+  const { server, port } = await memberThatFails((response) => {
+    response.writeHead(404, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ ok: false, error: { code: 'conversation_not_found', message: 'conversation not found' } }))
+  }, 'conv-lost')
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-task-'))
+  const service = {
+    config: { interopPort: port, interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
+  }
+  const tasks = new MemberTaskService({ ctx: { get: () => undefined }, service, dataDir })
+  try {
+    const started = Date.now()
+    const task = await tasks.run({ member: '127.0.0.1', prompt: 'long job', agent: { id: 'a', session: { id: 'a' } } })
+    assert.equal(task.status, 'failed')
+    assert.equal(task.interrupted, true)
+    assert.equal(task.attempts, 1, 'a lost conversation must not be retried')
+    assert.match(task.error, /conversation not found/u)
+    assert.ok(Date.now() - started < 4000, 'the failure must be immediate')
+  } finally {
+    await tasks.dispose()
+    await new Promise(resolve => server.close(resolve))
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('an idle conversation that never ran a turn is a failure, not a success', async () => {
+  const { server, port } = await memberThatFails((response) => {
+    // Exactly what a restart produces: the wait resolves before the turn starts.
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({
+      ok: true,
+      timedOut: false,
+      conversation: { id: 'conv-empty', status: 'idle', lastText: '', error: null, turns: 0, eventCount: 0 },
+    }))
+  }, 'conv-empty')
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-task-'))
+  const messages = []
+  const agent = { id: 'session-A', session: { id: 'session-A' }, followup: message => { messages.push(message) } }
+  const service = {
+    config: { interopPort: port, interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
+  }
+  const ctx = { get: name => name === 'agents' ? { get: id => id === 'session-A' ? agent : undefined } : undefined }
+  const tasks = new MemberTaskService({ ctx, service, dataDir, log: () => {} })
+  try {
+    const task = await tasks.start({ member: '127.0.0.1', prompt: 'long job', agent, notify: true })
+    const deadline = Date.now() + 10_000
+    while (messages.length === 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    const final = await tasks.status(task.id)
+    assert.equal(final.status, 'failed')
+    assert.equal(final.interrupted, true)
+    assert.match(final.error, /重启/u)
+    assert.equal(messages.length, 1)
+    assert.match(messages[0].content[0].text, /成员任务失败/u)
+    assert.match(messages[0].content[0].text, /call_member send/u)
+  } finally {
+    await tasks.dispose()
+    await new Promise(resolve => server.close(resolve))
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a delegation waits out a member runtime that is still starting', async () => {
+  let attempts = 0
+  const server = http.createServer(async (request, response) => {
+    let body = ''
+    for await (const chunk of request) body += String(chunk)
+    if (request.method === 'POST' && request.url === '/v1/conversations') {
+      attempts += 1
+      if (attempts === 1) {
+        // Exactly what a member answers while its SDK child boots.
+        response.writeHead(503, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ ok: false, error: { code: 'sdk_unavailable', message: 'The SDK runtime is still starting.' } }))
+        return
+      }
+      response.writeHead(201, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: true, conversation: { id: 'conv-boot', status: 'running' } }))
+      return
+    }
+    if (request.method === 'POST' && request.url === '/v1/conversations/conv-boot/wait') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({
+        ok: true,
+        timedOut: false,
+        conversation: { id: 'conv-boot', status: 'idle', lastText: 'BOOTED', error: null, turns: 1 },
+      }))
+      return
+    }
+    response.writeHead(404, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ ok: false, error: { code: 'not_found', message: 'unknown' } }))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-task-'))
+  const service = {
+    config: { interopPort: port, interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
+  }
+  const tasks = new MemberTaskService({ ctx: { get: () => undefined }, service, dataDir })
+  try {
+    const task = await tasks.run({ member: '127.0.0.1', prompt: 'restart window', agent: { id: 'a', session: { id: 'a' } } })
+    assert.equal(attempts, 2, 'the booting member must be retried once')
+    assert.equal(task.status, 'completed')
+    assert.equal(task.lastText, 'BOOTED')
+  } finally {
+    await tasks.dispose()
+    await new Promise(resolve => server.close(resolve))
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})

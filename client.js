@@ -657,7 +657,9 @@ html body {
   margin-top: auto;
   /* Room for the card's shadow, so it floats instead of touching the edge. */
   padding: 8px 0 14px;
-  background: var(--chat-pane-bg, transparent);
+  /* No layout-grey band behind the card: the page colour fades in from the
+     top, which still hides the transcript scrolling underneath. */
+  background: linear-gradient(to bottom, transparent 0, var(--chat-surface, #fff) 22px);
 }
 
 .chat-composer-box {
@@ -722,17 +724,18 @@ html body {
   padding: 0;
   border: none;
   border-radius: 999px;
-  background: var(--chat-list-bg, #f5f6f7);
-  color: var(--chat-text, #0f1115);
+  background: transparent;
+  color: var(--chat-muted, #61666b);
   font: inherit;
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .chat-composer-add:hover {
-  background: var(--chat-list-hover, #eceef0);
+  background: var(--chat-list-bg, #f5f6f7);
+  color: var(--chat-text, #0f1115);
 }
 
 .chat-composer-scope {
@@ -751,6 +754,13 @@ html body {
   width: 34px;
   height: 34px;
   min-width: 34px;
+}
+
+/* antd greys a disabled primary button; DSH keeps it tinted and pale. */
+.chat-composer-send.ant-btn-primary:disabled {
+  background: var(--chat-avatar-bg, #1677ff);
+  color: #fff;
+  opacity: 0.35;
 }
 
 .chat-mention-menu {

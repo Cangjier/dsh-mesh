@@ -27,6 +27,7 @@ import type { ColumnsType } from 'antd/es/table'
 import {
   ApartmentOutlined,
   ArrowLeftOutlined,
+  DeleteOutlined,
   CloudDownloadOutlined,
   EditOutlined,
   InfoCircleOutlined,
@@ -335,6 +336,8 @@ interface ChatMessage {
   out: boolean
   /** Avatar label: the last octet of the sender's mesh address. */
   number: string
+  /** Mesh address of the sender, used to open the member's page. */
+  senderIp: string
   /** Inline "@3" / "回复@1" prefix. */
   mention: string
   text: string
@@ -375,6 +378,7 @@ function conversationMessages(
     key: `${row.id}-out`,
     out: initiatorNumber === selfNumber,
     number: initiatorNumber,
+    senderIp: (row.initiator?.ip ?? '') === '' ? group.ip : String(row.initiator?.ip ?? ''),
     mention: `@${memberNumber}`,
     text: conversationTitle(row),
     time: sentAt,
@@ -387,6 +391,7 @@ function conversationMessages(
     key: `${row.id}-in`,
     out: false,
     number: memberNumber,
+    senderIp: group.ip,
     mention: `回复@${initiatorNumber}`,
     text,
     time: answeredAt,
@@ -402,21 +407,24 @@ function conversationMessages(
   return [sent]
 }
 
-function ChatBubble({ message, onDetail }: {
+function ChatBubble({ message, onDetail, onMember }: {
   message: ChatMessage
   onDetail: (message: ChatMessage) => void
+  onMember: (ip: string) => void
 }) {
   const truncatable = chatNeedsDetail(message.text)
   const pending = message.status === 'running' && message.out === false && message.text === '正在处理…'
   return (
     <div className={`chat-row ${message.out ? 'chat-row-out' : ''}`}>
-      <div
-        className="chat-avatar"
+      <button
+        type="button"
+        className="chat-avatar chat-avatar-button"
         style={{ background: message.out ? 'var(--chat-avatar-bg)' : chatAvatarColor(message.number) }}
-        aria-hidden
+        title={`查看成员 ${message.number} 的状态`}
+        onClick={() => onMember(message.senderIp)}
       >
         {message.number}
-      </div>
+      </button>
       <div className="chat-body">
         <div className={`chat-bubble ${message.out ? 'chat-bubble-out' : 'chat-bubble-in'}`}>
           <span className="chat-mention">{message.mention}</span>
@@ -443,17 +451,91 @@ function ChatBubble({ message, onDetail }: {
   )
 }
 
+/** What a member page shows: identity first, then the machine it runs on. */
+function MemberStatus({ member }: { member: Member }) {
+  const system = member.system ?? null
+  const memory = system?.memory
+  const disks = system?.disks ?? []
+  return (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <Descriptions
+        size="small"
+        column={2}
+        colon={false}
+        items={[
+          { key: 'name', label: '成员', children: member.name },
+          { key: 'ip', label: '组网地址', children: member.ip },
+          { key: 'online', label: '状态', children: member.online ? '在线' : '离线' },
+          { key: 'latency', label: '延迟', children: member.latencyMs > 0 ? `${String(member.latencyMs)} ms` : '—' },
+          { key: 'host', label: '主机名', children: system?.hostname ?? '—' },
+          { key: 'platform', label: '系统', children: system?.platform ?? '—' },
+          { key: 'arch', label: '架构', children: system?.arch ?? '—' },
+          { key: 'user', label: '运行用户', children: system?.user ?? '—' },
+          { key: 'appRoot', label: '安装目录', children: system?.appRoot ?? '—' },
+          { key: 'tag', label: '标签', children: member.tag ?? '—' },
+        ]}
+      />
+      {member.error !== null && member.error !== undefined && member.error !== '' ? (
+        <Alert type="warning" showIcon message={member.error} />
+      ) : null}
+      {system === null ? (
+        <Empty description="这个成员还没有上报系统信息" />
+      ) : (
+        <Space direction="vertical" size={14} style={{ width: '100%' }}>
+          <div>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>CPU</Typography.Text>
+            <div>
+              {system.cpu?.model ?? '—'}
+              {system.cpu?.cores === undefined ? null : ` · ${String(system.cpu.cores)} 核`}
+              {system.cpu?.usagePercent === undefined ? null : ` · 使用 ${String(Math.round(system.cpu.usagePercent))}%`}
+            </div>
+          </div>
+          <div>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>内存</Typography.Text>
+            <div>
+              {`${formatBytes(memory?.usedBytes ?? 0)} / ${formatBytes(memory?.totalBytes ?? 0)}`}
+            </div>
+            <Progress
+              percent={Math.round(memory?.usedPercent ?? 0)}
+              size="small"
+              status={(memory?.usedPercent ?? 0) >= 90 ? 'exception' : 'normal'}
+            />
+          </div>
+          {disks.map(disk => (
+            <div key={String(disk.mount ?? '')}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>{`磁盘 ${String(disk.mount ?? '')}`}</Typography.Text>
+              <div>
+                {`${formatBytes(disk.usedBytes ?? 0)} / ${formatBytes(disk.totalBytes ?? 0)}`}
+              </div>
+              <Progress
+                percent={Math.round(disk.usedPercent ?? 0)}
+                size="small"
+                status={(disk.usedPercent ?? 0) >= 90 ? 'exception' : 'normal'}
+              />
+            </div>
+          ))}
+        </Space>
+      )}
+    </Space>
+  )
+}
+
 /**
  * Every conversation in the mesh, merged into one group chat. Members are just
  * their mesh number (the last octet of 10.66.66.x), the local member sits on the
  * right, and each message says whom it is addressed to: "@3 …" out, "回复@1 …"
  * back.
  */
-function MemberConversations({ active }: { active: boolean }) {
+function MemberConversations({ active, members, refreshToken }: {
+  active: boolean
+  members: Member[]
+  refreshToken: number
+}) {
   const [snapshot, setSnapshot] = useState<ConversationSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [detail, setDetail] = useState<ChatMessage | null>(null)
+  const [memberIp, setMemberIp] = useState('')
   const messagesRef = useRef<HTMLDivElement | null>(null)
 
   const load = useCallback(async () => {
@@ -474,7 +556,7 @@ function MemberConversations({ active }: { active: boolean }) {
     if (!active) return undefined
     void load()
     return undefined
-  }, [active, load])
+  }, [active, load, refreshToken])
 
   // Clicking the transcript reloads it. No spinner, no banner: the messages are
   // simply replaced when the answer arrives.
@@ -533,10 +615,13 @@ function MemberConversations({ active }: { active: boolean }) {
     messagesRef.current?.scrollIntoView({ block: 'end' })
   }, [messages])
 
+  /** The member shown by an avatar click, resolved from the panel's snapshot. */
+  const member = memberIp === '' ? null : members.find(entry => entry.ip === memberIp) ?? null
+
   return (
     <div className="dsh-pw-tabbody" style={chatColors}>
       <div
-        style={{ display: detail === null ? undefined : 'none' }}
+        style={{ display: detail === null && member === null ? undefined : 'none' }}
         onClick={reloadOnClick}
       >
       {error !== '' ? <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} /> : null}
@@ -545,11 +630,21 @@ function MemberConversations({ active }: { active: boolean }) {
         <div className="chat-stream">
           {messages.length === 0 ? <Empty description="还没有对话" /> : null}
           {messages.map(entry => (
-            <ChatBubble key={entry.key} message={entry} onDetail={openDetail} />
+            <ChatBubble key={entry.key} message={entry} onDetail={openDetail} onMember={setMemberIp} />
           ))}
           <div ref={messagesRef} />
         </div>
       ) : null}
+      </div>
+      <div style={{ display: member === null ? 'none' : undefined }}>
+        {member === null ? null : (
+          <div className="chat-detail">
+            <div className="chat-detail-bar">
+              <Button type="text" icon={<ArrowLeftOutlined />} size="small" onClick={() => setMemberIp('')} aria-label="返回" />
+            </div>
+            <MemberStatus member={member} />
+          </div>
+        )}
       </div>
       <div style={{ display: detail === null ? 'none' : undefined }}>
         {detail === null ? null : (
@@ -584,6 +679,26 @@ function Panel({ ctx }: { ctx: any }) {
   const [progressLog, setProgressLog] = useState<string[]>([])
   const deployStatusRef = useRef<Record<string, string>>({})
   const [panelTab, setPanelTab] = useState<'members' | 'network' | 'conversations'>('members')
+  // Bumped by the toolbar buttons; the conversation tab reloads when it changes.
+  const [conversationRefresh, setConversationRefresh] = useState(0)
+  const [clearingConversations, setClearingConversations] = useState(false)
+
+  const clearConversations = useCallback(async () => {
+    setClearingConversations(true)
+    try {
+      const result = await api.clearConversations()
+      if (result.errors.length > 0) {
+        void message.warning(`清空完成，但有 ${String(result.errors.length)} 个成员失败`)
+      } else {
+        void message.success(result.removed > 0 ? `已清空 ${String(result.removed)} 条对话` : '没有可清空的对话')
+      }
+      setConversationRefresh(value => value + 1)
+    } catch (failure) {
+      void message.error(errorText(failure))
+    } finally {
+      setClearingConversations(false)
+    }
+  }, [])
   const [tags, setTags] = useState<Record<string, string>>({})
   const [tagTarget, setTagTarget] = useState<Member | null>(null)
   const [detailTarget, setDetailTarget] = useState<Member | null>(null)
@@ -994,6 +1109,27 @@ function Panel({ ctx }: { ctx: any }) {
           className="dsh-pw-tabs"
           activeKey={panelTab}
           onChange={key => setPanelTab(key as 'members' | 'network' | 'conversations')}
+          tabBarExtraContent={panelTab === 'conversations' ? (
+            <Space size={4}>
+              <Tooltip title="清空已完成对话">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<DeleteOutlined />}
+                  disabled={clearingConversations}
+                  onClick={() => { void clearConversations() }}
+                />
+              </Tooltip>
+              <Tooltip title="刷新">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  onClick={() => setConversationRefresh(value => value + 1)}
+                />
+              </Tooltip>
+            </Space>
+          ) : undefined}
           items={[
             {
               key: 'members',
@@ -1026,7 +1162,13 @@ function Panel({ ctx }: { ctx: any }) {
             {
               key: 'conversations',
               label: '对话',
-              children: <MemberConversations active={panelTab === 'conversations'} />,
+              children: (
+                <MemberConversations
+                  active={panelTab === 'conversations'}
+                  members={memberRows}
+                  refreshToken={conversationRefresh}
+                />
+              ),
             },
             {
               key: 'network',

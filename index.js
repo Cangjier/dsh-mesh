@@ -3032,6 +3032,17 @@ var MeshService = class {
     }
     return tasks.listByMember();
   }
+  /**
+   * Ask every member's interop service to drop its finished conversations.
+   * @returns {Promise<{ok: boolean, removed: number, errors: object[]}>} summary.
+   */
+  async clearConversations() {
+    const tasks = this.memberTasks;
+    if (tasks === void 0 || tasks === null) {
+      throw Object.assign(new Error("the member task service is not available yet"), { status: 503 });
+    }
+    return tasks.clearConversations();
+  }
   async members() {
     const stateFile = path6.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
@@ -3584,6 +3595,10 @@ function registerApi(ctx, service) {
         }
         if (method === "GET" && path9 === "/member-tags") {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() });
+          return;
+        }
+        if (method === "POST" && path9 === "/conversations/clear") {
+          writeJson(response, 200, await service.clearConversations());
           return;
         }
         if (method === "GET" && path9 === "/conversations") {
@@ -4160,6 +4175,29 @@ var MemberTaskService = class {
       return left.name.localeCompare(right.name);
     });
     return { ok: true, updatedAt: (/* @__PURE__ */ new Date()).toISOString(), groups };
+  }
+  /**
+   * Delete the finished conversations each member's interop service holds. A
+   * running one is left alone: its SDK session still owns it.
+   * @param {number} timeoutMs per-member timeout.
+   * @returns {Promise<{ok: boolean, removed: number, errors: object[]}>} summary.
+   */
+  async clearConversations(timeoutMs = 8e3) {
+    const state = await this.service.members();
+    const members = [state.local, ...Array.isArray(state.members) ? state.members : []].filter(Boolean);
+    let removed = 0;
+    const errors = [];
+    for (const member of members) {
+      const ip = String(member.ip ?? "");
+      if (ip === "") continue;
+      try {
+        const data = await this.#request(this.#baseUrl(ip), "DELETE", "/v1/conversations", void 0, timeoutMs);
+        if (Number.isInteger(data?.removed)) removed += data.removed;
+      } catch (error) {
+        errors.push({ member: String(member.name ?? ip), ip, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return { ok: true, removed, errors };
   }
   /**
    * Absolute path of one task's log file.

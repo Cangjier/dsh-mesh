@@ -208,6 +208,18 @@ export class MeshService {
     return tasks.listByMember()
   }
 
+  /**
+   * Ask every member's interop service to drop its finished conversations.
+   * @returns {Promise<{ok: boolean, removed: number, errors: object[]}>} summary.
+   */
+  async clearConversations() {
+    const tasks = this.memberTasks
+    if (tasks === undefined || tasks === null) {
+      throw Object.assign(new Error('the member task service is not available yet'), { status: 503 })
+    }
+    return tasks.clearConversations()
+  }
+
   async members() {
     const stateFile = path.join(this.home, 'wireguard', 'state.json')
     const { state, error } = await readWireGuardState({ file: stateFile })

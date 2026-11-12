@@ -553,6 +553,21 @@ const server = http.createServer(async (request, response) => {
       json(response, 200, { ok: true, conversations: [...conversations.values()].map(publicConversation) })
       return
     }
+    if (request.method === 'DELETE' && url.pathname === '/v1/conversations') {
+      // Drop the finished ones; a running conversation is still owned by the
+      // SDK session and would come back on its next event.
+      let removed = 0
+      for (const [id, conversation] of conversations) {
+        if (conversation.status === 'running') continue
+        conversations.delete(id)
+        if (conversation.sessionId) bySession.delete(conversation.sessionId)
+        removed += 1
+      }
+      saveState()
+      log(`cleared ${String(removed)} conversation(s)`)
+      json(response, 200, { ok: true, removed })
+      return
+    }
     if (request.method === 'POST' && url.pathname === '/v1/conversations') {
       if (!sdkReady) { fail(response, 503, 'sdk_unavailable', 'The SDK runtime is still starting.'); return }
       const body = await readJson(request)

@@ -433,6 +433,30 @@ export class MemberTaskService {
   }
 
   /**
+   * Delete the finished conversations each member's interop service holds. A
+   * running one is left alone: its SDK session still owns it.
+   * @param {number} timeoutMs per-member timeout.
+   * @returns {Promise<{ok: boolean, removed: number, errors: object[]}>} summary.
+   */
+  async clearConversations(timeoutMs = 8000) {
+    const state = await this.service.members()
+    const members = [state.local, ...(Array.isArray(state.members) ? state.members : [])].filter(Boolean)
+    let removed = 0
+    const errors = []
+    for (const member of members) {
+      const ip = String(member.ip ?? '')
+      if (ip === '') continue
+      try {
+        const data = await this.#request(this.#baseUrl(ip), 'DELETE', '/v1/conversations', undefined, timeoutMs)
+        if (Number.isInteger(data?.removed)) removed += data.removed
+      } catch (error) {
+        errors.push({ member: String(member.name ?? ip), ip, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return { ok: true, removed, errors }
+  }
+
+  /**
    * Absolute path of one task's log file.
    * @param {string} taskId task id.
    * @returns {string} log path.

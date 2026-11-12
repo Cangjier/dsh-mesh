@@ -350,6 +350,13 @@ export const api = {
     return request<ConversationSnapshot>('/api/dsh-mesh/conversations')
   },
 
+  clearConversations(): Promise<{ ok: boolean; removed: number; errors: Array<{ member: string; error: string }> }> {
+    return request<{ ok: boolean; removed: number; errors: Array<{ member: string; error: string }> }>(
+      '/api/dsh-mesh/conversations/clear',
+      { method: 'POST' },
+    )
+  },
+
   job(id: string): Promise<{ job: BuildJob }> {
     return request<{ job: BuildJob }>(`/api/dsh-mesh/build/${encodeURIComponent(id)}`)
   },

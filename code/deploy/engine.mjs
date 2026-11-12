@@ -20,7 +20,7 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { copyFile, link, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
@@ -121,7 +121,122 @@ fs.rmSync(target, { recursive: true, force: true })
 fs.cpSync(pluginDir, target, { recursive: true })
 fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\\n')
 console.log('profile-wire: dsh loads @local/dsh-mesh from ' + target)
+
+// The member inherits the deployer's account grants, but a fresh profile still
+// defaults to the API-key route and then fails with MISSING_CREDENTIAL. Point
+// its default model at the same provider route the deployer uses.
+const [providerArg, modelArg, effortArg] = process.argv.slice(4)
+if (typeof providerArg === 'string' && providerArg !== '') {
+  const pairs = [['provider', providerArg], ['model', modelArg || ''], ['reasoningEffort', effortArg || '']]
+    .filter(pair => pair[1] !== '')
+  const patchFile = path.join(profileDir, 'cordis.patch.yml')
+  const before = fs.existsSync(patchFile) ? fs.readFileSync(patchFile, 'utf8') : ''
+  const after = mergeModelRoute(before, pairs)
+  fs.writeFileSync(patchFile, after)
+  console.log('profile-wire: agent-default-model ' + pairs.map(pair => pair[0] + '=' + pair[1]).join(' '))
+}
+
+function mergeModelRoute(text, pairs) {
+  const trailing = text === '' || text.endsWith('\\n') ? '' : '\\n'
+  const lines = text.split('\\n')
+  const scalar = value => (/^[A-Za-z0-9._-]+$/.test(value) ? value : JSON.stringify(value))
+  let start = -1
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].trim() === '- id: agent-default-model') {
+      start = index
+      break
+    }
+  }
+  if (start === -1) {
+    const block = ['- id: agent-default-model', '  name: "@deepseek-ai/dsh-agent-default-model"', '  config:']
+    for (const [key, value] of pairs) block.push('    ' + key + ': ' + scalar(value))
+    const body = lines.filter(line => line !== '').join('\\n')
+    return (body === '' ? '' : body + '\\n') + block.join('\\n') + '\\n'
+  }
+  let end = lines.length
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (lines[index].startsWith('- ')) {
+      end = index
+      break
+    }
+  }
+  const block = lines.slice(start, end)
+  let configAt = -1
+  for (let index = 0; index < block.length; index += 1) {
+    if (block[index].trim() === 'config:') {
+      configAt = index
+      break
+    }
+  }
+  if (configAt === -1) {
+    block.push('  config:')
+    configAt = block.length - 1
+  }
+  for (const [key, value] of pairs) {
+    const at = block.findIndex(line => line.startsWith('    ' + key + ':'))
+    if (at !== -1) {
+      block[at] = '    ' + key + ': ' + scalar(value)
+      continue
+    }
+    // Append after the last existing key so the block keeps a natural order.
+    let insertAt = configAt + 1
+    for (let index = block.length - 1; index > configAt; index -= 1) {
+      if (block[index].startsWith('    ') && block[index].trim() !== '') {
+        insertAt = index + 1
+        break
+      }
+    }
+    block.splice(insertAt, 0, '    ' + key + ': ' + scalar(value))
+  }
+  return [...lines.slice(0, start), ...block, ...lines.slice(end)].join('\\n') + trailing
+}
 `
+
+/**
+ * The model route the deployer uses (`provider`, `model`, `reasoningEffort`).
+ *
+ * A member gets the deployer's account grants, but a fresh profile still
+ * defaults to the API-key provider route, so the first conversation there
+ * fails with `MISSING_CREDENTIAL`. Mirroring this entry makes the member call
+ * the same route — for an account provider that is exactly the shared login.
+ *
+ * @returns {{provider: string, model?: string, reasoningEffort?: string}|null} route or null.
+ */
+export function deployerModelRoute() {
+  if (process.env.DSH_DEPLOY_SYNC_MODEL === '0') return null
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path.join(homedir(), '.dsh')
+  const file = path.join(home, 'profiles', 'web', 'cordis.patch.yml')
+  if (!existsSync(file)) return null
+  let text
+  try {
+    text = readFileSync(file, 'utf8')
+  } catch {
+    return null
+  }
+  const lines = text.split('\n')
+  const start = lines.findIndex(line => /^- id:\s*agent-default-model\s*$/u.test(line))
+  if (start === -1) return null
+  let end = lines.length
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^- /u.test(lines[index])) {
+      end = index
+      break
+    }
+  }
+  const block = lines.slice(start, end)
+  const read = key => {
+    const line = block.find(candidate => new RegExp(`^\\s+${key}:`, 'u').test(candidate))
+    if (line === undefined) return undefined
+    let value = line.slice(line.indexOf(':') + 1).trim()
+    const hash = value.indexOf(' #')
+    if (hash !== -1) value = value.slice(0, hash).trim()
+    value = value.replace(/^(["'])(.*)\1$/u, '$2')
+    return value === '' ? undefined : value
+  }
+  const provider = read('provider')
+  if (provider === undefined) return null
+  return { provider, model: read('model'), reasoningEffort: read('reasoningEffort') }
+}
 
 /**
  * The deployer's DSH credentials file, or null when this host has no account.
@@ -361,6 +476,10 @@ export async function buildDeployPlan(options) {
     // BBR + fq on the member: the one step that makes a high-latency, lossy
     // mesh link usable. Set DSH_DEPLOY_NET_TUNE=0 to leave the host alone.
     tuneNetwork: options.tuneNetwork !== false && process.env.DSH_DEPLOY_NET_TUNE !== '0',
+    // The provider route the member's agent should use. Without it a fresh
+    // profile falls back to the API-key route and cannot spend the deployer's
+    // shared login. Set DSH_DEPLOY_SYNC_MODEL=0 to leave the member's own.
+    llm: options.llm === false ? null : deployerModelRoute(),
     // Named by content, not by release, so a retried deploy of the same package
     // reuses the upload instead of pushing hundreds of megabytes again.
     remotePackage: os === 'linux'
@@ -481,6 +600,11 @@ export function buildLinuxPrepareScript(plan) {
   // enough for cubic to collapse to a few hundred Kbps, while BBR keeps the
   // same link above 10 Mbps. Idempotent, non-fatal, and skipped when the
   // kernel has no bbr module.
+  // provider/model/reasoningEffort travel as extra argv so the member's agent
+  // calls the same route the deployer does (an account route needs no API key).
+  const llmArgs = plan.llm === null || plan.llm === undefined
+    ? ''
+    : `${[plan.llm.provider, plan.llm.model ?? '', plan.llm.reasoningEffort ?? ''].map(value => sh(value)).join(' ')} `
   const netTune = plan.tuneNetwork === false
     ? ''
     : `if command -v sysctl >/dev/null 2>&1; then
@@ -563,7 +687,7 @@ if [ ! -x "$NODE_BIN" ]; then NODE_BIN="$NEW/runtime/node/node"; fi
 if [ ! -x "$NODE_BIN" ]; then echo "missing the node binary under $NEW/runtime/node" >&2; exit 1; fi
 chmod +x "$NODE_BIN" 2>/dev/null || true
 "$NODE_BIN" --check "$NEW/gate/server.mjs"
-${netTune}"$NODE_BIN" - "$SHARED/home/profiles/web" "$NEW/plugins/dsh-mesh" <<'DSH_MESH_PROFILE_WIRE'
+${netTune}"$NODE_BIN" - "$SHARED/home/profiles/web" "$NEW/plugins/dsh-mesh" ${llmArgs}<<'DSH_MESH_PROFILE_WIRE'
 ${PROFILE_WIRE_SCRIPT}
 DSH_MESH_PROFILE_WIRE
 # The deployer's account grants make this member signed in without a QR scan.
@@ -813,7 +937,7 @@ if (-not (Test-Path $node)) { throw "missing $node" }
 if ($LASTEXITCODE -ne 0) { throw 'gate syntax check failed' }
 $wireScript = Join-Path $env:TEMP 'dsh-mesh-profile-wire.mjs'
 [IO.File]::WriteAllText($wireScript, ${ps(PROFILE_WIRE_SCRIPT)}, [Text.UTF8Encoding]::new($false))
-& $node $wireScript (Join-Path $Shared 'home\\profiles\\web') (Join-Path $New 'plugins\\dsh-mesh')
+& $node $wireScript (Join-Path $Shared 'home\\profiles\\web') (Join-Path $New 'plugins\\dsh-mesh')${plan.llm === null || plan.llm === undefined ? '' : ' ' + [plan.llm.provider, plan.llm.model ?? '', plan.llm.reasoningEffort ?? ''].map(value => ps(value)).join(' ')}
 if ($LASTEXITCODE -ne 0) { throw 'could not wire the dsh-mesh plugin into the DSH profile' }
 Remove-Item $wireScript -Force -ErrorAction SilentlyContinue
 $credentialsFile = '${plan.remoteCredentials}'

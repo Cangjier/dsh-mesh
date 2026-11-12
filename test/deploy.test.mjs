@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { promisify } from 'node:util'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -11,7 +13,9 @@ import {
   buildWindowsActivateScript,
   buildWindowsPrepareScript,
   DeployManager,
+  deployerModelRoute,
   describePlan,
+  PROFILE_WIRE_SCRIPT,
   normalizeServices,
 } from '../code/deploy/engine.mjs'
 
@@ -104,6 +108,66 @@ test('Linux prepare extracts and prepares but never restarts a service', async (
     assert.match(script, /99-dsh-mesh-net\.conf/)
     assert.match(script, /net\.ipv4\.tcp_congestion_control=bbr/)
     assert.match(script, /sysctl --system >\/dev\/null 2>&1 \|\| true/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the deployer model route is read from the local profile patch', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-llm-'))
+  const previous = process.env.DSH_HOME
+  try {
+    await mkdir(path.join(dir, 'profiles', 'web'), { recursive: true })
+    await writeFile(path.join(dir, 'profiles', 'web', 'cordis.patch.yml'), [
+      '- id: ui-chat',
+      '  config:',
+      '    transcriptView: standard',
+      '- id: agent-default-model',
+      '  name: "@deepseek-ai/dsh-agent-default-model"',
+      '  config:',
+      '    provider: deepseek-account',
+      '    model: deepseek-flash',
+      '    reasoningEffort: high',
+      '',
+    ].join('\n'))
+    process.env.DSH_HOME = dir
+    assert.deepEqual(deployerModelRoute(), {
+      provider: 'deepseek-account',
+      model: 'deepseek-flash',
+      reasoningEffort: 'high',
+    })
+    assert.match(buildLinuxPrepareScript(await buildDeployPlan({
+      host: 'example', os: 'linux', skipPackage: true, release: 'llmtest',
+      services: [{ name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' }],
+    })), /'deepseek-account' 'deepseek-flash' 'high' <<'DSH_MESH_PROFILE_WIRE'/u)
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the profile wire points the member at the deployer provider route', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-wire-'))
+  try {
+    const profile = path.join(dir, 'profiles', 'web')
+    const plugin = path.join(dir, 'plugin')
+    await mkdir(profile, { recursive: true })
+    await mkdir(plugin, { recursive: true })
+    await writeFile(path.join(plugin, 'package.json'), '{"name":"@local/dsh-mesh"}')
+    await writeFile(path.join(profile, 'cordis.patch.yml'), '- id: ui-settings-general\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n')
+    const script = path.join(dir, 'wire.mjs')
+    await writeFile(script, PROFILE_WIRE_SCRIPT)
+    const run = promisify(execFile)
+    await run(process.execPath, [script, profile, plugin, 'deepseek-account', 'deepseek-flash', 'high'])
+    const first = await readFile(path.join(profile, 'cordis.patch.yml'), 'utf8')
+    assert.match(first, /- id: agent-default-model/u)
+    assert.match(first, /provider: deepseek-account/u)
+    assert.match(first, /model: deepseek-flash/u)
+    assert.match(first, /reasoningEffort: high/u)
+    // A second deploy must not stack duplicate entries.
+    await run(process.execPath, [script, profile, plugin, 'deepseek-account', 'deepseek-flash', 'high'])
+    assert.equal(await readFile(path.join(profile, 'cordis.patch.yml'), 'utf8'), first)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

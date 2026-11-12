@@ -143,6 +143,21 @@ sysctl -n net.core.default_qdisc            # fq
   就被限速（例如 ECS 固定带宽 5 Mbps），那部分是套餐限制，BBR 不会突破。
   判断方法：`iperf3 -R -P 1/4/8` 全是同一个数字，且换成 UDP 也送不过去 → 限速。
 
+## 成员使用的模型路由
+
+部署会顺带把**部署者自己的 `agent-default-model` 设置**（`provider` / `model` /
+`reasoningEffort`）写进成员的 `profiles/web/cordis.patch.yml`。
+
+原因：成员的账号登录是复用部署者的（`deepseek-account-platform/*` 凭据），但新
+profile 默认走 **API key 路线**（`deepseek-official`），于是第一条对话就会报：
+
+```
+llm-deepseek: no API key for provider route "deepseek-official" … MISSING_CREDENTIAL
+```
+
+把 `provider` 指向 `deepseek-account` 之后，成员用的是共享的登录态，不需要任何 API
+key。想保留成员自己的设置就 `DSH_DEPLOY_SYNC_MODEL=0`。
+
 ## 常见故障速查
 
 | 症状 | 先看哪里 |

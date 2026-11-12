@@ -38,6 +38,7 @@ import {
 import zhCN from 'antd/locale/zh_CN'
 import enUS from 'antd/locale/en_US'
 import styles from './styles.css'
+import { renderMarkdown } from './markdown'
 import {
   api,
   ApiError,
@@ -629,17 +630,9 @@ function MemberConversations({ active }: { active: boolean }) {
         {detail === null ? null : (
           <div className="chat-detail">
             <div className="chat-detail-bar">
-              <Button icon={<ArrowLeftOutlined />} size="small" onClick={closeDetail}>
-                返回
-              </Button>
-              <Space size={8} wrap>
-                <Typography.Text strong>{detail.mention}</Typography.Text>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {[detail.time, detail.detailMeta].filter(part => part !== '').join(' · ')}
-                </Typography.Text>
-              </Space>
+              <Button type="text" icon={<ArrowLeftOutlined />} size="small" onClick={closeDetail} aria-label="返回" />
             </div>
-            <pre className="chat-detail-text">{detail.text}</pre>
+            <div className="chat-detail-text">{renderMarkdown(detail.text)}</div>
           </div>
         )}
       </div>

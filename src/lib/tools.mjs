@@ -247,7 +247,44 @@ export function registerTools(ctx, toolsCtx, service) {
     },
   }
 
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, membersDefinition]) {
+  const repackDefinition = {
+    name: 'repack',
+    description: [
+      '用当前仓库刷新一个已有的离线包（不重建 DSH 主体）。',
+      '',
+      '解包 → 用仓库的 gate/、shared/、config/、code/*、根脚本和 plugins/dsh-mesh/ 覆盖包内对应文件，',
+      'app/、web/、runtime/node/ 原样保留 → 重新压缩并把 .sha256 边车更新掉。',
+      '适合只改了网关或插件、不想重新下载依赖和 Node 运行时的场景；耗时约几十秒到两分钟。',
+      'package 可以是 ~/.dsh/packages 里的文件名，也可以是绝对路径；.tar.gz/.tgz 与 .zip 都支持。',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      properties: {
+        package: { type: 'string', description: '离线包文件名（~/.dsh/packages 下）或绝对路径。' },
+      },
+      required: ['package'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{
+        type: 'text',
+        text: typeof value?.text === 'string' ? value.text : JSON.stringify(value, null, 2),
+      }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args) {
+      const data = await service.repackPackage({ package: args.package })
+      const size = typeof data.bytes === 'number' ? `${data.bytes} 字节` : '未知大小'
+      return {
+        ok: data.ok === true,
+        text: `已重新打包 ${data.package}\n大小 ${size}\nsha256 ${data.sha256}\n包内文件 ${data.files} 个（DSH 主体未重建）`,
+        data,
+      }
+    },
+  }
+
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool)
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`)

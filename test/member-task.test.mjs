@@ -182,7 +182,7 @@ test('build tool returns the final job and its log path', async () => {
   }
 })
 
-test('registerTools exposes build, deploy, members and call_member', async () => {
+test('registerTools exposes build, deploy, members, call_member and repack', async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-tools-'))
   const names = []
   const tools = []
@@ -200,7 +200,7 @@ test('registerTools exposes build, deploy, members and call_member', async () =>
   const toolsCtx = { tools: { register: tool => { names.push(tool.name); tools.push(tool) } } }
   try {
     registerTools(ctx, toolsCtx, service)
-    assert.deepEqual(names.sort(), ['build', 'call_member', 'deploy', 'members'].sort())
+    assert.deepEqual(names.sort(), ['build', 'call_member', 'deploy', 'members', 'repack'].sort())
     for (const name of ['build', 'deploy', 'members']) {
       const tool = tools.find(candidate => candidate.name === name)
       assert.equal(tool.parameters.properties.action, undefined)
@@ -209,6 +209,8 @@ test('registerTools exposes build, deploy, members and call_member', async () =>
     assert.deepEqual(deploy.parameters.required, ['host', 'package'])
     const call = tools.find(candidate => candidate.name === 'call_member')
     assert.deepEqual(call.parameters.properties.action.enum, ['delegate', 'run', 'send'])
+    const repack = tools.find(candidate => candidate.name === 'repack')
+    assert.deepEqual(repack.parameters.required, ['package'])
   } finally {
     await rm(dataDir, { recursive: true, force: true })
   }

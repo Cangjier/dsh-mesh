@@ -28,6 +28,7 @@ import {
 } from '../../code/build/job.mjs'
 import { DEFAULT_REF, DEFAULT_SOURCE } from '../../code/build/engine.mjs'
 import { DeployManager } from '../../code/deploy/engine.mjs'
+import { repackArchive } from '../../code/build/repack.mjs'
 import { quickSystemInfo } from '../../code/shared/system-info.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -625,6 +626,24 @@ export class MeshService {
       serviceUser,
       package: packagePath,
     }
+  }
+
+  /**
+   * Refresh a prebuilt package from this repository, in place.
+   *
+   * The DSH app, the browser bundles and the Node runtime inside the package
+   * stay as they are; only the gateway, the scripts and the plugin files are
+   * replaced, then the archive and its checksum are rewritten.
+   * @param {{package: string}} request package name (in the packages dir) or path.
+   * @returns {Promise<object>} summary.
+   */
+  async repackPackage(request) {
+    const packagePath = await this.resolvePackage(request.package)
+    const summary = await repackArchive(packagePath, {
+      repositoryRoot: this.repositoryRoot,
+      log: line => this.log(`repack: ${line}`),
+    })
+    return { ok: true, ...summary }
   }
 
   /**

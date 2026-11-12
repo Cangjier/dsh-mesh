@@ -1,13 +1,13 @@
 // src/index.ts
 import { homedir as homedir2 } from "node:os";
-import path7 from "node:path";
+import path8 from "node:path";
 
 // src/lib/service.mjs
-import { mkdir as mkdir4, readFile as readFile5, readdir as readdir3, rm as rm4, stat as stat4, writeFile as writeFile4 } from "node:fs/promises";
-import { readFileSync as readFileSync2, existsSync as existsSync5 } from "node:fs";
-import { createHash as createHash3 } from "node:crypto";
+import { mkdir as mkdir5, readFile as readFile6, readdir as readdir4, rm as rm5, stat as stat5, writeFile as writeFile5 } from "node:fs/promises";
+import { readFileSync as readFileSync2, existsSync as existsSync6 } from "node:fs";
+import { createHash as createHash4 } from "node:crypto";
 import os5 from "node:os";
-import path5 from "node:path";
+import path6 from "node:path";
 import { fileURLToPath } from "node:url";
 
 // code/shared/wireguard.mjs
@@ -2428,12 +2428,143 @@ var DeployManager = class {
   }
 };
 
-// code/shared/system-info.mjs
+// code/build/repack.mjs
 import { execFile } from "node:child_process";
-import { existsSync as existsSync4, readFileSync, statfsSync } from "node:fs";
-import os4 from "node:os";
+import { createHash as createHash3 } from "node:crypto";
+import { cp as cp2, mkdir as mkdir4, mkdtemp as mkdtemp2, readFile as readFile5, readdir as readdir3, rm as rm4, stat as stat4, writeFile as writeFile4 } from "node:fs/promises";
+import { createReadStream as createReadStream2, existsSync as existsSync4 } from "node:fs";
+import { tmpdir as tmpdir2 } from "node:os";
+import path5 from "node:path";
 import { promisify } from "node:util";
-var execFileAsync = promisify(execFile);
+var run = promisify(execFile);
+var CODE_SCRIPTS = ["install.sh", "start.sh", "stop.sh", "status.sh", "doctor.sh", "install.ps1", "start.ps1", "stop.ps1", "start.cmd", "stop.cmd"];
+var ROOT_SCRIPTS = ["start-interop.sh", "install-interop-service.sh", "uninstall-interop-service.sh"];
+var PLUGIN_FILES = ["index.js", "client.js", "cordis.patch.yml", "package.json"];
+var PLUGIN_DIRS = ["locale", "build", "code/build", "code/shared"];
+var CODE_DIRS = ["windows-service", "interop-service", "wireguard"];
+async function clear(target) {
+  await rm4(target, { recursive: true, force: true });
+}
+async function replaceDirectory(from, to) {
+  if (!existsSync4(from)) return;
+  await clear(to);
+  await cp2(from, to, { recursive: true });
+}
+async function replaceFile(from, to) {
+  if (!existsSync4(from)) return;
+  await clear(to);
+  await cp2(from, to);
+}
+async function countFiles(dir) {
+  let total = 0;
+  for (const entry of await readdir3(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) total += await countFiles(path5.join(dir, entry.name));
+    else if (entry.isFile()) total += 1;
+  }
+  return total;
+}
+async function repackDirectory(packageDir, repositoryRoot) {
+  const manifestFile = path5.join(packageDir, "manifest.json");
+  if (!existsSync4(manifestFile)) throw new Error(`${packageDir} is not an extracted package (no manifest.json)`);
+  await replaceDirectory(path5.join(repositoryRoot, "code", "gate"), path5.join(packageDir, "gate"));
+  await replaceDirectory(path5.join(repositoryRoot, "code", "shared"), path5.join(packageDir, "shared"));
+  await replaceDirectory(path5.join(repositoryRoot, "code", "config"), path5.join(packageDir, "config"));
+  for (const name of CODE_DIRS) {
+    await replaceDirectory(path5.join(repositoryRoot, "code", name), path5.join(packageDir, "code", name));
+  }
+  await replaceDirectory(path5.join(repositoryRoot, "docs"), path5.join(packageDir, "docs"));
+  for (const name of CODE_SCRIPTS) {
+    await replaceFile(path5.join(repositoryRoot, "code", name), path5.join(packageDir, name));
+  }
+  for (const name of ROOT_SCRIPTS) {
+    await replaceFile(path5.join(repositoryRoot, name), path5.join(packageDir, name));
+  }
+  for (const name of PLUGIN_FILES) {
+    await replaceFile(path5.join(repositoryRoot, name), path5.join(packageDir, "plugins", "dsh-mesh", name));
+  }
+  for (const name of PLUGIN_DIRS) {
+    await replaceDirectory(path5.join(repositoryRoot, name), path5.join(packageDir, "plugins", "dsh-mesh", name));
+  }
+  const manifest = JSON.parse(await readFile5(manifestFile, "utf8"));
+  manifest.builtAt = (/* @__PURE__ */ new Date()).toISOString();
+  manifest.repackedFrom = "code/build/repack.mjs";
+  manifest.files = await countFiles(packageDir);
+  await writeFile4(manifestFile, `${JSON.stringify(manifest, null, 2)}
+`, "utf8");
+  const clientBytes = (await stat4(path5.join(packageDir, "plugins", "dsh-mesh", "client.js"))).size;
+  return { packageDir, version: manifest.version, target: manifest.target, files: manifest.files, clientBytes };
+}
+async function sha256File2(file) {
+  const hash = createHash3("sha256");
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream2(file);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", resolve);
+    stream.on("error", reject);
+  });
+  return hash.digest("hex");
+}
+function archiveRootName(file) {
+  return path5.basename(file).replace(/\.(tar\.gz|tgz|zip)$/u, "");
+}
+async function extractArchive(file, directory) {
+  await mkdir4(directory, { recursive: true });
+  if (file.endsWith(".zip")) {
+    try {
+      await run("unzip", ["-q", file, "-d", directory]);
+    } catch {
+      await run("tar", ["-xf", file, "-C", directory]);
+    }
+  } else {
+    await run("tar", ["-xzf", file, "-C", directory]);
+  }
+  const root = path5.join(directory, archiveRootName(file));
+  if (!existsSync4(path5.join(root, "manifest.json"))) {
+    throw new Error(`archive ${path5.basename(file)} has no ${archiveRootName(file)}/manifest.json`);
+  }
+  return root;
+}
+async function compressDirectory(parent, name, file) {
+  await clear(file);
+  if (file.endsWith(".zip")) {
+    try {
+      await run("zip", ["-qr", "-X", file, name], { cwd: parent });
+    } catch {
+      await run("tar", ["-a", "-cf", file, name], { cwd: parent });
+    }
+  } else {
+    await run("tar", ["-czf", file, name], { cwd: parent });
+  }
+}
+async function repackArchive(file, { repositoryRoot, log = () => {
+} }) {
+  const work = await mkdtemp2(path5.join(tmpdir2(), "dsh-repack-"));
+  try {
+    log(`extracting ${path5.basename(file)}`);
+    const packageDir = await extractArchive(file, work);
+    const summary = await repackDirectory(packageDir, repositoryRoot);
+    log(`replaced gateway, scripts and plugin files (${String(summary.files)} files in the package)`);
+    const parent = path5.dirname(packageDir);
+    const name = path5.basename(packageDir);
+    await compressDirectory(parent, name, file);
+    const bytes = (await stat4(file)).size;
+    const sha256 = await sha256File2(file);
+    await writeFile4(`${file}.sha256`, `${sha256}  ${path5.basename(file)}
+
+`, "utf8");
+    log(`wrote ${path5.basename(file)} (${String(bytes)} bytes)`);
+    return { package: file, version: summary.version, target: summary.target, bytes, sha256, files: summary.files };
+  } finally {
+    await rm4(work, { recursive: true, force: true });
+  }
+}
+
+// code/shared/system-info.mjs
+import { execFile as execFile2 } from "node:child_process";
+import { existsSync as existsSync5, readFileSync, statfsSync } from "node:fs";
+import os4 from "node:os";
+import { promisify as promisify2 } from "node:util";
+var execFileAsync = promisify2(execFile2);
 function round(value, digits = 1) {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
@@ -2493,23 +2624,23 @@ function quickSystemInfo(options = {}) {
 }
 
 // src/lib/service.mjs
-var HERE = path5.dirname(fileURLToPath(import.meta.url));
+var HERE = path6.dirname(fileURLToPath(import.meta.url));
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync5(path5.join(current, "build", "recipes.json")) && existsSync5(path5.join(current, "code", "build"))) {
+    if (existsSync6(path6.join(current, "build", "recipes.json")) && existsSync6(path6.join(current, "code", "build"))) {
       return current;
     }
-    const parent = path5.dirname(current);
+    const parent = path6.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return path5.resolve(start, "..", "..");
+  return path6.resolve(start, "..", "..");
 }
 var REPOSITORY_ROOT = findRepositoryRoot(HERE);
 function packageVersion() {
   try {
-    const parsed = JSON.parse(readFileSync2(path5.join(REPOSITORY_ROOT, "package.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync2(path6.join(REPOSITORY_ROOT, "package.json"), "utf8"));
     return typeof parsed.version === "string" ? parsed.version : "0.0.0";
   } catch {
     return "0.0.0";
@@ -2524,16 +2655,16 @@ var MeshService = class {
     this.config = options.config ?? {};
     this.logLine = options.log ?? (() => {
     });
-    this.jobRoot = path5.join(this.dataDir, "build");
-    this.cacheDir = path5.join(this.dataDir, "cache");
+    this.jobRoot = path6.join(this.dataDir, "build");
+    this.cacheDir = path6.join(this.dataDir, "cache");
     this.version = packageVersion();
     this.repositoryRoot = REPOSITORY_ROOT;
-    this.recipesPath = path5.join(REPOSITORY_ROOT, "build", "recipes.json");
-    this.overlayRoot = path5.join(REPOSITORY_ROOT, "build", "overlays");
-    this.home = path5.dirname(this.dataDir);
-    this.deployRoot = path5.join(this.dataDir, "deploy");
-    this.memberTagsFile = path5.join(this.dataDir, "member-tags.json");
-    this.packagesDir = path5.join(os5.homedir(), ".dsh", "packages");
+    this.recipesPath = path6.join(REPOSITORY_ROOT, "build", "recipes.json");
+    this.overlayRoot = path6.join(REPOSITORY_ROOT, "build", "overlays");
+    this.home = path6.dirname(this.dataDir);
+    this.deployRoot = path6.join(this.dataDir, "deploy");
+    this.memberTagsFile = path6.join(this.dataDir, "member-tags.json");
+    this.packagesDir = path6.join(os5.homedir(), ".dsh", "packages");
     this.deploy = new DeployManager({
       repositoryRoot: REPOSITORY_ROOT,
       dataDir: this.deployRoot,
@@ -2558,7 +2689,7 @@ var MeshService = class {
    * @returns {Promise<object>} status.
    */
   async status() {
-    const stateFile = path5.join(this.home, "wireguard", "state.json");
+    const stateFile = path6.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     return {
@@ -2600,7 +2731,7 @@ var MeshService = class {
    * @returns {Promise<object>} discovery snapshot.
    */
   async members() {
-    const stateFile = path5.join(this.home, "wireguard", "state.json");
+    const stateFile = path6.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     const self = {
@@ -2636,7 +2767,7 @@ var MeshService = class {
    */
   async memberTags() {
     try {
-      const parsed = JSON.parse(await readFile5(this.memberTagsFile, "utf8"));
+      const parsed = JSON.parse(await readFile6(this.memberTagsFile, "utf8"));
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
       const tags = {};
       for (const [id, tag] of Object.entries(parsed)) {
@@ -2660,8 +2791,8 @@ var MeshService = class {
     const tags = await this.memberTags();
     if (label === "") delete tags[memberId];
     else tags[memberId] = label;
-    await mkdir4(this.dataDir, { recursive: true });
-    await writeFile4(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
+    await mkdir5(this.dataDir, { recursive: true });
+    await writeFile5(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
 `, "utf8");
     return { ok: true, tags };
   }
@@ -2676,12 +2807,12 @@ var MeshService = class {
    * @returns {Promise<string[]>} ids whose outputs were removed.
    */
   async cleanupBuilds(options = {}) {
-    if (!existsSync5(this.jobRoot)) return [];
-    const entries = await readdir3(this.jobRoot, { withFileTypes: true });
+    if (!existsSync6(this.jobRoot)) return [];
+    const entries = await readdir4(this.jobRoot, { withFileTypes: true });
     const removed = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path5.join(this.jobRoot, entry.name);
+      const dir = path6.join(this.jobRoot, entry.name);
       let state;
       try {
         state = await readState(dir);
@@ -2690,9 +2821,9 @@ var MeshService = class {
       }
       if (this.running.has(state.id)) continue;
       if (state.id === options.keep) continue;
-      await rm4(path5.join(dir, "src"), { recursive: true, force: true });
-      await rm4(path5.join(dir, "work-order"), { recursive: true, force: true });
-      if (options.keepDist !== true) await rm4(path5.join(dir, "dist"), { recursive: true, force: true });
+      await rm5(path6.join(dir, "src"), { recursive: true, force: true });
+      await rm5(path6.join(dir, "work-order"), { recursive: true, force: true });
+      if (options.keepDist !== true) await rm5(path6.join(dir, "dist"), { recursive: true, force: true });
       removed.push(state.id);
     }
     return removed;
@@ -2794,8 +2925,8 @@ var MeshService = class {
     const state = await readState(dir);
     return {
       ...state,
-      logFile: path5.join(dir, "build.log"),
-      stateFile: path5.join(dir, "state.json"),
+      logFile: path6.join(dir, "build.log"),
+      stateFile: path6.join(dir, "state.json"),
       logTail: await readLogTail(dir, 60),
       running: this.running.has(id),
       workOrderMarkdown: state.workOrder?.markdown ?? null,
@@ -2807,13 +2938,13 @@ var MeshService = class {
    * @returns {Promise<object[]>} jobs.
    */
   async jobs() {
-    if (!existsSync5(this.jobRoot)) return [];
-    const entries = await readdir3(this.jobRoot, { withFileTypes: true });
+    if (!existsSync6(this.jobRoot)) return [];
+    const entries = await readdir4(this.jobRoot, { withFileTypes: true });
     const jobs = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       try {
-        const state = await readState(path5.join(this.jobRoot, entry.name));
+        const state = await readState(path6.join(this.jobRoot, entry.name));
         jobs.push({
           id: state.id,
           status: state.status,
@@ -2854,7 +2985,7 @@ var MeshService = class {
    * @returns {Promise<object>} recipes.
    */
   async recipes() {
-    const parsed = JSON.parse(await readFile5(this.recipesPath, "utf8"));
+    const parsed = JSON.parse(await readFile6(this.recipesPath, "utf8"));
     return {
       source: parsed.source,
       ref: parsed.ref,
@@ -2872,13 +3003,13 @@ var MeshService = class {
    * @returns {Promise<object>} package list.
    */
   async packages() {
-    const entries = await readdir3(this.packagesDir, { withFileTypes: true }).catch(() => []);
+    const entries = await readdir4(this.packagesDir, { withFileTypes: true }).catch(() => []);
     const packages = [];
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(entry.name)) continue;
-      const file = path5.join(this.packagesDir, entry.name);
-      const info = await stat4(file).catch(() => null);
+      const file = path6.join(this.packagesDir, entry.name);
+      const info = await stat5(file).catch(() => null);
       if (info === null) continue;
       packages.push({
         name: entry.name,
@@ -2900,9 +3031,9 @@ var MeshService = class {
   async resolvePackage(input) {
     const raw = typeof input === "string" ? input.trim() : "";
     if (raw === "") throw new Error("package is required");
-    const candidates = path5.isAbsolute(raw) ? [raw] : [path5.join(this.packagesDir, raw), path5.join(this.repositoryRoot, "dist", raw)];
+    const candidates = path6.isAbsolute(raw) ? [raw] : [path6.join(this.packagesDir, raw), path6.join(this.repositoryRoot, "dist", raw)];
     for (const file of candidates) {
-      const info = await stat4(file).catch(() => null);
+      const info = await stat5(file).catch(() => null);
       if (info?.isFile()) return file;
     }
     throw new Error(`package not found: ${raw}`);
@@ -2925,7 +3056,7 @@ var MeshService = class {
     const member = memberId !== "" ? all.find((candidate) => candidate.id === memberId) : all.find((candidate) => candidate.id === host || candidate.name === host || candidate.ip === host);
     if (memberId !== "" && member === void 0) throw new Error(`member not found: ${memberId}`);
     if (member !== void 0) {
-      const os7 = /win(?:dows)?/iu.test(path5.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+      const os7 = /win(?:dows)?/iu.test(path6.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
       const deployRequest = await this.#memberDeployRequest(member, packagePath, os7);
       const started2 = await this.deploy.start({ ...deployRequest, member: member.id });
       return {
@@ -2936,7 +3067,7 @@ var MeshService = class {
       };
     }
     if (host === "") throw new Error("host is required");
-    const os6 = /win(?:dows)?/iu.test(path5.basename(packagePath)) ? "windows" : "linux";
+    const os6 = /win(?:dows)?/iu.test(path6.basename(packagePath)) ? "windows" : "linux";
     const appRoot = os6 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
     const started = await this.deploy.start({ host, package: packagePath, os: os6, appRoot });
     return { ok: true, job: started.job, member: null, packagePath };
@@ -2971,7 +3102,7 @@ var MeshService = class {
     return {
       job,
       member: started.member,
-      logFile: path5.join(this.deployRoot, started.job.id, "deploy.log"),
+      logFile: path6.join(this.deployRoot, started.job.id, "deploy.log"),
       log: await this.deployLogs(started.job.id, 80)
     };
   }
@@ -2986,14 +3117,14 @@ var MeshService = class {
     if (member.ip === "") throw new Error(`member ${member.id} has no VPN address`);
     let user = "root";
     let identityFile;
-    const { state } = await readWireGuardState({ file: path5.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path6.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
-        const digest = createHash3("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path5.join(this.home, "wireguard", "ssh", `${digest}.key`);
-        if (existsSync5(candidate)) identityFile = candidate;
+        const digest = createHash4("sha256").update(peer.publicKey).digest("hex");
+        const candidate = path6.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        if (existsSync6(candidate)) identityFile = candidate;
       }
     }
     const system = member.system;
@@ -3024,6 +3155,23 @@ var MeshService = class {
       serviceUser,
       package: packagePath
     };
+  }
+  /**
+   * Refresh a prebuilt package from this repository, in place.
+   *
+   * The DSH app, the browser bundles and the Node runtime inside the package
+   * stay as they are; only the gateway, the scripts and the plugin files are
+   * replaced, then the archive and its checksum are rewritten.
+   * @param {{package: string}} request package name (in the packages dir) or path.
+   * @returns {Promise<object>} summary.
+   */
+  async repackPackage(request) {
+    const packagePath = await this.resolvePackage(request.package);
+    const summary = await repackArchive(packagePath, {
+      repositoryRoot: this.repositoryRoot,
+      log: (line) => this.log(`repack: ${line}`)
+    });
+    return { ok: true, ...summary };
   }
   /**
    * Plan an SSH blue-green deployment without touching the network.
@@ -3081,8 +3229,8 @@ var MeshService = class {
    */
   _jobDir(id) {
     if (typeof id !== "string" || !/^[A-Za-z0-9._-]+$/u.test(id)) throw new Error("invalid job id");
-    const dir = path5.resolve(this.jobRoot, id);
-    if (!dir.startsWith(`${path5.resolve(this.jobRoot)}${path5.sep}`)) throw new Error("invalid job id");
+    const dir = path6.resolve(this.jobRoot, id);
+    if (!dir.startsWith(`${path6.resolve(this.jobRoot)}${path6.sep}`)) throw new Error("invalid job id");
     return dir;
   }
 };
@@ -3123,33 +3271,33 @@ function registerApi(ctx, service) {
       try {
         const method = request.method ?? "GET";
         const url = new URL(request.url ?? "/", "http://local.invalid");
-        const path8 = url.pathname.slice(API_PREFIX.length) || "/";
-        if (method === "GET" && path8 === "/status") {
+        const path9 = url.pathname.slice(API_PREFIX.length) || "/";
+        if (method === "GET" && path9 === "/status") {
           writeJson(response, 200, await service.status());
           return;
         }
-        if (method === "GET" && path8 === "/members") {
+        if (method === "GET" && path9 === "/members") {
           writeJson(response, 200, await service.members());
           return;
         }
-        if (method === "GET" && path8 === "/member-tags") {
+        if (method === "GET" && path9 === "/member-tags") {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() });
           return;
         }
-        if (method === "GET" && path8 === "/jobs") {
+        if (method === "GET" && path9 === "/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() });
           return;
         }
-        if (method === "GET" && path8 === "/packages") {
+        if (method === "GET" && path9 === "/packages") {
           writeJson(response, 200, await service.packages());
           return;
         }
-        if (method === "GET" && path8 === "/deploy/jobs") {
+        if (method === "GET" && path9 === "/deploy/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) });
           return;
         }
         if (method === "GET") {
-          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path8);
+          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path9);
           if (deployRead !== null) {
             const lines = Number.parseInt(url.searchParams.get("lines") ?? "200", 10);
             const job = await service.deployStatus(deployRead[1]);
@@ -3166,7 +3314,7 @@ function registerApi(ctx, service) {
             });
             return;
           }
-          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path8);
+          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path9);
           if (read !== null) {
             if (read[2] === "/log") {
               const lines = Number.parseInt(url.searchParams.get("lines") ?? "80", 10);
@@ -3188,7 +3336,7 @@ function registerApi(ctx, service) {
           writeJson(response, 403, { ok: false, error: { code: "forbidden", message: `Missing the ${AGENT_HEADER} header.` } });
           return;
         }
-        if (path8 === "/deploy") {
+        if (path9 === "/deploy") {
           const body = await readJson(request);
           const result = await service.deployMember({
             member: typeof body.member === "string" ? body.member : void 0,
@@ -3197,7 +3345,7 @@ function registerApi(ctx, service) {
           writeJson(response, 202, result);
           return;
         }
-        if (path8 === "/member-tags") {
+        if (path9 === "/member-tags") {
           const body = await readJson(request);
           writeJson(response, 200, await service.setMemberTag(
             typeof body.id === "string" ? body.id : "",
@@ -3205,7 +3353,7 @@ function registerApi(ctx, service) {
           ));
           return;
         }
-        if (path8 === "/build") {
+        if (path9 === "/build") {
           const body = await readJson(request);
           const job = await service.startBuild({
             source: typeof body.source === "string" ? body.source : void 0,
@@ -3217,12 +3365,12 @@ function registerApi(ctx, service) {
           writeJson(response, 202, { ok: true, job });
           return;
         }
-        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path8);
+        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path9);
         if (resume !== null) {
           writeJson(response, 202, { ok: true, job: await service.resumeBuild(resume[1]) });
           return;
         }
-        const match = /^\/build\/([^/]+)\/learn$/u.exec(path8);
+        const match = /^\/build\/([^/]+)\/learn$/u.exec(path9);
         if (match !== null) {
           writeJson(response, 200, { ok: true, job: await service.learn(match[1]) });
           return;
@@ -3289,15 +3437,15 @@ function registerWireGuardApi(ctx) {
 
 // src/lib/member-tasks.mjs
 import { randomUUID } from "node:crypto";
-import { mkdir as mkdir5, readFile as readFile6, readdir as readdir4, rename as rename3, writeFile as writeFile5 } from "node:fs/promises";
-import { existsSync as existsSync6, readFileSync as readFileSync3 } from "node:fs";
-import path6 from "node:path";
+import { mkdir as mkdir6, readFile as readFile7, readdir as readdir5, rename as rename3, writeFile as writeFile6 } from "node:fs/promises";
+import { existsSync as existsSync7, readFileSync as readFileSync3 } from "node:fs";
+import path7 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
 function envFile(file) {
   const values = {};
-  if (!existsSync6(file)) return values;
+  if (!existsSync7(file)) return values;
   for (const raw of readFileSync3(file, "utf8").split(/\r?\n/)) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;
@@ -3321,7 +3469,7 @@ var MemberTaskService = class {
     this.dataDir = options.dataDir;
     this.logLine = options.log ?? (() => {
     });
-    this.taskRoot = path6.join(this.dataDir, "member-tasks");
+    this.taskRoot = path7.join(this.dataDir, "member-tasks");
     this.tasks = /* @__PURE__ */ new Map();
     this.monitors = /* @__PURE__ */ new Map();
     this.loaded = false;
@@ -3341,16 +3489,16 @@ var MemberTaskService = class {
   async #ensureLoaded() {
     if (this.loaded) return;
     this.loaded = true;
-    await mkdir5(this.taskRoot, { recursive: true });
+    await mkdir6(this.taskRoot, { recursive: true });
     let files = [];
     try {
-      files = await readdir4(this.taskRoot);
+      files = await readdir5(this.taskRoot);
     } catch {
     }
     for (const file of files) {
       if (!file.endsWith(".json")) continue;
       try {
-        const task = JSON.parse(await readFile6(path6.join(this.taskRoot, file), "utf8"));
+        const task = JSON.parse(await readFile7(path7.join(this.taskRoot, file), "utf8"));
         if (task?.id === void 0) continue;
         if (task.status === "running" || task.status === "starting") {
           task.status = "interrupted";
@@ -3364,10 +3512,10 @@ var MemberTaskService = class {
   }
   async #save(task) {
     task.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const file = path6.join(this.taskRoot, `${task.id}.json`);
+    const file = path7.join(this.taskRoot, `${task.id}.json`);
     const temporary = `${file}.${process.pid}.tmp`;
-    await mkdir5(this.taskRoot, { recursive: true });
-    await writeFile5(temporary, `${JSON.stringify(task, null, 2)}
+    await mkdir6(this.taskRoot, { recursive: true });
+    await writeFile6(temporary, `${JSON.stringify(task, null, 2)}
 `, "utf8");
     await rename3(temporary, file);
   }
@@ -3375,7 +3523,7 @@ var MemberTaskService = class {
     const text = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
 `;
     try {
-      await writeFile5(path6.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
+      await writeFile6(path7.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
     } catch {
     }
     try {
@@ -3395,9 +3543,9 @@ var MemberTaskService = class {
     if (this.service.config?.interopUseGatePassword !== false) {
       if (process.env.DSH_GATE_PASSWORD) return process.env.DSH_GATE_PASSWORD;
       const candidates = [
-        path6.join(this.service.repositoryRoot, "..", "config", "gate.env"),
-        path6.join(this.service.repositoryRoot, "config", "gate.env"),
-        path6.join(this.service.dataDir, "..", "..", "config", "gate.env")
+        path7.join(this.service.repositoryRoot, "..", "config", "gate.env"),
+        path7.join(this.service.repositoryRoot, "config", "gate.env"),
+        path7.join(this.service.dataDir, "..", "..", "config", "gate.env")
       ];
       for (const file of candidates) {
         const password = envFile(file).DSH_GATE_PASSWORD;
@@ -3635,7 +3783,7 @@ var MemberTaskService = class {
     const task = this.tasks.get(String(taskId));
     if (task === void 0) return "";
     try {
-      const text = await readFile6(path6.join(this.taskRoot, `${task.id}.log`), "utf8");
+      const text = await readFile7(path7.join(this.taskRoot, `${task.id}.log`), "utf8");
       return text.split("\n").slice(-Math.max(1, Math.min(lines, 500))).join("\n");
     } catch {
       return "";
@@ -3647,7 +3795,7 @@ var MemberTaskService = class {
    * @returns {string} log path.
    */
   logPath(taskId) {
-    return path6.join(this.taskRoot, `${String(taskId)}.log`);
+    return path7.join(this.taskRoot, `${String(taskId)}.log`);
   }
 };
 
@@ -3874,7 +4022,46 @@ function registerTools(ctx, toolsCtx, service) {
       return { ok: true, text: formatMembers(data), data };
     }
   };
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, membersDefinition]) {
+  const repackDefinition = {
+    name: "repack",
+    description: [
+      "\u7528\u5F53\u524D\u4ED3\u5E93\u5237\u65B0\u4E00\u4E2A\u5DF2\u6709\u7684\u79BB\u7EBF\u5305\uFF08\u4E0D\u91CD\u5EFA DSH \u4E3B\u4F53\uFF09\u3002",
+      "",
+      "\u89E3\u5305 \u2192 \u7528\u4ED3\u5E93\u7684 gate/\u3001shared/\u3001config/\u3001code/*\u3001\u6839\u811A\u672C\u548C plugins/dsh-mesh/ \u8986\u76D6\u5305\u5185\u5BF9\u5E94\u6587\u4EF6\uFF0C",
+      "app/\u3001web/\u3001runtime/node/ \u539F\u6837\u4FDD\u7559 \u2192 \u91CD\u65B0\u538B\u7F29\u5E76\u628A .sha256 \u8FB9\u8F66\u66F4\u65B0\u6389\u3002",
+      "\u9002\u5408\u53EA\u6539\u4E86\u7F51\u5173\u6216\u63D2\u4EF6\u3001\u4E0D\u60F3\u91CD\u65B0\u4E0B\u8F7D\u4F9D\u8D56\u548C Node \u8FD0\u884C\u65F6\u7684\u573A\u666F\uFF1B\u8017\u65F6\u7EA6\u51E0\u5341\u79D2\u5230\u4E24\u5206\u949F\u3002",
+      "package \u53EF\u4EE5\u662F ~/.dsh/packages \u91CC\u7684\u6587\u4EF6\u540D\uFF0C\u4E5F\u53EF\u4EE5\u662F\u7EDD\u5BF9\u8DEF\u5F84\uFF1B.tar.gz/.tgz \u4E0E .zip \u90FD\u652F\u6301\u3002"
+    ].join("\n"),
+    parameters: {
+      type: "object",
+      properties: {
+        package: { type: "string", description: "\u79BB\u7EBF\u5305\u6587\u4EF6\u540D\uFF08~/.dsh/packages \u4E0B\uFF09\u6216\u7EDD\u5BF9\u8DEF\u5F84\u3002" }
+      },
+      required: ["package"],
+      additionalProperties: false
+    },
+    output: {
+      schema: { type: "object", additionalProperties: true },
+      render: (_args, value) => [{
+        type: "text",
+        text: typeof value?.text === "string" ? value.text : JSON.stringify(value, null, 2)
+      }]
+    },
+    isConcurrencySafe: () => false,
+    async execute(args) {
+      const data = await service.repackPackage({ package: args.package });
+      const size = typeof data.bytes === "number" ? `${data.bytes} \u5B57\u8282` : "\u672A\u77E5\u5927\u5C0F";
+      return {
+        ok: data.ok === true,
+        text: `\u5DF2\u91CD\u65B0\u6253\u5305 ${data.package}
+\u5927\u5C0F ${size}
+sha256 ${data.sha256}
+\u5305\u5185\u6587\u4EF6 ${data.files} \u4E2A\uFF08DSH \u4E3B\u4F53\u672A\u91CD\u5EFA\uFF09`,
+        data
+      };
+    }
+  };
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool);
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`);
@@ -3961,8 +4148,8 @@ function formatBytes2(value) {
 // src/index.ts
 var inject = ["webServer"];
 function dataDirectory() {
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path7.join(homedir2(), ".dsh");
-  return path7.join(home, "mesh");
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path8.join(homedir2(), ".dsh");
+  return path8.join(home, "mesh");
 }
 async function apply(ctx, config = {}) {
   const service = new MeshService({

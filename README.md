@@ -235,6 +235,16 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `build/recipes.json` | 源码覆盖层清单（picker / login） |
 | `build/overlays/` | 对 DSH 源码的整文件覆盖层 |
 
+## 工具
+
+| 工具 | 作用 |
+|---|---|
+| `build` | 从 DSH 源码全量构建离线包（下载依赖 + Node 运行时） |
+| `deploy` | SSH 蓝绿部署到成员 |
+| `repack` | 用当前仓库刷新已有离线包：只替换 `gate/`、`shared/`、`config/`、`code/*`、根脚本和 `plugins/dsh-mesh/`，DSH 主体（`app/`、`web/`、`runtime/`）复用，最后更新 `.sha256` |
+| `members` | WireGuard 成员发现 |
+| `call_member` | 把任务转给其他成员 |
+
 ## 约定与限制
 
 - 所有对 DSH 源码的修改都是**整文件覆盖层 + base SHA-256**；脚本幂等，失配即工作单，不猜锚点。

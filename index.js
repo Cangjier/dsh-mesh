@@ -2990,7 +2990,7 @@ var MeshService = class {
     if (host === "") throw new Error(`member ${member.id} has no VPN address`);
     if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
     const path9 = "/__gate/cluster/__gate/session/promote";
-    const response = await fetch(`http://${host}/__gate/session/promote`, {
+    const response = await fetch(`http://${host}${path9}`, {
       method: "POST",
       headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path9 }) }
     });

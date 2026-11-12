@@ -424,8 +424,37 @@ export class MemberService {
     }
     delete req.headers[CLUSTER_HEADER]
     req.url = stripped
+    if (stripped === '/__gate/session/promote' && req.method === 'POST') {
+      await this._promoteSession(res)
+      return
+    }
     req.__dshCluster = true
     await dispatchLocal(req, res)
+  }
+
+  /**
+   * Ask the Windows supervisor to re-evaluate where its stack runs.
+   * @param {import('node:http').ServerResponse} res response.
+   * @returns {Promise<void>} resolves once the answer is written.
+   */
+  async _promoteSession(res) {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const root = process.env.DSH_PACKAGE_ROOT && process.env.DSH_PACKAGE_ROOT.trim() !== ''
+      ? process.env.DSH_PACKAGE_ROOT.trim()
+      : process.cwd()
+    const dataDir = path.join(root, 'data')
+    try { fs.mkdirSync(dataDir, { recursive: true }) } catch { }
+    try {
+      fs.writeFileSync(path.join(dataDir, 'session-command.json'), `${JSON.stringify({ action: 'promote', at: new Date().toISOString() })}\n`)
+    } catch { }
+    // The supervisor watches that file once per tick; give it one tick.
+    await new Promise(resolve => setTimeout(resolve, 2500))
+    let status = null
+    try { status = JSON.parse(fs.readFileSync(path.join(dataDir, 'session-status.json'), 'utf8')) } catch { }
+    const body = JSON.stringify({ ok: true, status })
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+    res.end(body)
   }
 
   /**

@@ -22,7 +22,7 @@ import { createReadStream } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { copyFile, link, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 
 const DEFAULT_APP_ROOT = {
@@ -121,6 +121,17 @@ fs.cpSync(pluginDir, target, { recursive: true })
 fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\\n')
 console.log('profile-wire: dsh loads @local/dsh-mesh from ' + target)
 `
+
+/**
+ * The deployer's DSH credentials file, or null when this host has no account.
+ * @returns {string|null} absolute path.
+ */
+export function deployerCredentialsFile() {
+  if (process.env.DSH_DEPLOY_SHARE_ACCOUNT === '0') return null
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path.join(homedir(), '.dsh')
+  const file = path.join(home, '.credentials.yaml')
+  return existsSync(file) ? file : null
+}
 
 /** Human-readable byte count for progress details. */
 export function formatBytes(value) {
@@ -351,6 +362,11 @@ export async function buildDeployPlan(options) {
     remotePackage: os === 'linux'
       ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path.extname(packagePath)}`
       : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path.extname(packagePath)}`,
+    // The deployer's account grants travel with the deploy so a fresh member
+    // needs no QR scan of its own.
+    remoteCredentials: os === 'linux'
+      ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}.account`
+      : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}.account`,
   }
 }
 
@@ -507,6 +523,15 @@ test -x "$NEW/runtime/node/node"
 "$NEW/runtime/node/node" - "$SHARED/home/profiles/web" "$NEW/plugins/dsh-mesh" <<'DSH_MESH_PROFILE_WIRE'
 ${PROFILE_WIRE_SCRIPT}
 DSH_MESH_PROFILE_WIRE
+# The deployer's account grants make this member signed in without a QR scan.
+CREDENTIALS_FILE=${sh(plan.remoteCredentials)}
+if [ -f "$CREDENTIALS_FILE" ]; then
+  if "$NEW/runtime/node/node" "$NEW/shared/credentials-merge.mjs" "$SHARED/home/.credentials.yaml" "$CREDENTIALS_FILE"; then
+    rm -f "$CREDENTIALS_FILE"
+  else
+    echo "could not copy the deployer account sign-in" >&2
+  fi
+fi
 test -f "$NEW/manifest.json"
 
 write_unit() {
@@ -725,6 +750,11 @@ $wireScript = Join-Path $env:TEMP 'dsh-mesh-profile-wire.mjs'
 & $node $wireScript (Join-Path $Shared 'home\\profiles\\web') (Join-Path $New 'plugins\\dsh-mesh')
 if ($LASTEXITCODE -ne 0) { throw 'could not wire the dsh-mesh plugin into the DSH profile' }
 Remove-Item $wireScript -Force -ErrorAction SilentlyContinue
+$credentialsFile = '${plan.remoteCredentials}'
+if (Test-Path $credentialsFile) {
+  & $node (Join-Path $New 'shared\\credentials-merge.mjs') (Join-Path $Shared 'home\\.credentials.yaml') $credentialsFile
+  if ($LASTEXITCODE -eq 0) { Remove-Item $credentialsFile -Force -ErrorAction SilentlyContinue } else { Write-Warning 'could not copy the deployer account sign-in' }
+}
 ${serviceLines}
 Write-Output "prepared $Release at $New"
 `
@@ -1326,6 +1356,19 @@ export class DeployManager {
           indeterminate: false,
         }
         await mark('upload', 'succeeded', `${formatBytes(plan.package.bytes)} · ${uploadSeconds.toFixed(1)}s · ${formatBytes(plan.package.bytes / uploadSeconds)}/s`)
+      }
+      // Sign the member in with the deployer's account: the account grants in
+      // `.credentials.yaml` are all a member needs, so no QR scan is required.
+      const credentialsFile = deployerCredentialsFile()
+      if (credentialsFile !== null) {
+        try {
+          await runner.upload(credentialsFile, plan.remoteCredentials)
+          await log('shared the deployer\'s account sign-in')
+        } catch (error) {
+          await log(`account sign-in was not shared: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      } else {
+        await log('no deployer account to share (DSH_HOME/.credentials.yaml is missing)')
       }
       state.phase = 'prepare'
       await mark('prepare', 'running')

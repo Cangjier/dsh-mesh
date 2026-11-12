@@ -1,10 +1,10 @@
 // src/index.ts
-import { homedir } from "node:os";
+import { homedir as homedir2 } from "node:os";
 import path7 from "node:path";
 
 // src/lib/service.mjs
 import { mkdir as mkdir4, readFile as readFile5, readdir as readdir3, rm as rm4, stat as stat4, writeFile as writeFile4 } from "node:fs/promises";
-import { readFileSync as readFileSync2, existsSync as existsSync4 } from "node:fs";
+import { readFileSync as readFileSync2, existsSync as existsSync5 } from "node:fs";
 import { createHash as createHash3 } from "node:crypto";
 import os5 from "node:os";
 import path5 from "node:path";
@@ -1116,8 +1116,9 @@ async function readSourceVersion(worktree) {
 import { createHash as createHash2 } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { spawn as spawn2 } from "node:child_process";
+import { existsSync as existsSync3 } from "node:fs";
 import { copyFile, link, mkdir as mkdir3, mkdtemp, readFile as readFile4, readdir as readdir2, rm as rm3, stat as stat3, writeFile as writeFile3 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path4 from "node:path";
 var DEFAULT_APP_ROOT = {
   linux: "/opt/dsh-mesh",
@@ -1187,6 +1188,12 @@ fs.cpSync(pluginDir, target, { recursive: true })
 fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\\n')
 console.log('profile-wire: dsh loads @local/dsh-mesh from ' + target)
 `;
+function deployerCredentialsFile() {
+  if (process.env.DSH_DEPLOY_SHARE_ACCOUNT === "0") return null;
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path4.join(homedir(), ".dsh");
+  const file = path4.join(home, ".credentials.yaml");
+  return existsSync3(file) ? file : null;
+}
 function formatBytes(value) {
   const bytes = Number(value);
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -1334,7 +1341,10 @@ async function buildDeployPlan(options) {
     sudo: options.sudo !== false,
     // Named by content, not by release, so a retried deploy of the same package
     // reuses the upload instead of pushing hundreds of megabytes again.
-    remotePackage: os6 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path4.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path4.extname(packagePath)}`
+    remotePackage: os6 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path4.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path4.extname(packagePath)}`,
+    // The deployer's account grants travel with the deploy so a fresh member
+    // needs no QR scan of its own.
+    remoteCredentials: os6 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}.account` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}.account`
   };
 }
 async function probeTarget(options) {
@@ -1464,6 +1474,15 @@ test -x "$NEW/runtime/node/node"
 "$NEW/runtime/node/node" - "$SHARED/home/profiles/web" "$NEW/plugins/dsh-mesh" <<'DSH_MESH_PROFILE_WIRE'
 ${PROFILE_WIRE_SCRIPT}
 DSH_MESH_PROFILE_WIRE
+# The deployer's account grants make this member signed in without a QR scan.
+CREDENTIALS_FILE=${sh(plan.remoteCredentials)}
+if [ -f "$CREDENTIALS_FILE" ]; then
+  if "$NEW/runtime/node/node" "$NEW/shared/credentials-merge.mjs" "$SHARED/home/.credentials.yaml" "$CREDENTIALS_FILE"; then
+    rm -f "$CREDENTIALS_FILE"
+  else
+    echo "could not copy the deployer account sign-in" >&2
+  fi
+fi
 test -f "$NEW/manifest.json"
 
 write_unit() {
@@ -1654,6 +1673,11 @@ $wireScript = Join-Path $env:TEMP 'dsh-mesh-profile-wire.mjs'
 & $node $wireScript (Join-Path $Shared 'home\\profiles\\web') (Join-Path $New 'plugins\\dsh-mesh')
 if ($LASTEXITCODE -ne 0) { throw 'could not wire the dsh-mesh plugin into the DSH profile' }
 Remove-Item $wireScript -Force -ErrorAction SilentlyContinue
+$credentialsFile = '${plan.remoteCredentials}'
+if (Test-Path $credentialsFile) {
+  & $node (Join-Path $New 'shared\\credentials-merge.mjs') (Join-Path $Shared 'home\\.credentials.yaml') $credentialsFile
+  if ($LASTEXITCODE -eq 0) { Remove-Item $credentialsFile -Force -ErrorAction SilentlyContinue } else { Write-Warning 'could not copy the deployer account sign-in' }
+}
 ${serviceLines}
 Write-Output "prepared $Release at $New"
 `;
@@ -2197,6 +2221,17 @@ var DeployManager = class {
         };
         await mark("upload", "succeeded", `${formatBytes(plan.package.bytes)} \xB7 ${uploadSeconds.toFixed(1)}s \xB7 ${formatBytes(plan.package.bytes / uploadSeconds)}/s`);
       }
+      const credentialsFile = deployerCredentialsFile();
+      if (credentialsFile !== null) {
+        try {
+          await runner.upload(credentialsFile, plan.remoteCredentials);
+          await log("shared the deployer's account sign-in");
+        } catch (error) {
+          await log(`account sign-in was not shared: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else {
+        await log("no deployer account to share (DSH_HOME/.credentials.yaml is missing)");
+      }
       state.phase = "prepare";
       await mark("prepare", "running");
       await log("prepare: extract, shared dirs, service definitions (no switch)");
@@ -2389,7 +2424,7 @@ var DeployManager = class {
 
 // code/shared/system-info.mjs
 import { execFile } from "node:child_process";
-import { existsSync as existsSync3, readFileSync, statfsSync } from "node:fs";
+import { existsSync as existsSync4, readFileSync, statfsSync } from "node:fs";
 import os4 from "node:os";
 import { promisify } from "node:util";
 var execFileAsync = promisify(execFile);
@@ -2456,7 +2491,7 @@ var HERE = path5.dirname(fileURLToPath(import.meta.url));
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync4(path5.join(current, "build", "recipes.json")) && existsSync4(path5.join(current, "code", "build"))) {
+    if (existsSync5(path5.join(current, "build", "recipes.json")) && existsSync5(path5.join(current, "code", "build"))) {
       return current;
     }
     const parent = path5.dirname(current);
@@ -2635,7 +2670,7 @@ var MeshService = class {
    * @returns {Promise<string[]>} ids whose outputs were removed.
    */
   async cleanupBuilds(options = {}) {
-    if (!existsSync4(this.jobRoot)) return [];
+    if (!existsSync5(this.jobRoot)) return [];
     const entries = await readdir3(this.jobRoot, { withFileTypes: true });
     const removed = [];
     for (const entry of entries) {
@@ -2766,7 +2801,7 @@ var MeshService = class {
    * @returns {Promise<object[]>} jobs.
    */
   async jobs() {
-    if (!existsSync4(this.jobRoot)) return [];
+    if (!existsSync5(this.jobRoot)) return [];
     const entries = await readdir3(this.jobRoot, { withFileTypes: true });
     const jobs = [];
     for (const entry of entries) {
@@ -2952,7 +2987,7 @@ var MeshService = class {
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
         const digest = createHash3("sha256").update(peer.publicKey).digest("hex");
         const candidate = path5.join(this.home, "wireguard", "ssh", `${digest}.key`);
-        if (existsSync4(candidate)) identityFile = candidate;
+        if (existsSync5(candidate)) identityFile = candidate;
       }
     }
     const system = member.system;
@@ -3249,14 +3284,14 @@ function registerWireGuardApi(ctx) {
 // src/lib/member-tasks.mjs
 import { randomUUID } from "node:crypto";
 import { mkdir as mkdir5, readFile as readFile6, readdir as readdir4, rename as rename3, writeFile as writeFile5 } from "node:fs/promises";
-import { existsSync as existsSync5, readFileSync as readFileSync3 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync3 } from "node:fs";
 import path6 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
 function envFile(file) {
   const values = {};
-  if (!existsSync5(file)) return values;
+  if (!existsSync6(file)) return values;
   for (const raw of readFileSync3(file, "utf8").split(/\r?\n/)) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;
@@ -3920,7 +3955,7 @@ function formatBytes2(value) {
 // src/index.ts
 var inject = ["webServer"];
 function dataDirectory() {
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path7.join(homedir(), ".dsh");
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path7.join(homedir2(), ".dsh");
   return path7.join(home, "mesh");
 }
 async function apply(ctx, config = {}) {

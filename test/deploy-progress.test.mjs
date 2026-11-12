@@ -126,8 +126,9 @@ test('an already uploaded package is reused instead of transferred again', async
     async remoteSize() {
       return bytes
     },
-    async upload() {
-      uploads += 1
+    async upload(_local, remote) {
+      // The account share is a separate, tiny transfer; only the package counts.
+      if (!String(remote).endsWith('.account')) uploads += 1
     },
     async script() {},
   }), path.join(root, 'jobs'))

@@ -1118,7 +1118,9 @@ function Panel({ ctx }: { ctx: any }) {
     const actionColumn: ColumnsType<Member>[number] = {
       title: '操作',
       key: 'action',
-      width: screens.lg === true ? '11%' : 120,
+      // Wide enough for the running-deploy pill (spinner + "正在部署 62%");
+      // a percentage forces the label onto a second line otherwise.
+      width: screens.lg === true ? 160 : 140,
       align: 'right',
       render: (_value, member) => {
         const runningJob = deployJobs.find(job => job.status === 'running'
@@ -1350,7 +1352,10 @@ function Panel({ ctx }: { ctx: any }) {
                 dataSource={memberRows}
                 columns={columns}
                 scroll={{
-                  x: screens.lg === true ? 900 : undefined,
+                  // 820 keeps the last column inside the card at lg; a larger
+                  // minimum made the table wider than its container and clipped
+                  // the running-deploy pill.
+                  x: screens.lg === true ? 820 : undefined,
                   ...(memberRows.length > 8 ? { y: 'max(240px, calc(100vh - 320px))' } : {}),
                 }}
                 pagination={{

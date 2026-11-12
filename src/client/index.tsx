@@ -293,6 +293,9 @@ function conversationStatusColor(status: string | undefined): string {
 }
 
 /** What a conversation is about: its title, else the last answer, else its id. */
+/** How far the list has to be pulled before the drop triggers a refresh. */
+const PULL_THRESHOLD = 56
+
 /** Palette for the member avatars; picked by address so it stays stable. */
 const CHAT_AVATAR_COLORS = ['#5b8ff9', '#61ddaa', '#f6bd16', '#7262fd', '#78d3f8', '#f6903d', '#e8684a']
 
@@ -453,7 +456,11 @@ function MemberConversations({ active }: { active: boolean }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [detail, setDetail] = useState<ChatMessage | null>(null)
+  const [pull, setPull] = useState(0)
+  const [refreshing, setRefreshing] = useState(false)
   const messagesRef = useRef<HTMLDivElement | null>(null)
+  const drag = useRef<{ startY: number } | null>(null)
+  const wheelBudget = useRef(0)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -474,6 +481,74 @@ function MemberConversations({ active }: { active: boolean }) {
     void load()
     return undefined
   }, [active, load])
+
+  const refresh = useCallback(async () => {
+    if (refreshing) return
+    setRefreshing(true)
+    setPull(44)
+    try {
+      await load()
+    } finally {
+      setRefreshing(false)
+      setPull(0)
+    }
+  }, [load, refreshing])
+
+  /** The tab content is the scroller, so a pull only counts at its very top. */
+  const atTop = (node: HTMLElement | null): boolean => node === null || node.scrollTop <= 0
+
+  const scrollParent = (event: React.SyntheticEvent): HTMLElement | null =>
+    (event.currentTarget as HTMLElement).closest<HTMLElement>('.ant-tabs-content-holder')
+
+  // Desktop users do not drag, so a wheel flick upwards while already at the
+  // top pulls too. The budget resets as soon as the list scrolls.
+  const onWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (refreshing) return
+    if (!atTop(scrollParent(event))) {
+      wheelBudget.current = 0
+      setPull(0)
+      return
+    }
+    if (event.deltaY >= 0) {
+      wheelBudget.current = 0
+      setPull(0)
+      return
+    }
+    wheelBudget.current += -event.deltaY
+    const next = Math.min(wheelBudget.current / 3, 80)
+    setPull(next)
+    if (wheelBudget.current >= PULL_THRESHOLD) {
+      wheelBudget.current = 0
+      void refresh()
+    }
+  }
+
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (refreshing) return
+    if (!atTop(scrollParent(event))) return
+    drag.current = { startY: event.clientY }
+  }
+
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const state = drag.current
+    if (state === null) return
+    const dy = event.clientY - state.startY
+    if (dy <= 0) {
+      setPull(0)
+      return
+    }
+    // Dragging down would otherwise select the bubble text instead of pulling.
+    event.preventDefault()
+    window.getSelection()?.removeAllRanges()
+    setPull(Math.min(dy / 2, 80))
+  }
+
+  const endDrag = () => {
+    if (drag.current === null) return
+    drag.current = null
+    if (pull >= PULL_THRESHOLD) void refresh()
+    else setPull(0)
+  }
 
   // Colours follow the DSH theme so the chat matches the surrounding app and
   // keeps working in dark mode; the CSS only owns the layout.
@@ -498,8 +573,6 @@ function MemberConversations({ active }: { active: boolean }) {
   const messages = useMemo(() => groups
     .flatMap(group => group.conversations.flatMap(row => conversationMessages(row, group, selfNumber)))
     .sort((left, right) => left.sortKey.localeCompare(right.sortKey)), [groups, selfNumber])
-  const online = groups.filter(group => group.online).length
-  const busy = groups.reduce((sum, group) => sum + group.conversations.filter(row => row.status === 'running').length, 0)
 
   // A chat opens at the newest message, like every messenger. The tab content
   // itself is the scroller, so bring the sentinel at the end into view.
@@ -508,14 +581,21 @@ function MemberConversations({ active }: { active: boolean }) {
   }, [messages])
 
   return (
-    <div className="dsh-pw-tabbody" style={chatColors}>
-      <div className="chat-toolbar">
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {`群聊 · ${String(groups.length)} 个成员（${String(online)} 在线）· ${String(messages.length)} 条消息${busy > 0 ? ` · ${String(busy)} 个进行中` : ''} · 成员用组网 IP 最后一段，长文本点「详细」`}
-        </Typography.Text>
-        <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => { void load() }}>
-          刷新
-        </Button>
+    <div
+      className={`dsh-pw-tabbody ${pull > 0 ? 'chat-pulling' : ''}`}
+      style={chatColors}
+      onWheel={onWheel}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={endDrag}
+      onPointerLeave={endDrag}
+    >
+      <div className={`chat-pull ${pull > 0 ? 'chat-pull-active' : ''}`} style={{ height: pull }}>
+        {pull > 0 ? (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {refreshing ? '正在刷新…' : pull >= PULL_THRESHOLD ? '松开刷新' : '下拉刷新'}
+          </Typography.Text>
+        ) : null}
       </div>
       {error !== '' ? <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} /> : null}
       {groups.length === 0 && !loading && error === '' ? <Empty description="还没有成员" /> : null}

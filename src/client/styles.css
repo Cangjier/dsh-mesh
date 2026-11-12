@@ -241,19 +241,21 @@
    The colours come from the DSH theme as CSS custom properties set on
    .chat-shell (see MemberConversations), so this file only owns layout and
    falls back to light-mode values when a variable is missing. */
-.chat-toolbar {
-  /* The chat history scrolls with the tab content, so keep the counters and the
-     refresh button in reach instead of letting them scroll away. */
-  position: sticky;
-  top: 0;
-  z-index: 2;
+.chat-pulling {
+  user-select: none;
+  cursor: grabbing;
+}
+
+.chat-pull {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 0;
-  margin-bottom: 4px;
-  background: var(--chat-surface, #fff);
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+  transition: height 120ms ease;
+}
+
+.chat-pull-active {
+  transition: none;
 }
 
 .chat-stream {

@@ -329,78 +329,75 @@ function conversationTitle(row: MemberConversation): string {
 
 interface ChatMessage {
   key: string
-  /** true when the hub sent it, false when the member answered. */
+  /** true when the local member sent it, so it sits on the right. */
   out: boolean
-  /** Inline "@member" / "回复@me" prefix. */
+  /** Avatar label: the last octet of the sender's mesh address. */
+  number: string
+  /** Inline "@3" / "回复@1" prefix. */
   mention: string
-  /** Short label in the avatar square: the member on an answer, "我" on a send. */
-  avatar: string
-  /** Stable colour seed, shared with the member list so both agree. */
-  avatarSeed: string
   text: string
+  /** Displayed clock time. */
   time: string
+  /** ISO instant, kept apart because the displayed form does not sort. */
+  sortKey: string
   status: string
   detailMeta: string
 }
 
-/** One conversation is one exchange: the prompt out, the answer back. */
-function conversationMessages(row: MemberConversation, memberName: string, avatarSeed: string): ChatMessage[] {
+/** The mesh address ends in the number the chat calls a member by. */
+function chatNumber(ip: string | undefined): string {
+  const text = (ip ?? '').trim()
+  const last = text.slice(text.lastIndexOf('.') + 1)
+  return /^\d{1,3}$/.test(last) ? last : ''
+}
+
+/**
+ * One conversation is one exchange: the initiator's prompt and the answer the
+ * member's interop service produced. Both are addressed by number, so the whole
+ * mesh reads as a single group chat instead of a per-member inbox.
+ */
+function conversationMessages(
+  row: MemberConversation,
+  group: ConversationGroup,
+  selfNumber: string,
+): ChatMessage[] {
   const status = row.status ?? ''
+  const memberNumber = chatNumber(group.ip) === '' ? group.ip : chatNumber(group.ip)
+  const initiatorNumber = chatNumber(row.initiator?.ip) === '' ? selfNumber : chatNumber(row.initiator?.ip)
   const meta = [row.id.slice(0, 8), status, row.turns === undefined ? '' : `${String(row.turns)} 轮`]
     .filter(part => part !== '')
     .join(' · ')
-  const messages: ChatMessage[] = [
-    {
-      key: `${row.id}-out`,
-      out: true,
-      mention: `@${memberName}`,
-      avatar: '我',
-      avatarSeed: 'self',
-      text: conversationTitle(row),
-      time: chatTime(row.createdAt),
-      status,
-      detailMeta: meta,
-    },
-  ]
-  const answer = (row.lastText ?? '').trim()
-  if (answer !== '') {
-    messages.push({
-      key: `${row.id}-in`,
-      out: false,
-      mention: '回复@我',
-      avatar: memberName.slice(0, 1),
-      avatarSeed,
-      text: answer,
-      time: chatTime(row.updatedAt ?? row.createdAt),
-      status,
-      detailMeta: meta,
-    })
-  } else if (status === 'running') {
-    messages.push({
-      key: `${row.id}-pending`,
-      out: false,
-      mention: '回复@我',
-      avatar: memberName.slice(0, 1),
-      avatarSeed,
-      text: '正在处理…',
-      time: chatTime(row.updatedAt),
-      status,
-      detailMeta: meta,
-    })
-  } else if (row.error !== null && row.error !== undefined && String(row.error) !== '') {
-    messages.push({
-      key: `${row.id}-error`,
-      out: false,
-      mention: '回复@我',
-      avatar: memberName.slice(0, 1),
-      avatarSeed,
-      text: String(row.error),
-      time: chatTime(row.updatedAt),
-      status,
-      detailMeta: meta,
-    })
+  const sentAt = chatTime(row.createdAt)
+  const answeredAt = chatTime(row.updatedAt ?? row.createdAt)
+  const sent: ChatMessage = {
+    key: `${row.id}-out`,
+    out: initiatorNumber === selfNumber,
+    number: initiatorNumber,
+    mention: `@${memberNumber}`,
+    text: conversationTitle(row),
+    time: sentAt,
+    sortKey: String(row.createdAt ?? ''),
+    status,
+    detailMeta: meta,
   }
-  return messages
+  const answer = (row.lastText ?? '').trim()
+  const reply = (text: string): ChatMessage => ({
+    key: `${row.id}-in`,
+    out: false,
+    number: memberNumber,
+    mention: `回复@${initiatorNumber}`,
+    text,
+    time: answeredAt,
+    sortKey: String(row.updatedAt ?? row.createdAt ?? ''),
+    status,
+    detailMeta: meta,
+  })
+  if (answer !== '') return [sent, reply(answer)]
+  if (status === 'running') return [sent, reply('正在处理…')]
+  if (row.error !== null && row.error !== undefined && String(row.error) !== '') {
+    return [sent, reply(String(row.error))]
+  }
+  return [sent]
 }
 
 function ChatBubble({ message, onDetail }: {
@@ -411,23 +408,23 @@ function ChatBubble({ message, onDetail }: {
   const truncatable = chatNeedsDetail(message.text)
   const pending = message.status === 'running' && message.out === false && message.text === '正在处理…'
   return (
-    <div className={`${'chat-row'} ${message.out ? 'chat-row-out' : ''}`}>
+    <div className={`chat-row ${message.out ? 'chat-row-out' : ''}`}>
       <div
-        className={'chat-avatar'}
-        style={{ background: message.out ? 'var(--chat-avatar-bg)' : chatAvatarColor(message.avatarSeed) }}
+        className="chat-avatar"
+        style={{ background: message.out ? 'var(--chat-avatar-bg)' : chatAvatarColor(message.number) }}
         aria-hidden
       >
-        {message.avatar}
+        {message.number}
       </div>
-      <div className={'chat-body'}>
-        <div className={`${'chat-bubble'} ${message.out ? 'chat-bubble-out' : 'chat-bubble-in'}`}>
-          <span className={'chat-mention'}>{message.mention}</span>
-          <span className={`${'chat-text'} ${truncatable && !expanded ? 'chat-text-clamped' : ''}`}>
+      <div className="chat-body">
+        <div className={`chat-bubble ${message.out ? 'chat-bubble-out' : 'chat-bubble-in'}`}>
+          <span className="chat-mention">{message.mention}</span>
+          <span className={`chat-text ${truncatable && !expanded ? 'chat-text-clamped' : ''}`}>
             {message.text}
           </span>
           {pending ? <Spin size="small" style={{ marginLeft: 8 }} /> : null}
         </div>
-        <div className={`${'chat-foot'} ${message.out ? 'chat-foot-out' : ''}`}>
+        <div className={`chat-foot ${message.out ? 'chat-foot-out' : ''}`}>
           {truncatable && !expanded ? (
             <Button type="link" size="small" style={{ height: 'auto', padding: 0 }} onClick={() => setExpanded(true)}>
               详细
@@ -446,17 +443,17 @@ function ChatBubble({ message, onDetail }: {
 }
 
 /**
- * Conversations each member's interop service controls, laid out as a chat: the
- * member list on the left, one bubble per exchange on the right. A message
- * carries the "@member" it was sent to (or "回复@me" when it is the answer), so
- * the transcript reads like a WeChat thread instead of a table.
+ * Every conversation in the mesh, merged into one group chat. Members are just
+ * their mesh number (the last octet of 10.66.66.x), the local member sits on the
+ * right, and each message says whom it is addressed to: "@3 …" out, "回复@1 …"
+ * back.
  */
 function MemberConversations({ active }: { active: boolean }) {
   const [snapshot, setSnapshot] = useState<ConversationSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [selectedId, setSelectedId] = useState('')
   const [detail, setDetail] = useState<ChatMessage | null>(null)
+  const messagesRef = useRef<HTMLDivElement | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -496,107 +493,57 @@ function MemberConversations({ active }: { active: boolean }) {
   } as React.CSSProperties
 
   const groups: ConversationGroup[] = snapshot?.groups ?? []
-  const selfName = groups.find(group => group.self)?.name ?? '我'
-  const chats = useMemo(() => [...groups].sort((left, right) => {
-    if (left.conversations.length !== right.conversations.length) {
-      return right.conversations.length - left.conversations.length
-    }
-    return left.name.localeCompare(right.name)
-  }), [groups])
-  const selected = chats.find(group => group.id === selectedId) ?? chats[0]
-  const messagesRef = useRef<HTMLDivElement | null>(null)
-  const messages = useMemo(() => {
-    if (selected === undefined) return []
-    return [...selected.conversations]
-      .sort((left, right) => String(left.createdAt ?? '').localeCompare(String(right.createdAt ?? '')))
-      .flatMap(row => conversationMessages(row, selected.name, selected.ip))
-  }, [selected, selfName])
+  const selfNumber = chatNumber(groups.find(group => group.self)?.ip) || '1'
+  const messages = useMemo(() => groups
+    .flatMap(group => group.conversations.flatMap(row => conversationMessages(row, group, selfNumber)))
+    .sort((left, right) => left.sortKey.localeCompare(right.sortKey)), [groups, selfNumber])
+  const online = groups.filter(group => group.online).length
+  const busy = groups.reduce((sum, group) => sum + group.conversations.filter(row => row.status === 'running').length, 0)
+
   // A chat opens at the newest message, like every messenger.
   useEffect(() => {
     const node = messagesRef.current
     if (node !== null) node.scrollTop = node.scrollHeight
   }, [messages])
-  const total = groups.reduce((sum, group) => sum + group.conversations.length, 0)
-  const busy = groups.reduce((sum, group) => sum + group.conversations.filter(row => row.status === 'running').length, 0)
 
   return (
     <div className="dsh-pw-tabbody">
       <div className="chat-toolbar">
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {`${String(total)} 个对话${busy > 0 ? ` · ${String(busy)} 个进行中` : ''}`}
+          {`群聊 · ${String(groups.length)} 个成员（${String(online)} 在线）· ${String(messages.length)} 条消息${busy > 0 ? ` · ${String(busy)} 个进行中` : ''}`}
         </Typography.Text>
         <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => { void load() }}>
           刷新
         </Button>
       </div>
       {error !== '' ? <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} /> : null}
-      {chats.length === 0 && !loading && error === '' ? <Empty description="还没有成员" /> : null}
-      {chats.length > 0 ? (
-        <div className={'chat-shell'} style={chatColors}>
-          <div className={'chat-list'}>
-            {chats.map(group => {
-              const last = [...group.conversations].sort((left, right) => String(left.updatedAt ?? '').localeCompare(String(right.updatedAt ?? ''))).at(-1)
-              const preview = last === undefined ? '还没有对话' : (last.lastText ?? conversationTitle(last)).replace(/\s+/gu, ' ')
-              return (
-                <div
-                  key={group.id}
-                  className={`chat-list-item ${group.id === selected?.id ? 'chat-list-item-active' : ''}`}
-                  onClick={() => setSelectedId(group.id)}
-                >
-                  <div className={'chat-avatar'} style={{ background: chatAvatarColor(group.ip) }}>
-                    {group.name.slice(0, 1)}
-                  </div>
-                  <div className={'chat-list-meta'}>
-                    <div className={'chat-list-name'}>
-                      <Typography.Text ellipsis style={{ maxWidth: 130 }}>{group.name}</Typography.Text>
-                    </div>
-                    <div className={'chat-list-preview'}>{preview}</div>
-                  </div>
-                  <div className={'chat-list-side'}>
-                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                      {chatTime(last?.updatedAt ?? last?.createdAt)}
-                    </Typography.Text>
-                    {group.conversations.length > 0 ? (
-                      <span className={'chat-count'}>{group.conversations.length}</span>
-                    ) : null}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-          <div className={'chat-pane'}>
-            {selected === undefined ? null : (
-              <>
-                <div className={'chat-pane-head'}>
-                  <Space size={8}>
-                    <Typography.Text strong>{selected.name}</Typography.Text>
-                    <Typography.Text type="secondary">{selected.ip}</Typography.Text>
-                    {selected.self ? <Tag color="blue">本机</Tag> : null}
-                    {selected.online ? null : <Tag>离线</Tag>}
-                    {selected.dsh ? null : <Tag color="orange">无交互服务</Tag>}
-                  </Space>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    {`${String(selected.conversations.length)} 条对话`}
-                  </Typography.Text>
-                </div>
-                <div className={'chat-messages'} ref={messagesRef}>
-                  {selected.error !== null && selected.error !== undefined ? (
-                    <Alert type="warning" showIcon message={`交互服务不可用：${selected.error}`} />
-                  ) : null}
-                  {messages.length === 0 && (selected.error === null || selected.error === undefined) ? (
-                    <Empty description="这个成员还没有通过交互服务创建的对话" />
-                  ) : null}
-                  {messages.map(entry => (
-                    <ChatBubble key={entry.key} message={entry} onDetail={setDetail} />
-                  ))}
-                </div>
-              </>
-            )}
+      {groups.length === 0 && !loading && error === '' ? <Empty description="还没有成员" /> : null}
+      {groups.length > 0 ? (
+        <div className="chat-shell" style={chatColors}>
+          <div className="chat-pane">
+            <div className="chat-pane-head">
+              <Space size={8}>
+                <Typography.Text strong>群聊</Typography.Text>
+                <Typography.Text type="secondary">{`${String(groups.length)} 个成员`}</Typography.Text>
+                {groups.filter(group => group.dsh === false).length > 0 ? (
+                  <Tag color="orange">{`${String(groups.filter(group => group.dsh === false).length)} 个无交互服务`}</Tag>
+                ) : null}
+              </Space>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {`本机 ${selfNumber}`}
+              </Typography.Text>
+            </div>
+            <div className="chat-messages" ref={messagesRef}>
+              {messages.length === 0 ? <Empty description="还没有对话" /> : null}
+              {messages.map(entry => (
+                <ChatBubble key={entry.key} message={entry} onDetail={setDetail} />
+              ))}
+            </div>
           </div>
         </div>
       ) : null}
       <Typography.Paragraph type="secondary" style={{ marginTop: 10, marginBottom: 0, fontSize: 12 }}>
-        消息来自各成员的交互服务（8765），点「刷新」拉取最新；内容较长时截断显示，点「详细」看全文。
+        成员用组网 IP 的最后一段表示；点「刷新」拉取最新，内容较长时截断显示，点「详细」看全文。
       </Typography.Paragraph>
       <Modal
         open={detail !== null}
@@ -610,7 +557,7 @@ function MemberConversations({ active }: { active: boolean }) {
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               {[detail.time, detail.detailMeta].filter(part => part !== '').join(' · ')}
             </Typography.Text>
-            <pre className={'chat-detail-text'}>{detail.text}</pre>
+            <pre className="chat-detail-text">{detail.text}</pre>
           </Space>
         )}
       </Modal>

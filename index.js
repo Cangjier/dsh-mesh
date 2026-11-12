@@ -1477,8 +1477,10 @@ DSH_MESH_PROFILE_WIRE
 # The deployer's account grants make this member signed in without a QR scan.
 CREDENTIALS_FILE=${sh(plan.remoteCredentials)}
 if [ -f "$CREDENTIALS_FILE" ]; then
-  if "$NEW/runtime/node/node" "$NEW/shared/credentials-merge.mjs" "$SHARED/home/.credentials.yaml" "$CREDENTIALS_FILE"; then
-    rm -f "$CREDENTIALS_FILE"
+  MERGE_HELPER="$NEW/shared/credentials-merge.mjs"
+  if [ -f "$CREDENTIALS_FILE.mjs" ]; then MERGE_HELPER="$CREDENTIALS_FILE.mjs"; fi
+  if "$NEW/runtime/node/node" "$MERGE_HELPER" "$SHARED/home/.credentials.yaml" "$CREDENTIALS_FILE"; then
+    rm -f "$CREDENTIALS_FILE" "$CREDENTIALS_FILE.mjs"
   else
     echo "could not copy the deployer account sign-in" >&2
   fi
@@ -1675,8 +1677,10 @@ if ($LASTEXITCODE -ne 0) { throw 'could not wire the dsh-mesh plugin into the DS
 Remove-Item $wireScript -Force -ErrorAction SilentlyContinue
 $credentialsFile = '${plan.remoteCredentials}'
 if (Test-Path $credentialsFile) {
-  & $node (Join-Path $New 'shared\\credentials-merge.mjs') (Join-Path $Shared 'home\\.credentials.yaml') $credentialsFile
-  if ($LASTEXITCODE -eq 0) { Remove-Item $credentialsFile -Force -ErrorAction SilentlyContinue } else { Write-Warning 'could not copy the deployer account sign-in' }
+  $mergeHelper = Join-Path $New 'shared\\credentials-merge.mjs'
+  if (Test-Path ($credentialsFile + '.mjs')) { $mergeHelper = $credentialsFile + '.mjs' }
+  & $node $mergeHelper (Join-Path $Shared 'home\\.credentials.yaml') $credentialsFile
+  if ($LASTEXITCODE -eq 0) { Remove-Item $credentialsFile, ($credentialsFile + '.mjs') -Force -ErrorAction SilentlyContinue } else { Write-Warning 'could not copy the deployer account sign-in' }
 }
 ${serviceLines}
 Write-Output "prepared $Release at $New"
@@ -2225,6 +2229,8 @@ var DeployManager = class {
       if (credentialsFile !== null) {
         try {
           await runner.upload(credentialsFile, plan.remoteCredentials);
+          const helperFile = path4.join(this.repositoryRoot, "code", "shared", "credentials-merge.mjs");
+          if (existsSync3(helperFile)) await runner.upload(helperFile, `${plan.remoteCredentials}.mjs`);
           await log("shared the deployer's account sign-in");
         } catch (error) {
           await log(`account sign-in was not shared: ${error instanceof Error ? error.message : String(error)}`);

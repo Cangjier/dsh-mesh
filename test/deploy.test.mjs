@@ -109,6 +109,44 @@ test('Linux prepare extracts and prepares but never restarts a service', async (
   }
 })
 
+test('a first deploy seeds gate.env instead of refusing to run', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
+  try {
+    const packagePath = path.join(dir, 'pkg.tar.gz')
+    await writeFile(packagePath, 'fake')
+    const plan = await buildDeployPlan({
+      host: 'example', os: 'linux', package: packagePath, repositoryRoot: dir,
+      release: 'first1', gatePassword: 'pw-12345678', gatePort: '8080',
+      services: [{ name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' }],
+    })
+    const script = buildLinuxPrepareScript(plan)
+    assert.doesNotMatch(script, /install this member once/)
+    assert.match(script, /seeded \$ENV_FILE/)
+    assert.match(script, /'DSH_GATE_PORT=%s\\n' '8080'/)
+    assert.match(script, /'DSH_GATE_PASSWORD=%s\\n' 'pw-12345678'/)
+    assert.match(script, /chmod 600 "\$ENV_FILE"/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('network tuning can be switched off for a member that tunes itself', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
+  try {
+    const packagePath = path.join(dir, 'pkg.tar.gz')
+    await writeFile(packagePath, 'fake')
+    const plan = await buildDeployPlan({
+      host: 'example', os: 'linux', package: packagePath, repositoryRoot: dir,
+      release: 'notune', tuneNetwork: false,
+      services: [{ name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' }],
+    })
+    assert.equal(plan.tuneNetwork, false)
+    assert.doesNotMatch(buildLinuxPrepareScript(plan), /99-dsh-mesh-net/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('deploy keeps a per-user install under that user and chowns it', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
   try {

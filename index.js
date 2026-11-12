@@ -1473,9 +1473,22 @@ done
 ${chown}
 ENV_FILE="$SHARED/config/gate.env"
 if [ ! -f "$ENV_FILE" ]; then
-  echo "missing $ENV_FILE; install this member once before the first SSH deploy" >&2
-  exit 1
+  # A member that was never installed has no shared config yet. The deploy
+  # already carries the package, the units and the password, so seed the same
+  # fields install.sh writes instead of refusing the first deploy.
+  mkdir -p "$SHARED/config" "$SHARED/home" "$SHARED/workspace"
+  cat > "$ENV_FILE" <<'DSH_MESH_ENV'
+# dsh-mesh\uFF1A\u7531\u9996\u6B21 SSH \u90E8\u7F72\u751F\u6210\u7684\u7F51\u5173\u914D\u7F6E\uFF08\u4E0E install.sh \u7684\u6A21\u677F\u7B49\u4EF7\uFF09
+DSH_GATE_BIND=::
+DSH_GATE_COOKIE_DAYS=30
+DSH_WEB_PORT=31280
+DSH_MESH_ENV
+  printf 'DSH_GATE_PORT=%s\\n' ${sh(plan.gatePort)} >> "$ENV_FILE"
+  printf 'DSH_GATE_PASSWORD=%s\\n' ${sh(plan.gatePassword || "ChangeMe-Please-2026")} >> "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  echo "seeded $ENV_FILE for a first deploy"
 fi
+${plan.serviceUser === void 0 || plan.serviceUser === "root" ? "" : `chown ${sh(`${plan.serviceUser}:`)} "$ENV_FILE" 2>/dev/null || true`}
 sed -i "s|^DSH_HOME=.*|DSH_HOME=$SHARED/home|" "$ENV_FILE"
 sed -i "s|^DSH_WORKDIR=.*|DSH_WORKDIR=$SHARED/workspace|" "$ENV_FILE"
 grep -q '^DSH_HOME=' "$ENV_FILE" || echo "DSH_HOME=$SHARED/home" >> "$ENV_FILE"

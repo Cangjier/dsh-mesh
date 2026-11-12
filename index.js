@@ -5,7 +5,7 @@ import path8 from "node:path";
 // src/lib/service.mjs
 import { mkdir as mkdir5, readFile as readFile6, readdir as readdir4, rm as rm5, stat as stat5, writeFile as writeFile5 } from "node:fs/promises";
 import { readFileSync as readFileSync3, existsSync as existsSync6 } from "node:fs";
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 import os5 from "node:os";
 import path6 from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2645,9 +2645,31 @@ var DeployManager = class {
   }
 };
 
+// code/shared/cluster.mjs
+import { createHash as createHash3, createHmac, randomBytes as randomBytes2, timingSafeEqual } from "node:crypto";
+function deriveClusterSecret(password) {
+  if (typeof password !== "string" || password === "") return "";
+  return createHash3("sha256").update("dsh-mesh/cluster/v1\0").update(password, "utf8").digest("hex");
+}
+var CLUSTER_HEADER = "x-dsh-cluster";
+var VERSION = "v1";
+function signClusterRequest(secret, request) {
+  if (typeof secret !== "string" || secret.length === 0) {
+    throw new Error("cluster secret is not configured");
+  }
+  const timestamp = request.timestamp ?? Date.now();
+  const nonce = request.nonce ?? randomBytes2(16).toString("hex");
+  const payload = payloadOf(request.method, request.path, timestamp, nonce);
+  const signature = createHmac("sha256", secret).update(payload).digest("base64url");
+  return `${VERSION}.${String(timestamp)}.${nonce}.${signature}`;
+}
+function payloadOf(method, path9, timestamp, nonce) {
+  return [VERSION, String(method).toUpperCase(), path9, String(timestamp), nonce].join("\n");
+}
+
 // code/build/repack.mjs
 import { execFile } from "node:child_process";
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 import { cp as cp2, mkdir as mkdir4, mkdtemp as mkdtemp2, readFile as readFile5, readdir as readdir3, rm as rm4, stat as stat4, writeFile as writeFile4 } from "node:fs/promises";
 import { createReadStream as createReadStream2, existsSync as existsSync4 } from "node:fs";
 import path5 from "node:path";
@@ -2711,7 +2733,7 @@ async function repackDirectory(packageDir, repositoryRoot) {
   return { packageDir, version: manifest.version, target: manifest.target, files: manifest.files, clientBytes };
 }
 async function sha256File2(file) {
-  const hash = createHash3("sha256");
+  const hash = createHash4("sha256");
   await new Promise((resolve, reject) => {
     const stream = createReadStream2(file);
     stream.on("data", (chunk) => hash.update(chunk));
@@ -2946,6 +2968,41 @@ var MeshService = class {
    * this one keeps the panel useful when DSH is opened directly.
    * @returns {Promise<object>} discovery snapshot.
    */
+  /**
+   * Ask a Windows member to move its stack into the interactive session.
+   *
+   * The request travels as a cluster call, the same signed channel a member
+   * switch uses, so no new secret is introduced. The member's gate writes the
+   * supervisor command file and answers with the supervisor's status.
+   * @param {string} target member id, name or address.
+   * @returns {Promise<{ok: boolean, member: object, status: object|null}>} result.
+   */
+  async promoteSession(target) {
+    const wanted = String(target ?? "").trim();
+    if (wanted === "") throw new Error("member is required");
+    const snapshot = await this.members();
+    const all = [snapshot.local, ...Array.isArray(snapshot.members) ? snapshot.members : []].filter(Boolean);
+    const member = all.find((candidate) => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted);
+    if (member === void 0) throw new Error(`member not found: ${wanted}`);
+    const password = process.env.DSH_GATE_PASSWORD ?? "";
+    if (password === "") throw new Error("DSH_GATE_PASSWORD is not set; cannot sign the cluster request");
+    let host = String(member.ip ?? "");
+    if (host === "") throw new Error(`member ${member.id} has no VPN address`);
+    if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
+    const path9 = "/__gate/cluster/__gate/session/promote";
+    const response = await fetch(`http://${host}/__gate/session/promote`, {
+      method: "POST",
+      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path9 }) }
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`member ${member.name} refused the request: HTTP ${String(response.status)} ${text.slice(0, 120)}`);
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+    }
+    return { ok: true, member: { id: member.id, name: member.name, ip: member.ip }, status: parsed?.status ?? null };
+  }
   /**
    * Conversations controlled by every member's interop service, grouped by
    * member. The task service owns the interop client and its token.
@@ -3350,7 +3407,7 @@ var MeshService = class {
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
-        const digest = createHash4("sha256").update(peer.publicKey).digest("hex");
+        const digest = createHash5("sha256").update(peer.publicKey).digest("hex");
         const candidate = path6.join(this.home, "wireguard", "ssh", `${digest}.key`);
         if (existsSync6(candidate)) identityFile = candidate;
       }
@@ -3575,6 +3632,11 @@ function registerApi(ctx, service) {
             package: typeof body.package === "string" ? body.package : void 0
           });
           writeJson(response, 202, result);
+          return;
+        }
+        if (path9 === "/session/promote") {
+          const body = await readJson(request);
+          writeJson(response, 200, await service.promoteSession(String(body.member ?? "")));
           return;
         }
         if (path9 === "/member-tags") {

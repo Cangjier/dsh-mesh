@@ -95,6 +95,16 @@ namespace DshMesh
             if (stopping) return;
             try
             {
+                // A promote request from the panel asks for one explicit
+                // re-evaluation instead of waiting for the next tick.
+                string command = Path.Combine(root, "data", "session-command.json");
+                if (File.Exists(command))
+                {
+                    string body = "";
+                    try { body = File.ReadAllText(command); } catch { }
+                    try { File.Delete(command); } catch { }
+                    Log("session command: " + body.Trim());
+                }
                 string decision = QueryMode();
                 string nextMode = decision.StartsWith("interactive", StringComparison.Ordinal) ? "interactive" : "session0";
                 if (nextMode != mode)

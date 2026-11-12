@@ -1334,6 +1334,27 @@ function redirectPlainHttp(req, res, url, pathname) {
   return true
 }
 
+/** Ask the Windows supervisor to re-evaluate where the stack runs. */
+async function handleSessionPromote(res) {
+  const root = process.env.DSH_PACKAGE_ROOT && process.env.DSH_PACKAGE_ROOT.trim() !== ''
+    ? process.env.DSH_PACKAGE_ROOT.trim()
+    : process.cwd()
+  const dataDir = path.join(root, 'data')
+  const commandFile = path.join(dataDir, 'session-command.json')
+  const statusFile = path.join(dataDir, 'session-status.json')
+  try { mkdirSync(dataDir, { recursive: true }) } catch { }
+  await writeFile(commandFile, `${JSON.stringify({ action: 'promote', at: new Date().toISOString() })}\n`, 'utf8').catch(() => {})
+  // The supervisor watches that file once per tick; give it one tick to react.
+  await new Promise(resolve => setTimeout(resolve, 2500))
+  let status = null
+  try {
+    status = JSON.parse(await readFile(statusFile, 'utf8'))
+  } catch { }
+  const body = JSON.stringify({ ok: true, status })
+  res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+  res.end(body)
+}
+
 async function dispatch(req, res) {
   const url = new URL(req.url ?? '/', 'http://gate.invalid')
   const pathname = url.pathname
@@ -1362,6 +1383,15 @@ async function dispatch(req, res) {
     }
     if (pathname === '/__gate/logout') {
       handleLogout(req, res)
+      return
+    }
+    if (pathname === '/__gate/session/promote' && req.method === 'POST') {
+      // Only a peer gate may ask for this: a browser can reach the same path.
+      if (req.__dshCluster !== true) {
+        sendText(res, 403, 'cluster only\n')
+        return
+      }
+      await handleSessionPromote(res)
       return
     }
     if (pathname === '/__gate/health') {

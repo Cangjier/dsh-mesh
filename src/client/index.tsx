@@ -466,6 +466,8 @@ function Panel({ ctx }: { ctx: any }) {
   const [tags, setTags] = useState<Record<string, string>>({})
   const [tagTarget, setTagTarget] = useState<Member | null>(null)
   const [detailTarget, setDetailTarget] = useState<Member | null>(null)
+
+  const [promoting, setPromoting] = useState('')
   const [tagText, setTagText] = useState('')
   const [tagSaving, setTagSaving] = useState(false)
   const [messageApi, contextHolder] = message.useMessage()
@@ -939,7 +941,33 @@ function Panel({ ctx }: { ctx: any }) {
         open={detailTarget !== null}
         title={detailTarget !== null ? `${detailTarget.name} · 详情` : '成员详情'}
         width={560}
-        footer={<Button onClick={() => setDetailTarget(null)}>关闭</Button>}
+        footer={(
+          <Space>
+            {detailTarget !== null && String(detailTarget.system?.platform ?? '').toLowerCase().startsWith('win') ? (
+              <Tooltip title="让这台 Windows 成员的 DSH 在交互会话里运行（沙箱、截屏、扫码都依赖它）。没有交互管理员时会保持原样。">
+                <Button
+                  loading={promoting !== ''}
+                  onClick={() => {
+                    const target = detailTarget
+                    if (target === null) return
+                    setPromoting(target.id)
+                    api.promoteSession(target.id)
+                      .then(result => {
+                        const mode = typeof result.status?.mode === 'string' ? result.status.mode : 'unknown'
+                        const detail = typeof result.status?.detail === 'string' ? result.status.detail : ''
+                        void messageApi.success(`已请求提升：${mode}${detail !== '' ? `（${detail}）` : ''}`)
+                      })
+                      .catch((cause: unknown) => { void messageApi.error(errorText(cause)) })
+                      .finally(() => setPromoting(''))
+                  }}
+                >
+                  提升到交互会话
+                </Button>
+              </Tooltip>
+            ) : null}
+            <Button onClick={() => setDetailTarget(null)}>关闭</Button>
+          </Space>
+        )}
         onCancel={() => setDetailTarget(null)}
         destroyOnHidden
       >

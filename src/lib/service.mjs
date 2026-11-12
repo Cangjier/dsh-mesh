@@ -28,6 +28,7 @@ import {
 } from '../../code/build/job.mjs'
 import { DEFAULT_REF, DEFAULT_SOURCE } from '../../code/build/engine.mjs'
 import { DeployManager } from '../../code/deploy/engine.mjs'
+import { CLUSTER_HEADER, deriveClusterSecret, signClusterRequest } from '../../code/shared/cluster.mjs'
 import { repackArchive } from '../../code/build/repack.mjs'
 import { quickSystemInfo } from '../../code/shared/system-info.mjs'
 
@@ -161,6 +162,39 @@ export class MeshService {
    * this one keeps the panel useful when DSH is opened directly.
    * @returns {Promise<object>} discovery snapshot.
    */
+  /**
+   * Ask a Windows member to move its stack into the interactive session.
+   *
+   * The request travels as a cluster call, the same signed channel a member
+   * switch uses, so no new secret is introduced. The member's gate writes the
+   * supervisor command file and answers with the supervisor's status.
+   * @param {string} target member id, name or address.
+   * @returns {Promise<{ok: boolean, member: object, status: object|null}>} result.
+   */
+  async promoteSession(target) {
+    const wanted = String(target ?? '').trim()
+    if (wanted === '') throw new Error('member is required')
+    const snapshot = await this.members()
+    const all = [snapshot.local, ...(Array.isArray(snapshot.members) ? snapshot.members : [])].filter(Boolean)
+    const member = all.find(candidate => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted)
+    if (member === undefined) throw new Error(`member not found: ${wanted}`)
+    const password = process.env.DSH_GATE_PASSWORD ?? ''
+    if (password === '') throw new Error('DSH_GATE_PASSWORD is not set; cannot sign the cluster request')
+    let host = String(member.ip ?? '')
+    if (host === '') throw new Error(`member ${member.id} has no VPN address`)
+    if (host.includes(':') && !host.startsWith('[')) host = `[${host}]`
+    const path = '/__gate/cluster/__gate/session/promote'
+    const response = await fetch(`http://${host}/__gate/session/promote`, {
+      method: 'POST',
+      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: 'POST', path }) },
+    })
+    const text = await response.text()
+    if (!response.ok) throw new Error(`member ${member.name} refused the request: HTTP ${String(response.status)} ${text.slice(0, 120)}`)
+    let parsed = null
+    try { parsed = JSON.parse(text) } catch { }
+    return { ok: true, member: { id: member.id, name: member.name, ip: member.ip }, status: parsed?.status ?? null }
+  }
+
   /**
    * Conversations controlled by every member's interop service, grouped by
    * member. The task service owns the interop client and its token.

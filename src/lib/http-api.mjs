@@ -142,6 +142,11 @@ export function registerApi(ctx, service) {
           writeJson(response, 202, result)
           return
         }
+        if (path === '/session/promote') {
+          const body = await readJson(request)
+          writeJson(response, 200, await service.promoteSession(String(body.member ?? '')))
+          return
+        }
         if (path === '/member-tags') {
           const body = await readJson(request)
           writeJson(response, 200, await service.setMemberTag(

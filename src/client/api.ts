@@ -338,6 +338,14 @@ export const api = {
     })
   },
 
+  promoteSession(member: string): Promise<{ ok: boolean; member: { id: string; name: string; ip: string }; status: Record<string, unknown> | null }> {
+    return request('/api/dsh-mesh/session/promote', {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: JSON.stringify({ member }),
+    })
+  },
+
   conversations(): Promise<ConversationSnapshot> {
     return request<ConversationSnapshot>('/api/dsh-mesh/conversations')
   },

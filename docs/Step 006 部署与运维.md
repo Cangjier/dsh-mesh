@@ -105,6 +105,44 @@ sudo systemctl start dsh-web
 
 补丁脚本对新版本失败时会**报错退出**（锚点找不到），不会留下半成品——按 Step 007 重新定位锚点。
 
+## 网络调优（BBR + fq）
+
+成员常常跨洲，实测 `.2`（腾讯云美西）↔ 杭州 hub 是 **148 ms RTT + 3~5% 丢包**。
+这种链路上内核默认的 cubic 会崩到 **0.3 Mbps**，而同一条链路换成 BBR 后是
+**10~16 Mbps**（40 倍），所以调优跟着组网一起做，不需要额外一步。
+
+写入的位置只有一个文件：
+
+```
+/etc/sysctl.d/99-dsh-mesh-net.conf
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+```
+
+三个入口都会写它，都是幂等的，内核没有 `bbr` 模块时自动跳过：
+
+| 入口 | 什么时候跑 |
+|---|---|
+| `code/install.sh` | 服务器首次安装 / 重跑安装脚本时 |
+| SSH 蓝绿部署的 prepare | 每次 `deploy` 部署成员时（root 身份） |
+| WireGuard 面板「SSH 授权」 | 成员手动入网时，粘贴的那一行命令里顺带执行 |
+
+部署时的这一步可以用 `DSH_DEPLOY_NET_TUNE=0` 关掉（比如成员自己已经调过内核参数）。
+
+验证：
+
+```bash
+sysctl -n net.ipv4.tcp_congestion_control   # bbr
+sysctl -n net.core.default_qdisc            # fq
+```
+
+两点注意：
+
+- **Windows 成员不适用**：BBR 是 Linux 内核特性，Windows 侧不做任何改动。
+- **改不了带宽上限**：BBR 治的是「高延迟 + 丢包导致的 TCP 崩溃」。如果对端出口本来
+  就被限速（例如 ECS 固定带宽 5 Mbps），那部分是套餐限制，BBR 不会突破。
+  判断方法：`iperf3 -R -P 1/4/8` 全是同一个数字，且换成 UDP 也送不过去 → 限速。
+
 ## 常见故障速查
 
 | 症状 | 先看哪里 |
@@ -115,3 +153,4 @@ sudo systemctl start dsh-web
 | 登录弹层一直转 | 日志 `account login: …`；多半是内部 RPC 超时 |
 | 扫码后没反应 | 看 `account sign-in: page …` 走到哪一步 |
 | 内存吃满 | `free -m`、`systemctl show dsh-web -p MemoryCurrent` |
+| 跨机器传输只有几百 KB/s | `sysctl -n net.ipv4.tcp_congestion_control` 是不是 `bbr`；不是就重跑安装或部署 |

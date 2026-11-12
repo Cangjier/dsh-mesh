@@ -17,8 +17,18 @@ export function buildSshAuthorizeCommand(user: string, publicKey: string): strin
   if (!/^ssh-ed25519 [A-Za-z0-9+/=]+$/.test(key)) {
     throw new Error('Unexpected SSH public key format.');
   }
-  return `u='${user}'; h=$(awk -F: -v u="$u" '$1==u{print $6; exit}' /etc/passwd); [ -n "$h" ] || { echo "No such user: $u" >&2; exit 1; }; S=""; [ "$(id -u)" -ne 0 ] && S="sudo"; $S sh -c 'mkdir -p "$1/.ssh" && chmod 700 "$1/.ssh" && touch "$1/.ssh/authorized_keys" && { grep -qxF "$2" "$1/.ssh/authorized_keys" || printf "%s\\n" "$2" >> "$1/.ssh/authorized_keys"; } && chown -R "$3" "$1/.ssh" && chmod 600 "$1/.ssh/authorized_keys"' sh "$h" '${key}' '${user}' && echo "SSH key installed for $u"`;
+  return `u='${user}'; h=$(awk -F: -v u="$u" '$1==u{print $6; exit}' /etc/passwd); [ -n "$h" ] || { echo "No such user: $u" >&2; exit 1; }; S=""; [ "$(id -u)" -ne 0 ] && S="sudo"; $S sh -c 'mkdir -p "$1/.ssh" && chmod 700 "$1/.ssh" && touch "$1/.ssh/authorized_keys" && { grep -qxF "$2" "$1/.ssh/authorized_keys" || printf "%s\\n" "$2" >> "$1/.ssh/authorized_keys"; } && chown -R "$3" "$1/.ssh" && chmod 600 "$1/.ssh/authorized_keys"' sh "$h" '${key}' '${user}' && echo "SSH key installed for $u" && { ${NET_TUNE_COMMAND}; true; }`;
 }
+
+/**
+ * Shell snippet that turns on BBR + fq on a Linux peer.
+ *
+ * Mesh peers are often continents apart: 150 ms RTT with a few percent loss is
+ * enough to collapse cubic to a few hundred Kbps, while BBR keeps the same link
+ * above 10 Mbps. The snippet is idempotent, needs root (callers prefix it with
+ * `$S`/sudo), and leaves the host untouched when the kernel has no bbr module.
+ */
+export const NET_TUNE_COMMAND = `S=""; [ "$(id -u)" -ne 0 ] && S="sudo"; $S sh -c 'mkdir -p /etc/sysctl.d; modprobe tcp_bbr 2>/dev/null || true; modprobe sch_fq 2>/dev/null || true; if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then printf "%s\\n" "net.core.default_qdisc=fq" "net.ipv4.tcp_congestion_control=bbr" > /etc/sysctl.d/99-dsh-mesh-net.conf; sysctl --system >/dev/null 2>&1 || true; echo "network tuning: bbr + fq enabled"; else echo "network tuning: bbr unavailable on this kernel, skipped"; fi'`;
 
 /**
  * PowerShell command that installs the server public key on a Windows client.

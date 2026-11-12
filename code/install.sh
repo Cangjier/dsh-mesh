@@ -277,6 +277,25 @@ SYSCTL
   fi
 fi
 
+# ── 网络调优：BBR + fq ──────────────────────────────────────────────────────
+# 成员常常跨洲（比如 150ms RTT、3~5% 丢包），cubic 在这种链路上会崩到几百 Kbps，
+# 实测同一链路 BBR 能到 10 Mbps 以上。只写自己的调优文件，不动别人的 sysctl.d。
+if [ -d /etc/sysctl.d ] && [ "$(id -u)" = "0" ]; then
+  modprobe tcp_bbr >/dev/null 2>&1 || true
+  modprobe sch_fq >/dev/null 2>&1 || true
+  if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    cat > /etc/sysctl.d/99-dsh-mesh-net.conf <<'SYSCTL'
+# dsh-mesh：跨地域成员之间的高延迟/丢包链路使用 BBR 拥塞控制
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+SYSCTL
+    sysctl --system >/dev/null 2>&1 || true
+    say "网络调优已开启：BBR + fq"
+  else
+    warn "内核 $(uname -r) 没有 bbr 模块，跳过网络调优"
+  fi
+fi
+
 # 运行用户拥有数据与工作区
 if [ "$(id -u)" = "0" ] && [ "$RUN_USER" != "root" ]; then
   if ! id -u "$RUN_USER" >/dev/null 2>&1; then

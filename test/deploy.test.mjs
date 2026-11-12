@@ -100,6 +100,10 @@ test('Linux prepare extracts and prepares but never restarts a service', async (
     assert.doesNotMatch(script, /systemctl restart/)
     assert.ok(script.indexOf('dsh-wg-control.service') < script.indexOf('dsh-web-app.service'))
     assert.ok(script.indexOf('dsh-web-app.service') < script.indexOf('dsh-web-gate.service'))
+    // A member that is continents away needs BBR; the block must stay non-fatal.
+    assert.match(script, /99-dsh-mesh-net\.conf/)
+    assert.match(script, /net\.ipv4\.tcp_congestion_control=bbr/)
+    assert.match(script, /sysctl --system >\/dev\/null 2>&1 \|\| true/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

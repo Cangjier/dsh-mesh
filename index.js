@@ -1340,6 +1340,9 @@ async function buildDeployPlan(options) {
     gatePort,
     retention,
     sudo: options.sudo !== false,
+    // BBR + fq on the member: the one step that makes a high-latency, lossy
+    // mesh link usable. Set DSH_DEPLOY_NET_TUNE=0 to leave the host alone.
+    tuneNetwork: options.tuneNetwork !== false && process.env.DSH_DEPLOY_NET_TUNE !== "0",
     // Named by content, not by release, so a retried deploy of the same package
     // reuses the upload instead of pushing hundreds of megabytes again.
     remotePackage: os6 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path4.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path4.extname(packagePath)}`,
@@ -1425,6 +1428,19 @@ function buildLinuxPrepareScript(plan) {
   }).join("\n");
   const chown = plan.serviceUser === void 0 || plan.serviceUser === "root" ? "" : `chown -R ${sh(`${plan.serviceUser}:`)} "$APP_ROOT" 2>/dev/null || true
 `;
+  const netTune = plan.tuneNetwork === false ? "" : `if command -v sysctl >/dev/null 2>&1; then
+  mkdir -p /etc/sysctl.d
+  modprobe tcp_bbr 2>/dev/null || true
+  modprobe sch_fq 2>/dev/null || true
+  if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    printf '%s\\n' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control=bbr' > /etc/sysctl.d/99-dsh-mesh-net.conf
+    sysctl --system >/dev/null 2>&1 || true
+    echo 'network tuning: bbr + fq enabled'
+  else
+    echo 'network tuning: bbr unavailable on this kernel, skipped'
+  fi
+fi
+`;
   return `#!/usr/bin/env bash
 set -euo pipefail
 APP_ROOT=${sh(plan.appRoot)}
@@ -1479,7 +1495,7 @@ if [ ! -x "$NODE_BIN" ]; then NODE_BIN="$NEW/runtime/node/node"; fi
 if [ ! -x "$NODE_BIN" ]; then echo "missing the node binary under $NEW/runtime/node" >&2; exit 1; fi
 chmod +x "$NODE_BIN" 2>/dev/null || true
 "$NODE_BIN" --check "$NEW/gate/server.mjs"
-"$NODE_BIN" - "$SHARED/home/profiles/web" "$NEW/plugins/dsh-mesh" <<'DSH_MESH_PROFILE_WIRE'
+${netTune}"$NODE_BIN" - "$SHARED/home/profiles/web" "$NEW/plugins/dsh-mesh" <<'DSH_MESH_PROFILE_WIRE'
 ${PROFILE_WIRE_SCRIPT}
 DSH_MESH_PROFILE_WIRE
 # The deployer's account grants make this member signed in without a QR scan.

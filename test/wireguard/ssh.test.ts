@@ -11,6 +11,11 @@ test('SSH authorize command installs only the public key for the chosen user', (
   assert.match(command, /authorized_keys/);
   assert.doesNotMatch(command, /PRIVATE KEY/);
   assert.doesNotMatch(command, /dsh-wireguard@host/);
+  // The same paste also turns on BBR + fq; cubic collapses on high-latency links.
+  assert.match(command, /99-dsh-mesh-net\.conf/);
+  assert.match(command, /net\.ipv4\.tcp_congestion_control=bbr/);
+  assert.match(command, /net\.core\.default_qdisc=fq/);
+  assert.match(command, /tcp_available_congestion_control/);
 
   const syntax = spawnSync('sh', ['-n'], { input: command, encoding: 'utf8' });
   assert.equal(syntax.status, 0, syntax.stderr);

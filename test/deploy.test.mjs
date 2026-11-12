@@ -211,6 +211,87 @@ test('network tuning can be switched off for a member that tunes itself', async 
   }
 })
 
+test('a Linux deploy installs the interop service on the VPN address', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
+  try {
+    const packagePath = path.join(dir, 'pkg.tar.gz')
+    await writeFile(packagePath, 'fake')
+    const plan = await buildDeployPlan({
+      host: '10.66.66.9', os: 'linux', package: packagePath, repositoryRoot: dir,
+      release: 'interop1',
+      services: [{ name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' }],
+    })
+    assert.equal(plan.interop.bind, '10.66.66.9')
+    assert.equal(plan.interop.port, 8765)
+    const prepare = buildLinuxPrepareScript(plan)
+    assert.match(prepare, /write_unit dsh-interop\.service "\$APP_ROOT\/current\/start-interop\.sh"/)
+    assert.match(prepare, /DSH_INTEROP_BIND=10\.66\.66\.9/)
+    assert.match(prepare, /DSH_INTEROP_USE_GATE_PASSWORD=1/)
+    assert.match(prepare, /DSH_INTEROP_PROVIDER=deepseek-account/)
+    const activate = buildLinuxActivateScript(plan)
+    assert.match(activate, /systemctl restart dsh-interop\.service 2>\/dev\/null \|\| echo/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a host name is not exposed: interop binds the wildcard address', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
+  try {
+    const packagePath = path.join(dir, 'pkg.tar.gz')
+    await writeFile(packagePath, 'fake')
+    const plan = await buildDeployPlan({
+      host: 'member.example', os: 'linux', package: packagePath, repositoryRoot: dir,
+      release: 'interop2',
+      services: [{ name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' }],
+    })
+    assert.equal(plan.interop.bind, '0.0.0.0')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the interop step can be skipped for a member that runs it itself', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
+  try {
+    const packagePath = path.join(dir, 'pkg.tar.gz')
+    await writeFile(packagePath, 'fake')
+    const plan = await buildDeployPlan({
+      host: '10.66.66.9', os: 'linux', package: packagePath, repositoryRoot: dir,
+      release: 'interop3', interop: false,
+      services: [{ name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' }],
+    })
+    assert.equal(plan.interop, null)
+    assert.doesNotMatch(buildLinuxPrepareScript(plan), /dsh-interop/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a Windows deploy installs the interop service through its script', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
+  try {
+    const packagePath = path.join(dir, 'pkg.zip')
+    await writeFile(packagePath, 'fake')
+    const plan = await buildDeployPlan({
+      host: '10.66.66.7', os: 'windows', package: packagePath, repositoryRoot: dir,
+      release: 'wininterop',
+      services: [
+        { name: 'DSH-Web-App', role: 'dsh', command: 'dsh-web-app-service.exe' },
+        { name: 'DSH-Mesh', role: 'gate', command: 'dsh-mesh-service.exe' },
+      ],
+    })
+    const prepare = buildWindowsPrepareScript(plan)
+    assert.match(prepare, /install-interop-service\.ps1/)
+    assert.match(prepare, /-Bind '10\.66\.66\.7'/u)
+    assert.match(prepare, /-Provider 'deepseek-account'/u)
+    assert.match(prepare, /-Model 'deepseek-flash'/u)
+    assert.match(prepare, /-UseGatePassword/u)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('deploy keeps a per-user install under that user and chowns it', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
   try {

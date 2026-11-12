@@ -22,8 +22,18 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { JsonRpcLineTransport } from '../../app/node_modules/@deepseek-ai/dsh-sdk-protocol/lib/index.js'
-import { collectSystemInfo } from '../shared/system-info.mjs'
-import { conversationRecord, normalizeInitiator, normalizeTitle, titleFromPrompt } from '../shared/conversation-meta.mjs'
+// A built package flattens `code/shared` to `shared/`, while the source tree and
+// the plugin copy keep it next to `code/interop-service`. Resolve both, so the
+// same file runs in every layout.
+async function sharedModule(name) {
+  for (const candidate of [`../shared/${name}`, `../../shared/${name}`]) {
+    const url = new URL(candidate, import.meta.url)
+    if (existsSync(fileURLToPath(url))) return import(url.href)
+  }
+  throw new Error(`missing the shared module ${name}`)
+}
+const { collectSystemInfo } = await sharedModule('system-info.mjs')
+const { conversationRecord, normalizeInitiator, normalizeTitle, titleFromPrompt } = await sharedModule('conversation-meta.mjs')
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..', '..')

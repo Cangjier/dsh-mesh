@@ -5,6 +5,7 @@ param(
   [int]$Port = 8765,
   [string]$Bind = '127.0.0.1',
   [string]$Token = '',
+  [string]$Provider = 'deepseek-official',
   [string]$Model = 'deepseek-flash',
   [switch]$Approve,
   [switch]$UseGatePassword
@@ -35,7 +36,7 @@ $lines = @(
   "DSH_INTEROP_BIND=$Bind",
   "DSH_INTEROP_PORT=$Port",
   "DSH_INTEROP_TOKEN=$Token",
-  'DSH_INTEROP_PROVIDER=deepseek-official',
+  "DSH_INTEROP_PROVIDER=$Provider",
   "DSH_INTEROP_MODEL=$Model",
   "DSH_INTEROP_APPROVE=$(if ($Approve) { '1' } else { '0' })",
   "DSH_INTEROP_USE_GATE_PASSWORD=$(if ($UseGatePassword) { '1' } else { '0' })"

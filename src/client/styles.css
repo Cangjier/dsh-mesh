@@ -241,23 +241,6 @@
    The colours come from the DSH theme as CSS custom properties set on
    .chat-shell (see MemberConversations), so this file only owns layout and
    falls back to light-mode values when a variable is missing. */
-.chat-pulling {
-  user-select: none;
-  cursor: grabbing;
-}
-
-.chat-pull {
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  overflow: hidden;
-  transition: height 120ms ease;
-}
-
-.chat-pull-active {
-  transition: none;
-}
-
 .chat-stream {
   display: flex;
   flex-direction: column;

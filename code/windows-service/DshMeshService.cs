@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.ServiceProcess;
@@ -7,22 +8,36 @@ using System.Threading;
 namespace DshMesh
 {
     /// <summary>
-    /// Windows service wrapper for the dsh-mesh gate.
+    /// Windows service wrapper for the dsh-mesh stack.
     ///
-    /// The service starts start.ps1 (which loads config/gate.env and runs the
-    /// packaged Node gate) and restarts it if it exits. Stopping the service
-    /// kills the whole child tree so port 80 is released. The desktop DSH is a
-    /// different process and is never touched.
+    /// The service runs as LocalSystem. In session 0 the DSH sandbox cannot
+    /// start (no logon SID), screenshots are black and GUI browsers never open,
+    /// so the stack is normally handed to the logged-on administrator through a
+    /// scheduled task with an interactive token. When no interactive
+    /// administrator is available the service falls back to running the stack
+    /// itself in session 0, which keeps the gateway and the conversation
+    /// delegation alive at the cost of the desktop-only features.
+    ///
+    /// The service owns both children in session 0 (gate + interop) and owns
+    /// nothing in interactive mode: the task owns the same two processes, so
+    /// stopping the service stops the task as well.
     /// </summary>
     public sealed class GatewayService : ServiceBase
     {
+        private const string StackTask = "DSH-Mesh-Stack";
+
         private readonly string root;
         private readonly string logPath;
+        private readonly string statusPath;
         private readonly object logLock = new object();
         private readonly object childLock = new object();
-        private Process child;
+        private Process gate;
+        private Process interop;
         private Timer restartTimer;
+        private Timer watchTimer;
         private bool stopping;
+        private string mode = "session0";
+        private string modeDetail = "starting";
 
         public GatewayService()
         {
@@ -32,6 +47,7 @@ namespace DshMesh
             AutoLog = true;
             root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
             logPath = Path.Combine(root, "data", "service.log");
+            statusPath = Path.Combine(root, "data", "session-status.json");
             Directory.CreateDirectory(Path.Combine(root, "data"));
         }
 
@@ -39,22 +55,18 @@ namespace DshMesh
         {
             stopping = false;
             Log("service starting");
-            StartChild();
+            string decision = QueryMode();
+            ApplyMode(decision);
+            watchTimer = new Timer(delegate(object state) { Watch(); }, null, 20000, 20000);
         }
 
         protected override void OnStop()
         {
             stopping = true;
             Log("service stopping");
-            lock (childLock)
-            {
-                if (restartTimer != null)
-                {
-                    restartTimer.Dispose();
-                    restartTimer = null;
-                }
-            }
-            StopChild();
+            DisposeTimer(ref watchTimer);
+            DisposeTimer(ref restartTimer);
+            StopStack();
             base.OnStop();
         }
 
@@ -64,60 +76,283 @@ namespace DshMesh
             base.OnShutdown();
         }
 
-        private void StartChild()
+        private void DisposeTimer(ref Timer timer)
         {
+            Timer current;
             lock (childLock)
             {
-                if (stopping) return;
-                if (child != null && !child.HasExited) return;
-                string powershell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
-                string script = Path.Combine(root, "start.ps1");
-                if (!File.Exists(script))
+                current = timer;
+                timer = null;
+            }
+            if (current != null) current.Dispose();
+        }
+
+        /// <summary>
+        /// Re-read the session decision and switch mode when it changed.
+        /// </summary>
+        private void Watch()
+        {
+            if (stopping) return;
+            try
+            {
+                string decision = QueryMode();
+                string nextMode = decision.StartsWith("interactive", StringComparison.Ordinal) ? "interactive" : "session0";
+                if (nextMode != mode)
                 {
-                    Log("missing " + script);
-                    ScheduleRestart();
+                    Log("session decision changed to " + decision);
+                    ApplyMode(decision);
                     return;
                 }
+                // Same mode, but a crashed child must come back.
+                if (mode == "session0") EnsureSession0Children();
+                else EnsureTaskRunning();
+            }
+            catch (Exception error)
+            {
+                Log("watch failed: " + error.Message);
+            }
+        }
+
+        /// <summary>
+        /// Ask select-session.ps1 where the stack should run.
+        /// </summary>
+        private string QueryMode()
+        {
+            string script = Path.Combine(root, "code", "windows-service", "select-session.ps1");
+            if (!File.Exists(script)) return "session0 missing select-session.ps1";
+            try
+            {
                 ProcessStartInfo info = new ProcessStartInfo();
-                info.FileName = powershell;
-                info.Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"";
+                info.FileName = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+                info.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + script + "\"";
                 info.WorkingDirectory = root;
                 info.UseShellExecute = false;
                 info.CreateNoWindow = true;
                 info.RedirectStandardOutput = true;
                 info.RedirectStandardError = true;
-                Process process = new Process();
-                process.StartInfo = info;
-                process.EnableRaisingEvents = true;
-                process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e)
+                using (Process process = Process.Start(info))
                 {
-                    if (e.Data != null) Log("[out] " + e.Data);
-                };
-                process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
+                    string output = process.StandardOutput.ReadToEnd().Trim();
+                    process.WaitForExit(20000);
+                    if (output == "") return "session0 select-session.ps1 returned nothing";
+                    return output.Split('\n')[0].Trim();
+                }
+            }
+            catch (Exception error)
+            {
+                return "session0 " + error.Message;
+            }
+        }
+
+        private void ApplyMode(string decision)
+        {
+            bool interactive = decision.StartsWith("interactive", StringComparison.Ordinal);
+            string detail = decision.Length > "interactive".Length ? decision.Substring("interactive".Length).Trim() : "";
+            if (interactive)
+            {
+                // Release port 80 (and the interop port) before the task takes them.
+                StopSession0Children();
+                if (!StartTask(detail))
                 {
-                    if (e.Data != null) Log("[err] " + e.Data);
-                };
-                process.Exited += delegate(object sender, EventArgs e)
+                    mode = "session0";
+                    modeDetail = "could not start the interactive task";
+                    EnsureSession0Children();
+                }
+                else
                 {
-                    int code = -1;
-                    try { code = process.ExitCode; } catch { }
-                    Log("child exited with code " + code);
-                    ScheduleRestart();
-                };
+                    mode = "interactive";
+                    modeDetail = detail;
+                    Log("stack handed to the interactive task for " + detail);
+                }
+            }
+            else
+            {
+                mode = "session0";
+                modeDetail = decision.Length > "session0".Length ? decision.Substring("session0".Length).Trim() : "";
+                EndTask();
+                EnsureSession0Children();
+                Log("stack runs in session 0: " + modeDetail);
+            }
+            WriteStatus();
+        }
+
+        private void WriteStatus()
+        {
+            try
+            {
+                string body = "{\"mode\":\"" + Escape(mode) + "\",\"detail\":\"" + Escape(modeDetail) + "\",\"updatedAt\":\"" + DateTime.UtcNow.ToString("o") + "\"}";
+                File.WriteAllText(statusPath, body);
+            }
+            catch { }
+        }
+
+        private static string Escape(string value)
+        {
+            return (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"");
+        }
+
+        /// <summary>
+        /// Run start-stack.ps1 as the interactive administrator. The task is
+        /// recreated on every promotion so it always points at the current
+        /// release.
+        /// </summary>
+        private bool StartTask(string user)
+        {
+            if (string.IsNullOrWhiteSpace(user)) return false;
+            string script = Path.Combine(root, "start-stack.ps1");
+            if (!File.Exists(script)) { Log("missing " + script); return false; }
+            EndTask();
+            string taskCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"";
+            int created = Run(Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
+                "/Create /F /TN \"" + StackTask + "\" /TR \"" + taskCommand + "\" /SC ONCE /ST 00:00 /RU \"" + user + "\" /IT /RL HIGHEST");
+            if (created != 0) { Log("schtasks create failed with " + created); return false; }
+            int started = Run(Path.Combine(Environment.SystemDirectory, "schtasks.exe"), "/Run /TN \"" + StackTask + "\"");
+            if (started != 0) { Log("schtasks run failed with " + started); return false; }
+            return true;
+        }
+
+        private void EnsureTaskRunning()
+        {
+            // A finished task is restarted; schtasks /query returns 0 while it
+            // is running, 1 once it is done.
+            if (TaskRunning()) return;
+            string user = modeDetail;
+            if (!StartTask(user)) Log("interactive task did not come back");
+        }
+
+        private bool TaskRunning()
+        {
+            try
+            {
+                ProcessStartInfo info = new ProcessStartInfo();
+                info.FileName = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+                info.Arguments = "/Query /TN \"" + StackTask + "\" /FO LIST";
+                info.UseShellExecute = false;
+                info.CreateNoWindow = true;
+                info.RedirectStandardOutput = true;
+                info.RedirectStandardError = true;
+                using (Process process = Process.Start(info))
+                {
+                    string text = process.StandardOutput.ReadToEnd();
+                    process.WaitForExit(15000);
+                    // "Status: Running" (en) / "状态: 正在运行" (zh)
+                    return text.Contains("Running") || text.Contains("正在运行");
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void EndTask()
+        {
+            Run(Path.Combine(Environment.SystemDirectory, "schtasks.exe"), "/End /TN \"" + StackTask + "\"");
+            Run(Path.Combine(Environment.SystemDirectory, "schtasks.exe"), "/Delete /F /TN \"" + StackTask + "\"");
+        }
+
+        private int Run(string file, string arguments)
+        {
+            try
+            {
+                ProcessStartInfo info = new ProcessStartInfo();
+                info.FileName = file;
+                info.Arguments = arguments;
+                info.UseShellExecute = false;
+                info.CreateNoWindow = true;
+                info.RedirectStandardOutput = true;
+                info.RedirectStandardError = true;
+                using (Process process = Process.Start(info))
+                {
+                    process.StandardOutput.ReadToEnd();
+                    process.StandardError.ReadToEnd();
+                    process.WaitForExit(30000);
+                    return process.ExitCode;
+                }
+            }
+            catch (Exception error)
+            {
+                Log(file + " failed: " + error.Message);
+                return -1;
+            }
+        }
+
+        private void EnsureSession0Children()
+        {
+            EnsureChild(ref gate, () => StartGate());
+            EnsureChild(ref interop, () => StartInterop());
+        }
+
+        private void EnsureChild(ref Process slot, Func<Process> start)
+        {
+            lock (childLock)
+            {
+                if (stopping) return;
+                if (slot != null && !slot.HasExited) return;
                 try
                 {
-                    process.Start();
-                    child = process;
-                    process.BeginOutputReadLine();
-                    process.BeginErrorReadLine();
-                    Log("child started, pid " + process.Id);
+                    slot = start();
+                    if (slot != null) Log("child started, pid " + slot.Id);
                 }
                 catch (Exception error)
                 {
                     Log("cannot start child: " + error.Message);
-                    ScheduleRestart();
+                    slot = null;
                 }
             }
+            if (slot == null) ScheduleRestart();
+        }
+
+        private Process StartGate()
+        {
+            string script = Path.Combine(root, "start.ps1");
+            if (!File.Exists(script)) { Log("missing " + script); return null; }
+            return Spawn(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+                "-NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"", "gate", delegate(object sender, EventArgs e)
+                {
+                    Log("gate exited");
+                    ScheduleRestart();
+                });
+        }
+
+        private Process StartInterop()
+        {
+            string node = Path.Combine(root, "runtime", "node", "node.exe");
+            string script = Path.Combine(root, "code", "interop-service", "server.mjs");
+            if (!File.Exists(node) || !File.Exists(script)) return null;
+            return Spawn(node, "\"" + script + "\"", "interop", delegate(object sender, EventArgs e)
+            {
+                Log("interop exited");
+                ScheduleRestart();
+            });
+        }
+
+        private Process Spawn(string file, string arguments, string tag, EventHandler exited)
+        {
+            ProcessStartInfo info = new ProcessStartInfo();
+            info.FileName = file;
+            info.Arguments = arguments;
+            info.WorkingDirectory = root;
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            info.RedirectStandardOutput = true;
+            info.RedirectStandardError = true;
+            Process process = new Process();
+            process.StartInfo = info;
+            process.EnableRaisingEvents = true;
+            process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e)
+            {
+                if (e.Data != null) Log("[" + tag + "] " + e.Data);
+            };
+            process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
+            {
+                if (e.Data != null) Log("[" + tag + "!] " + e.Data);
+            };
+            process.Exited += exited;
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            return process;
         }
 
         private void ScheduleRestart()
@@ -127,23 +362,31 @@ namespace DshMesh
                 if (stopping || restartTimer != null) return;
                 restartTimer = new Timer(delegate(object state)
                 {
-                    lock (childLock)
-                    {
-                        restartTimer.Dispose();
-                        restartTimer = null;
-                    }
-                    StartChild();
+                    DisposeTimer(ref restartTimer);
+                    EnsureSession0Children();
                 }, null, 5000, Timeout.Infinite);
             }
         }
 
-        private void StopChild()
+        private void StopSession0Children()
+        {
+            StopProcess(ref gate);
+            StopProcess(ref interop);
+        }
+
+        private void StopStack()
+        {
+            EndTask();
+            StopSession0Children();
+        }
+
+        private void StopProcess(ref Process slot)
         {
             Process process;
             lock (childLock)
             {
-                process = child;
-                child = null;
+                process = slot;
+                slot = null;
             }
             if (process == null) return;
             try
@@ -169,27 +412,20 @@ namespace DshMesh
                 if (!process.HasExited) process.WaitForExit(5000);
             }
             catch { }
-            Log("child stopped");
-        }
-
-        private void Log(string line)
-        {
-            try
-            {
-                lock (logLock)
-                {
-                    File.AppendAllText(logPath, DateTime.Now.ToString("o") + " " + line + Environment.NewLine);
-                }
-            }
-            catch
-            {
-                // A service must not fail because its log file is unavailable.
-            }
         }
 
         public static void Main()
         {
             ServiceBase.Run(new GatewayService());
+        }
+
+        private void Log(string line)
+        {
+            string text = DateTime.Now.ToString("o") + " " + line;
+            lock (logLock)
+            {
+                try { File.AppendAllText(logPath, text + Environment.NewLine); } catch { }
+            }
         }
     }
 }

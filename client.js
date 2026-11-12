@@ -762,10 +762,17 @@ html body {
 }
 
 .chat-detail-bar {
+  /* Pinned to the top of the tab content: the text below scrolls under it, so
+     \u8FD4\u56DE never needs a scroll-back trip. */
+  position: sticky;
+  top: 0;
+  z-index: 3;
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+  padding: 8px 0;
+  background: var(--chat-surface, #fff);
 }
 
 .chat-detail-text {

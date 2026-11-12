@@ -293,6 +293,32 @@ function conversationStatusColor(status: string | undefined): string {
 }
 
 /** What a conversation is about: its title, else the last answer, else its id. */
+/** Palette for the member avatars; picked by address so it stays stable. */
+const CHAT_AVATAR_COLORS = ['#5b8ff9', '#61ddaa', '#f6bd16', '#7262fd', '#78d3f8', '#f6903d', '#e8684a']
+
+function chatAvatarColor(seed: string): string {
+  let hash = 0
+  for (let index = 0; index < seed.length; index += 1) hash = (hash * 31 + seed.charCodeAt(index)) % 100_000
+  return CHAT_AVATAR_COLORS[hash % CHAT_AVATAR_COLORS.length] ?? '#5b8ff9'
+}
+
+/** Long enough to blow up the bubble: three lines or ~160 characters. */
+function chatNeedsDetail(text: string): boolean {
+  return text.length > 160 || text.split('\n').length > 3
+}
+
+function chatTime(value: string | undefined): string {
+  if (value === undefined || value === '') return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  const now = Date.now()
+  const delta = now - date.getTime()
+  if (delta >= 0 && delta < 24 * 60 * 60 * 1000) {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+  return date.toLocaleDateString()
+}
+
 function conversationTitle(row: MemberConversation): string {
   const title = (row.title ?? '').trim()
   if (title !== '') return title
@@ -301,67 +327,136 @@ function conversationTitle(row: MemberConversation): string {
   return row.id.slice(0, 8)
 }
 
-/** Which machine started a conversation, and how. */
-function conversationInitiator(row: MemberConversation): string {
-  const initiator = row.initiator
-  if (initiator === null || initiator === undefined) return '—'
-  const name = initiator.name ?? initiator.id ?? '—'
-  const source = initiator.source === 'call_member' ? 'call_member' : initiator.source ?? ''
-  return source === '' ? name : `${name} · ${source}`
+interface ChatMessage {
+  key: string
+  /** true when the hub sent it, false when the member answered. */
+  out: boolean
+  /** Inline "@member" / "回复@me" prefix. */
+  mention: string
+  /** Short label in the avatar square: the member on an answer, "我" on a send. */
+  avatar: string
+  /** Stable colour seed, shared with the member list so both agree. */
+  avatarSeed: string
+  text: string
+  time: string
+  status: string
+  detailMeta: string
 }
 
-function conversationTime(value: string | undefined): string {
-  if (value === undefined || value === '') return '—'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString()
+/** One conversation is one exchange: the prompt out, the answer back. */
+function conversationMessages(row: MemberConversation, memberName: string, avatarSeed: string): ChatMessage[] {
+  const status = row.status ?? ''
+  const meta = [row.id.slice(0, 8), status, row.turns === undefined ? '' : `${String(row.turns)} 轮`]
+    .filter(part => part !== '')
+    .join(' · ')
+  const messages: ChatMessage[] = [
+    {
+      key: `${row.id}-out`,
+      out: true,
+      mention: `@${memberName}`,
+      avatar: '我',
+      avatarSeed: 'self',
+      text: conversationTitle(row),
+      time: chatTime(row.createdAt),
+      status,
+      detailMeta: meta,
+    },
+  ]
+  const answer = (row.lastText ?? '').trim()
+  if (answer !== '') {
+    messages.push({
+      key: `${row.id}-in`,
+      out: false,
+      mention: '回复@我',
+      avatar: memberName.slice(0, 1),
+      avatarSeed,
+      text: answer,
+      time: chatTime(row.updatedAt ?? row.createdAt),
+      status,
+      detailMeta: meta,
+    })
+  } else if (status === 'running') {
+    messages.push({
+      key: `${row.id}-pending`,
+      out: false,
+      mention: '回复@我',
+      avatar: memberName.slice(0, 1),
+      avatarSeed,
+      text: '正在处理…',
+      time: chatTime(row.updatedAt),
+      status,
+      detailMeta: meta,
+    })
+  } else if (row.error !== null && row.error !== undefined && String(row.error) !== '') {
+    messages.push({
+      key: `${row.id}-error`,
+      out: false,
+      mention: '回复@我',
+      avatar: memberName.slice(0, 1),
+      avatarSeed,
+      text: String(row.error),
+      time: chatTime(row.updatedAt),
+      status,
+      detailMeta: meta,
+    })
+  }
+  return messages
 }
 
-const CONVERSATION_COLUMNS: ColumnsType<MemberConversation> = [
-  {
-    title: '对话',
-    dataIndex: 'title',
-    render: (_value, row) => (
-      <Typography.Text ellipsis={{ tooltip: conversationTitle(row) }} style={{ maxWidth: 320 }}>
-        {conversationTitle(row)}
-      </Typography.Text>
-    ),
-  },
-  {
-    title: '发起者',
-    dataIndex: 'initiator',
-    width: 200,
-    render: (_value, row) => <span>{conversationInitiator(row)}</span>,
-  },
-  {
-    title: '状态',
-    dataIndex: 'status',
-    width: 100,
-    render: (_value, row) => <Tag color={conversationStatusColor(row.status)}>{row.status ?? '—'}</Tag>,
-  },
-  {
-    title: '轮次',
-    dataIndex: 'turns',
-    width: 70,
-    render: (_value, row) => <span>{row.turns ?? 0}</span>,
-  },
-  {
-    title: '最近活动',
-    dataIndex: 'updatedAt',
-    width: 180,
-    render: (_value, row) => <span>{conversationTime(row.updatedAt ?? row.createdAt)}</span>,
-  },
-]
+function ChatBubble({ message, onDetail }: {
+  message: ChatMessage
+  onDetail: (message: ChatMessage) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const truncatable = chatNeedsDetail(message.text)
+  const pending = message.status === 'running' && message.out === false && message.text === '正在处理…'
+  return (
+    <div className={`${'chat-row'} ${message.out ? 'chat-row-out' : ''}`}>
+      <div
+        className={'chat-avatar'}
+        style={{ background: message.out ? 'var(--chat-avatar-bg)' : chatAvatarColor(message.avatarSeed) }}
+        aria-hidden
+      >
+        {message.avatar}
+      </div>
+      <div className={'chat-body'}>
+        <div className={`${'chat-bubble'} ${message.out ? 'chat-bubble-out' : 'chat-bubble-in'}`}>
+          <span className={'chat-mention'}>{message.mention}</span>
+          <span className={`${'chat-text'} ${truncatable && !expanded ? 'chat-text-clamped' : ''}`}>
+            {message.text}
+          </span>
+          {pending ? <Spin size="small" style={{ marginLeft: 8 }} /> : null}
+        </div>
+        <div className={`${'chat-foot'} ${message.out ? 'chat-foot-out' : ''}`}>
+          {truncatable && !expanded ? (
+            <Button type="link" size="small" style={{ height: 'auto', padding: 0 }} onClick={() => setExpanded(true)}>
+              详细
+            </Button>
+          ) : null}
+          {truncatable && expanded ? (
+            <Button type="link" size="small" style={{ height: 'auto', padding: 0 }} onClick={() => setExpanded(false)}>
+              收起
+            </Button>
+          ) : null}
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{message.time}</Typography.Text>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 /**
- * Conversations each member's interop service controls. Grouped by member, so a
- * delegated task is visible next to the machine that ran it — and next to the
- * machine that started it.
+ * Conversations each member's interop service controls, laid out as a chat: the
+ * member list on the left, one bubble per exchange on the right. A message
+ * carries the "@member" it was sent to (or "回复@me" when it is the answer), so
+ * the transcript reads like a WeChat thread instead of a table.
  */
 function MemberConversations({ active }: { active: boolean }) {
   const [snapshot, setSnapshot] = useState<ConversationSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [selectedId, setSelectedId] = useState('')
+  const [detail, setDetail] = useState<ChatMessage | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -376,70 +471,149 @@ function MemberConversations({ active }: { active: boolean }) {
   }, [])
 
   useEffect(() => {
+    // Load once when the tab is opened; refreshing is a deliberate action, so a
+    // running conversation is never rebuilt under the reader.
     if (!active) return undefined
     void load()
-    // The list is cheap to rebuild and members change state out of band.
-    const timer = setInterval(() => { void load() }, 20_000)
-    return () => clearInterval(timer)
+    return undefined
   }, [active, load])
 
+  // Colours follow the DSH theme so the chat matches the surrounding app and
+  // keeps working in dark mode; the CSS only owns the layout.
+  const { token } = antdTheme.useToken()
+  const chatColors = {
+    '--chat-pane-bg': token.colorBgLayout,
+    '--chat-list-bg': token.colorFillQuaternary,
+    '--chat-list-hover': token.colorFillSecondary,
+    '--chat-list-active': token.colorFill,
+    '--chat-item-border': token.colorBorderSecondary,
+    '--chat-in-bg': token.colorBgContainer,
+    '--chat-in-border': token.colorBorderSecondary,
+    '--chat-out-bg': token.colorPrimaryBg,
+    '--chat-out-border': token.colorPrimaryBorder,
+    '--chat-avatar-bg': token.colorPrimary,
+    '--chat-text': token.colorText,
+  } as React.CSSProperties
+
   const groups: ConversationGroup[] = snapshot?.groups ?? []
+  const selfName = groups.find(group => group.self)?.name ?? '我'
+  const chats = useMemo(() => [...groups].sort((left, right) => {
+    if (left.conversations.length !== right.conversations.length) {
+      return right.conversations.length - left.conversations.length
+    }
+    return left.name.localeCompare(right.name)
+  }), [groups])
+  const selected = chats.find(group => group.id === selectedId) ?? chats[0]
+  const messagesRef = useRef<HTMLDivElement | null>(null)
+  const messages = useMemo(() => {
+    if (selected === undefined) return []
+    return [...selected.conversations]
+      .sort((left, right) => String(left.createdAt ?? '').localeCompare(String(right.createdAt ?? '')))
+      .flatMap(row => conversationMessages(row, selected.name, selected.ip))
+  }, [selected, selfName])
+  // A chat opens at the newest message, like every messenger.
+  useEffect(() => {
+    const node = messagesRef.current
+    if (node !== null) node.scrollTop = node.scrollHeight
+  }, [messages])
   const total = groups.reduce((sum, group) => sum + group.conversations.length, 0)
   const busy = groups.reduce((sum, group) => sum + group.conversations.filter(row => row.status === 'running').length, 0)
 
   return (
     <div className="dsh-pw-tabbody">
-      <Card
-        size="small"
-        title="成员对话"
-        extra={(
-          <Space size={12}>
-            <Typography.Text type="secondary">
-              {`${String(total)} 个对话${busy > 0 ? ` · ${String(busy)} 个进行中` : ''}`}
+      <div className="chat-toolbar">
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {`${String(total)} 个对话${busy > 0 ? ` · ${String(busy)} 个进行中` : ''}`}
+        </Typography.Text>
+        <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => { void load() }}>
+          刷新
+        </Button>
+      </div>
+      {error !== '' ? <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} /> : null}
+      {chats.length === 0 && !loading && error === '' ? <Empty description="还没有成员" /> : null}
+      {chats.length > 0 ? (
+        <div className={'chat-shell'} style={chatColors}>
+          <div className={'chat-list'}>
+            {chats.map(group => {
+              const last = [...group.conversations].sort((left, right) => String(left.updatedAt ?? '').localeCompare(String(right.updatedAt ?? ''))).at(-1)
+              const preview = last === undefined ? '还没有对话' : (last.lastText ?? conversationTitle(last)).replace(/\s+/gu, ' ')
+              return (
+                <div
+                  key={group.id}
+                  className={`chat-list-item ${group.id === selected?.id ? 'chat-list-item-active' : ''}`}
+                  onClick={() => setSelectedId(group.id)}
+                >
+                  <div className={'chat-avatar'} style={{ background: chatAvatarColor(group.ip) }}>
+                    {group.name.slice(0, 1)}
+                  </div>
+                  <div className={'chat-list-meta'}>
+                    <div className={'chat-list-name'}>
+                      <Typography.Text ellipsis style={{ maxWidth: 130 }}>{group.name}</Typography.Text>
+                    </div>
+                    <div className={'chat-list-preview'}>{preview}</div>
+                  </div>
+                  <div className={'chat-list-side'}>
+                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                      {chatTime(last?.updatedAt ?? last?.createdAt)}
+                    </Typography.Text>
+                    {group.conversations.length > 0 ? (
+                      <span className={'chat-count'}>{group.conversations.length}</span>
+                    ) : null}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          <div className={'chat-pane'}>
+            {selected === undefined ? null : (
+              <>
+                <div className={'chat-pane-head'}>
+                  <Space size={8}>
+                    <Typography.Text strong>{selected.name}</Typography.Text>
+                    <Typography.Text type="secondary">{selected.ip}</Typography.Text>
+                    {selected.self ? <Tag color="blue">本机</Tag> : null}
+                    {selected.online ? null : <Tag>离线</Tag>}
+                    {selected.dsh ? null : <Tag color="orange">无交互服务</Tag>}
+                  </Space>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {`${String(selected.conversations.length)} 条对话`}
+                  </Typography.Text>
+                </div>
+                <div className={'chat-messages'} ref={messagesRef}>
+                  {selected.error !== null && selected.error !== undefined ? (
+                    <Alert type="warning" showIcon message={`交互服务不可用：${selected.error}`} />
+                  ) : null}
+                  {messages.length === 0 && (selected.error === null || selected.error === undefined) ? (
+                    <Empty description="这个成员还没有通过交互服务创建的对话" />
+                  ) : null}
+                  {messages.map(entry => (
+                    <ChatBubble key={entry.key} message={entry} onDetail={setDetail} />
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      ) : null}
+      <Typography.Paragraph type="secondary" style={{ marginTop: 10, marginBottom: 0, fontSize: 12 }}>
+        消息来自各成员的交互服务（8765），点「刷新」拉取最新；内容较长时截断显示，点「详细」看全文。
+      </Typography.Paragraph>
+      <Modal
+        open={detail !== null}
+        title={detail === null ? '' : detail.mention}
+        footer={null}
+        width={720}
+        onCancel={() => setDetail(null)}
+      >
+        {detail === null ? null : (
+          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {[detail.time, detail.detailMeta].filter(part => part !== '').join(' · ')}
             </Typography.Text>
-            <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => { void load() }}>
-              刷新
-            </Button>
+            <pre className={'chat-detail-text'}>{detail.text}</pre>
           </Space>
         )}
-      >
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
-          列表来自各成员的交互服务（8765），按成员分组；「发起者」是创建这个对话的机器，
-          会话标题取第一条消息。
-        </Typography.Paragraph>
-        {error !== '' ? <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} /> : null}
-        {groups.length === 0 && !loading && error === '' ? <Empty description="还没有成员" /> : null}
-        {groups.length > 0 ? (
-          <Collapse
-            ghost
-            items={groups.map(group => ({
-              key: group.id,
-              label: (
-                <Space size={8} wrap>
-                  <Typography.Text strong>{group.name}</Typography.Text>
-                  <Typography.Text type="secondary">{group.ip}</Typography.Text>
-                  {group.self ? <Tag color="blue">本机</Tag> : null}
-                  {group.online ? null : <Tag>离线</Tag>}
-                  <Tag>{`${String(group.conversations.length)} 个对话`}</Tag>
-                  {group.conversations.some(row => row.status === 'running') ? <Tag color="processing">进行中</Tag> : null}
-                </Space>
-              ),
-              children: group.error !== null && group.error !== undefined
-                ? <Alert type="warning" showIcon message={`交互服务不可用：${group.error}`} />
-                : (
-                  <Table<MemberConversation>
-                    rowKey="id"
-                    size="small"
-                    dataSource={group.conversations}
-                    columns={CONVERSATION_COLUMNS}
-                    pagination={group.conversations.length > 10 ? { pageSize: 10, hideOnSinglePage: true } : false}
-                    locale={{ emptyText: <Empty description="这个成员还没有通过交互服务创建的对话" /> }}
-                  />
-                ),
-            }))}
-          />
-        ) : null}
-      </Card>
+      </Modal>
     </div>
   )
 }

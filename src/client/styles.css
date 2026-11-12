@@ -248,6 +248,124 @@
   padding: 4px 0 8px;
 }
 
+/* ---- composer ---- */
+.chat-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* A short transcript still leaves the input at the bottom of the pane. */
+  min-height: calc(100vh - 240px);
+}
+
+.chat-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.chat-composer {
+  /* The tab content is the scroller, so pinning the composer keeps it reachable
+     while the transcript scrolls under it. */
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+  margin-top: auto;
+  padding: 8px 0 4px;
+  background: var(--chat-pane-bg, transparent);
+}
+
+.chat-composer-box {
+  border: 1px solid var(--chat-in-border, #e5e7eb);
+  border-radius: 14px;
+  background: var(--chat-surface, #fff);
+  padding: 8px 10px 6px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.chat-composer-box:focus-within {
+  border-color: var(--chat-avatar-bg, #1677ff);
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.1);
+}
+
+.chat-composer-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 24px;
+  max-height: 168px;
+  padding: 2px 0;
+  border: none;
+  outline: none;
+  resize: none;
+  overflow-y: auto;
+  background: transparent;
+  color: var(--chat-text, inherit);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.chat-composer-input::placeholder {
+  color: var(--chat-text, inherit);
+  opacity: 0.35;
+}
+
+.chat-composer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.chat-mention-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+  padding: 4px;
+  border: 1px solid var(--chat-in-border, #e5e7eb);
+  border-radius: 12px;
+  background: var(--chat-surface, #fff);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.chat-mention-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--chat-text, inherit);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-mention-item:hover,
+.chat-mention-item-active {
+  background: var(--chat-list-hover, #f2f3f5);
+}
+
+.chat-mention-item .chat-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.chat-mention-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .chat-avatar {
   flex: 0 0 auto;
   width: 34px;

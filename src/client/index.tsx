@@ -33,6 +33,7 @@ import {
   InfoCircleOutlined,
   LoadingOutlined,
   ReloadOutlined,
+  SendOutlined,
   SwapOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
@@ -198,6 +199,33 @@ function etaText(speed: number, remaining: number): string {
 }
 
 /** Detail view for one deployment: upload meter, steps, and log tail. */
+/** Share of the whole job each step owns, so one number covers upload → live. */
+const DEPLOY_STEP_SHARE: Record<string, [number, number]> = {
+  upload: [0, 60],
+  prepare: [60, 90],
+  activate: [90, 100],
+}
+
+/**
+ * Overall percentage of a deploy job.
+ *
+ * The job reports one meter whose label says what is being measured; the step
+ * list says which share of the work is done, so the member table can show a
+ * single number that never goes backwards.
+ */
+function deployPercent(job: DeployJob): number {
+  if (job.status === 'succeeded') return 100
+  const meter = job.progress
+  const inner = typeof meter?.percent === 'number' ? Math.max(0, Math.min(100, meter.percent)) : 0
+  if (job.status !== 'running') return Math.round(inner)
+  const active = (job.steps ?? []).find(step => step.status === 'running')
+  if (active === undefined) return 0
+  const share = DEPLOY_STEP_SHARE[active.key]
+  if (share === undefined) return Math.round(inner)
+  const own = active.progress === undefined || active.progress === null ? inner : active.progress.percent
+  return Math.round(share[0] + ((share[1] - share[0]) * Math.max(0, Math.min(100, own))) / 100)
+}
+
 function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] }) {
   // Older hosts returned the log as one string; never assume the array shape.
   const logLines = Array.isArray(lines) ? lines : String(lines ?? '').split(/\r?\n/u)
@@ -208,14 +236,21 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
   const indeterminate = progress?.indeterminate === true
   const percent = indeterminate ? 100 : Math.max(0, Math.min(100, progress?.percent ?? 0))
   const running = job.status === 'running'
-  const uploadText = indeterminate
-    ? `已上传 ${formatBytes(bytes)} / ${formatBytes(total)}（服务器不支持流式上传，无法显示百分比）`
-    : `${formatBytes(bytes)} / ${formatBytes(total)}${speed > 0 ? ` · ${formatBytes(speed)}/s` : ''}${etaText(speed, total - bytes)}`
+  // The meter is shared by the upload and the extraction: same bar, different
+  // unit. `label` comes from the deploy engine, which is the only place that
+  // knows which phase is running.
+  const meters = progress?.total ?? 0
+  const meterLabel = progress?.label ?? '上传安装包'
+  const meterText = total > 0
+    ? (indeterminate
+      ? `已上传 ${formatBytes(bytes)} / ${formatBytes(total)}（服务器不支持流式上传，无法显示百分比）`
+      : `${formatBytes(bytes)} / ${formatBytes(total)}${speed > 0 ? ` · ${formatBytes(speed)}/s` : ''}${etaText(speed, total - bytes)}`)
+    : meters > 0 ? `已解压 ${progress?.done ?? 0} / ${meters} 项` : ''
   return (
     <Space direction="vertical" size={14} style={{ width: '100%' }}>
       <Space size={8} wrap>
         {running
-          ? <Tag color="processing">部署中</Tag>
+          ? <Tag color="processing">部署中 {deployPercent(job)}%</Tag>
           : job.status === 'succeeded'
             ? <Tag color="success">部署成功</Tag>
             : <Tag color="error">部署失败</Tag>}
@@ -237,13 +272,15 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
         ]}
       />
       <div>
-        <Typography.Text strong>上传安装包</Typography.Text>
+        <Typography.Text strong>{meterLabel}</Typography.Text>
         <Progress
           percent={percent}
           status={job.status === 'failed' ? 'exception' : percent >= 100 ? 'success' : 'active'}
           showInfo={!indeterminate}
         />
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>{uploadText}</Typography.Text>
+        {meterText === '' ? null : (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{meterText}</Typography.Text>
+        )}
       </div>
       <Steps
         direction="vertical"
@@ -618,23 +655,193 @@ function MemberConversations({ active, members, refreshToken }: {
   /** The member shown by an avatar click, resolved from the panel's snapshot. */
   const member = memberIp === '' ? null : members.find(entry => entry.ip === memberIp) ?? null
 
+  // ---- composer ----
+  // A message typed here becomes a conversation on the member, so `@3` routes
+  // to one machine and a message without a mention goes to all of them.
+  const [draft, setDraft] = useState('')
+  const [sending, setSending] = useState(false)
+  const [sendError, setSendError] = useState('')
+  const [mention, setMention] = useState<{ query: string; index: number } | null>(null)
+  const draftRef = useRef<HTMLTextAreaElement | null>(null)
+
+  // Self is not a target: the panel already shows its own side of the chat.
+  const roster = useMemo(() => members
+    .filter(entry => entry.kind !== 'self' && (entry.ip ?? '') !== '')
+    .map(entry => ({ member: entry, number: chatNumber(entry.ip) }))
+    .filter(entry => entry.number !== '')
+    .sort((left, right) => Number(left.number) - Number(right.number)), [members])
+
+  const suggestions = useMemo(() => {
+    if (mention === null) return []
+    const query = mention.query.toLowerCase()
+    return roster.filter(entry => query === ''
+      || entry.number.startsWith(query)
+      || entry.member.name.toLowerCase().includes(query))
+  }, [mention, roster])
+
+  /** The `@` fragment the caret sits in, if any. */
+  const mentionAt = (value: string, caret: number) => {
+    const match = /@([^\s@]*)$/u.exec(value.slice(0, caret))
+    if (match === null) return null
+    const query = match[1] ?? ''
+    return { query, start: caret - query.length - 1 }
+  }
+
+  const syncMention = (value: string, caret: number) => {
+    const found = mentionAt(value, caret)
+    setMention(found === null ? null : { query: found.query, index: 0 })
+  }
+
+  const insertMention = (number: string) => {
+    const box = draftRef.current
+    const caret = box?.selectionStart ?? draft.length
+    const found = mentionAt(draft, caret)
+    if (found === null) return
+    setDraft(`${draft.slice(0, found.start)}@${number} ${draft.slice(caret)}`)
+    setMention(null)
+    const at = found.start + number.length + 2
+    window.setTimeout(() => {
+      box?.focus()
+      box?.setSelectionRange(at, at)
+    }, 0)
+  }
+
+  const send = async () => {
+    const text = draft.trim()
+    if (text === '' || sending) return
+    const tokens = Array.from(new Set(Array.from(text.matchAll(/@(\d{1,3})/gu)).map(match => match[1] ?? '')))
+    const picked = tokens
+      .map(number => roster.find(entry => entry.number === number)?.member)
+      .filter((entry): entry is Member => entry !== undefined)
+    if (tokens.length > 0 && picked.length === 0) {
+      setSendError(`没有找到成员 ${tokens.join('、')}`)
+      return
+    }
+    // The mention is addressing, not content: the bubble already renders it.
+    const content = text.replace(/^(\s*@\d{1,3}\s*)+/u, '').trim() || text
+    setSending(true)
+    setSendError('')
+    try {
+      const result = await api.sendConversation(content, picked.map(entry => entry.id))
+      setDraft('')
+      setMention(null)
+      if (result.errors.length > 0) {
+        setSendError(`${result.errors.map(entry => entry.member).join('、')} 发送失败：${result.errors[0]?.error ?? ''}`)
+      }
+      await load()
+    } catch (cause) {
+      setSendError(errorText(cause))
+    } finally {
+      setSending(false)
+    }
+  }
+
+  // Grow with the text, then scroll: the transcript keeps the room it needs.
+  useEffect(() => {
+    const box = draftRef.current
+    if (box === null) return
+    box.style.height = 'auto'
+    box.style.height = `${Math.min(168, box.scrollHeight)}px`
+  }, [draft])
+
   return (
     <div className="dsh-pw-tabbody" style={chatColors}>
-      <div
-        style={{ display: detail === null && member === null ? undefined : 'none' }}
-        onClick={reloadOnClick}
-      >
-      {error !== '' ? <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} /> : null}
-      {groups.length === 0 && !loading && error === '' ? <Empty description="还没有成员" /> : null}
-      {groups.length > 0 ? (
-        <div className="chat-stream">
-          {messages.length === 0 ? <Empty description="还没有对话" /> : null}
-          {messages.map(entry => (
-            <ChatBubble key={entry.key} message={entry} onDetail={openDetail} onMember={setMemberIp} />
-          ))}
-          <div ref={messagesRef} />
+      <div className="chat-page" style={{ display: detail === null && member === null ? undefined : 'none' }}>
+        <div className="chat-scroll" onClick={reloadOnClick}>
+          {error !== '' ? <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} /> : null}
+          {groups.length === 0 && !loading && error === '' ? <Empty description="还没有成员" /> : null}
+          {groups.length > 0 ? (
+            <div className="chat-stream">
+              {messages.length === 0 ? <Empty description="还没有对话" /> : null}
+              {messages.map(entry => (
+                <ChatBubble key={entry.key} message={entry} onDetail={openDetail} onMember={setMemberIp} />
+              ))}
+              <div ref={messagesRef} />
+            </div>
+          ) : null}
         </div>
-      ) : null}
+        <div className="chat-composer">
+          {mention !== null && suggestions.length > 0 ? (
+            <div className="chat-mention-menu" role="listbox" aria-label="选择成员">
+              {suggestions.map((entry, index) => (
+                <button
+                  key={entry.member.id}
+                  type="button"
+                  role="option"
+                  aria-selected={index === mention.index}
+                  className={`chat-mention-item ${index === mention.index ? 'chat-mention-item-active' : ''}`}
+                  // mousedown, not click: the textarea must not lose the caret.
+                  onMouseDown={(event) => { event.preventDefault(); insertMention(entry.number) }}
+                >
+                  <span className="chat-avatar" style={{ background: chatAvatarColor(entry.number) }}>
+                    {entry.number}
+                  </span>
+                  <span className="chat-mention-name">{entry.member.name}</span>
+                  {entry.member.online ? null : (
+                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>离线</Typography.Text>
+                  )}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <div className="chat-composer-box">
+            <textarea
+              ref={draftRef}
+              className="chat-composer-input"
+              value={draft}
+              rows={1}
+              placeholder="发消息给成员：@ 选择成员，不 @ 就发给全员"
+              onChange={(event) => {
+                setDraft(event.target.value)
+                syncMention(event.target.value, event.target.selectionStart ?? event.target.value.length)
+              }}
+              onClick={(event) => syncMention(draft, event.currentTarget.selectionStart ?? draft.length)}
+              onKeyDown={(event) => {
+                if (mention !== null && suggestions.length > 0) {
+                  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                    event.preventDefault()
+                    const step = event.key === 'ArrowDown' ? 1 : suggestions.length - 1
+                    setMention({ ...mention, index: (mention.index + step) % suggestions.length })
+                    return
+                  }
+                  if (event.key === 'Enter' || event.key === 'Tab') {
+                    event.preventDefault()
+                    const entry = suggestions[mention.index]
+                    if (entry !== undefined) insertMention(entry.number)
+                    return
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    setMention(null)
+                    return
+                  }
+                }
+                if (event.key === 'Enter' && event.shiftKey === false) {
+                  event.preventDefault()
+                  void send()
+                }
+              }}
+            />
+            <div className="chat-composer-bar">
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                @ 选择成员 · Enter 发送 · Shift+Enter 换行
+              </Typography.Text>
+              <Button
+                type="primary"
+                shape="circle"
+                size="small"
+                aria-label="发送"
+                loading={sending}
+                disabled={draft.trim() === ''}
+                icon={sending ? undefined : <SendOutlined />}
+                onClick={() => { void send() }}
+              />
+            </div>
+          </div>
+          {sendError === '' ? null : (
+            <Typography.Text type="danger" style={{ fontSize: 12 }}>{sendError}</Typography.Text>
+          )}
+        </div>
       </div>
       <div style={{ display: member === null ? 'none' : undefined }}>
         {member === null ? null : (
@@ -923,7 +1130,7 @@ function Panel({ ctx }: { ctx: any }) {
               icon={<LoadingOutlined />}
               onClick={() => openProgress(runningJob)}
             >
-              正在部署
+              正在部署 {deployPercent(runningJob)}%
             </Button>
           )
         }

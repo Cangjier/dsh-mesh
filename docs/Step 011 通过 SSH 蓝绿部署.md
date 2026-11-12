@@ -118,6 +118,32 @@ dsh_mesh_deploy action="rollback" host="10.66.66.3" user="root" os="linux" \
   identityFile="C:\Users\Admin\.ssh\id_ed25519"
 ```
 
+## 进度与共享作业目录
+
+一次部署的作业状态写在 `$DSH_HOME/mesh/deploy/<job-id>/`：
+
+- `job.json`：`status` / `phase` / 三个步骤 / 当前进度表
+- `deploy.log`：每行带时间戳的日志
+
+面板的「部署」按钮、agent 的 `deploy` 工具和下面的脚本入口写的是**同一个目录**，所以任何窗口刷新后读到的都是同一份状态——部署从 A 窗口发起，B 窗口也能看到「正在部署 62%」。
+
+进度表只有一条，`progress.label` 说明当前在量什么：
+
+| label | 单位 | 来源 |
+| --- | --- | --- |
+| 上传安装包 | 字节 | `bytes / totalBytes`，带速率与 ETA |
+| 解压安装包 | 归档条目 | Linux 由 `tar --checkpoint=1000` 每 1000 项打一条 `DSH-MESH-EXTRACT <n>`，脚本先用 `tar -tzf \| wc -l` 取总数；Windows 用 `tar -xf -v` 逐条计数 |
+| 切换并重启服务 | — | 不确定进度，横条跑动 |
+
+纯脚本部署（不经过面板，也不经过 agent 的 `deploy` 工具）走同一个入口：
+
+```bash
+node code/deploy/cli.mjs --host 10.66.66.2 --package dsh-mesh-0.2.2-rc.2-linux-x64.tar.gz
+# 或 npm run deploy -- --host 10.66.66.2 --package ...
+```
+
+`--no-wait` 只起作业并打印 id；`--json` 把最终作业和日志尾巴打成 JSON；`--data-dir` 换作业目录（默认 `$DSH_HOME/mesh/deploy`）。
+
 ## SSH 前提
 
 - 密钥登录，`BatchMode=yes`；工具不会交互式询问密码。

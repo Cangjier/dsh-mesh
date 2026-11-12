@@ -70,6 +70,21 @@ export interface ConversationGroup {
   error: string | null
 }
 
+/** One member that accepted a panel message. */
+export interface SendOutcome {
+  member: string
+  ip: string
+  conversationId: string
+  /** true when the text joined a conversation that was already running. */
+  reused: boolean
+}
+
+export interface SendResult {
+  ok: boolean
+  sent: SendOutcome[]
+  errors: Array<{ member: string; ip: string; error: string }>
+}
+
 export interface ConversationSnapshot {
   ok: boolean
   updatedAt: string
@@ -150,10 +165,15 @@ export interface DeployStep {
 }
 
 export interface DeployProgress {
+  /** What the meter measures: the upload's bytes, then the extraction's entries. */
+  label?: string
   bytes: number
   totalBytes: number
   percent: number
   speed: number
+  /** Archive entries, used while the package is being extracted. */
+  done?: number
+  total?: number
   indeterminate: boolean
 }
 
@@ -343,6 +363,16 @@ export const api = {
       method: 'POST',
       headers: { 'x-dsh-mesh': '1' },
       body: JSON.stringify({ member }),
+    })
+  },
+
+  /**
+   * Post a message from the panel. An empty member list means every member.
+   */
+  sendConversation(text: string, members: string[]): Promise<SendResult> {
+    return request<SendResult>('/api/dsh-mesh/conversations/send', {
+      method: 'POST',
+      body: JSON.stringify({ text, members }),
     })
   },
 

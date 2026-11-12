@@ -263,6 +263,91 @@ export class MemberTaskService {
     return task
   }
 
+  /**
+   * Send a message typed in the panel to one or more members.
+   *
+   * A member whose conversation is still running gets the text as a follow-up;
+   * everyone else gets a fresh conversation. No task is created and nothing is
+   * notified back: the panel reads conversations straight from each member, so
+   * the answer shows up in the group chat on the next refresh.
+   * @param {{text: string, members?: string[]}} input text and target ids/ips.
+   * @returns {Promise<{ok: boolean, sent: object[], errors: object[]}>} outcome.
+   */
+  async sendTo({ text, members = [] }) {
+    const content = String(text ?? '').trim()
+    if (content === '') throw new Error('text is required')
+    const snapshot = await this.service.members()
+    this.identity = this.identity ?? {
+      id: String(snapshot.local?.id ?? 'local'),
+      name: String(snapshot.local?.name ?? snapshot.local?.id ?? 'local'),
+      ip: String(snapshot.local?.ip ?? ''),
+    }
+    const others = [snapshot.local, ...(Array.isArray(snapshot.members) ? snapshot.members : [])]
+      .filter(Boolean)
+      .filter(member => member.kind !== 'self' && member.self !== true)
+    const wanted = (Array.isArray(members) ? members : [])
+      .map(item => String(item).trim())
+      .filter(item => item !== '')
+    /** @type {object[]} */
+    const targets = []
+    if (wanted.length === 0) {
+      targets.push(...others)
+    } else {
+      for (const item of wanted) {
+        const match = others.find(member => [String(member.id), String(member.ip), String(member.name)].includes(item))
+        if (match !== undefined) {
+          if (!targets.includes(match)) targets.push(match)
+          continue
+        }
+        const resolved = await this.#resolveMember(item).catch(() => null)
+        if (resolved !== null && !targets.some(member => member.ip === resolved.ip)) targets.push(resolved)
+      }
+    }
+    if (targets.length === 0) throw new Error('no member to send to')
+    const sent = []
+    const errors = []
+    await Promise.all(targets.map(async (member) => {
+      const name = String(member.name ?? member.id ?? member.ip ?? '')
+      const ip = String(member.ip ?? '')
+      const label = ip === '' ? name : `${name} (${ip})`
+      try {
+        const baseUrl = this.#baseUrl(ip === '' ? name : ip)
+        const listed = await this.#request(baseUrl, 'GET', '/v1/conversations', undefined, 8000).catch(() => null)
+        const live = (Array.isArray(listed?.conversations) ? listed.conversations : [])
+          .find(row => row.status === 'running' && this.#isOwnConversation(row))
+        if (live !== undefined) {
+          await this.#request(baseUrl, 'POST', `/v1/conversations/${encodeURIComponent(live.id)}/messages`, { content }, 30_000)
+          sent.push({ member: name, ip, conversationId: String(live.id), reused: true })
+          return
+        }
+        const created = await this.#request(baseUrl, 'POST', '/v1/conversations', {
+          prompt: content,
+          // The panel clamps the bubble, so the whole text is the title: a
+          // truncated one would never be recoverable through 详细.
+          title: content.length > 2000 ? `${content.slice(0, 2000)}…` : content,
+          initiator: { ...this.identity, source: 'panel' },
+        }, 60_000)
+        const conversation = created?.conversation ?? {}
+        sent.push({ member: name, ip, conversationId: String(conversation.id ?? ''), reused: false })
+      } catch (error) {
+        errors.push({ member: label, ip, error: error instanceof Error ? error.message : String(error) })
+      }
+    }))
+    return { ok: true, sent, errors }
+  }
+
+  /**
+   * True when a member's conversation was started from this machine.
+   * @param {object} row conversation summary.
+   * @returns {boolean} whether this host initiated it.
+   */
+  #isOwnConversation(row) {
+    const initiator = row?.initiator ?? null
+    if (initiator === null || this.identity === null) return false
+    if (initiator.id !== undefined && String(initiator.id) === String(this.identity.id)) return true
+    return initiator.ip !== undefined && String(initiator.ip) !== '' && String(initiator.ip) === String(this.identity.ip)
+  }
+
   async #monitor(task) {
     while (!this.disposed && (task.status === 'running' || task.status === 'starting')) {
       task.attempts += 1

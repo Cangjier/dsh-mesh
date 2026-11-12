@@ -40,7 +40,8 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.wireguard.json --noEmit",
     "test": "node --test \"test/*.test.mjs\"",
     "test:wireguard": "node --test --import tsx \"test/wireguard/*.test.ts\"",
-    "build:control": "node scripts/build.mjs control"
+    "build:control": "node scripts/build.mjs control",
+    "deploy": "node code/deploy/cli.mjs"
   },
   "dsh": {
     "bundle": {

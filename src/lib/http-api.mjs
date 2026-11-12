@@ -77,6 +77,14 @@ export function registerApi(ctx, service) {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() })
           return
         }
+        if (method === 'POST' && path === '/conversations/send') {
+          const body = await readJson(request)
+          writeJson(response, 200, await service.sendConversation({
+            text: typeof body.text === 'string' ? body.text : '',
+            members: Array.isArray(body.members) ? body.members.filter(item => typeof item === 'string') : [],
+          }))
+          return
+        }
         if (method === 'POST' && path === '/conversations/clear') {
           writeJson(response, 200, await service.clearConversations())
           return

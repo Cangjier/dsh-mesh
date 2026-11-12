@@ -1121,6 +1121,7 @@ import { copyFile, link, mkdir as mkdir3, mkdtemp, readFile as readFile4, readdi
 import { isIP as isIP2 } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import path4 from "node:path";
+var EXTRACT_CHECKPOINT = 1e3;
 var DEFAULT_APP_ROOT = {
   linux: "/opt/dsh-mesh",
   windows: "C:\\dsh-mesh"
@@ -1582,7 +1583,12 @@ if [ -e "$NEW" ]; then
   exit 1
 fi
 mkdir -p "$NEW"
-tar -xzf "$PACKAGE" -C "$NEW" --strip-components=1
+# One marker per 1000 entries: the deploy engine turns these into the panel's
+# extraction progress. Counting first costs a gzip pass but gives an honest
+# denominator; printing every path would flood the job log with 78k lines.
+printf 'DSH-MESH-EXTRACT-TOTAL %s
+' "$(tar -tzf "$PACKAGE" | wc -l | tr -d ' ')"
+tar -xzf "$PACKAGE" -C "$NEW" --strip-components=1 --checkpoint=1000 --checkpoint-action=echo='DSH-MESH-EXTRACT %u'
 
 # Shared mutable state stays outside every release. The first deploy copies it
 # from the currently running tree; later deploys inherit it untouched.
@@ -2424,6 +2430,21 @@ var DeployManager = class {
       void log(text).catch(() => {
       });
     };
+    const meter = (label, patch) => {
+      state.progress = {
+        label,
+        percent: 0,
+        bytes: 0,
+        totalBytes: 0,
+        speed: 0,
+        done: 0,
+        total: 0,
+        indeterminate: false,
+        ...patch
+      };
+      state.updatedAt = stamp();
+      this.#saveThrottled(stateFile, state);
+    };
     try {
       const runner = this.runnerFactory(plan);
       await log(`target ${plan.host} (${plan.os}), release ${plan.release}`);
@@ -2434,29 +2455,26 @@ var DeployManager = class {
       const existingBytes = typeof runner.remoteSize === "function" ? await runner.remoteSize(plan.remotePackage).catch(() => null) : null;
       if (existingBytes === plan.package.bytes) {
         await log(`package already present on the target (${formatBytes(existingBytes)}), skipping upload`);
-        state.progress = { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100, speed: 0, indeterminate: false };
+        meter("\u4E0A\u4F20\u5B89\u88C5\u5305", { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 });
         await mark("upload", "succeeded", `${formatBytes(existingBytes)} \xB7 \u5DF2\u5B58\u5728\uFF0C\u8DF3\u8FC7\u4E0A\u4F20`);
       } else {
         await runner.upload(plan.package.path, plan.remotePackage, (progress) => {
           const totalBytes = progress.totalBytes ?? plan.package.bytes;
-          state.progress = {
+          meter("\u4E0A\u4F20\u5B89\u88C5\u5305", {
             bytes: progress.bytes ?? 0,
             totalBytes,
             percent: progress.percent ?? (totalBytes > 0 ? Math.min(100, Math.round((progress.bytes ?? 0) / totalBytes * 100)) : 0),
             speed: progress.speed ?? 0,
             indeterminate: progress.indeterminate === true
-          };
-          state.updatedAt = stamp();
-          this.#saveThrottled(stateFile, state);
+          });
         });
         const uploadSeconds = Math.max(0.1, (Date.now() - uploadStarted) / 1e3);
-        state.progress = {
+        meter("\u4E0A\u4F20\u5B89\u88C5\u5305", {
           bytes: plan.package.bytes,
           totalBytes: plan.package.bytes,
           percent: 100,
-          speed: plan.package.bytes / uploadSeconds,
-          indeterminate: false
-        };
+          speed: plan.package.bytes / uploadSeconds
+        });
         await mark("upload", "succeeded", `${formatBytes(plan.package.bytes)} \xB7 ${uploadSeconds.toFixed(1)}s \xB7 ${formatBytes(plan.package.bytes / uploadSeconds)}/s`);
       }
       const credentialsFile = deployerCredentialsFile();
@@ -2476,35 +2494,56 @@ var DeployManager = class {
       await mark("prepare", "running");
       await log("prepare: extract, shared dirs, service definitions (no switch)");
       let preExtracted = false;
+      const prepareStep = stepOf("prepare");
+      let entries = 0;
+      const extractProgress = (done, total, finished = false) => {
+        const percent = total > 0 ? finished ? 100 : Math.min(99, Math.round(done / total * 100)) : 0;
+        if (prepareStep !== void 0) prepareStep.progress = { done, total, percent };
+        meter("\u89E3\u538B\u5B89\u88C5\u5305", { done, total, percent, indeterminate: total === 0 });
+      };
+      const trackExtract = (line) => {
+        const text = line.trim();
+        const head = /^DSH-MESH-EXTRACT-TOTAL (\d+)$/u.exec(text);
+        if (head !== null) {
+          entries = Number.parseInt(head[1], 10);
+          extractProgress(0, entries);
+          return true;
+        }
+        const tick = /^DSH-MESH-EXTRACT (\d+)$/u.exec(text);
+        if (tick !== null) {
+          extractProgress(Number.parseInt(tick[1], 10) * EXTRACT_CHECKPOINT, entries);
+          return true;
+        }
+        return false;
+      };
       if (plan.os === "windows" && typeof runner.archiveEntries === "function" && typeof runner.extractArchive === "function") {
         const newDir = `${plan.releases}\\${plan.release}`;
         const total = await runner.archiveEntries(plan.remotePackage).catch(() => 0);
         if (total > 0) {
           await log(`extracting ${total} archive entries with tar`);
-          const prepareStep = state.steps.find((item) => item.key === "prepare");
           let done = 0;
           await runner.extractArchive(plan.remotePackage, newDir, () => {
             done += 1;
-            if (done % 500 === 0 || done === total) {
-              if (prepareStep !== void 0) {
-                prepareStep.progress = { done, total, percent: Math.min(99, Math.round(done / total * 100)) };
-              }
-              state.updatedAt = stamp();
-              this.#saveThrottled(stateFile, state);
-            }
+            if (done % 500 === 0 || done === total) extractProgress(done, total);
           });
-          if (prepareStep !== void 0) prepareStep.progress = { done: total, total, percent: 100 };
+          extractProgress(total, total, true);
           preExtracted = true;
         }
       }
       const scripts = this.scripts({ ...plan, preExtracted });
-      await runner.script(scripts.prepare, plan.os, (line) => note("prepare", line));
+      await runner.script(scripts.prepare, plan.os, (line) => {
+        if (trackExtract(line)) return;
+        note("prepare", line);
+      });
+      if (plan.os === "linux" && entries > 0) extractProgress(entries, entries, true);
       await mark("prepare", "succeeded");
       state.phase = "activate";
+      meter("\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", { percent: 99, indeterminate: true });
       await mark("activate", "running");
       await log("activate: switch current, restart services with the gateway last");
       await runner.script(scripts.activate, plan.os, (line) => note("activate", line));
       await mark("activate", "succeeded");
+      meter("\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", { ...state.progress, percent: 100, indeterminate: false });
       state.status = "succeeded";
       state.phase = "done";
       state.updatedAt = stamp();
@@ -3031,6 +3070,25 @@ var MeshService = class {
       throw Object.assign(new Error("the member task service is not available yet"), { status: 503 });
     }
     return tasks.listByMember();
+  }
+  /**
+   * Post a message typed in the panel to selected members.
+   *
+   * An empty selection broadcasts to every other member; the panel resolves
+   * `@3` mentions into ids before calling, so this stays a transport.
+   * @param {{text?: string, members?: string[]}} request message and targets.
+   * @returns {Promise<{ok: boolean, sent: object[], errors: object[]}>} outcome.
+   */
+  async sendConversation(request) {
+    const tasks = this.memberTasks;
+    if (tasks === void 0 || tasks === null) {
+      throw Object.assign(new Error("the member task service is not available yet"), { status: 503 });
+    }
+    const text = typeof request?.text === "string" ? request.text.trim() : "";
+    if (text === "") throw Object.assign(new Error("\u6D88\u606F\u4E0D\u80FD\u4E3A\u7A7A"), { status: 400 });
+    if (text.length > 8e3) throw Object.assign(new Error("\u6D88\u606F\u592A\u957F\uFF08\u4E0A\u9650 8000 \u5B57\uFF09"), { status: 400 });
+    const members = Array.isArray(request?.members) ? request.members.filter((item) => typeof item === "string" && item.trim() !== "") : [];
+    return tasks.sendTo({ text, members });
   }
   /**
    * Ask every member's interop service to drop its finished conversations.
@@ -3597,6 +3655,14 @@ function registerApi(ctx, service) {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() });
           return;
         }
+        if (method === "POST" && path9 === "/conversations/send") {
+          const body = await readJson(request);
+          writeJson(response, 200, await service.sendConversation({
+            text: typeof body.text === "string" ? body.text : "",
+            members: Array.isArray(body.members) ? body.members.filter((item) => typeof item === "string") : []
+          }));
+          return;
+        }
         if (method === "POST" && path9 === "/conversations/clear") {
           writeJson(response, 200, await service.clearConversations());
           return;
@@ -4017,6 +4083,83 @@ var MemberTaskService = class {
       });
     }
     return task;
+  }
+  /**
+   * Send a message typed in the panel to one or more members.
+   *
+   * A member whose conversation is still running gets the text as a follow-up;
+   * everyone else gets a fresh conversation. No task is created and nothing is
+   * notified back: the panel reads conversations straight from each member, so
+   * the answer shows up in the group chat on the next refresh.
+   * @param {{text: string, members?: string[]}} input text and target ids/ips.
+   * @returns {Promise<{ok: boolean, sent: object[], errors: object[]}>} outcome.
+   */
+  async sendTo({ text, members = [] }) {
+    const content = String(text ?? "").trim();
+    if (content === "") throw new Error("text is required");
+    const snapshot = await this.service.members();
+    this.identity = this.identity ?? {
+      id: String(snapshot.local?.id ?? "local"),
+      name: String(snapshot.local?.name ?? snapshot.local?.id ?? "local"),
+      ip: String(snapshot.local?.ip ?? "")
+    };
+    const others = [snapshot.local, ...Array.isArray(snapshot.members) ? snapshot.members : []].filter(Boolean).filter((member) => member.kind !== "self" && member.self !== true);
+    const wanted = (Array.isArray(members) ? members : []).map((item) => String(item).trim()).filter((item) => item !== "");
+    const targets = [];
+    if (wanted.length === 0) {
+      targets.push(...others);
+    } else {
+      for (const item of wanted) {
+        const match = others.find((member) => [String(member.id), String(member.ip), String(member.name)].includes(item));
+        if (match !== void 0) {
+          if (!targets.includes(match)) targets.push(match);
+          continue;
+        }
+        const resolved = await this.#resolveMember(item).catch(() => null);
+        if (resolved !== null && !targets.some((member) => member.ip === resolved.ip)) targets.push(resolved);
+      }
+    }
+    if (targets.length === 0) throw new Error("no member to send to");
+    const sent = [];
+    const errors = [];
+    await Promise.all(targets.map(async (member) => {
+      const name = String(member.name ?? member.id ?? member.ip ?? "");
+      const ip = String(member.ip ?? "");
+      const label = ip === "" ? name : `${name} (${ip})`;
+      try {
+        const baseUrl = this.#baseUrl(ip === "" ? name : ip);
+        const listed = await this.#request(baseUrl, "GET", "/v1/conversations", void 0, 8e3).catch(() => null);
+        const live = (Array.isArray(listed?.conversations) ? listed.conversations : []).find((row) => row.status === "running" && this.#isOwnConversation(row));
+        if (live !== void 0) {
+          await this.#request(baseUrl, "POST", `/v1/conversations/${encodeURIComponent(live.id)}/messages`, { content }, 3e4);
+          sent.push({ member: name, ip, conversationId: String(live.id), reused: true });
+          return;
+        }
+        const created = await this.#request(baseUrl, "POST", "/v1/conversations", {
+          prompt: content,
+          // The panel clamps the bubble, so the whole text is the title: a
+          // truncated one would never be recoverable through 详细.
+          title: content.length > 2e3 ? `${content.slice(0, 2e3)}\u2026` : content,
+          initiator: { ...this.identity, source: "panel" }
+        }, 6e4);
+        const conversation = created?.conversation ?? {};
+        sent.push({ member: name, ip, conversationId: String(conversation.id ?? ""), reused: false });
+      } catch (error) {
+        errors.push({ member: label, ip, error: error instanceof Error ? error.message : String(error) });
+      }
+    }));
+    return { ok: true, sent, errors };
+  }
+  /**
+   * True when a member's conversation was started from this machine.
+   * @param {object} row conversation summary.
+   * @returns {boolean} whether this host initiated it.
+   */
+  #isOwnConversation(row) {
+    const initiator = row?.initiator ?? null;
+    if (initiator === null || this.identity === null) return false;
+    if (initiator.id !== void 0 && String(initiator.id) === String(this.identity.id)) return true;
+    return initiator.ip !== void 0 && String(initiator.ip) !== "" && String(initiator.ip) === String(this.identity.ip);
   }
   async #monitor(task) {
     while (!this.disposed && (task.status === "running" || task.status === "starting")) {

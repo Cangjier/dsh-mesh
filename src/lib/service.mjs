@@ -16,6 +16,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   discoverMembers,
+  probeMember,
   readWireGuardState,
   wireGuardIdentity,
 } from '../../code/shared/wireguard.mjs'
@@ -33,6 +34,11 @@ import { repackArchive } from '../../code/build/repack.mjs'
 import { quickSystemInfo } from '../../code/shared/system-info.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
+
+/** A good member probe outlives a failed re-probe by this long. */
+const PROBE_GRACE_MS = 45_000
+/** Budget for the second probe attempt before a peer is called unreachable. */
+const PROBE_RETRY_MS = 3_000
 
 /**
  * Find the package root both when this module runs from `src/lib` and when it
@@ -98,6 +104,15 @@ export class MeshService {
     this.running = new Map()
     /** @type {{value: object, expiresAt: number}|null} */
     this.systemCache = null
+    /**
+     * Last successful probe per peer address.
+     *
+     * A long-haul peer loses a packet now and then, and one failed probe used
+     * to flip its row to 未部署 until the next refresh. Keeping the last good
+     * answer for a short grace period makes that flicker stop.
+     * @type {Map<string, {port: number|null, gate: object|null, system: object|null, latencyMs: number, at: number}>}
+     */
+    this.probes = new Map()
   }
 
   /** Cached local host inventory for the member table. */
@@ -269,10 +284,66 @@ export class MeshService {
     // this machine, `members` are the peers.
     const tags = await this.memberTags()
     self.tag = tags[self.id] ?? null
-    const members = snapshot.members.map(member => ({
-      ...member,
-      tag: tags[member.id] ?? null,
+    const ports = Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080]
+    const now = Date.now()
+    const members = await Promise.all(snapshot.members.map(async (member) => {
+      const tag = tags[member.id] ?? null
+      const known = this.probes.get(member.ip)
+      if (member.dsh) {
+        this.probes.set(member.ip, {
+          port: member.port,
+          gate: member.gate,
+          system: member.system,
+          latencyMs: member.latencyMs,
+          at: now,
+        })
+        return { ...member, tag }
+      }
+      // One lost packet must not read as "not deployed": a peer that answered
+      // before gets a second probe, and if that also fails the last good answer
+      // stands in for a while. A peer that never answered fails fast instead.
+      if (known === undefined) return { ...member, tag }
+      // Retry the port that answered last time instead of walking every port
+      // again: one extra request, not two more timeouts.
+      const retryPorts = known.port === null ? ports : [known.port]
+      const retry = await probeMember(member.ip, { ports: retryPorts, timeoutMs: PROBE_RETRY_MS }).catch(() => null)
+      if (retry !== null && retry.ok) {
+        this.probes.set(member.ip, {
+          port: retry.port,
+          gate: retry.info,
+          system: retry.info?.system ?? null,
+          latencyMs: retry.latencyMs,
+          at: now,
+        })
+        return {
+          ...member,
+          dsh: true,
+          port: retry.port,
+          latencyMs: retry.latencyMs,
+          gate: retry.info,
+          system: retry.info?.system ?? null,
+          error: null,
+          tag,
+        }
+      }
+      if (now - known.at > PROBE_GRACE_MS) return { ...member, tag }
+      return {
+        ...member,
+        dsh: true,
+        port: known.port,
+        latencyMs: known.latencyMs,
+        gate: known.gate,
+        system: known.system,
+        error: null,
+        tag,
+        probeStale: true,
+      }
     }))
+    if (this.probes.size > 64) {
+      for (const [ip, cached] of this.probes) {
+        if (now - cached.at > PROBE_GRACE_MS) this.probes.delete(ip)
+      }
+    }
     return { ...snapshot, self, members, local: self }
   }
 

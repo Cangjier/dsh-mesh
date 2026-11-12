@@ -2919,6 +2919,8 @@ function quickSystemInfo(options = {}) {
 
 // src/lib/service.mjs
 var HERE = path6.dirname(fileURLToPath(import.meta.url));
+var PROBE_GRACE_MS = 45e3;
+var PROBE_RETRY_MS = 3e3;
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
@@ -2966,6 +2968,7 @@ var MeshService = class {
     });
     this.running = /* @__PURE__ */ new Map();
     this.systemCache = null;
+    this.probes = /* @__PURE__ */ new Map();
   }
   /** Cached local host inventory for the member table. */
   async systemInfo() {
@@ -3126,10 +3129,61 @@ var MeshService = class {
     });
     const tags = await this.memberTags();
     self.tag = tags[self.id] ?? null;
-    const members = snapshot.members.map((member) => ({
-      ...member,
-      tag: tags[member.id] ?? null
+    const ports = Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080];
+    const now = Date.now();
+    const members = await Promise.all(snapshot.members.map(async (member) => {
+      const tag = tags[member.id] ?? null;
+      const known = this.probes.get(member.ip);
+      if (member.dsh) {
+        this.probes.set(member.ip, {
+          port: member.port,
+          gate: member.gate,
+          system: member.system,
+          latencyMs: member.latencyMs,
+          at: now
+        });
+        return { ...member, tag };
+      }
+      if (known === void 0) return { ...member, tag };
+      const retryPorts = known.port === null ? ports : [known.port];
+      const retry = await probeMember(member.ip, { ports: retryPorts, timeoutMs: PROBE_RETRY_MS }).catch(() => null);
+      if (retry !== null && retry.ok) {
+        this.probes.set(member.ip, {
+          port: retry.port,
+          gate: retry.info,
+          system: retry.info?.system ?? null,
+          latencyMs: retry.latencyMs,
+          at: now
+        });
+        return {
+          ...member,
+          dsh: true,
+          port: retry.port,
+          latencyMs: retry.latencyMs,
+          gate: retry.info,
+          system: retry.info?.system ?? null,
+          error: null,
+          tag
+        };
+      }
+      if (now - known.at > PROBE_GRACE_MS) return { ...member, tag };
+      return {
+        ...member,
+        dsh: true,
+        port: known.port,
+        latencyMs: known.latencyMs,
+        gate: known.gate,
+        system: known.system,
+        error: null,
+        tag,
+        probeStale: true
+      };
     }));
+    if (this.probes.size > 64) {
+      for (const [ip, cached] of this.probes) {
+        if (now - cached.at > PROBE_GRACE_MS) this.probes.delete(ip);
+      }
+    }
     return { ...snapshot, self, members, local: self };
   }
   /**

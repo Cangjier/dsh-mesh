@@ -77,6 +77,10 @@ export function registerApi(ctx, service) {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() })
           return
         }
+        if (method === 'GET' && path === '/conversations') {
+          writeJson(response, 200, await service.conversations())
+          return
+        }
         if (method === 'GET' && path === '/jobs') {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() })
           return

@@ -152,6 +152,9 @@ export function registerTools(ctx, toolsCtx, service) {
     dataDir: service.dataDir,
     log: line => ctx.logger?.info?.(`mesh: ${line}`),
   })
+
+  // The panel lists member conversations through the same client.
+  service.memberTasks = memberTasks
   try {
     ctx.effect(() => () => memberTasks.dispose(), 'mesh member tasks')
   } catch { }

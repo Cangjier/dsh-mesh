@@ -14,6 +14,7 @@ import { registerTools } from '../src/lib/tools.mjs'
  */
 async function fakeMember() {
   let conversations = 0
+  const created = []
   const server = http.createServer(async (request, response) => {
     let body = ''
     for await (const chunk of request) body += String(chunk)
@@ -22,7 +23,19 @@ async function fakeMember() {
       response.end(JSON.stringify({ ok: false, error: { code: 'unauthorized', message: 'bad token' } }))
       return
     }
+    if (request.method === 'GET' && request.url === '/v1/conversations') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({
+        ok: true,
+        conversations: [
+          { id: 'conv-1', title: 'render the report', status: 'idle', turns: 2, updatedAt: '2026-11-12T06:00:00.000Z', initiator: { id: 'local', name: 'member-a', source: 'call_member' } },
+          { id: 'conv-2', title: 'check the logs', status: 'running', turns: 1, updatedAt: '2026-11-12T06:05:00.000Z', initiator: null },
+        ],
+      }))
+      return
+    }
     if (request.method === 'POST' && request.url === '/v1/conversations') {
+      created.push(body === '' ? {} : JSON.parse(body))
       conversations += 1
       response.writeHead(201, { 'content-type': 'application/json' })
       response.end(JSON.stringify({ ok: true, conversation: { id: `conv-${conversations}`, status: 'running' } }))
@@ -50,7 +63,7 @@ async function fakeMember() {
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
-  return { server, port: address.port }
+  return { server, port: address.port, created }
 }
 
 test('a completed member conversation notifies the originating agent', async () => {
@@ -212,6 +225,65 @@ test('registerTools exposes build, deploy, members, call_member and repack', asy
     const repack = tools.find(candidate => candidate.name === 'repack')
     assert.deepEqual(repack.parameters.required, ['package'])
   } finally {
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a delegation tells the member what the conversation is about and who started it', async () => {
+  const { server, port, created } = await fakeMember()
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-task-'))
+  const agent = { id: 'session-A', session: { id: 'session-A' }, followup: () => {} }
+  const service = {
+    config: { interopPort: port, interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
+  }
+  const ctx = { get: name => name === 'agents' ? { get: id => id === 'session-A' ? agent : undefined } : undefined }
+  const tasks = new MemberTaskService({ ctx, service, dataDir, log: () => {} })
+  try {
+    await tasks.start({ member: '127.0.0.1', prompt: 'summarise the deploy log', agent, notify: false })
+    assert.equal(created.length, 1)
+    assert.equal(created[0].title, 'summarise the deploy log')
+    assert.equal(created[0].initiator.name, 'member-b')
+    assert.equal(created[0].initiator.id, 'local')
+    assert.equal(created[0].initiator.source, 'call_member')
+  } finally {
+    await tasks.dispose()
+    await new Promise(resolve => server.close(resolve))
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('the conversation list is grouped per member and survives one failing peer', async () => {
+  const { server, port } = await fakeMember()
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-task-'))
+  const service = {
+    config: { interopPort: port, interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({
+      local: { id: 'local', kind: 'self', name: 'member-a', ip: '127.0.0.1', online: true, dsh: true },
+      // Unroutable on purpose: the list must still return the healthy member.
+      members: [{ id: 'peer-1', kind: 'peer', name: 'member-b', ip: '10.255.255.1', online: false, dsh: true }],
+    }),
+  }
+  const tasks = new MemberTaskService({ ctx: { get: () => undefined }, service, dataDir })
+  try {
+    const snapshot = await tasks.listByMember(300)
+    assert.equal(snapshot.ok, true)
+    assert.equal(snapshot.groups.length, 2)
+    assert.equal(snapshot.groups[0].self, true)
+    assert.equal(snapshot.groups[0].name, 'member-a')
+    assert.equal(snapshot.groups[0].conversations.length, 2)
+    assert.equal(snapshot.groups[0].conversations[0].title, 'render the report')
+    assert.equal(snapshot.groups[0].conversations[0].initiator.source, 'call_member')
+    assert.equal(snapshot.groups[1].name, 'member-b')
+    assert.equal(snapshot.groups[1].conversations.length, 0)
+    assert.ok(typeof snapshot.groups[1].error === 'string' && snapshot.groups[1].error !== '')
+  } finally {
+    await tasks.dispose()
+    await new Promise(resolve => server.close(resolve))
     await rm(dataDir, { recursive: true, force: true })
   }
 })

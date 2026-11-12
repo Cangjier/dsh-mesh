@@ -16,19 +16,21 @@
 
 import { spawn } from 'node:child_process'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { JsonRpcLineTransport } from '../../app/node_modules/@deepseek-ai/dsh-sdk-protocol/lib/index.js'
 import { collectSystemInfo } from '../shared/system-info.mjs'
+import { conversationRecord, normalizeInitiator, normalizeTitle, titleFromPrompt } from '../shared/conversation-meta.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..', '..')
 const DATA = path.join(ROOT, 'data')
 const DSH_ENTRY = path.join(ROOT, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const TOKEN_FILE = path.join(DATA, 'interop-token')
+const STATE_FILE = path.join(DATA, 'conversations.json')
 const CONFIG_FILE = path.join(ROOT, 'config', 'interop.env')
 
 mkdirSync(DATA, { recursive: true })
@@ -191,11 +193,17 @@ function publicConversation(conversation) {
     error: conversation.error,
     eventCount: conversation.events.length,
     cwd: conversation.cwd,
+    // What the mesh panel lists: what this conversation is about and who
+    // started it (another member, or this machine when started by hand).
+    title: conversation.title ?? '',
+    initiator: conversation.initiator ?? null,
+    turns: Number.isSafeInteger(conversation.turns) ? conversation.turns : 0,
   }
 }
 
 function updateConversation(conversation, patch) {
   Object.assign(conversation, patch, { updatedAt: new Date().toISOString() })
+  scheduleSave()
 }
 
 function broadcast(conversation, payload) {
@@ -203,6 +211,74 @@ function broadcast(conversation, payload) {
     try {
       client.write(`event: ${payload.type ?? 'message'}\ndata: ${JSON.stringify(payload)}\n\n`)
     } catch { }
+  }
+}
+
+// The conversation map is what the mesh panel lists, so it outlives a restart:
+// only the slim record is written, never events or sockets.
+let saveTimer = null
+let saving = false
+
+function scheduleSave() {
+  if (saveTimer !== null || stopping) return
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    saveState()
+  }, 500)
+  saveTimer.unref?.()
+}
+
+function saveState() {
+  if (saving) return
+  saving = true
+  try {
+    const payload = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      conversations: [...conversations.values()].map(conversationRecord),
+    }
+    const temporary = `${STATE_FILE}.tmp`
+    writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`)
+    renameSync(temporary, STATE_FILE)
+  } catch (error) {
+    log(`could not persist conversations: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    saving = false
+  }
+}
+
+function loadState() {
+  if (!existsSync(STATE_FILE)) return
+  try {
+    const parsed = JSON.parse(readFileSync(STATE_FILE, 'utf8'))
+    const records = Array.isArray(parsed?.conversations) ? parsed.conversations : []
+    for (const record of records) {
+      if (typeof record?.id !== 'string' || conversations.has(record.id)) continue
+      const conversation = {
+        id: record.id,
+        sessionId: typeof record.sessionId === 'string' ? record.sessionId : record.id,
+        cwd: typeof record.cwd === 'string' ? record.cwd : WORKDIR,
+        // A turn that was running when the service stopped is not running now:
+        // the SDK child that owned it died with the service.
+        status: record.status === 'running' ? 'idle' : typeof record.status === 'string' ? record.status : 'idle',
+        title: typeof record.title === 'string' ? record.title : '',
+        initiator: normalizeInitiator(record.initiator),
+        createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
+        updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date().toISOString(),
+        lastText: typeof record.lastText === 'string' ? record.lastText : '',
+        error: null,
+        events: [],
+        clients: new Set(),
+        callbackUrl: '',
+        notifiedAt: null,
+        turns: Number.isSafeInteger(record.turns) ? record.turns : 0,
+      }
+      conversations.set(conversation.id, conversation)
+      bySession.set(conversation.sessionId, conversation)
+    }
+    if (conversations.size > 0) log(`restored ${String(conversations.size)} conversation(s) from ${STATE_FILE}`)
+  } catch (error) {
+    log(`could not restore conversations: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -376,6 +452,8 @@ async function createConversation(request) {
     id,
     sessionId,
     cwd,
+    title: normalizeTitle(request.title) || titleFromPrompt(request.prompt),
+    initiator: normalizeInitiator(request.initiator),
     status: 'blank',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -389,6 +467,7 @@ async function createConversation(request) {
   }
   conversations.set(id, conversation)
   bySession.set(sessionId, conversation)
+  scheduleSave()
   try {
     await sdkRequest('session/working-directory/set', { sessionId, path: cwd })
     if (request.prompt !== undefined) {
@@ -529,6 +608,7 @@ const server = http.createServer(async (request, response) => {
   }
 })
 
+loadState()
 server.listen(PORT, HOST, () => {
   log(`listening on http://${HOST}:${String(PORT)}; token source ${TOKEN_SOURCE}`)
   startChild()
@@ -540,6 +620,7 @@ async function shutdown(signal) {
   log(`${signal}; stopping`)
   server.close()
   if (restartTimer !== null) clearTimeout(restartTimer)
+  saveState()
   try { await transport?.request('shutdown', {}) } catch { }
   transport?.close()
   if (child !== null && !child.killed) child.kill('SIGTERM')

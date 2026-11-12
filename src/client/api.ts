@@ -44,6 +44,38 @@ export interface Snapshot {
   cluster?: { configured: boolean; memberPort: number }
 }
 
+export interface MemberConversation {
+  id: string
+  sessionId?: string
+  title?: string
+  initiator?: { id?: string; name?: string; ip?: string; source?: string } | null
+  status?: string
+  createdAt?: string
+  updatedAt?: string
+  lastText?: string
+  turns?: number
+  eventCount?: number
+  cwd?: string
+  error?: string | null
+}
+
+export interface ConversationGroup {
+  id: string
+  name: string
+  ip: string
+  online: boolean
+  self: boolean
+  dsh: boolean
+  conversations: MemberConversation[]
+  error: string | null
+}
+
+export interface ConversationSnapshot {
+  ok: boolean
+  updatedAt: string
+  groups: ConversationGroup[]
+}
+
 export interface HostStatus {
   ok: boolean
   host: {
@@ -304,6 +336,10 @@ export const api = {
       headers: { 'x-dsh-mesh': '1' },
       body: JSON.stringify(body),
     })
+  },
+
+  conversations(): Promise<ConversationSnapshot> {
+    return request<ConversationSnapshot>('/api/dsh-mesh/conversations')
   },
 
   job(id: string): Promise<{ job: BuildJob }> {

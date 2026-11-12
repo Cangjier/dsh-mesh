@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Collapse,
   ConfigProvider,
   Descriptions,
   Empty,
@@ -36,7 +37,21 @@ import {
 import zhCN from 'antd/locale/zh_CN'
 import enUS from 'antd/locale/en_US'
 import styles from './styles.css'
-import { api, ApiError, isStartingError, STARTING_MESSAGE, OFFLINE_MESSAGE, type DeployJob, type Member, type PackageInfo, type Snapshot, type SystemInfo } from './api'
+import {
+  api,
+  ApiError,
+  isStartingError,
+  STARTING_MESSAGE,
+  OFFLINE_MESSAGE,
+  type ConversationGroup,
+  type ConversationSnapshot,
+  type DeployJob,
+  type Member,
+  type MemberConversation,
+  type PackageInfo,
+  type Snapshot,
+  type SystemInfo,
+} from './api'
 import { WireGuardPanel } from './wireguard'
 import { EN as WIREGUARD_EN, dictionary as wireguardDictionary } from './wireguard/i18n'
 
@@ -265,6 +280,170 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
   )
 }
 
+/** Badge colour for a conversation status reported by a member's interop service. */
+function conversationStatusColor(status: string | undefined): string {
+  switch (status) {
+    case 'running': return 'processing'
+    case 'idle': return 'success'
+    case 'error':
+    case 'unavailable': return 'error'
+    case 'blank': return 'default'
+    default: return 'default'
+  }
+}
+
+/** What a conversation is about: its title, else the last answer, else its id. */
+function conversationTitle(row: MemberConversation): string {
+  const title = (row.title ?? '').trim()
+  if (title !== '') return title
+  const last = (row.lastText ?? '').trim()
+  if (last !== '') return last
+  return row.id.slice(0, 8)
+}
+
+/** Which machine started a conversation, and how. */
+function conversationInitiator(row: MemberConversation): string {
+  const initiator = row.initiator
+  if (initiator === null || initiator === undefined) return '—'
+  const name = initiator.name ?? initiator.id ?? '—'
+  const source = initiator.source === 'call_member' ? 'call_member' : initiator.source ?? ''
+  return source === '' ? name : `${name} · ${source}`
+}
+
+function conversationTime(value: string | undefined): string {
+  if (value === undefined || value === '') return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+const CONVERSATION_COLUMNS: ColumnsType<MemberConversation> = [
+  {
+    title: '对话',
+    dataIndex: 'title',
+    render: (_value, row) => (
+      <Typography.Text ellipsis={{ tooltip: conversationTitle(row) }} style={{ maxWidth: 320 }}>
+        {conversationTitle(row)}
+      </Typography.Text>
+    ),
+  },
+  {
+    title: '发起者',
+    dataIndex: 'initiator',
+    width: 200,
+    render: (_value, row) => <span>{conversationInitiator(row)}</span>,
+  },
+  {
+    title: '状态',
+    dataIndex: 'status',
+    width: 100,
+    render: (_value, row) => <Tag color={conversationStatusColor(row.status)}>{row.status ?? '—'}</Tag>,
+  },
+  {
+    title: '轮次',
+    dataIndex: 'turns',
+    width: 70,
+    render: (_value, row) => <span>{row.turns ?? 0}</span>,
+  },
+  {
+    title: '最近活动',
+    dataIndex: 'updatedAt',
+    width: 180,
+    render: (_value, row) => <span>{conversationTime(row.updatedAt ?? row.createdAt)}</span>,
+  },
+]
+
+/**
+ * Conversations each member's interop service controls. Grouped by member, so a
+ * delegated task is visible next to the machine that ran it — and next to the
+ * machine that started it.
+ */
+function MemberConversations({ active }: { active: boolean }) {
+  const [snapshot, setSnapshot] = useState<ConversationSnapshot | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      setSnapshot(await api.conversations())
+      setError('')
+    } catch (cause) {
+      setError(errorText(cause))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!active) return undefined
+    void load()
+    // The list is cheap to rebuild and members change state out of band.
+    const timer = setInterval(() => { void load() }, 20_000)
+    return () => clearInterval(timer)
+  }, [active, load])
+
+  const groups: ConversationGroup[] = snapshot?.groups ?? []
+  const total = groups.reduce((sum, group) => sum + group.conversations.length, 0)
+  const busy = groups.reduce((sum, group) => sum + group.conversations.filter(row => row.status === 'running').length, 0)
+
+  return (
+    <div className="dsh-pw-tabbody">
+      <Card
+        size="small"
+        title="成员对话"
+        extra={(
+          <Space size={12}>
+            <Typography.Text type="secondary">
+              {`${String(total)} 个对话${busy > 0 ? ` · ${String(busy)} 个进行中` : ''}`}
+            </Typography.Text>
+            <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => { void load() }}>
+              刷新
+            </Button>
+          </Space>
+        )}
+      >
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+          列表来自各成员的交互服务（8765），按成员分组；「发起者」是创建这个对话的机器，
+          会话标题取第一条消息。
+        </Typography.Paragraph>
+        {error !== '' ? <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} /> : null}
+        {groups.length === 0 && !loading && error === '' ? <Empty description="还没有成员" /> : null}
+        {groups.length > 0 ? (
+          <Collapse
+            ghost
+            items={groups.map(group => ({
+              key: group.id,
+              label: (
+                <Space size={8} wrap>
+                  <Typography.Text strong>{group.name}</Typography.Text>
+                  <Typography.Text type="secondary">{group.ip}</Typography.Text>
+                  {group.self ? <Tag color="blue">本机</Tag> : null}
+                  {group.online ? null : <Tag>离线</Tag>}
+                  <Tag>{`${String(group.conversations.length)} 个对话`}</Tag>
+                  {group.conversations.some(row => row.status === 'running') ? <Tag color="processing">进行中</Tag> : null}
+                </Space>
+              ),
+              children: group.error !== null && group.error !== undefined
+                ? <Alert type="warning" showIcon message={`交互服务不可用：${group.error}`} />
+                : (
+                  <Table<MemberConversation>
+                    rowKey="id"
+                    size="small"
+                    dataSource={group.conversations}
+                    columns={CONVERSATION_COLUMNS}
+                    pagination={group.conversations.length > 10 ? { pageSize: 10, hideOnSinglePage: true } : false}
+                    locale={{ emptyText: <Empty description="这个成员还没有通过交互服务创建的对话" /> }}
+                  />
+                ),
+            }))}
+          />
+        ) : null}
+      </Card>
+    </div>
+  )
+}
+
 function Panel({ ctx }: { ctx: any }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [gateAvailable, setGateAvailable] = useState(false)
@@ -283,7 +462,7 @@ function Panel({ ctx }: { ctx: any }) {
   const [progressJob, setProgressJob] = useState<DeployJob | null>(null)
   const [progressLog, setProgressLog] = useState<string[]>([])
   const deployStatusRef = useRef<Record<string, string>>({})
-  const [panelTab, setPanelTab] = useState<'members' | 'network'>('members')
+  const [panelTab, setPanelTab] = useState<'members' | 'network' | 'conversations'>('members')
   const [tags, setTags] = useState<Record<string, string>>({})
   const [tagTarget, setTagTarget] = useState<Member | null>(null)
   const [detailTarget, setDetailTarget] = useState<Member | null>(null)
@@ -691,7 +870,7 @@ function Panel({ ctx }: { ctx: any }) {
         <Tabs
           className="dsh-pw-tabs"
           activeKey={panelTab}
-          onChange={key => setPanelTab(key as 'members' | 'network')}
+          onChange={key => setPanelTab(key as 'members' | 'network' | 'conversations')}
           items={[
             {
               key: 'members',
@@ -720,6 +899,11 @@ function Panel({ ctx }: { ctx: any }) {
             </Card>
         </div>
               ),
+            },
+            {
+              key: 'conversations',
+              label: '对话',
+              children: <MemberConversations active={panelTab === 'conversations'} />,
             },
             {
               key: 'network',

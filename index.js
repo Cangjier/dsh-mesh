@@ -2896,6 +2896,18 @@ var MeshService = class {
    * this one keeps the panel useful when DSH is opened directly.
    * @returns {Promise<object>} discovery snapshot.
    */
+  /**
+   * Conversations controlled by every member's interop service, grouped by
+   * member. The task service owns the interop client and its token.
+   * @returns {Promise<{ok: boolean, updatedAt: string, groups: object[]}>} groups.
+   */
+  async conversations() {
+    const tasks = this.memberTasks;
+    if (tasks === void 0 || tasks === null) {
+      throw Object.assign(new Error("the member task service is not available yet"), { status: 503 });
+    }
+    return tasks.listByMember();
+  }
   async members() {
     const stateFile = path6.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
@@ -3450,6 +3462,10 @@ function registerApi(ctx, service) {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() });
           return;
         }
+        if (method === "GET" && path9 === "/conversations") {
+          writeJson(response, 200, await service.conversations());
+          return;
+        }
         if (method === "GET" && path9 === "/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() });
           return;
@@ -3638,6 +3654,7 @@ var MemberTaskService = class {
     this.taskRoot = path7.join(this.dataDir, "member-tasks");
     this.tasks = /* @__PURE__ */ new Map();
     this.monitors = /* @__PURE__ */ new Map();
+    this.identity = null;
     this.loaded = false;
     this.disposed = false;
   }
@@ -3720,6 +3737,17 @@ var MemberTaskService = class {
     }
     throw new Error("no interop token: set interopToken, DSH_INTEROP_TOKEN, or DSH_GATE_PASSWORD");
   }
+  /**
+   * The interop base URL of one member address.
+   * @param {string} address member VPN address or http(s) URL.
+   * @returns {string} base URL without trailing slash.
+   */
+  #baseUrl(address) {
+    const raw = String(address ?? "");
+    if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, "");
+    const host = raw.includes(":") && !raw.startsWith("[") ? `[${raw}]` : raw;
+    return `http://${host}:${String(this.#port())}`;
+  }
   async #resolveMember(input) {
     const raw = String(input ?? "").trim();
     if (raw === "") throw new Error("member is required");
@@ -3727,17 +3755,20 @@ var MemberTaskService = class {
       return { name: raw, ip: raw, baseUrl: raw.replace(/\/+$/, "") };
     }
     const snapshot = await this.service.members();
+    this.identity = this.identity ?? {
+      id: String(snapshot.local?.id ?? "local"),
+      name: String(snapshot.local?.name ?? snapshot.local?.id ?? "local"),
+      ip: String(snapshot.local?.ip ?? "")
+    };
     const all = [snapshot.local, ...Array.isArray(snapshot.members) ? snapshot.members : []].filter(Boolean);
     const match = all.find((member2) => String(member2.id) === raw || String(member2.name) === raw || String(member2.ip) === raw);
     const member = match ?? { id: raw, name: raw, ip: raw };
     let host = String(member.ip ?? member.id ?? raw);
     if (/^https?:\/\//i.test(host)) return { name: member.name ?? raw, ip: host, baseUrl: host.replace(/\/+$/, "") };
-    if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
-    const port = this.#port();
     return {
       name: member.name ?? member.id ?? raw,
       ip: String(member.ip ?? member.id ?? raw),
-      baseUrl: `http://${host}:${String(port)}`
+      baseUrl: this.#baseUrl(host)
     };
   }
   async #request(baseUrl, method, endpoint, body, timeoutMs = 3e4) {
@@ -3776,7 +3807,13 @@ var MemberTaskService = class {
     if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("prompt is required");
     if (agent === void 0 || agent === null) throw new Error("delegation must be called from a DSH conversation");
     const target = await this.#resolveMember(member);
-    const payload = { prompt, ...typeof cwd === "string" && cwd !== "" ? { cwd } : {} };
+    const payload = {
+      prompt,
+      // The member's panel lists these; without a title it would show a UUID.
+      title: truncate(prompt, 80),
+      initiator: { ...this.identity ?? { id: "local" }, source: "call_member" },
+      ...typeof cwd === "string" && cwd !== "" ? { cwd } : {}
+    };
     const created = await this.#request(target.baseUrl, "POST", "/v1/conversations", payload, 6e4);
     const conversation = created.conversation;
     if (conversation === void 0 || typeof conversation.id !== "string") throw new Error("member interop did not return a conversation id");
@@ -3956,6 +3993,46 @@ var MemberTaskService = class {
     }
   }
   /**
+   * List the conversations every member's interop service currently controls.
+   *
+   * A slow or offline member degrades to an `error` entry so one bad peer does
+   * not hide the rest of the list.
+   * @param {number} [timeoutMs] per-member request budget.
+   * @returns {Promise<{ok: boolean, updatedAt: string, groups: object[]}>} groups by member.
+   */
+  async listByMember(timeoutMs = 4e3) {
+    const snapshot = await this.service.members();
+    this.identity = this.identity ?? {
+      id: String(snapshot.local?.id ?? "local"),
+      name: String(snapshot.local?.name ?? snapshot.local?.id ?? "local"),
+      ip: String(snapshot.local?.ip ?? "")
+    };
+    const members = [snapshot.local, ...Array.isArray(snapshot.members) ? snapshot.members : []].filter(Boolean);
+    const groups = await Promise.all(members.map(async (member) => {
+      const summary = {
+        id: String(member.id),
+        name: String(member.name ?? member.id),
+        ip: String(member.ip ?? ""),
+        online: member.online !== false,
+        self: member.kind === "self",
+        dsh: member.dsh === true
+      };
+      if (summary.ip === "") return { ...summary, conversations: [], error: "no VPN address" };
+      try {
+        const data = await this.#request(this.#baseUrl(summary.ip), "GET", "/v1/conversations", void 0, timeoutMs);
+        return { ...summary, conversations: Array.isArray(data?.conversations) ? data.conversations : [], error: null };
+      } catch (error) {
+        return { ...summary, conversations: [], error: error instanceof Error ? error.message : String(error) };
+      }
+    }));
+    groups.sort((left, right) => {
+      if (left.self !== right.self) return left.self ? -1 : 1;
+      if (left.online !== right.online) return left.online ? -1 : 1;
+      return left.name.localeCompare(right.name);
+    });
+    return { ok: true, updatedAt: (/* @__PURE__ */ new Date()).toISOString(), groups };
+  }
+  /**
    * Absolute path of one task's log file.
    * @param {string} taskId task id.
    * @returns {string} log path.
@@ -4097,6 +4174,7 @@ function registerTools(ctx, toolsCtx, service) {
     dataDir: service.dataDir,
     log: (line) => ctx.logger?.info?.(`mesh: ${line}`)
   });
+  service.memberTasks = memberTasks;
   try {
     ctx.effect(() => () => memberTasks.dispose(), "mesh member tasks");
   } catch {

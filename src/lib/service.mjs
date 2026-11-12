@@ -161,6 +161,19 @@ export class MeshService {
    * this one keeps the panel useful when DSH is opened directly.
    * @returns {Promise<object>} discovery snapshot.
    */
+  /**
+   * Conversations controlled by every member's interop service, grouped by
+   * member. The task service owns the interop client and its token.
+   * @returns {Promise<{ok: boolean, updatedAt: string, groups: object[]}>} groups.
+   */
+  async conversations() {
+    const tasks = this.memberTasks
+    if (tasks === undefined || tasks === null) {
+      throw Object.assign(new Error('the member task service is not available yet'), { status: 503 })
+    }
+    return tasks.listByMember()
+  }
+
   async members() {
     const stateFile = path.join(this.home, 'wireguard', 'state.json')
     const { state, error } = await readWireGuardState({ file: stateFile })

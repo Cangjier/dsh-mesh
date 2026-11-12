@@ -47,6 +47,8 @@ export class MemberTaskService {
     this.taskRoot = path.join(this.dataDir, 'member-tasks')
     this.tasks = new Map()
     this.monitors = new Map()
+    /** Cached `{ id, name, ip }` of this machine, filled by the first member lookup. */
+    this.identity = null
     this.loaded = false
     this.disposed = false
   }
@@ -123,6 +125,18 @@ export class MemberTaskService {
     throw new Error('no interop token: set interopToken, DSH_INTEROP_TOKEN, or DSH_GATE_PASSWORD')
   }
 
+  /**
+   * The interop base URL of one member address.
+   * @param {string} address member VPN address or http(s) URL.
+   * @returns {string} base URL without trailing slash.
+   */
+  #baseUrl(address) {
+    const raw = String(address ?? '')
+    if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, '')
+    const host = raw.includes(':') && !raw.startsWith('[') ? `[${raw}]` : raw
+    return `http://${host}:${String(this.#port())}`
+  }
+
   async #resolveMember(input) {
     const raw = String(input ?? '').trim()
     if (raw === '') throw new Error('member is required')
@@ -130,17 +144,20 @@ export class MemberTaskService {
       return { name: raw, ip: raw, baseUrl: raw.replace(/\/+$/, '') }
     }
     const snapshot = await this.service.members()
+    this.identity = this.identity ?? {
+      id: String(snapshot.local?.id ?? 'local'),
+      name: String(snapshot.local?.name ?? snapshot.local?.id ?? 'local'),
+      ip: String(snapshot.local?.ip ?? ''),
+    }
     const all = [snapshot.local, ...(Array.isArray(snapshot.members) ? snapshot.members : [])].filter(Boolean)
     const match = all.find(member => String(member.id) === raw || String(member.name) === raw || String(member.ip) === raw)
     const member = match ?? { id: raw, name: raw, ip: raw }
     let host = String(member.ip ?? member.id ?? raw)
     if (/^https?:\/\//i.test(host)) return { name: member.name ?? raw, ip: host, baseUrl: host.replace(/\/+$/, '') }
-    if (host.includes(':') && !host.startsWith('[')) host = `[${host}]`
-    const port = this.#port()
     return {
       name: member.name ?? member.id ?? raw,
       ip: String(member.ip ?? member.id ?? raw),
-      baseUrl: `http://${host}:${String(port)}`,
+      baseUrl: this.#baseUrl(host),
     }
   }
 
@@ -178,7 +195,13 @@ export class MemberTaskService {
     if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('prompt is required')
     if (agent === undefined || agent === null) throw new Error('delegation must be called from a DSH conversation')
     const target = await this.#resolveMember(member)
-    const payload = { prompt, ...(typeof cwd === 'string' && cwd !== '' ? { cwd } : {}) }
+    const payload = {
+      prompt,
+      // The member's panel lists these; without a title it would show a UUID.
+      title: truncate(prompt, 80),
+      initiator: { ...(this.identity ?? { id: 'local' }), source: 'call_member' },
+      ...(typeof cwd === 'string' && cwd !== '' ? { cwd } : {}),
+    }
     const created = await this.#request(target.baseUrl, 'POST', '/v1/conversations', payload, 60_000)
     const conversation = created.conversation
     if (conversation === undefined || typeof conversation.id !== 'string') throw new Error('member interop did not return a conversation id')
@@ -366,6 +389,47 @@ export class MemberTaskService {
     } catch {
       return ''
     }
+  }
+
+  /**
+   * List the conversations every member's interop service currently controls.
+   *
+   * A slow or offline member degrades to an `error` entry so one bad peer does
+   * not hide the rest of the list.
+   * @param {number} [timeoutMs] per-member request budget.
+   * @returns {Promise<{ok: boolean, updatedAt: string, groups: object[]}>} groups by member.
+   */
+  async listByMember(timeoutMs = 4000) {
+    const snapshot = await this.service.members()
+    this.identity = this.identity ?? {
+      id: String(snapshot.local?.id ?? 'local'),
+      name: String(snapshot.local?.name ?? snapshot.local?.id ?? 'local'),
+      ip: String(snapshot.local?.ip ?? ''),
+    }
+    const members = [snapshot.local, ...(Array.isArray(snapshot.members) ? snapshot.members : [])].filter(Boolean)
+    const groups = await Promise.all(members.map(async (member) => {
+      const summary = {
+        id: String(member.id),
+        name: String(member.name ?? member.id),
+        ip: String(member.ip ?? ''),
+        online: member.online !== false,
+        self: member.kind === 'self',
+        dsh: member.dsh === true,
+      }
+      if (summary.ip === '') return { ...summary, conversations: [], error: 'no VPN address' }
+      try {
+        const data = await this.#request(this.#baseUrl(summary.ip), 'GET', '/v1/conversations', undefined, timeoutMs)
+        return { ...summary, conversations: Array.isArray(data?.conversations) ? data.conversations : [], error: null }
+      } catch (error) {
+        return { ...summary, conversations: [], error: error instanceof Error ? error.message : String(error) }
+      }
+    }))
+    groups.sort((left, right) => {
+      if (left.self !== right.self) return left.self ? -1 : 1
+      if (left.online !== right.online) return left.online ? -1 : 1
+      return left.name.localeCompare(right.name)
+    })
+    return { ok: true, updatedAt: new Date().toISOString(), groups }
   }
 
   /**

@@ -269,34 +269,32 @@
   bottom: 0;
   z-index: 4;
   margin-top: auto;
-  padding: 8px 0 4px;
+  /* Room for the card's shadow, so it floats instead of touching the edge. */
+  padding: 8px 0 14px;
   background: var(--chat-pane-bg, transparent);
 }
 
 .chat-composer-box {
-  /* A filled row, not an outlined box: the send button rides at the end of the
-     text, so an empty composer is one line tall instead of two. */
+  /* Mirrors the DSH composer: a white card with a hairline ring and two very
+     soft lights, the text on top and the tools on their own row. */
   display: flex;
-  align-items: flex-end;
-  gap: 6px;
+  flex-direction: column;
   border: none;
-  border-radius: 12px;
-  background: var(--chat-list-bg, #f5f6f7);
-  padding: 6px 6px 6px 12px;
-  transition: background 0.15s ease;
-}
-
-.chat-composer-box:focus-within {
-  background: var(--chat-list-hover, #eceef0);
+  border-radius: 28px;
+  background: var(--chat-surface, #fff);
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.1),
+    0 4px 16px rgba(0, 0, 0, 0.03),
+    0 0 24px rgba(0, 0, 0, 0.03);
+  padding: 8px 0 0;
 }
 
 .chat-composer-input {
-  flex: 1 1 auto;
   width: 100%;
   box-sizing: border-box;
-  min-height: 24px;
+  min-height: 52px;
   max-height: 168px;
-  padding: 4px 0;
+  padding: 4px 14px 0;
   border: none;
   outline: none;
   resize: none;
@@ -305,17 +303,68 @@
   color: var(--chat-text, inherit);
   font: inherit;
   font-size: 14px;
-  line-height: 1.6;
+  line-height: 24px;
 }
 
 .chat-composer-input::placeholder {
-  color: var(--chat-text, inherit);
-  opacity: 0.35;
+  color: var(--chat-muted, #8a8f98);
+}
+
+.chat-composer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 12px 10px;
+}
+
+.chat-composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* The `+` slot of the DSH composer, used here to start an `@` mention. */
+.chat-composer-add {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--chat-list-bg, #f5f6f7);
+  color: var(--chat-text, #0f1115);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.chat-composer-add:hover {
+  background: var(--chat-list-hover, #eceef0);
+}
+
+.chat-composer-scope {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 4px 0 8px;
+  color: var(--chat-muted, #61666b);
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .chat-composer-send {
   flex: 0 0 auto;
-  margin-bottom: 1px;
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
 }
 
 .chat-mention-menu {

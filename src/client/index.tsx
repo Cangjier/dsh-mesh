@@ -33,7 +33,7 @@ import {
   InfoCircleOutlined,
   LoadingOutlined,
   ReloadOutlined,
-  SendOutlined,
+  ArrowUpOutlined,
   SwapOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
@@ -619,6 +619,7 @@ function MemberConversations({ active, members, refreshToken }: {
     '--chat-out-border': token.colorPrimaryBorder,
     '--chat-avatar-bg': token.colorPrimary,
     '--chat-text': token.colorText,
+    '--chat-muted': token.colorTextTertiary,
   } as React.CSSProperties
 
   const groups: ConversationGroup[] = snapshot?.groups ?? []
@@ -686,6 +687,18 @@ function MemberConversations({ active, members, refreshToken }: {
     return { query, start: caret - query.length - 1 }
   }
 
+  /** Insert an `@` at the caret and open the picker, like the `+` slot. */
+  const openMention = () => {
+    const box = draftRef.current
+    const caret = box?.selectionStart ?? draft.length
+    setDraft(`${draft.slice(0, caret)}@${draft.slice(caret)}`)
+    setMention({ query: '', index: 0 })
+    window.setTimeout(() => {
+      box?.focus()
+      box?.setSelectionRange(caret + 1, caret + 1)
+    }, 0)
+  }
+
   const syncMention = (value: string, caret: number) => {
     const found = mentionAt(value, caret)
     setMention(found === null ? null : { query: found.query, index: 0 })
@@ -734,6 +747,12 @@ function MemberConversations({ active, members, refreshToken }: {
       setSending(false)
     }
   }
+
+  /** Numbers mentioned in the draft, in the order they appear. */
+  const mentioned = Array.from(new Set(Array.from(draft.matchAll(/@(\d{1,3})/gu)).map(match => match[1] ?? '')))
+  const scopeText = mentioned.length === 0
+    ? '发给全员'
+    : `发给 ${mentioned.join('、')} 号`
 
   // Grow with the text, then scroll: the transcript keeps the room it needs.
   useEffect(() => {
@@ -789,7 +808,7 @@ function MemberConversations({ active, members, refreshToken }: {
               className="chat-composer-input"
               value={draft}
               rows={1}
-              placeholder="发消息，@ 选择成员"
+              placeholder="发消息给成员，@ 选择成员"
               onChange={(event) => {
                 setDraft(event.target.value)
                 syncMention(event.target.value, event.target.selectionStart ?? event.target.value.length)
@@ -821,17 +840,30 @@ function MemberConversations({ active, members, refreshToken }: {
                 }
               }}
             />
-            <Button
-              className="chat-composer-send"
-              type="primary"
-              shape="circle"
-              size="small"
-              aria-label="发送"
-              loading={sending}
-              disabled={draft.trim() === ''}
-              icon={sending ? undefined : <SendOutlined />}
-              onClick={() => { void send() }}
-            />
+            <div className="chat-composer-bar">
+              <div className="chat-composer-tools">
+                <button
+                  type="button"
+                  className="chat-composer-add"
+                  aria-label="选择成员"
+                  title="选择成员"
+                  onClick={openMention}
+                >
+                  @
+                </button>
+                <span className="chat-composer-scope">{scopeText}</span>
+              </div>
+              <Button
+                className="chat-composer-send"
+                type="primary"
+                shape="circle"
+                aria-label="发送"
+                loading={sending}
+                disabled={draft.trim() === ''}
+                icon={sending ? undefined : <ArrowUpOutlined />}
+                onClick={() => { void send() }}
+              />
+            </div>
           </div>
           {sendError === '' ? null : (
             <Typography.Text type="danger" style={{ fontSize: 12 }}>{sendError}</Typography.Text>

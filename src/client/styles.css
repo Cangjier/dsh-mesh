@@ -274,24 +274,29 @@
 }
 
 .chat-composer-box {
-  border: 1px solid var(--chat-in-border, #e5e7eb);
-  border-radius: 14px;
-  background: var(--chat-surface, #fff);
-  padding: 8px 10px 6px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  /* A filled row, not an outlined box: the send button rides at the end of the
+     text, so an empty composer is one line tall instead of two. */
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  border: none;
+  border-radius: 12px;
+  background: var(--chat-list-bg, #f5f6f7);
+  padding: 6px 6px 6px 12px;
+  transition: background 0.15s ease;
 }
 
 .chat-composer-box:focus-within {
-  border-color: var(--chat-avatar-bg, #1677ff);
-  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.1);
+  background: var(--chat-list-hover, #eceef0);
 }
 
 .chat-composer-input {
+  flex: 1 1 auto;
   width: 100%;
   box-sizing: border-box;
   min-height: 24px;
   max-height: 168px;
-  padding: 2px 0;
+  padding: 4px 0;
   border: none;
   outline: none;
   resize: none;
@@ -308,12 +313,9 @@
   opacity: 0.35;
 }
 
-.chat-composer-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding-top: 4px;
+.chat-composer-send {
+  flex: 0 0 auto;
+  margin-bottom: 1px;
 }
 
 .chat-mention-menu {
@@ -370,13 +372,21 @@
   flex: 0 0 auto;
   width: 34px;
   height: 34px;
+  padding: 0;
+  border: none;
   border-radius: 8px;
   color: #fff;
   font-size: 13px;
+  line-height: 1;
+  font-family: inherit;
   display: flex;
   align-items: center;
   justify-content: center;
   user-select: none;
+}
+
+.chat-avatar-button {
+  cursor: pointer;
 }
 
 .chat-row {

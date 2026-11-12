@@ -298,12 +298,9 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
                   {step.detail !== '' ? `${duration === '' ? '' : ' · '}${step.detail}` : ''}
                 </Typography.Text>
                 {step.progress !== undefined && step.progress !== null ? (
-                  <Space size={8} style={{ width: '100%' }}>
-                    <Progress percent={step.progress.percent} size="small" showInfo={false} style={{ width: 160 }} />
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      {step.progress.done} / {step.progress.total}
-                    </Typography.Text>
-                  </Space>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {step.progress.done} / {step.progress.total} 项 · {step.progress.percent}%
+                  </Typography.Text>
                 ) : null}
               </Space>
             ),
@@ -646,10 +643,12 @@ function MemberConversations({ active, members, refreshToken }: {
     transcriptScroll.current = null
   }
 
-  // A chat opens at the newest message, like every messenger. The tab content
-  // itself is the scroller, so bring the sentinel at the end into view.
+  // A chat opens at the newest message, like every messenger. Scrolling the
+  // container (not the sentinel) keeps the composer, which sits below the
+  // transcript, inside the viewport instead of just under it.
   useEffect(() => {
-    messagesRef.current?.scrollIntoView({ block: 'end' })
+    const holder = messagesRef.current?.closest<HTMLElement>('.ant-tabs-content-holder') ?? null
+    if (holder !== null) holder.scrollTop = holder.scrollHeight
   }, [messages])
 
   /** The member shown by an avatar click, resolved from the panel's snapshot. */
@@ -790,7 +789,7 @@ function MemberConversations({ active, members, refreshToken }: {
               className="chat-composer-input"
               value={draft}
               rows={1}
-              placeholder="发消息给成员：@ 选择成员，不 @ 就发给全员"
+              placeholder="发消息，@ 选择成员"
               onChange={(event) => {
                 setDraft(event.target.value)
                 syncMention(event.target.value, event.target.selectionStart ?? event.target.value.length)
@@ -822,21 +821,17 @@ function MemberConversations({ active, members, refreshToken }: {
                 }
               }}
             />
-            <div className="chat-composer-bar">
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                @ 选择成员 · Enter 发送 · Shift+Enter 换行
-              </Typography.Text>
-              <Button
-                type="primary"
-                shape="circle"
-                size="small"
-                aria-label="发送"
-                loading={sending}
-                disabled={draft.trim() === ''}
-                icon={sending ? undefined : <SendOutlined />}
-                onClick={() => { void send() }}
-              />
-            </div>
+            <Button
+              className="chat-composer-send"
+              type="primary"
+              shape="circle"
+              size="small"
+              aria-label="发送"
+              loading={sending}
+              disabled={draft.trim() === ''}
+              icon={sending ? undefined : <SendOutlined />}
+              onClick={() => { void send() }}
+            />
           </div>
           {sendError === '' ? null : (
             <Typography.Text type="danger" style={{ fontSize: 12 }}>{sendError}</Typography.Text>

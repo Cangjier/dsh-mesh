@@ -1675,7 +1675,9 @@ export class DeployManager {
       // Counting every extracted path would push 78k lines through the SSH
       // stream, so the script lets tar emit one marker per checkpoint instead.
       const trackExtract = (line) => {
-        const text = line.trim()
+        // tar writes its checkpoint action to stderr, so the marker arrives as
+        // `tar: DSH-MESH-EXTRACT 12`; the shell's own total comes from stdout.
+        const text = line.trim().replace(/^tar:\s*/u, '')
         const head = /^DSH-MESH-EXTRACT-TOTAL (\d+)$/u.exec(text)
         if (head !== null) {
           entries = Number.parseInt(head[1], 10)

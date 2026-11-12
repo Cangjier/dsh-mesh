@@ -179,6 +179,38 @@ test('Windows extraction reports entry progress and skips Expand-Archive', async
   }
 })
 
+test('Linux extraction turns tar checkpoints into entry progress', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mesh-deploy-'))
+  const packagePath = path.join(root, 'package.tar.gz')
+  await writeFile(packagePath, 'not really a tarball')
+  const manager = managerWith(() => ({
+    async upload(_l, _r, onProgress) {
+      onProgress?.({ bytes: 10, totalBytes: 10, percent: 100, speed: 5, indeterminate: false })
+    },
+    async script(script, _os, onLine) {
+      // Only the prepare script emits markers; activate must stay quiet.
+      if (!script.includes('DSH-MESH-EXTRACT-TOTAL')) return
+      onLine?.('counting archive entries')
+      onLine?.('DSH-MESH-EXTRACT-TOTAL 2500')
+      onLine?.('DSH-MESH-EXTRACT 1')
+      // tar writes checkpoints to stderr, so the line carries its prefix.
+      onLine?.('tar: DSH-MESH-EXTRACT 2')
+    },
+  }), path.join(root, 'jobs'))
+
+  try {
+    const started = await manager.start({ host: '10.66.66.3', os: 'linux', package: packagePath, appRoot: '/tmp/dsh-test' })
+    const final = await manager.wait(started.job.id)
+    assert.equal(final.status, 'succeeded')
+    const prepare = final.steps.find(step => step.key === 'prepare')
+    assert.deepEqual(prepare.progress, { done: 2500, total: 2500, percent: 100 })
+    assert.equal(final.progress.label, '切换并重启服务')
+    assert.equal(final.progress.percent, 100)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('a first install inherits the deployer gateway credentials', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'mesh-deploy-'))
   const packagePath = path.join(root, 'package.zip')

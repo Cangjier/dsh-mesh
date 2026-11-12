@@ -2502,7 +2502,7 @@ var DeployManager = class {
         meter("\u89E3\u538B\u5B89\u88C5\u5305", { done, total, percent, indeterminate: total === 0 });
       };
       const trackExtract = (line) => {
-        const text = line.trim();
+        const text = line.trim().replace(/^tar:\s*/u, "");
         const head = /^DSH-MESH-EXTRACT-TOTAL (\d+)$/u.exec(text);
         if (head !== null) {
           entries = Number.parseInt(head[1], 10);

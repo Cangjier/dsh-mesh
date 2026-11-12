@@ -35,10 +35,10 @@ test('default service manifest matches the package layout', () => {
   assert.deepEqual(linux.map(service => service.role), ['gate'])
   assert.equal(linux[0].name, 'dsh-web-gate.service')
   assert.equal(linux[0].command, 'start.sh')
-  // Windows keeps the split pair of service executables.
+  // Windows runs one supervisor service that owns gate + interop.
   const windows = normalizeServices(undefined, 'windows')
-  assert.deepEqual(windows.map(service => service.role), ['dsh', 'gate'])
-  assert.equal(windows[1].name, 'DSH-Mesh')
+  assert.deepEqual(windows.map(service => service.role), ['gate'])
+  assert.equal(windows[0].name, 'DSH-Mesh')
 })
 
 test('normalizeServices refuses a manifest without a gateway', () => {
@@ -268,25 +268,21 @@ test('the interop step can be skipped for a member that runs it itself', async (
   }
 })
 
-test('a Windows deploy installs the interop service through its script', async () => {
+test('a Windows deploy supervises the whole stack with one service', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
   try {
     const packagePath = path.join(dir, 'pkg.zip')
     await writeFile(packagePath, 'fake')
     const plan = await buildDeployPlan({
       host: '10.66.66.7', os: 'windows', package: packagePath, repositoryRoot: dir,
-      release: 'wininterop',
-      services: [
-        { name: 'DSH-Web-App', role: 'dsh', command: 'dsh-web-app-service.exe' },
-        { name: 'DSH-Mesh', role: 'gate', command: 'dsh-mesh-service.exe' },
-      ],
+      release: 'winsuper',
     })
+    assert.deepEqual(plan.services.map(service => service.name), ['DSH-Mesh'])
     const prepare = buildWindowsPrepareScript(plan)
-    assert.match(prepare, /install-interop-service\.ps1/)
-    assert.match(prepare, /-Bind '10\.66\.66\.7'/u)
-    assert.match(prepare, /-Provider 'deepseek-account'/u)
-    assert.match(prepare, /-Model 'deepseek-flash'/u)
-    assert.match(prepare, /-UseGatePassword/u)
+    // The supervisor owns interop; a second installer would fight over the port.
+    assert.doesNotMatch(prepare, /install-interop-service\.ps1/u)
+    // The split web-app service duplicated the gate's own DSH spawn.
+    assert.match(prepare, /sc\.exe delete 'DSH-Web-App'/u)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

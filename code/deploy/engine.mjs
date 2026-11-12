@@ -39,7 +39,10 @@ const DEFAULT_SERVICES = {
     { name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' },
   ],
   windows: [
-    { name: 'DSH-Web-App', role: 'dsh', command: 'dsh-web-app-service.exe' },
+    // The supervisor service owns the whole stack: it runs start-stack.ps1
+    // (gate + interop) in the interactive session when it can, and in session 0
+    // otherwise. The old split DSH-Web-App service duplicated the gate's own
+    // DSH spawn and is removed by the deploy.
     { name: 'DSH-Mesh', role: 'gate', command: 'dsh-mesh-service.exe' },
   ],
 }
@@ -876,7 +879,15 @@ echo "rolled back to $OLD"
  * @returns {string} PowerShell script.
  */
 export function buildWindowsPrepareScript(plan) {
-  const serviceLines = `function Ensure-DshService([string]$Name, [string]$Display, [string]$Description, [string]$ExePath) {
+  const serviceLines = `# The gate spawns DSH itself, so a leftover split service would run a second
+# copy on another port. Retire it once.
+$legacy = Get-Service -Name 'DSH-Web-App' -ErrorAction SilentlyContinue
+if ($null -ne $legacy) {
+  Stop-Service -Name 'DSH-Web-App' -Force -ErrorAction SilentlyContinue
+  & sc.exe delete 'DSH-Web-App' | Out-Null
+  Write-Output 'removed the legacy DSH-Web-App service'
+}
+function Ensure-DshService([string]$Name, [string]$Display, [string]$Description, [string]$ExePath) {
   $binPath = '"' + $ExePath + '"'
   if ($null -eq (Get-Service -Name $Name -ErrorAction SilentlyContinue)) {
     & sc.exe create $Name binPath= $binPath start= auto DisplayName= $Display | Out-Null
@@ -987,20 +998,7 @@ if (Test-Path $credentialsFile) {
   if ($LASTEXITCODE -eq 0) { Remove-Item $credentialsFile, ($credentialsFile + '.mjs') -Force -ErrorAction SilentlyContinue } else { Write-Warning 'could not copy the deployer account sign-in' }
 }
 ${serviceLines}
-${plan.interop === null || plan.interop === undefined ? '' : `# The interop service is what lets another member drive a conversation here.
-# It is auxiliary: a failure is reported and the deploy keeps going.
-$interopScript = Join-Path $New 'code\\windows-service\\install-interop-service.ps1'
-if (Test-Path $interopScript) {
-  try {
-    & $interopScript -Root $New -Bind ${ps(plan.interop.bind)} -Provider ${ps(plan.interop.provider)} -Model ${ps(plan.interop.model)} -UseGatePassword -Port ${plan.interop.port}
-    Write-Output 'dsh-interop service installed'
-  } catch {
-    Write-Warning "the interop service was not installed: $($_.Exception.Message)"
-  }
-} else {
-  Write-Warning 'the package has no install-interop-service.ps1'
-}
-`}Write-Output "prepared $Release at $New"
+Write-Output "prepared $Release at $New"
 `
 }
 

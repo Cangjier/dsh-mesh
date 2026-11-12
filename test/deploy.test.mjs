@@ -25,11 +25,13 @@ test('normalizeServices orders control, dsh and the gateway last', () => {
   assert.equal(services[2].command, 'start.sh')
 })
 
-test('default service manifest is the split DSH/gate pair', () => {
+test('default service manifest matches the package layout', () => {
+  // A package runs one gate service that spawns the private DSH.
   const linux = normalizeServices(undefined, 'linux')
-  assert.deepEqual(linux.map(service => service.role), ['dsh', 'gate'])
-  assert.equal(linux[0].name, 'dsh-web-app.service')
-  assert.equal(linux[1].name, 'dsh-web-gate.service')
+  assert.deepEqual(linux.map(service => service.role), ['gate'])
+  assert.equal(linux[0].name, 'dsh-web-gate.service')
+  assert.equal(linux[0].command, 'start.sh')
+  // Windows keeps the split pair of service executables.
   const windows = normalizeServices(undefined, 'windows')
   assert.deepEqual(windows.map(service => service.role), ['dsh', 'gate'])
   assert.equal(windows[1].name, 'DSH-Mesh')

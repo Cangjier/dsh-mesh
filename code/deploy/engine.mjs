@@ -33,7 +33,8 @@ const DEFAULT_APP_ROOT = {
 /** Services used by the split package: DSH first, gateway last. */
 const DEFAULT_SERVICES = {
   linux: [
-    { name: 'dsh-web-app.service', role: 'dsh', command: 'start-dsh.sh' },
+    // The package's start.sh runs the gate, which spawns the private DSH; the
+    // split services belong to the hand-installed layout, not to a package.
     { name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' },
   ],
   windows: [
@@ -518,9 +519,16 @@ ${plan.gatePassword ? `sed -i ${sh(`s|^DSH_GATE_PASSWORD=.*|DSH_GATE_PASSWORD=${
 grep -q '^DSH_GATE_PASSWORD=' "$ENV_FILE" || echo ${sh(`DSH_GATE_PASSWORD=${plan.gatePassword}`)} >> "$ENV_FILE"
 echo 'gateway password synced from the deployer'
 ` : ''}sed -i '/^DSH_GATE_CLUSTER_KEY=/d' "$ENV_FILE"
-test -x "$NEW/runtime/node/node"
-"$NEW/runtime/node/node" --check "$NEW/gate/server.mjs"
-"$NEW/runtime/node/node" - "$SHARED/home/profiles/web" "$NEW/plugins/dsh-mesh" <<'DSH_MESH_PROFILE_WIRE'
+# An archive written on a filesystem without modes (or an old package) can lose
+# the executable bit on the launch scripts.
+chmod +x "$NEW"/*.sh 2>/dev/null || true
+# The runtime ships as runtime/node/bin/node; older packages used runtime/node/node.
+NODE_BIN="$NEW/runtime/node/bin/node"
+if [ ! -x "$NODE_BIN" ]; then NODE_BIN="$NEW/runtime/node/node"; fi
+if [ ! -x "$NODE_BIN" ]; then echo "missing the node binary under $NEW/runtime/node" >&2; exit 1; fi
+chmod +x "$NODE_BIN" 2>/dev/null || true
+"$NODE_BIN" --check "$NEW/gate/server.mjs"
+"$NODE_BIN" - "$SHARED/home/profiles/web" "$NEW/plugins/dsh-mesh" <<'DSH_MESH_PROFILE_WIRE'
 ${PROFILE_WIRE_SCRIPT}
 DSH_MESH_PROFILE_WIRE
 # The deployer's account grants make this member signed in without a QR scan.
@@ -528,7 +536,7 @@ CREDENTIALS_FILE=${sh(plan.remoteCredentials)}
 if [ -f "$CREDENTIALS_FILE" ]; then
   MERGE_HELPER="$NEW/shared/credentials-merge.mjs"
   if [ -f "$CREDENTIALS_FILE.mjs" ]; then MERGE_HELPER="$CREDENTIALS_FILE.mjs"; fi
-  if "$NEW/runtime/node/node" "$MERGE_HELPER" "$SHARED/home/.credentials.yaml" "$CREDENTIALS_FILE"; then
+  if "$NODE_BIN" "$MERGE_HELPER" "$SHARED/home/.credentials.yaml" "$CREDENTIALS_FILE"; then
     rm -f "$CREDENTIALS_FILE" "$CREDENTIALS_FILE.mjs"
   else
     echo "could not copy the deployer account sign-in" >&2
@@ -544,8 +552,29 @@ write_unit() {
   cat > "$dropin/dsh-release.conf" <<EOF
 [Service]
 WorkingDirectory=$APP_ROOT/current
+ExecStart=
 ExecStart=$command
 EOF
+  # A machine that never ran install.sh has no unit to extend; write a minimal
+  # one so the drop-in above has something to override.
+  if [ ! -f "/etc/systemd/system/$unit" ]; then
+    cat > "/etc/systemd/system/$unit" <<EOF
+[Unit]
+Description=$unit (dsh-mesh)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$APP_ROOT/current
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  fi
+  systemctl enable "$unit" >/dev/null 2>&1 || true
 }
 ${serviceBlocks}
 systemctl daemon-reload

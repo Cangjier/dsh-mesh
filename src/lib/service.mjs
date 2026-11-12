@@ -641,7 +641,7 @@ export class MeshService {
     const packagePath = await this.resolvePackage(request.package)
     const summary = await repackArchive(packagePath, {
       repositoryRoot: this.repositoryRoot,
-      log: line => this.log(`repack: ${line}`),
+      log: line => this.logLine(`repack: ${line}`),
     })
     return { ok: true, ...summary }
   }

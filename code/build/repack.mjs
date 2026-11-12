@@ -18,7 +18,6 @@ import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { createReadStream, existsSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 
@@ -196,7 +195,9 @@ async function compressDirectory(parent, name, file) {
  * @returns {Promise<{package: string, version: string, target: object, bytes: number, sha256: string, files: number}>} summary.
  */
 export async function repackArchive(file, { repositoryRoot, log = () => {} }) {
-  const work = await mkdtemp(path.join(tmpdir(), 'dsh-repack-'))
+  // A package unpacks to more than a gigabyte, and a host's `/tmp` is often a
+  // small tmpfs, so work beside the archive on the same filesystem.
+  const work = await mkdtemp(path.join(path.dirname(file), '.repack-'))
   try {
     log(`extracting ${path.basename(file)}`)
     const packageDir = await extractArchive(file, work)

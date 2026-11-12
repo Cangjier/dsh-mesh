@@ -120,6 +120,7 @@ powershell -ExecutionPolicy Bypass -File .\code\windows-service\uninstall-servic
 - 外层入口的网关负责密码门；成员 gate 用「密码派生密钥」的 HMAC 接受外层请求，用户只输一次密码。
 - 配了 TLS（`DSH_GATE_TLS_CERT`/`DSH_GATE_TLS_KEY`）后，80 端口的浏览器请求默认 308 跳到 443；`DSH_GATE_REDIRECT_HTTPS=0` 关闭。前面有 Cloudflare/nginx 终止 TLS 时，会按 `X-Forwarded-Proto: https` 判定「浏览器已经是 https」而不再跳转；`/__gate/cluster/*`、`/__gate/health`、`/__gate/member` 等机器间接口不跳转。
 - 部署时会复用部署者的账号登录：把部署者 `$DSH_HOME/.credentials.yaml` 里的 `deepseek-account-platform/*` 记录合并到成员的同名文件（成员自己的 `client-connection/browser-session` 等记录保留），成员装好后即是已登录状态，不用再扫码。设置 `DSH_DEPLOY_SHARE_ACCOUNT=0` 可关闭共享；部署者自己没登录时自然跳过。
+- 只想把插件/网关的新改动带进离线包时，不用重跑整条构建：`tar -xzf`（或 `unzip`）现有包到工作目录，执行 `node scripts/repack.mjs <解开的包目录>`，它会用仓库里的 `gate/`、`shared/`、`config/`、`code/*`、根脚本和 `plugins/dsh-mesh/` 覆盖包内对应文件，`app/`、`web/`、`runtime/` 原样保留，然后重新压缩即可。
 - Windows 服务默认以 LocalSystem 运行，Edge/Chrome 在该账户下无法启动，扫码登录会退回「交互会话」方式：网关用 `schtasks` 以当前登录用户（`DSH-Login-Browser` 任务，Interactive）启动 headless 浏览器，再用 CDP 连上它；调试端口由 `DSH_GATE_CHROME_PORT`（默认 9222）指定。
 - Windows 默认端口 8080（80 常需要管理员/URL ACL）；`DSH_GATE_MEMBER_PORT` 要与 peer 实际访问端口一致。
 - 自定义成员端口：入口网关设 `DSH_GATE_MEMBER_PORTS=8081,9000`；发现阶段会按这个列表探测。

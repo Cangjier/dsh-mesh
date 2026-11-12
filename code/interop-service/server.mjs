@@ -619,6 +619,13 @@ const server = http.createServer(async (request, response) => {
 })
 
 loadState()
+// A member runs exactly one interop service. If the port is already taken the
+// process must die loudly: staying alive would let a stale instance keep
+// serving an old release while the new one looks healthy.
+server.on('error', error => {
+  log(`listener failed on http://${HOST}:${String(PORT)}: ${error instanceof Error ? error.message : String(error)}`)
+  process.exit(1)
+})
 server.listen(PORT, HOST, () => {
   log(`listening on http://${HOST}:${String(PORT)}; token source ${TOKEN_SOURCE}`)
   startChild()

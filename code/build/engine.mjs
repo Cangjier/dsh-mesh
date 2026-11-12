@@ -525,7 +525,7 @@ export async function assembleWebPackage(options) {
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'interop-service'), path.join(packageDir, 'code', 'interop-service'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'wireguard'), path.join(packageDir, 'code', 'wireguard'))
   await copyIfExists(path.join(options.repositoryRoot, 'docs'), path.join(packageDir, 'docs'))
-  for (const file of ['install.sh', 'start.sh', 'stop.sh', 'status.sh', 'doctor.sh', 'install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'VERSION']) {
+  for (const file of ['install.sh', 'start.sh', 'stop.sh', 'status.sh', 'doctor.sh', 'install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'start-stack.ps1', 'VERSION']) {
     await copyIfExists(path.join(options.repositoryRoot, 'code', file), path.join(packageDir, file))
   }
   for (const file of ['start-interop.sh', 'install-interop-service.sh', 'uninstall-interop-service.sh']) {
@@ -801,7 +801,7 @@ export async function assembleRuntimePackage(options) {
     fetchImpl: options.fetchImpl,
     log,
   })
-  for (const file of ['install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd']) {
+  for (const file of ['install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'start-stack.ps1']) {
     await copyIfExists(path.join(options.repositoryRoot, 'code', file), path.join(packageDir, file))
   }
   await writeFile(path.join(packageDir, '.offline-payload'), 'dsh-mesh\n', 'utf8')

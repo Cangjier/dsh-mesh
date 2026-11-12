@@ -189,6 +189,41 @@ llm-deepseek: no API key for provider route "deepseek-official" … MISSING_CRED
 把 `provider` 指向 `deepseek-account` 之后，成员用的是共享的登录态，不需要任何 API
 key。想保留成员自己的设置就 `DSH_DEPLOY_SYNC_MODEL=0`。
 
+## 成员没有公网 IPv4（IPv6-only 主机）
+
+有的机器（典型是 IPv6-only 的云主机）只有公网 IPv6 和一段私网 IPv4，`api.deepseek.com`
+**只有 A 记录、没有 AAAA**，于是这个成员能组网、能 ssh，但任何对话都在传输层失败：
+
+```
+DeepSeek Messages transport failed
+```
+
+排查三步（在成员上）：
+
+```bash
+ip -4 addr show                        # 只有 192.168.x / 私网地址
+getent ahostsv6 api.deepseek.com       # 只有 ::ffff: 映射，没有真正的 AAAA
+curl -s -m 10 -o /dev/null -w '%{http_code}\n' https://api.deepseek.com/models
+```
+
+解决办法是让它借 hub 出 IPv4：hub 开转发 + MASQUERADE，成员把 `0.0.0.0/0` 放进隧道的
+`AllowedIPs` 并加一条 metric 更小的默认路由（`AllowedIPs` 里没有 `0.0.0.0/0` 时，
+WireGuard 会**静默丢掉**默认路由送进隧道的数据包，看起来像"路由加好了却完全不通"）。
+
+两端各跑一次，脚本会装一个开机自愈的 `dsh-mesh-egress.service`：
+
+```bash
+# hub（10.66.66.1）
+sudo code/wireguard/egress-via-hub.sh hub 10.66.66.3
+
+# 需要出口的成员
+sudo code/wireguard/egress-via-hub.sh member
+sudo code/wireguard/egress-via-hub.sh status   # 任一端查看现状
+```
+
+撤销用 `--remove`。代价是这个成员的所有 IPv4 流量都绕 hub（hub 的出网带宽是瓶颈），
+只适合低流量的成员机。
+
 ## 常见故障速查
 
 | 症状 | 先看哪里 |

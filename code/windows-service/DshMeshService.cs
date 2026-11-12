@@ -38,6 +38,10 @@ namespace DshMesh
         private bool stopping;
         private string mode = "session0";
         private string modeDetail = "starting";
+        // A failed promotion must not be retried on every watch tick: doing so
+        // tears the session-0 stack down over and over while the task can never
+        // start. While this is in the future the service stays in session 0.
+        private DateTime interactiveBlockedUntil = DateTime.MinValue;
 
         public GatewayService()
         {
@@ -97,6 +101,7 @@ namespace DshMesh
             {
                 // A promote request from the panel asks for one explicit
                 // re-evaluation instead of waiting for the next tick.
+                bool promoted = false;
                 string command = Path.Combine(root, "data", "session-command.json");
                 if (File.Exists(command))
                 {
@@ -104,11 +109,22 @@ namespace DshMesh
                     try { body = File.ReadAllText(command); } catch { }
                     try { File.Delete(command); } catch { }
                     Log("session command: " + body.Trim());
+                    // An explicit request clears a previous failure so the
+                    // operator can retry immediately.
+                    promoted = true;
+                    interactiveBlockedUntil = DateTime.MinValue;
                 }
                 string decision = QueryMode();
                 string nextMode = decision.StartsWith("interactive", StringComparison.Ordinal) ? "interactive" : "session0";
                 if (nextMode != mode)
                 {
+                    if (nextMode == "interactive" && !promoted && DateTime.UtcNow < interactiveBlockedUntil)
+                    {
+                        // Promotion already failed recently; keep the session-0
+                        // stack alive instead of restarting the same failure.
+                        EnsureSession0Children();
+                        return;
+                    }
                     Log("session decision changed to " + decision);
                     ApplyMode(decision);
                     return;
@@ -160,20 +176,26 @@ namespace DshMesh
             string detail = decision.Length > "interactive".Length ? decision.Substring("interactive".Length).Trim() : "";
             if (interactive)
             {
+                // Create the task first: if the release is incomplete there is
+                // nothing to hand over, and killing a healthy session-0 stack
+                // for a promotion that cannot happen only causes an outage.
+                if (!CreateTask(detail))
+                {
+                    BlockInteractive("interactive task unavailable");
+                    WriteStatus();
+                    return;
+                }
                 // Release port 80 (and the interop port) before the task takes them.
                 StopSession0Children();
-                if (!StartTask(detail))
+                if (!RunTask())
                 {
-                    mode = "session0";
-                    modeDetail = "could not start the interactive task";
-                    EnsureSession0Children();
+                    BlockInteractive("could not start the interactive task");
+                    WriteStatus();
+                    return;
                 }
-                else
-                {
-                    mode = "interactive";
-                    modeDetail = detail;
-                    Log("stack handed to the interactive task for " + detail);
-                }
+                mode = "interactive";
+                modeDetail = detail;
+                Log("stack handed to the interactive task for " + detail);
             }
             else
             {
@@ -202,13 +224,27 @@ namespace DshMesh
         }
 
         /// <summary>
-        /// Run start-stack.ps1 as the interactive administrator. The task is
-        /// recreated on every promotion so it always points at the current
-        /// release.
+        /// Fall back to session 0 and stop retrying the promotion for a while.
+        /// The session-0 children are restarted so the member stays online.
         /// </summary>
-        private bool StartTask(string user)
+        private void BlockInteractive(string reason)
         {
-            if (string.IsNullOrWhiteSpace(user)) return false;
+            interactiveBlockedUntil = DateTime.UtcNow.AddMinutes(5);
+            mode = "session0";
+            modeDetail = reason;
+            Log("staying in session 0 for 5 minutes: " + reason);
+            EnsureSession0Children();
+        }
+
+        /// <summary>
+        /// Create the interactive task that runs start-stack.ps1. The task is
+        /// recreated on every promotion so it always points at the current
+        /// release. It is created but not started, so a caller can decide to
+        /// stop the session-0 stack only once the task is known to be valid.
+        /// </summary>
+        private bool CreateTask(string user)
+        {
+            if (string.IsNullOrWhiteSpace(user)) { Log("no interactive user for the stack task"); return false; }
             string script = Path.Combine(root, "start-stack.ps1");
             if (!File.Exists(script)) { Log("missing " + script); return false; }
             EndTask();
@@ -216,9 +252,19 @@ namespace DshMesh
             int created = Run(Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
                 "/Create /F /TN \"" + StackTask + "\" /TR \"" + taskCommand + "\" /SC ONCE /ST 00:00 /RU \"" + user + "\" /IT /RL HIGHEST");
             if (created != 0) { Log("schtasks create failed with " + created); return false; }
+            return true;
+        }
+
+        private bool RunTask()
+        {
             int started = Run(Path.Combine(Environment.SystemDirectory, "schtasks.exe"), "/Run /TN \"" + StackTask + "\"");
             if (started != 0) { Log("schtasks run failed with " + started); return false; }
             return true;
+        }
+
+        private bool StartTask(string user)
+        {
+            return CreateTask(user) && RunTask();
         }
 
         private void EnsureTaskRunning()
@@ -227,7 +273,7 @@ namespace DshMesh
             // is running, 1 once it is done.
             if (TaskRunning()) return;
             string user = modeDetail;
-            if (!StartTask(user)) Log("interactive task did not come back");
+            if (!StartTask(user)) BlockInteractive("interactive task did not come back");
         }
 
         private bool TaskRunning()

@@ -108,7 +108,7 @@ powershell -ExecutionPolicy Bypass -File .\code\windows-service\install-service.
 powershell -ExecutionPolicy Bypass -File .\code\windows-service\uninstall-service.ps1
 ```
 
-服务由 `dsh-mesh-service.exe` 包住 `start.ps1`；子进程异常退出会 5 秒后自动重启，服务停止时会杀掉整个 PowerShell → gate 进程树，确保 80 端口释放。它和桌面版 DSH 是两个独立进程树，桌面 DSH 退出不会影响这个服务。
+`dsh-mesh-service.exe` 是**守护服务**：它只负责生命周期和会话选择，不亲自跑业务进程。无人登录、或登录的不是管理员时，它在 session 0 里直接拉起 `gate` 和 `dsh-interop`（截图是黑的、浏览器也起不来，但成员在线）；有管理员登录时，它用 `schtasks /RU <用户> /IT /RL HIGHEST` 建一个 `DSH-Mesh-Stack` 任务，由该任务执行 `start-stack.ps1` 在交互会话里跑同一套 gate + interop，成员界面「提升到交互会话」按钮就是触发这次重新判定。当前模式与原因写在 `data\session-status.json`，日志在 `data\service.log`。提升失败会退回 session 0 并冷却 5 分钟，不会反复拆栈。它和桌面版 DSH 是两个独立进程树，桌面 DSH 退出不会影响这个服务。
 
 `-InstallService` 现在会继续调用 `install-split-services.ps1`，把 DSH 也拆成独立的 `DSH-Web-App` 服务；网关进入 external-DSH 模式，只监听 `data/dsh-web.json`，不再 spawn DSH。网关、DSH、WireGuard 控制面板三者互不依赖，详见 [Step 012](docs/Step%20012%20独立服务与WireGuard控制面板.md)。
 

@@ -137,4 +137,6 @@ dsh_mesh_deploy action="rollback" host="10.66.66.3" user="root" os="linux" \
 
 - 当前离线包还是**一个网关服务**（DSH 是它的子进程），所以清单里只有一个 gate；服务拆分、独立 WireGuard 控制面板是部署前要完成的架构步骤。工具已经按 `control → dsh → gate` 的清单工作，拆分后只需要改清单和启动命令。
 - Windows 的 `dsh-mesh-service.exe` 不在离线包里，`prepare` 会从当前 release 复制；首次部署前必须先安装一次服务。
+- Windows 的 `prepare` 还会写 `shared\config\interop.env`（bind = 成员的 VPN 地址、token = 网关密码），守护服务在 session 0 里用它拉起 interop；`start-stack.ps1` 负责交互会话里的同一套栈，它必须出现在 release 根目录——打包白名单漏掉它时，提升会失败并且每 20 秒重试一次，表现为 `data\service.log` 里反复 `missing …\current\start-stack.ps1`。
+- 切换会话模式后如果 `data\service.log` 里出现 `listening on http://127.0.0.1:8765`，说明 interop 没读到 `interop.env`（回落到了 loopback），从别的成员连不上；`start-stack.ps1` 会按 `data\stack-pids.json` 清掉上一次残留的栈进程，避免旧进程继续占着 80/8765 服务旧代码。
 - 还没有做远端 systemd/SCM 的服务创建，只做“切换 + 重启 + 回滚”。

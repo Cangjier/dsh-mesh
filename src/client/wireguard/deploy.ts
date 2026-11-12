@@ -68,15 +68,22 @@ $wg = Join-Path $env:ProgramFiles 'WireGuard\\wg.exe'
 if (-not (Test-Path $wg)) { throw 'Install WireGuard for Windows first: https://www.wireguard.com/install/' }
 $key = (& $wg genkey).Trim()
 $pub = ($key | & $wg pubkey).Trim()
-$payload = @{ name = $env:COMPUTERNAME; publicKey = $pub; code = $code; family = $family } | ConvertTo-Json -Compress
+$payload = @{ name = $env:COMPUTERNAME; publicKey = $pub; code = $code; family = $family; platform = 'windows' } | ConvertTo-Json -Compress
 $join = Invoke-RestMethod -Method Post -Uri "$control/join" -ContentType 'application/json' -Body $payload
 if (-not $join.ok) { throw 'Join failed' }
 $conf = Join-Path $env:ProgramData 'WireGuard\\dshwg0.conf'
 New-Item -ItemType Directory -Force (Split-Path $conf) | Out-Null
+$allowed = $join.server.vpnCidr
+if ($join.egress) { $allowed = '0.0.0.0/0' }
 $lines = @('[Interface]', "PrivateKey = $key", "Address = $($join.client.address)", "MTU = $($join.server.mtu)")
 if ($join.server.dns) { $lines += "DNS = $($join.server.dns)" }
-$lines += '', '[Peer]', "PublicKey = $($join.server.publicKey)", "Endpoint = $($join.server.endpoint)", "AllowedIPs = $($join.server.vpnCidr)", 'PersistentKeepalive = 25'
+$lines += '', '[Peer]', "PublicKey = $($join.server.publicKey)", "Endpoint = $($join.server.endpoint)", "AllowedIPs = $allowed", 'PersistentKeepalive = 25'
 Set-Content -Path $conf -Value $lines -Encoding ascii
+# WireGuard for Windows installs its routes from AllowedIPs, so 0.0.0.0/0
+# becomes the default route while the tunnel service is up and the config file
+# is the reboot-persistent half. Reinstall the service to apply a changed
+# AllowedIPs on an existing tunnel.
+if ($join.egress) { & (Join-Path $env:ProgramFiles 'WireGuard\\wireguard.exe') /uninstalltunnelservice dshwg0 2>$null }
 & (Join-Path $env:ProgramFiles 'WireGuard\\wireguard.exe') /installtunnelservice $conf`;
   let binary = '';
   for (let index = 0; index < script.length; index += 1) {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import type { Snapshot } from '../../src/client/wireguard/api';
-import { buildLinuxClientCommand, buildLinuxClientSimpleCommand, LINUX_CLIENT_RESTART_COMMAND } from '../../src/client/wireguard/deploy';
+import { buildLinuxClientCommand, buildLinuxClientSimpleCommand, buildWindowsClientCommand, LINUX_CLIENT_RESTART_COMMAND } from '../../src/client/wireguard/deploy';
 import { LINUX_CLIENT_SCRIPT } from '../../src/wireguard/lib/client-script';
 
 function runningState(overrides: Partial<Snapshot> = {}): Snapshot {
@@ -63,6 +63,8 @@ function runningState(overrides: Partial<Snapshot> = {}): Snapshot {
       endpoint: null,
       interfaceName: null,
       mtu: 1420,
+      egress: false,
+      hubIp: null,
       connectedAt: null,
       lastHandshakeAt: null,
       receivedBytes: 0,
@@ -90,7 +92,9 @@ test('static client script is portable, parameterized, and contains no secrets',
   }
   assert.match(LINUX_CLIENT_SCRIPT, /Unknown package manager/);
   assert.match(LINUX_CLIENT_SCRIPT, /wg-quick up "\$IFACE"/);
-  assert.match(LINUX_CLIENT_SCRIPT, /AllowedIPs = \$VPN_CIDR/);
+  assert.match(LINUX_CLIENT_SCRIPT, /AllowedIPs = \$ALLOWED_IPS/);
+  assert.match(LINUX_CLIENT_SCRIPT, /EGRESS=0/);
+  assert.match(LINUX_CLIENT_SCRIPT, /dsh-mesh-egress\.service/);
   assert.match(LINUX_CLIENT_SCRIPT, /PersistentKeepalive = 25/);
   assert.doesNotMatch(LINUX_CLIENT_SCRIPT, /secret-code|vpn\.example\.com/);
   assert.doesNotMatch(LINUX_CLIENT_SCRIPT, /\$\{/);
@@ -156,4 +160,17 @@ test('keeps bracketed IPv6 endpoints intact in the deployment command', () => {
   });
   assert.match(command, /'http:\/\/\[2408:400a:109:bf00::1\]:51821\/client\.sh'/);
   assert.match(command, /'http:\/\/\[2408:400a:109:bf00::1\]:51821' 'secret-code'/);
+});
+
+
+test('Windows deploy switches AllowedIPs and reinstalls the tunnel only for egress', () => {
+  const command = buildWindowsClientCommand(runningState());
+  assert.equal(command.includes('\n'), false);
+  assert.match(command, /^powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand /);
+  const encoded = command.split(' ').pop() ?? '';
+  const script = Buffer.from(encoded, 'base64').toString('utf16le');
+  assert.match(script, /platform = 'windows'/);
+  assert.match(script, /if \(\$join\.egress\) \{ \$allowed = '0\.0\.0\.0\/0' \}/);
+  assert.match(script, /AllowedIPs = \$allowed/);
+  assert.match(script, /if \(\$join\.egress\) \{ & .*\/uninstalltunnelservice dshwg0 2>\$null \}/);
 });

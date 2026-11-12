@@ -216,7 +216,7 @@ export function buildServerConfig(input) {
 
 /**
  * Render a client's WireGuard configuration.
- * @param {{ privateKey: string, address: string, settings: typeof DEFAULT_SETTINGS, serverPublicKey: string, endpoint: string, vpnCidr: string }} input
+ * @param {{ privateKey: string, address: string, settings: typeof DEFAULT_SETTINGS, serverPublicKey: string, endpoint: string, vpnCidr: string, egress?: boolean }} input
  * @returns {string} configuration text.
  */
 export function buildClientConfig(input) {
@@ -233,7 +233,9 @@ export function buildClientConfig(input) {
     '[Peer]',
     `PublicKey = ${input.serverPublicKey}`,
     `Endpoint = ${input.endpoint}`,
-    `AllowedIPs = ${input.vpnCidr}`,
+    // Egress is opt-in per peer: without 0.0.0.0/0 the tunnel drops every
+    // packet that the default route sends into it.
+    `AllowedIPs = ${input.egress === true ? '0.0.0.0/0' : input.vpnCidr}`,
     'PersistentKeepalive = 25',
   );
   return `${lines.join('\n')}\n`;

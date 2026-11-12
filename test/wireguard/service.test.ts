@@ -17,7 +17,7 @@ function fakePlatform(overrides = {}) {
     wireguard: null,
     ip: '/usr/sbin/ip',
     sudo: null,
-    iptables: null,
+    iptables: '/usr/sbin/iptables',
     nft: null,
     sysctl: null,
     ...overrides,
@@ -432,5 +432,280 @@ test('advertises an IPv6 transport endpoint while keeping IPv4 VPN addressing', 
     });
     assert.equal(joined.server.endpoint, '[2408:400a:109:bf00::1]:51820');
     await service.stopServer();
+  });
+});
+
+
+test('enables egress on the hub and member, persists it, and carries it on rejoin', async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const sshCalls: Array<{ command: string; host: string; user: string }> = [];
+  await withService(async ({ service }) => {
+    const port = await freePort();
+    await service.startServer({
+      controlPort: port,
+      listenPort: 51820,
+      vpnCidr: '10.66.66.0/24',
+      serverIp: '10.66.66.1',
+      endpointHost: '192.168.1.10',
+      joinCode: 'secret-code',
+      mtu: 1420,
+      interfaceName: 'dshwg0',
+      dns: '',
+    });
+    const client = generateKeyPair();
+    const joined = await service.joinPeer({ name: 'egress-client', publicKey: client.publicKey, code: 'secret-code', platform: 'linux' });
+    assert.equal(joined.egress, false);
+    assert.equal(joined.server.vpnIp, '10.66.66.1');
+
+    const configured = await service.configurePeerSsh({ publicKey: client.publicKey, user: 'root', platform: 'linux' });
+    const sshPeer = configured.state.server.peers.find((candidate) => candidate.publicKey === client.publicKey);
+    assert.ok(sshPeer);
+    assert.equal(sshPeer.platform, 'linux');
+
+    const enabled = await service.setPeerEgress({ publicKey: client.publicKey, enabled: true });
+    assert.equal(enabled.applied, true);
+    assert.equal(enabled.egress, true);
+    assert.match(enabled.manual.enable, /^sudo sh -c '/);
+    assert.match(enabled.manual.enable, /10\.66\.66\.1/);
+    const enabledPeer = enabled.state.server.peers.find((candidate) => candidate.publicKey === client.publicKey);
+    assert.ok(enabledPeer);
+    assert.equal(enabledPeer.egress, true);
+
+    const hubCall = calls.find((call) => call.args.includes('hub') && call.args.includes('10.66.66.2'));
+    assert.ok(hubCall, 'the helper script must receive the member VPN address');
+    assert.equal(sshCalls.length, 1);
+    assert.equal(sshCalls[0].host, '10.66.66.2');
+    assert.equal(sshCalls[0].user, 'root');
+    assert.match(sshCalls[0].command, /AllowedIPs = 0\.0\.0\.0\/0/);
+    assert.match(sshCalls[0].command, /dsh-mesh-egress\.service/);
+
+    const rejoined = await service.joinPeer({ name: 'egress-client', publicKey: client.publicKey, code: 'secret-code', platform: 'linux' });
+    assert.equal(rejoined.egress, true);
+    assert.equal(rejoined.server.vpnIp, '10.66.66.1');
+    assert.ok(calls.filter((call) => call.args.includes('hub')).length >= 2);
+
+    const disabled = await service.setPeerEgress({ publicKey: client.publicKey, enabled: false });
+    assert.equal(disabled.applied, true);
+    assert.equal(disabled.egress, false);
+    const removeCall = calls.find((call) => call.command.endsWith('iptables') && call.args.includes('-D') && call.args.includes('10.66.66.2/32'));
+    assert.ok(removeCall, 'the hub NAT rule must be deleted immediately');
+    assert.ok(removeCall.args.includes('-o') && removeCall.args.includes('eth0'));
+    assert.equal(sshCalls.length, 2);
+    assert.match(sshCalls[1].command, /AllowedIPs = \$VPN_CIDR/);
+    const disabledPeer = disabled.state.server.peers.find((candidate) => candidate.publicKey === client.publicKey);
+    assert.ok(disabledPeer);
+    assert.equal(disabledPeer.egress, false);
+    await service.stopServer();
+  }, {
+    knownHosts: {
+      refresh: async () => ['ssh-ed25519 AAAA'],
+      forget: async () => {},
+    },
+    commandRunner: async (command: string, args: readonly string[]) => {
+      calls.push({ command, args: [...args] });
+      if (command.endsWith('ip')) {
+        return { stdout: 'default via 192.168.1.1 dev eth0 proto dhcp metric 100\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    },
+    sshRunner: async (input: { command: string; host: string; user: string }) => {
+      sshCalls.push({ command: input.command, host: input.host, user: input.user });
+      return { stdout: '', stderr: '' };
+    },
+  });
+});
+
+test('keeps the hub half and returns a manual command when the peer has no SSH', async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  await withService(async ({ service }) => {
+    const port = await freePort();
+    await service.startServer({
+      controlPort: port,
+      listenPort: 51820,
+      vpnCidr: '10.66.66.0/24',
+      serverIp: '10.66.66.1',
+      endpointHost: '192.168.1.10',
+      joinCode: 'secret-code',
+      mtu: 1420,
+      interfaceName: 'dshwg0',
+      dns: '',
+    });
+    const client = generateKeyPair();
+    await service.joinPeer({ name: 'manual-client', publicKey: client.publicKey, code: 'secret-code', platform: 'linux' });
+
+    const result = await service.setPeerEgress({ publicKey: client.publicKey, enabled: true });
+    assert.equal(result.applied, false);
+    assert.match(result.reason, /SSH/);
+    assert.match(result.manual.enable, /^sudo sh -c '/);
+    assert.match(result.manual.enable, /0\.0\.0\.0\/0/);
+    assert.match(result.manual.disable, /10\.66\.66\.0\/24/);
+    assert.ok(result.manual.enable.includes('10.66.66.1'));
+    const peer = result.state.server.peers.find((candidate) => candidate.publicKey === client.publicKey);
+    assert.ok(peer);
+    assert.equal(peer.egress, true);
+    assert.ok(calls.some((call) => call.args.includes('hub') && call.args.includes('10.66.66.2')));
+
+    const login = await fetch(`http://127.0.0.1:${port}/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ password: 'secret-code' }).toString(),
+      redirect: 'manual',
+    });
+    const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0];
+    const page = await fetch(`http://127.0.0.1:${port}/`, { headers: { cookie } });
+    const html = await page.text();
+    assert.match(html, /通过 hub 出网/);
+    assert.match(html, /data-egress-key=/);
+    assert.match(html, /该成员未配置 SSH/);
+
+    const toggle = await fetch(`http://127.0.0.1:${port}/peers/egress`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ publicKey: client.publicKey, enabled: false }),
+    });
+    assert.equal(toggle.status, 200);
+    const toggled = await toggle.json();
+    assert.equal(toggled.ok, true);
+    assert.equal(toggled.applied, false);
+    assert.match(toggled.manual.disable, /^sudo sh -c '/);
+    await service.stopServer();
+  }, {
+    commandRunner: async (command: string, args: readonly string[]) => {
+      calls.push({ command, args: [...args] });
+      if (command.endsWith('ip')) {
+        return { stdout: 'default via 192.168.1.1 dev eth0 proto dhcp metric 100\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+});
+
+test('Windows peers get a PowerShell manual command', async () => {
+  await withService(async ({ service }) => {
+    const port = await freePort();
+    await service.startServer({
+      controlPort: port,
+      listenPort: 51820,
+      vpnCidr: '10.66.66.0/24',
+      serverIp: '10.66.66.1',
+      endpointHost: '192.168.1.10',
+      joinCode: 'secret-code',
+      mtu: 1420,
+      interfaceName: 'dshwg0',
+      dns: '',
+    });
+    const client = generateKeyPair();
+    await service.joinPeer({ name: 'windows-client', publicKey: client.publicKey, code: 'secret-code', platform: 'windows' });
+    const result = await service.setPeerEgress({ publicKey: client.publicKey, enabled: true });
+    assert.equal(result.applied, false);
+    assert.match(result.manual.enable, /^powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand /);
+    assert.match(result.manual.disable, /^powershell /);
+    await service.stopServer();
+  }, {
+    commandRunner: async (command: string, args: readonly string[]) => {
+      if (command.endsWith('ip')) {
+        return { stdout: 'default via 192.168.1.1 dev eth0 proto dhcp metric 100\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+});
+
+
+test('a client join that carries egress writes 0.0.0.0/0 and a hub default route', async () => {
+  const serverKeys = generateKeyPair();
+  const fetchImpl = async (url: string) => {
+    if (url.endsWith('/health')) {
+      return new Response(JSON.stringify({
+        ok: true,
+        service: 'dsh-wireguard',
+        publicKey: serverKeys.publicKey,
+        vpnCidr: '10.66.66.0/24',
+        listenPort: 51820,
+        mtu: 1420,
+        dns: '',
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.endsWith('/join')) {
+      return new Response(JSON.stringify({
+        ok: true,
+        egress: true,
+        client: { ip: '10.66.66.2', address: '10.66.66.2/32', name: 'egress-client' },
+        server: { publicKey: serverKeys.publicKey, endpoint: '192.168.1.10:51820', vpnCidr: '10.66.66.0/24', vpnIp: '10.66.66.1' },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.endsWith('/leave')) {
+      return new Response(JSON.stringify({ ok: true, removed: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'dsh-wireguard-client-egress-test-'));
+  const tunnel = fakeTunnel();
+  const service = new WireGuardService({
+    dataDir,
+    platformFactory: async () => fakePlatform(),
+    tunnelFactory: () => tunnel,
+    fetchImpl,
+    log: () => {},
+  });
+  await service.init();
+  try {
+    const state = await service.connectClient({ serverAddress: '192.168.1.10:51821', joinCode: 'secret' });
+    assert.equal(state.client.egress, true);
+    assert.equal(state.client.hubIp, '10.66.66.1');
+    assert.equal(tunnel.clientInput.egress, true);
+    assert.equal(tunnel.clientInput.hubIp, '10.66.66.1');
+    const config = await readFile(path.join(dataDir, 'client.conf'), 'utf8');
+    assert.match(config, /AllowedIPs = 0\.0\.0\.0\/0/);
+    await service.disconnectClient();
+  } finally {
+    await service.dispose();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+
+test('an SSH failure leaves the hub half applied and reports the member error', async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  await withService(async ({ service }) => {
+    const port = await freePort();
+    await service.startServer({
+      controlPort: port,
+      listenPort: 51820,
+      vpnCidr: '10.66.66.0/24',
+      serverIp: '10.66.66.1',
+      endpointHost: '192.168.1.10',
+      joinCode: 'secret-code',
+      mtu: 1420,
+      interfaceName: 'dshwg0',
+      dns: '',
+    });
+    const client = generateKeyPair();
+    await service.joinPeer({ name: 'unreachable-client', publicKey: client.publicKey, code: 'secret-code', platform: 'linux' });
+    await service.configurePeerSsh({ publicKey: client.publicKey, user: 'root', platform: 'linux' });
+
+    const result = await service.setPeerEgress({ publicKey: client.publicKey, enabled: true });
+    assert.equal(result.applied, false);
+    assert.match(result.reason, /成员端自动配置失败/);
+    assert.match(result.reason, /ssh timed out/);
+    assert.match(result.manual.enable, /^sudo sh -c '/);
+    const peer = result.state.server.peers.find((candidate) => candidate.publicKey === client.publicKey);
+    assert.ok(peer);
+    assert.equal(peer.egress, true);
+    assert.ok(calls.some((call) => call.args.includes('hub') && call.args.includes('10.66.66.2')));
+    await service.stopServer();
+  }, {
+    knownHosts: {
+      refresh: async () => ['ssh-ed25519 AAAA'],
+      forget: async () => {},
+    },
+    commandRunner: async (command: string, args: readonly string[]) => {
+      calls.push({ command, args: [...args] });
+      if (command.endsWith('ip')) return { stdout: 'default via 192.168.1.1 dev eth0\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    },
+    sshRunner: async () => {
+      throw new Error('ssh timed out');
+    },
   });
 });

@@ -90,6 +90,13 @@ async function copyToClipboard(text: string): Promise<boolean> {
 
 type T = (key: string, params?: Record<string, string | number>) => string;
 type TabKey = 'service' | 'client';
+type EgressOutcome = {
+  applied: boolean;
+  egress: boolean;
+  state: Snapshot;
+  manual?: { enable: string; disable: string };
+  reason?: string;
+};
 
 function useT(ctx: any, provided?: (key: string) => string): T {
   const [, force] = useState(0);
@@ -189,16 +196,37 @@ function useController(ctx: any) {
     }
   }, []);
 
-  const configureSsh = useCallback(async (publicKey: string, user: string) => {
+  const configureSsh = useCallback(async (publicKey: string, user: string, platform: 'linux' | 'windows') => {
     setBusy('ssh');
     try {
-      const result = await api.configureSsh(publicKey, user);
+      const result = await api.configureSsh(publicKey, user, platform);
       if (alive.current) {
         setState(result.state);
         setError(null);
         setRetries(0);
       }
       return result.commands;
+    } catch (failure) {
+      if (alive.current) {
+        setError(failure instanceof ApiError ? failure : new ApiError({ code: 'unknown', message: String(failure) }, 0));
+        if (failure instanceof ApiError && failure.state) setState(failure.state);
+      }
+      return undefined;
+    } finally {
+      if (alive.current) setBusy('');
+    }
+  }, []);
+
+  const setPeerEgress = useCallback(async (publicKey: string, enabled: boolean) => {
+    setBusy('egress');
+    try {
+      const result = await api.setPeerEgress(publicKey, enabled);
+      if (alive.current) {
+        setState(result.state);
+        setError(null);
+        setRetries(0);
+      }
+      return result;
     } catch (failure) {
       if (alive.current) {
         setError(failure instanceof ApiError ? failure : new ApiError({ code: 'unknown', message: String(failure) }, 0));
@@ -224,10 +252,11 @@ function useController(ctx: any) {
     stopServer: () => action('stop', api.stopServer),
     removePeer: (publicKey: string) => action('remove', () => api.removePeer(publicKey)),
     configureSsh,
+    setPeerEgress,
     connectClient: (values: { serverAddress: string; joinCode: string; name?: string }) => action('connect', () => api.connectClient(values)),
     retryClient: () => action('retry', api.retryClient),
     disconnectClient: () => action('disconnect', api.disconnectClient),
-  }), [state, loading, refreshing, error, busy, refresh, action, configureSsh]);
+  }), [state, loading, refreshing, error, busy, refresh, action, configureSsh, setPeerEgress]);
 }
 
 function statusOf(state: Snapshot): { color: string; textKey: MessageKey } {
@@ -646,13 +675,15 @@ function RunningService({
   onStop,
   onRemove,
   onConfigureSsh,
+  onSetEgress,
 }: {
   state: Snapshot;
   t: T;
   busy: string;
   onStop: () => void;
   onRemove: (publicKey: string) => void;
-  onConfigureSsh: (publicKey: string, user: string) => Promise<{ linux: string; windows: string } | undefined>;
+  onConfigureSsh: (publicKey: string, user: string, platform: 'linux' | 'windows') => Promise<{ linux: string; windows: string } | undefined>;
+  onSetEgress: (publicKey: string, enabled: boolean) => Promise<EgressOutcome | undefined>;
 }) {
   const server: ServerState = state.server;
   const controlUrl = server.controlUrl || '';
@@ -662,6 +693,19 @@ function RunningService({
   const [sshCommands, setSshCommands] = useState<{ linux: string; windows: string } | null>(null);
   const [sshError, setSshError] = useState('');
   const [sshCopied, setSshCopied] = useState(false);
+  const [egressOutcome, setEgressOutcome] = useState<{ peer: Peer; enabled: boolean; result: EgressOutcome } | null>(null);
+  const [egressCopied, setEgressCopied] = useState(false);
+  const egressCommand = egressOutcome
+    ? (egressOutcome.enabled ? egressOutcome.result.manual?.enable : egressOutcome.result.manual?.disable) || ''
+    : '';
+  const toggleEgress = async (peer: Peer) => {
+    const enabled = !peer.egress;
+    const result = await onSetEgress(peer.publicKey, enabled);
+    if (result && result.applied === false && result.manual) {
+      setEgressCopied(false);
+      setEgressOutcome({ peer, enabled, result });
+    }
+  };
   const columns: ColumnsType<Peer> = [
     {
       title: t('service.peerName'),
@@ -692,6 +736,32 @@ function RunningService({
           ? <Badge status="success" text={t('service.online')} />
           : <Badge status="default" text={t('service.offline')} />;
       },
+    },
+    {
+      title: t('service.peerEgress'),
+      key: 'egress',
+      width: 170,
+      render: (_value, peer) => (
+        <Space direction="vertical" size={0}>
+          <Space size={4}>
+            <GlobalOutlined style={peer.egress ? { color: '#52c41a' } : { color: 'var(--dsw-alias-label-tertiary)' }} />
+            <Typography.Text type={peer.egress ? undefined : 'secondary'}>
+              {peer.egress ? t('service.egressOn') : t('service.egressOff')}
+            </Typography.Text>
+            <Button
+              size="small"
+              type="link"
+              loading={busy === 'egress'}
+              onClick={() => void toggleEgress(peer)}
+            >
+              {peer.egress ? t('service.egressDisable') : t('service.egressEnable')}
+            </Button>
+          </Space>
+          {peer.egress && !peer.sshConfigured ? (
+            <Typography.Text type="warning" style={{ fontSize: 11 }}>{t('service.egressNoSsh')}</Typography.Text>
+          ) : null}
+        </Space>
+      ),
     },
     {
       title: t('service.peerHandshake'),
@@ -895,7 +965,7 @@ function RunningService({
             }
             let commands = sshCommands;
             if (commands === null) {
-              const next = await onConfigureSsh(sshPeer.publicKey, user);
+              const next = await onConfigureSsh(sshPeer.publicKey, user, sshPlatform);
               if (!next) return;
               commands = next;
               setSshCommands(next);
@@ -909,6 +979,36 @@ function RunningService({
         >
           {sshCommands === null ? t('service.sshGenerate') : t('service.sshCopy')}
         </Button>
+      </Modal>
+      <Modal
+        open={egressOutcome !== null}
+        title={t('service.egressTitle')}
+        onCancel={() => setEgressOutcome(null)}
+        footer={null}
+        destroyOnHidden
+        width={720}
+      >
+        <Typography.Paragraph type="secondary">{t('service.egressHelp')}</Typography.Paragraph>
+        {egressOutcome?.result.reason ? (
+          <Alert type="warning" showIcon message={egressOutcome.result.reason} />
+        ) : null}
+        <Typography.Text strong>
+          {egressOutcome?.enabled ? t('service.egressManualEnable') : t('service.egressManualDisable')}
+        </Typography.Text>
+        <pre className="dsh-wg-command" style={{ maxHeight: 220, overflow: 'auto' }}>{egressCommand}</pre>
+        {egressCopied ? <Alert type="success" showIcon style={{ marginTop: 12 }} message={t('service.egressCopied')} /> : null}
+        <Space style={{ marginTop: 14 }}>
+          <Button
+            type="primary"
+            icon={<CopyOutlined />}
+            onClick={async () => {
+              if (await copyToClipboard(egressCommand)) setEgressCopied(true);
+            }}
+          >
+            {t('service.egressCopy')}
+          </Button>
+          <Button onClick={() => setEgressOutcome(null)}>{t('page.close')}</Button>
+        </Space>
       </Modal>
     </>
   );
@@ -1121,6 +1221,7 @@ export function WireGuardPanel({ ctx, embedded = false, t: providedT }: { ctx: a
         onStop={() => void controller.stopServer()}
         onRemove={(publicKey) => void controller.removePeer(publicKey)}
         onConfigureSsh={controller.configureSsh}
+        onSetEgress={controller.setPeerEgress}
       />
     ) : (
       <ServiceForm

@@ -145,13 +145,16 @@ export class Tunnel {
 
   /**
    * Create and configure the client interface.
-   * @param {{ interfaceName: string, privateKeyPath: string, address: string, settings: Record<string, unknown>, vpnCidr: string, serverPublicKey: string, endpoint: string, configPath: string }} input
+   * @param {{ interfaceName: string, privateKeyPath: string, address: string, settings: Record<string, unknown>, vpnCidr: string, serverPublicKey: string, endpoint: string, configPath: string, egress?: boolean, hubIp?: string | null }} input
    * @returns {Promise<void>}
    */
   async upClient(input: any): Promise<void> {
     this.requireWg();
     this.requireLinuxIp();
     this.requireWindowsWireGuard();
+    if (input.egress === true && (!input.hubIp || !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(String(input.hubIp)))) {
+      throw new WireGuardError('bad_server', 'The server enabled egress but did not return a usable VPN address.', { status: 502 });
+    }
     await this.down(input.interfaceName);
     try {
       if (this.platform.isWindows) {
@@ -163,8 +166,13 @@ export class Tunnel {
       await runPrivileged(this.platform.wg, ['set', input.interfaceName, 'private-key', input.privateKeyPath], { platform: this.platform });
       await runPrivileged(this.platform.ip, ['address', 'add', `${input.address}/32`, 'dev', input.interfaceName], { platform: this.platform });
       await runPrivileged(this.platform.ip, ['link', 'set', 'mtu', String(input.settings.mtu), 'up', 'dev', input.interfaceName], { platform: this.platform });
+      // Keep the VPN subnet reachable so the hub's own address has an on-link
+      // path even when egress replaces the default route.
       await runPrivileged(this.platform.ip, ['route', 'replace', input.vpnCidr, 'dev', input.interfaceName], { platform: this.platform });
-      await runPrivileged(this.platform.wg, ['set', input.interfaceName, 'peer', input.serverPublicKey, 'allowed-ips', input.vpnCidr, 'endpoint', input.endpoint, 'persistent-keepalive', '25'], { platform: this.platform });
+      if (input.egress === true) {
+        await runPrivileged(this.platform.ip, ['route', 'replace', 'default', 'via', String(input.hubIp), 'dev', input.interfaceName, 'metric', '50'], { platform: this.platform });
+      }
+      await runPrivileged(this.platform.wg, ['set', input.interfaceName, 'peer', input.serverPublicKey, 'allowed-ips', input.egress === true ? '0.0.0.0/0' : input.vpnCidr, 'endpoint', input.endpoint, 'persistent-keepalive', '25'], { platform: this.platform });
     } catch (error) {
       try {
         await this.down(input.interfaceName);

@@ -2,20 +2,28 @@
 
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { generateJoinCode, secretsMatch } from './access';
 import { DEFAULT_CONTROL_PORT, MAX_PEERS, PLUGIN_VERSION, SERVICE_NAME } from './constants';
 import { buildClientConfig, buildServerConfig, formatEndpointHost, normalizeDeviceName, normalizeEndpointHost, normalizeSettings, parseServerAddress } from './config';
 import { ControlPanel } from './control-panel';
 import { WireGuardError, missingToolHint } from './errors';
+import {
+  buildLinuxEgressSshCommand,
+  buildManualEgressCommands,
+  buildWindowsEgressScript,
+  encodeWindowsCommand,
+  type EgressTarget,
+} from './egress';
 import { installWireGuard as installPlatformWireGuard } from './installer';
 import { allocatePeerIp, ipv4ToString, isUsableHost, parseCidr, parseIpv4 } from './ip';
 import { keyFingerprint, normalizeKey } from './keys';
 import { forgetKnownHosts, refreshKnownHosts } from './known-hosts';
-import { detectGlobalIpv6, detectLanAddress, detectPlatform, localHostname, type PlatformInfo } from './platform';
+import { detectGlobalIpv6, detectLanAddress, detectPlatform, findExecutable, localHostname, runPrivileged, type PlatformInfo } from './platform';
 import { buildSshAuthorizeCommand, buildWindowsSshAuthorizeCommand, SSH_USER_PATTERN } from './ssh';
 import { emptyState, Store, type PluginState } from './store';
 import { Tunnel } from './tunnel';
@@ -35,6 +43,10 @@ export interface WireGuardServiceOptions {
     refresh?: (host: string) => Promise<unknown>;
     forget?: (host: string) => Promise<void>;
   };
+  /** Privileged command execution for the hub half, overridable in tests. */
+  commandRunner?: (command: string, args: readonly string[], options: { platform: PlatformInfo; timeout?: number }) => Promise<{ stdout: string; stderr: string }>;
+  /** SSH execution for the member half, overridable in tests. */
+  sshRunner?: (input: { host: string; user: string; keyPath: string; command: string; timeout: number }) => Promise<{ stdout: string; stderr: string }>;
 }
 
 function errorMessage(error: unknown): string {
@@ -58,6 +70,8 @@ export class WireGuardService {
   control: ControlPanel | null;
   controlExtraHandler: ((request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean> | boolean) | null;
   knownHosts: { refresh: (host: string) => Promise<unknown>; forget: (host: string) => Promise<void> };
+  readonly commandRunner: NonNullable<WireGuardServiceOptions['commandRunner']>;
+  readonly sshRunner: NonNullable<WireGuardServiceOptions['sshRunner']>;
   platform: PlatformInfo | null;
   tunnel: any;
   platformAt: number;
@@ -78,6 +92,21 @@ export class WireGuardService {
       refresh: options.knownHosts?.refresh ?? ((host: string) => refreshKnownHosts(host)),
       forget: options.knownHosts?.forget ?? ((host: string) => forgetKnownHosts(host)),
     };
+    this.commandRunner = options.commandRunner ?? ((command, args, commandOptions) => (
+      runPrivileged(command, args, { platform: commandOptions.platform, timeout: commandOptions.timeout })
+    ));
+    this.sshRunner = options.sshRunner ?? (async (input) => {
+      const result = await execFileAsync('ssh', [
+        '-i', input.keyPath,
+        '-o', 'BatchMode=yes',
+        '-o', 'IdentitiesOnly=yes',
+        '-o', 'StrictHostKeyChecking=yes',
+        '-o', 'ConnectTimeout=8',
+        `${input.user}@${input.host}`,
+        input.command,
+      ], { timeout: input.timeout, windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
+      return { stdout: String(result.stdout ?? ''), stderr: String(result.stderr ?? '') };
+    });
     this.platform = null;
     this.tunnel = null;
     this.platformAt = 0;
@@ -234,9 +263,11 @@ export class WireGuardService {
     const panel = new ControlPanel({
       getServerInfo: () => this.#controlInfo(),
       getPeers: () => this.#publicPeers(),
+      getPeerRows: () => this.#panelPeers(),
       getAccessCode: () => this.state.settings.joinCode,
       onJoin: (body, remoteAddress) => this.joinPeer(body, remoteAddress),
       onLeave: (body, remoteAddress) => this.leavePeer(body, remoteAddress),
+      onSetPeerEgress: (publicKey, enabled) => this.setPeerEgress({ publicKey, enabled }),
       extraHandler: this.controlExtraHandler,
       log: (line) => this.#log(line),
     });
@@ -360,6 +391,25 @@ export class WireGuardService {
       ip: peer.ip,
       online: peer.online === true,
       lastHandshakeAt: peer.lastHandshakeAt ?? null,
+      egress: peer.egress === true,
+    }));
+  }
+
+  /**
+   * Peer rows for the server-rendered control panel. Unlike `/peers` this list
+   * carries the public key, because the panel's egress toggle needs to address
+   * one peer; the page is only rendered after the join-code login.
+   * @returns {Array<Record<string, unknown>>} panel rows.
+   */
+  #panelPeers() {
+    return this.state.server.peers.map((peer) => ({
+      publicKey: peer.publicKey,
+      name: peer.name,
+      ip: peer.ip,
+      online: peer.online === true,
+      egress: peer.egress === true,
+      sshConfigured: typeof peer.sshUser === 'string' && peer.sshUser !== '',
+      platform: peer.platform === 'windows' ? 'windows' : peer.platform === 'linux' ? 'linux' : null,
     }));
   }
 
@@ -387,10 +437,287 @@ export class WireGuardService {
         name: normalizeDeviceName(raw.name, 'client'),
         createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
         applied: raw.applied !== false,
+        egress: raw.egress === true,
         sshUser: typeof raw.sshUser === 'string' && SSH_USER_PATTERN.test(raw.sshUser) ? raw.sshUser : null,
+        platform: raw.platform === 'windows' ? 'windows' : raw.platform === 'linux' ? 'linux' : null,
       });
     }
     return peers;
+  }
+
+  /**
+   * The absolute path of `egress-via-hub.sh`. The bundle can sit next to the
+   * script (control-service.js in code/wireguard), one level down (index.js at
+   * the package root), or in the source tree during development.
+   * @returns {Promise<string>} script path.
+   */
+  async #egressScriptPath() {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const configured = typeof this.config.egressScript === 'string'
+      ? this.config.egressScript.trim()
+      : String(process.env.DSH_MESH_EGRESS_SCRIPT ?? '').trim();
+    const candidates = [
+      ...(configured ? [configured] : []),
+      path.join(here, 'egress-via-hub.sh'),
+      path.join(here, 'code', 'wireguard', 'egress-via-hub.sh'),
+      path.resolve(here, '..', '..', '..', 'code', 'wireguard', 'egress-via-hub.sh'),
+    ];
+    for (const candidate of candidates) {
+      try {
+        await access(candidate);
+        return candidate;
+      } catch {
+        // Try the next layout.
+      }
+    }
+    throw new WireGuardError('egress_script_missing', 'The egress helper script egress-via-hub.sh was not found.', {
+      status: 500,
+      hint: 'Reinstall the plugin package so code/wireguard/egress-via-hub.sh is present next to the control service.',
+    });
+  }
+
+  /**
+   * Run one hub-side command behind the privilege boundary.
+   * @param {string} command executable.
+   * @param {readonly string[]} args arguments.
+   * @returns {Promise<{ stdout: string, stderr: string }>} output.
+   */
+  async #runHubCommand(command, args) {
+    this.#requirePlatform();
+    return this.commandRunner(command, args, { platform: this.platform, timeout: 30000 });
+  }
+
+  /**
+   * Regenerate the hub systemd unit for every peer that currently has egress.
+   * Delegating to egress-via-hub.sh keeps the iptables and unit dialect in one
+   * place; the script is idempotent, so it is also safe to call on every toggle.
+   * @returns {Promise<void>}
+   */
+  async #syncHubEgress() {
+    this.#requirePlatform();
+    if (this.platform?.isWindows) {
+      throw new WireGuardError('unsupported_platform', 'Egress via the hub needs a Linux hub with iptables.', {
+        status: 503,
+        hint: 'Run the WireGuard hub on Linux to NAT members through it.',
+      });
+    }
+    const script = await this.#egressScriptPath();
+    const bash = findExecutable('bash', ['/bin/bash', '/usr/bin/bash']) ?? 'bash';
+    const ips = this.state.server.peers
+      .filter((peer) => peer.egress === true)
+      .map((peer) => String(peer.ip ?? ''))
+      .filter((ip) => ip !== '');
+    if (ips.length === 0) await this.#runHubCommand(bash, [script, '--remove']);
+    else await this.#runHubCommand(bash, [script, 'hub', ...ips]);
+  }
+
+  /**
+   * Find the interface used by the default route, so a removed NAT rule matches
+   * the rule the helper script added.
+   * @returns {Promise<string | null>} WAN interface name.
+   */
+  async #wanInterface() {
+    const ip = this.platform?.ip ?? findExecutable('ip', ['/usr/sbin/ip', '/sbin/ip', '/usr/bin/ip']);
+    if (!ip) return null;
+    const result = await this.#runHubCommand(ip, ['-4', 'route', 'show', 'default']);
+    const match = /\bdev\s+(\S+)/.exec(result.stdout);
+    return match?.[1] ?? null;
+  }
+
+  /**
+   * Remove one member's MASQUERADE rule immediately. The rule is scoped to the
+   * member's /32 and the WAN interface, exactly like the helper script.
+   * @param {string} ip member VPN address.
+   * @returns {Promise<void>}
+   */
+  async #removeHubNat(ip) {
+    if (!this.platform || this.platform.isWindows) return;
+    const iptables = this.platform.iptables
+      ?? findExecutable('iptables', ['/usr/sbin/iptables', '/sbin/iptables', '/usr/bin/iptables']);
+    if (!iptables) {
+      this.#log(`could not remove the hub NAT rule for ${ip}: iptables was not found`);
+      return;
+    }
+    let wan = null;
+    try {
+      wan = await this.#wanInterface();
+    } catch (error) {
+      this.#log(`could not determine the WAN interface to remove the NAT rule for ${ip}: ${errorMessage(error)}`);
+      return;
+    }
+    if (!wan) {
+      this.#log(`could not remove the hub NAT rule for ${ip}: no default route was found`);
+      return;
+    }
+    try {
+      await this.#runHubCommand(iptables, ['-t', 'nat', '-D', 'POSTROUTING', '-s', `${ip}/32`, '-o', wan, '-j', 'MASQUERADE']);
+      this.#log(`removed the hub NAT rule for ${ip}/32 on ${wan}`);
+    } catch (error) {
+      // The rule may already be gone after a reboot; that is the desired state.
+      this.#log(`no hub NAT rule to remove for ${ip}/32 on ${wan}: ${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Best-effort cleanup when an egress peer leaves: drop its NAT rule and
+   * rewrite the unit without it. A leftover rule would be harmless but stale.
+   * @param {Record<string, any>} peer removed peer.
+   * @returns {Promise<void>}
+   */
+  async #cleanupPeerEgress(peer) {
+    try {
+      await this.#removeHubNat(String(peer.ip ?? ''));
+    } catch (error) {
+      this.#log(`could not remove the NAT rule of the leaving peer ${peer.ip}: ${errorMessage(error)}`);
+    }
+    try {
+      await this.#syncHubEgress();
+    } catch (error) {
+      this.#log(`could not refresh the hub egress unit after ${peer.name} left: ${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Values shared by the automatic and manual member halves. The peer record
+   * does not always know the OS (older peers joined before the client scripts
+   * sent it), so Linux is the documented default; configuring SSH in the panel
+   * records the platform explicitly.
+   * @param {Record<string, any>} peer peer record.
+   * @param {boolean} enabled whether egress should be on.
+   * @returns {EgressTarget} member values.
+   */
+  #egressTarget(peer, enabled): EgressTarget {
+    const hubKey = normalizeKey(this.state.server.publicKey);
+    const hubIp = String(this.state.settings.serverIp ?? '').trim();
+    const vpnCidr = parseCidr(this.state.server.vpnCidr || this.state.settings.vpnCidr);
+    if (!hubKey || !vpnCidr || parseIpv4(hubIp) === null) {
+      throw new WireGuardError('server_not_ready', 'The WireGuard server is missing its key or VPN address.', { status: 500 });
+    }
+    return {
+      enabled,
+      // Both sides default to dshwg0; the hub has no separate record of the
+      // member tunnel name, so it reuses the interface the join script created.
+      interfaceName: this.state.server.interfaceName || this.state.settings.interfaceName,
+      hubIp,
+      hubKey,
+      vpnCidr: vpnCidr.normalized,
+      platform: peer.platform === 'windows' ? 'windows' : 'linux',
+    };
+  }
+
+  /**
+   * Copy-paste commands for the member half.
+   * @param {Record<string, any>} peer peer record.
+   * @returns {{ enable: string, disable: string }} both directions.
+   */
+  #manualEgressCommands(peer) {
+    const target = this.#egressTarget(peer, true);
+    const base = { ...target };
+    delete base.enabled;
+    return buildManualEgressCommands(base);
+  }
+
+  /**
+   * Apply the member half over SSH. The remote script is the same one the panel
+   * shows for copy-paste, so success and failure stay in one dialect.
+   * @param {Record<string, any>} peer peer record.
+   * @param {boolean} enabled whether egress should be on.
+   * @returns {Promise<void>}
+   */
+  async #runMemberEgress(peer, enabled) {
+    if (typeof peer.sshUser !== 'string' || peer.sshUser === '') throw new Error('该成员未配置 SSH');
+    const keyPath = this.#sshKeyPath(peer.publicKey);
+    try {
+      await access(keyPath);
+    } catch {
+      throw new Error('该成员的 SSH 私钥不存在，请重新配置 SSH');
+    }
+    const target = this.#egressTarget(peer, enabled);
+    const command = target.platform === 'windows'
+      ? encodeWindowsCommand(buildWindowsEgressScript(target))
+      : buildLinuxEgressSshCommand(target, peer.sshUser);
+    await this.sshRunner({
+      host: peer.ip,
+      user: peer.sshUser,
+      keyPath,
+      command,
+      timeout: 40000,
+    });
+  }
+
+  /**
+   * Toggle IPv4 egress through the hub for one peer.
+   *
+   * The hub half is applied first and a failure there is fatal, because a
+   * member-side default route without NAT blackholes the member's internet.
+   * The member half is best effort: when SSH is missing or unreachable the
+   * toggle still persists so a rejoin writes `AllowedIPs = 0.0.0.0/0`, and the
+   * response carries copy-paste commands for the operator.
+   * @param {Record<string, unknown>} input peer public key and desired state.
+   * @returns {Promise<Record<string, unknown>>} applied flag, optional manual commands, snapshot.
+   */
+  async setPeerEgress(input) {
+    return this.#serialized(async () => {
+      await this.#detect(false);
+      this.#requirePlatform();
+      const publicKey = normalizeKey(input?.publicKey);
+      if (!publicKey) {
+        throw new WireGuardError('invalid_public_key', 'A valid WireGuard public key is required.', { status: 400 });
+      }
+      const enabled = input?.enabled === true || input?.egress === true;
+      const peer = this.state.server.peers.find((candidate) => candidate.publicKey === publicKey);
+      if (!peer) {
+        throw new WireGuardError('peer_not_found', 'That device has not joined this server.', { status: 404 });
+      }
+      if (!this.state.server.running || !this.state.server.publicKey) {
+        throw new WireGuardError('not_running', 'The WireGuard server is not running.', { status: 503 });
+      }
+      if (this.platform?.isWindows) {
+        throw new WireGuardError('unsupported_platform', 'Egress via the hub needs a Linux hub with iptables.', {
+          status: 503,
+          hint: 'Run the WireGuard hub on Linux to NAT members through it.',
+        });
+      }
+      const previous = peer.egress === true;
+      peer.egress = enabled;
+      try {
+        // The unit lists exactly the enabled peers; removing this peer's NAT
+        // rule happens after the rewrite so a failed rewrite cannot leave the
+        // member's default route pointing at a hub that no longer NATs it.
+        await this.#syncHubEgress();
+        if (!enabled) await this.#removeHubNat(String(peer.ip ?? ''));
+      } catch (error) {
+        peer.egress = previous;
+        throw new WireGuardError('egress_failed', `Could not update the hub NAT rule: ${errorMessage(error)}`, {
+          status: 500,
+          hint: 'Check that the control service runs as root and that iptables, bash and systemd are available on the hub.',
+          details: { stderr: errorMessage(error).slice(0, 800) },
+        });
+      }
+      await this.#persist();
+      const manual = this.#manualEgressCommands(peer);
+      const result = {
+        egress: enabled,
+        applied: false,
+        state: this.snapshot(),
+        manual,
+        reason: '',
+      };
+      if (typeof peer.sshUser !== 'string' || peer.sshUser === '') {
+        result.reason = '该成员未配置 SSH，无法自动应用到成员端。';
+        this.#log(`egress ${enabled ? 'enabled' : 'disabled'} on the hub for ${peer.name}; the member half needs manual work (no SSH)`);
+        return result;
+      }
+      try {
+        await this.#runMemberEgress(peer, enabled);
+        this.#log(`egress ${enabled ? 'enabled' : 'disabled'} for ${peer.name} (${peer.ip}) on both sides`);
+        return { egress: enabled, applied: true, state: this.snapshot(), manual };
+      } catch (error) {
+        const reason = `成员端自动配置失败：${errorMessage(error)}`;
+        this.#log(`could not apply egress on ${peer.name} over SSH: ${errorMessage(error)}`);
+        return { ...result, reason };
+      }
+    });
   }
 
   /**
@@ -525,6 +852,17 @@ export class WireGuardService {
         await this.#persist();
         throw error;
       }
+      if (peers.some((peer) => peer.egress === true)) {
+        // Recreate the NAT unit after a reinstall or a state restore. A failure
+        // is a warning, not a reason to stop the tunnel the operator just paid
+        // for with a restart.
+        try {
+          await this.#syncHubEgress();
+        } catch (error) {
+          this.state.server.warnings.push(`Could not restore hub NAT egress: ${errorMessage(error)}`);
+          this.#log(`could not restore hub NAT egress: ${errorMessage(error)}`);
+        }
+      }
       try {
         await this.#startControl();
       } catch (error) {
@@ -609,7 +947,7 @@ export class WireGuardService {
       const key = await this.store.ensureKey('client');
       const join = await this.#fetchJson(`${address.controlUrl}/join`, {
         method: 'POST',
-        body: { name, publicKey: key.publicKey, code: joinCode, family },
+        body: { name, publicKey: key.publicKey, code: joinCode, family, platform: this.platform?.isWindows ? 'windows' : 'linux' },
       });
       const assignedIp = parseIpv4(join?.client?.ip);
       if (assignedIp === null || !isUsableHost(assignedIp, vpnCidr)) {
@@ -618,6 +956,14 @@ export class WireGuardService {
       const assignedAddress = ipv4ToString(assignedIp);
       const joinedServerKey = normalizeKey(join?.server?.publicKey ?? serverPublicKey);
       if (!joinedServerKey) throw new WireGuardError('bad_server', 'The server returned an invalid public key.', { status: 502 });
+      // A server that enables egress for this peer answers with `egress:true`
+      // and its own VPN address, which the member uses as the default gateway.
+      const egress = join?.egress === true;
+      const hubIpNumber = parseIpv4(join?.server?.vpnIp);
+      if (egress && hubIpNumber === null) {
+        throw new WireGuardError('bad_server', 'The server enabled egress but did not return its VPN address.', { status: 502 });
+      }
+      const hubIp = egress ? ipv4ToString(hubIpNumber) : null;
       const endpoint = String(join?.server?.endpoint || `${formatEndpointHost(address.host)}:${listenPort}`);
       if (!/^(?:\[[0-9A-Fa-f:.]+\]|[^:\s]+):\d{1,5}$/.test(endpoint)) throw new WireGuardError('bad_server', 'The server returned an invalid WireGuard endpoint.', { status: 502 });
       const advertisedMtu = integerOr(health.mtu, this.state.settings.mtu);
@@ -633,6 +979,7 @@ export class WireGuardService {
         serverPublicKey: joinedServerKey,
         endpoint,
         vpnCidr: vpnCidr.normalized,
+        egress,
       });
       await this.store.writeConfig('client', configText, this.state.settings.interfaceName, this.platform?.isWindows === true);
       this.state.client = {
@@ -648,6 +995,8 @@ export class WireGuardService {
         endpoint,
         interfaceName: this.state.settings.interfaceName,
         mtu: clientSettings.mtu,
+        egress,
+        hubIp,
         joinCode,
         lastError: null,
       };
@@ -662,6 +1011,8 @@ export class WireGuardService {
           vpnCidr: vpnCidr.normalized,
           serverPublicKey: joinedServerKey,
           endpoint,
+          egress,
+          hubIp,
           configPath: this.store.configPath('client', this.state.client.interfaceName, this.platform?.isWindows === true),
         });
       } catch (error) {
@@ -706,6 +1057,8 @@ export class WireGuardService {
           vpnCidr: client.vpnCidr,
           serverPublicKey: client.serverPublicKey,
           endpoint: client.endpoint,
+          egress: client.egress === true,
+          hubIp: client.hubIp ?? null,
           configPath: this.store.configPath('client', client.interfaceName, this.platform?.isWindows === true),
         });
       } catch (error) {
@@ -784,8 +1137,19 @@ export class WireGuardService {
       const existing = this.state.server.peers.find((peer) => peer.publicKey === publicKey);
       if (existing) {
         existing.name = name;
+        const platform = body.platform === 'windows' ? 'windows' : body.platform === 'linux' ? 'linux' : null;
+        if (platform) existing.platform = platform;
         await this.tunnel.addPeer(this.state.server.interfaceName, existing);
         existing.applied = true;
+        if (existing.egress === true) {
+          // A rejoin writes AllowedIPs from the response, so the hub NAT rule
+          // has to be present before the member starts sending internet traffic.
+          try {
+            await this.#syncHubEgress();
+          } catch (error) {
+            this.#log(`could not apply hub NAT egress for ${name} on rejoin: ${errorMessage(error)}`);
+          }
+        }
         await this.#safeRewriteServerConfig();
         await this.#persist();
         this.#log(`peer ${name} (${existing.ip}) rejoined from ${remoteAddress || 'unknown'}`);
@@ -805,6 +1169,8 @@ export class WireGuardService {
         online: false,
         lastHandshakeAt: null,
         sshUser: null,
+        egress: false,
+        platform: body.platform === 'windows' ? 'windows' : body.platform === 'linux' ? 'linux' : null,
       };
       this.state.server.peers.push(peer);
       try {
@@ -842,6 +1208,7 @@ export class WireGuardService {
         await this.tunnel.removePeer(this.state.server.interfaceName, publicKey);
       }
       this.state.server.peers = this.state.server.peers.filter((candidate) => candidate.publicKey !== publicKey);
+      if (peer.egress === true) await this.#cleanupPeerEgress(peer);
       await this.#safeRewriteServerConfig();
       await this.#persist();
       this.#log(`peer ${peer.name} (${peer.ip}) left from ${remoteAddress || 'unknown'}`);
@@ -865,6 +1232,7 @@ export class WireGuardService {
       }
       this.state.server.peers = this.state.server.peers.filter((candidate) => candidate.publicKey !== key);
       await this.#removeSshKey(key);
+      if (peer.egress === true) await this.#cleanupPeerEgress(peer);
       try {
         await this.knownHosts.forget(peer.ip);
       } catch {
@@ -902,6 +1270,9 @@ export class WireGuardService {
       }
       const publicSshKey = await this.#ensureSshKey(publicKey);
       peer.sshUser = user;
+      // The egress automation needs the member OS to choose between the POSIX
+      // and PowerShell halves; record the tab the operator generated for.
+      if (input.platform === 'windows' || input.platform === 'linux') peer.platform = input.platform;
       await this.#persist();
       this.#log(`configured SSH access for ${peer.name} as ${user}`);
       // The peer's sshd host key may be newer than the stale entry left by a
@@ -1031,12 +1402,17 @@ export class WireGuardService {
     const endpoint = selected?.endpoint || server.endpoint;
     return {
       client: { ip: peer.ip, address: `${peer.ip}/32`, name: peer.name },
+      // The member scripts switch AllowedIPs to 0.0.0.0/0 only when this is
+      // true; keeping the flag out of `server` makes that switch explicit.
+      egress: peer.egress === true,
       server: {
         name: localHostname(),
         publicKey: server.publicKey,
         endpoint,
         endpointHost: server.endpointHost,
         vpnCidr: server.vpnCidr,
+        // The default route needs a next hop inside the tunnel.
+        vpnIp: this.state.settings.serverIp,
         listenPort: server.listenPort,
         controlPort: server.controlPort,
         mtu: server.mtu,
@@ -1239,8 +1615,10 @@ export class WireGuardService {
           receivedBytes: integerOr(peer.receivedBytes, 0),
           sentBytes: integerOr(peer.sentBytes, 0),
           applied: peer.applied !== false,
+          egress: peer.egress === true,
           sshConfigured: Boolean(peer.sshUser),
           sshUser: peer.sshUser ?? null,
+          platform: peer.platform === 'windows' ? 'windows' : peer.platform === 'linux' ? 'linux' : null,
         })),
       },
       client: {

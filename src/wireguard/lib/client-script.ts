@@ -115,7 +115,7 @@ fi
 
 NAME=$(hostname 2>/dev/null || echo linux-client)
 log "Joining server as device: $NAME"
-PAYLOAD='{"name":"'"$NAME"'","publicKey":"'"$PUBLIC_KEY"'","code":"'"$JOIN_CODE"'","family":"'"$FAMILY"'"}'
+PAYLOAD='{"name":"'"$NAME"'","publicKey":"'"$PUBLIC_KEY"'","code":"'"$JOIN_CODE"'","family":"'"$FAMILY"'","platform":"linux"}'
 JOIN=$(curl -sS -X POST -H "content-type: application/json" --data "$PAYLOAD" "$CONTROL_URL/join") || die "Cannot reach $CONTROL_URL."
 if ! printf '%s' "$JOIN" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
   die "Join failed: $JOIN"
@@ -135,6 +135,11 @@ ENDPOINT=$(json_str "$JOIN" endpoint)
 VPN_CIDR=$(json_str "$JOIN" vpnCidr)
 MTU=$(json_num "$JOIN" mtu)
 DNS=$(json_str "$JOIN" dns)
+HUB_IP=$(json_str "$JOIN" vpnIp)
+EGRESS=0
+if printf '%s' "$JOIN" | grep -Eq '"egress"[[:space:]]*:[[:space:]]*true'; then
+  EGRESS=1
+fi
 
 if [ -z "$ADDRESS" ] || [ -z "$SERVER_KEY" ] || [ -z "$ENDPOINT" ] || [ -z "$VPN_CIDR" ]; then
   die "The server response is incomplete: $JOIN"
@@ -146,6 +151,13 @@ esac
 if [ -z "$MTU" ]; then
   MTU=1420
 fi
+ALLOWED_IPS=$VPN_CIDR
+if [ "$EGRESS" -eq 1 ]; then
+  ALLOWED_IPS=0.0.0.0/0
+  if [ -z "$HUB_IP" ]; then
+    die "The server enabled egress but did not return its VPN address."
+  fi
+fi
 
 log "Assigned VPN address: $ADDRESS"
 log "WireGuard endpoint: $ENDPOINT"
@@ -153,6 +165,9 @@ log "VPN subnet: $VPN_CIDR"
 log "MTU: $MTU"
 if [ -n "$DNS" ]; then
   log "DNS: $DNS"
+fi
+if [ "$EGRESS" -eq 1 ]; then
+  log "IPv4 egress via hub: $HUB_IP"
 fi
 
 log "Writing configuration: $CONF"
@@ -171,7 +186,7 @@ umask 077
   echo "[Peer]"
   echo "PublicKey = $SERVER_KEY"
   echo "Endpoint = $ENDPOINT"
-  echo "AllowedIPs = $VPN_CIDR"
+  echo "AllowedIPs = $ALLOWED_IPS"
   echo "PersistentKeepalive = 25"
 } > "$CONF"
 log "Configuration written"
@@ -189,6 +204,40 @@ if command -v systemctl >/dev/null 2>&1; then
     log "Enabled wg-quick@$IFACE at boot"
   else
     log "Could not enable wg-quick@$IFACE at boot (continuing)"
+  fi
+fi
+
+if [ "$EGRESS" -eq 1 ]; then
+  log "Installing IPv4 egress persistence via $HUB_IP"
+  UNIT=/etc/systemd/system/dsh-mesh-egress.service
+  wg set "$IFACE" peer "$SERVER_KEY" allowed-ips 0.0.0.0/0
+  ip route replace default via "$HUB_IP" dev "$IFACE" metric 50
+  if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+    cat >"$UNIT" <<EOF
+[Unit]
+Description=dsh-mesh: route IPv4 egress through the hub ($HUB_IP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 0.0.0.0/0 has to be in the peer's AllowedIPs or the tunnel silently drops
+# every packet that the default route sends into it.
+ExecStart=/bin/sh -c 'wg set $IFACE peer $SERVER_KEY allowed-ips 0.0.0.0/0; ip route replace default via $HUB_IP dev $IFACE metric 50'
+ExecStop=/bin/sh -c 'ip route del default via $HUB_IP dev $IFACE 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    if systemctl enable --now dsh-mesh-egress.service >/dev/null 2>&1; then
+      log "Enabled dsh-mesh-egress.service at boot"
+    else
+      log "Could not enable dsh-mesh-egress.service; egress is active until reboot"
+    fi
+  else
+    log "systemd is unavailable; egress will not survive a reboot"
   fi
 fi
 

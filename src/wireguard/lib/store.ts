@@ -16,7 +16,7 @@ import { generateKeyPair, normalizeKey, publicKeyFromPrivate } from './keys';
  *   role: 'idle' | 'server' | 'client',
  *   settings: typeof DEFAULT_SETTINGS,
  *   server: { running: boolean, startedAt: string | null, publicKey: string, endpoint: string | null, endpointHost: string | null, controlUrl: string | null, controlPort: number, listenPort: number, vpnCidr: string, interfaceName: string, mtu: number, dns: string, peers: Array<Record<string, unknown>>, warnings: string[], forwarding: boolean | null },
- *   client: { connected: boolean, pending: boolean, publicKey: string | null, name: string | null, serverUrl: string | null, serverHost: string | null, assignedIp: string | null, serverPublicKey: string | null, vpnCidr: string | null, endpoint: string | null, interfaceName: string | null, mtu: number, joinCode: string | null, connectedAt: string | null, lastHandshakeAt: string | null, receivedBytes: number, sentBytes: number, lastError: string | null, warnings: string[] },
+ *   client: { connected: boolean, pending: boolean, publicKey: string | null, name: string | null, serverUrl: string | null, serverHost: string | null, assignedIp: string | null, serverPublicKey: string | null, vpnCidr: string | null, endpoint: string | null, interfaceName: string | null, mtu: number, egress: boolean, hubIp: string | null, joinCode: string | null, connectedAt: string | null, lastHandshakeAt: string | null, receivedBytes: number, sentBytes: number, lastError: string | null, warnings: string[] },
  *   lastError: string | null,
  *   logs: string[],
  *   updatedAt: string | null
@@ -57,6 +57,8 @@ export function emptyState() {
       endpoint: null,
       interfaceName: null,
       mtu: DEFAULT_SETTINGS.mtu,
+      egress: false,
+      hubIp: null,
       joinCode: null,
       connectedAt: null,
       lastHandshakeAt: null,
@@ -101,7 +103,18 @@ export function normalizeState(raw) {
       interfaceName: typeof server.interfaceName === 'string' ? server.interfaceName : base.server.interfaceName,
       mtu: Number.isInteger(server.mtu) ? server.mtu : base.server.mtu,
       dns: typeof server.dns === 'string' ? server.dns : base.server.dns,
-      peers: Array.isArray(server.peers) ? server.peers.filter((peer) => peer && typeof peer === 'object' && typeof peer.publicKey === 'string').slice(0, 1024) : [],
+      peers: Array.isArray(server.peers)
+        ? server.peers
+          .filter((peer) => peer && typeof peer === 'object' && typeof peer.publicKey === 'string')
+          // Old state files predate per-peer egress; false keeps the default
+          // behaviour (only the VPN subnet) after an upgrade.
+          .map((peer) => ({
+            ...peer,
+            egress: peer.egress === true,
+            platform: peer.platform === 'windows' ? 'windows' : peer.platform === 'linux' ? 'linux' : null,
+          }))
+          .slice(0, 1024)
+        : [],
       warnings: Array.isArray(server.warnings) ? server.warnings.filter((item) => typeof item === 'string').slice(0, 20) : [],
       forwarding: typeof server.forwarding === 'boolean' ? server.forwarding : null,
     };
@@ -122,6 +135,8 @@ export function normalizeState(raw) {
       endpoint: typeof client.endpoint === 'string' ? client.endpoint : null,
       interfaceName: typeof client.interfaceName === 'string' ? client.interfaceName : null,
       mtu: Number.isInteger(client.mtu) ? client.mtu : base.client.mtu,
+      egress: client.egress === true,
+      hubIp: typeof client.hubIp === 'string' ? client.hubIp : null,
       joinCode: typeof client.joinCode === 'string' ? client.joinCode : null,
       connectedAt: typeof client.connectedAt === 'string' ? client.connectedAt : null,
       lastHandshakeAt: typeof client.lastHandshakeAt === 'string' ? client.lastHandshakeAt : null,

@@ -98,9 +98,12 @@ function writeJson(response: import('node:http').ServerResponse, status: number,
 export interface ControlPanelOptions {
   getServerInfo: () => Record<string, unknown>;
   getPeers: () => Array<Record<string, unknown>>;
+  /** Peer rows with public keys, used only by the authenticated HTML page. */
+  getPeerRows?: () => Array<Record<string, unknown>>;
   getAccessCode: () => string;
   onJoin: (request: Record<string, unknown>, remoteAddress: string) => Promise<Record<string, unknown>>;
   onLeave: (request: Record<string, unknown>, remoteAddress: string) => Promise<Record<string, unknown>>;
+  onSetPeerEgress?: (publicKey: string, enabled: boolean) => Promise<Record<string, unknown>>;
   extraHandler?: (request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean> | boolean;
   log?: (message: string) => void;
 }
@@ -250,6 +253,22 @@ export class ControlPanel {
       try {
         const body = await readJson(request);
         const result = await this.options.onLeave(body, remoteAddress);
+        writeJson(response, 200, { ok: true, ...result });
+      } catch (error) {
+        this.writeError(response, error);
+      }
+      return;
+    }
+    if (method === 'POST' && url.pathname === '/peers/egress') {
+      try {
+        if (!this.authed(request)) {
+          throw new WireGuardError('invalid_join_code', 'The join code is missing or incorrect.', { status: 401 });
+        }
+        if (!this.options.onSetPeerEgress) {
+          throw new WireGuardError('not_supported', 'This control panel does not support egress changes.', { status: 501 });
+        }
+        const body = await readJson(request);
+        const result = await this.options.onSetPeerEgress(String(body.publicKey ?? ''), body.enabled === true);
         writeJson(response, 200, { ok: true, ...result });
       } catch (error) {
         this.writeError(response, error);
@@ -458,30 +477,54 @@ button:hover { background: #1f6ae5; }
 
   /**
    * Render the status page shown when the port is opened in a browser. It is
-   * password-protected when configured and never includes the join code or
-   * peer identities.
+   * password-protected when configured, never includes the join code or private
+   * keys, and only exposes peer identities after that login. The egress toggle
+   * posts back to this same listener; SSH-unreachable members answer with a
+   * copy-paste command that the page shows in a <pre>.
    * @param {import('node:http').ServerResponse} response response.
    * @returns {void}
    */
   writePage(response) {
     const info = this.options.getServerInfo();
-    const peers = this.options.getPeers();
+    const rows = this.options.getPeerRows ? this.options.getPeerRows() : this.options.getPeers();
     const protectedPage = Boolean(this.options.getAccessCode());
     const endpoint = escapeHtml(info.endpoint ?? 'not available');
     const control = escapeHtml(String(info.controlUrl ?? `http://${info.endpointHost ?? 'server'}:${info.controlPort ?? ''}`));
+    const peerTable = rows.length === 0
+      ? '<p>还没有设备加入。 / No device has joined yet.</p>'
+      : `<table class="peers">
+<thead><tr><th>设备 / Device</th><th>VPN 地址 / Address</th><th>通过 hub 出网 / Egress</th><th>操作 / Action</th></tr></thead>
+<tbody>${rows.map((peer) => {
+  const key = typeof peer.publicKey === 'string' ? peer.publicKey : '';
+  const enabled = peer.egress === true;
+  const ssh = peer.sshConfigured === true;
+  const status = enabled ? '<span class="on">已启用</span>' : '<span class="off">未启用</span>';
+  const sshHint = ssh ? '' : '<br><span class="muted">该成员未配置 SSH</span>';
+  const button = key
+    ? `<button type="button" data-egress-key="${escapeHtml(key)}" data-egress-enable="${enabled ? '0' : '1'}">${enabled ? '关闭' : '开启'}</button>`
+    : '<span class="muted">—</span>';
+  return `<tr>
+<td>${escapeHtml(peer.name ?? '')}<br><span class="muted">${escapeHtml(peer.ip ?? '')}</span></td>
+<td><code>${escapeHtml(peer.ip ?? '')}</code></td>
+<td>${status}${sshHint}</td>
+<td>${button}</td>
+</tr>`;
+}).join('')}</tbody></table>
+<pre id="egress-result" class="result" hidden></pre>`;
     const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'">
 <title>WireGuard control panel</title>
 <style>
 :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
 body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f4f7fb; color: #152033; }
-main { width: min(640px, calc(100vw - 40px)); margin: 40px 0; padding: 28px; border-radius: 18px; background: #fff; box-shadow: 0 18px 60px rgba(23, 44, 75, .12); }
+main { width: min(720px, calc(100vw - 40px)); margin: 40px 0; padding: 28px; border-radius: 18px; background: #fff; box-shadow: 0 18px 60px rgba(23, 44, 75, .12); }
 h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: -.02em; }
+h2 { margin: 24px 0 8px; font-size: 16px; }
 p { color: #5b6b82; line-height: 1.55; }
 .badge { display: inline-block; padding: 3px 9px; border-radius: 999px; background: #e6f7ee; color: #147a4b; font-size: 12px; font-weight: 600; }
 dl { display: grid; grid-template-columns: 150px 1fr; gap: 10px 16px; margin: 22px 0; }
@@ -491,7 +534,16 @@ code { background: #eef3fa; padding: 2px 6px; border-radius: 5px; }
 .note { padding: 12px 14px; border-radius: 10px; background: #f0f6ff; color: #27456f; font-size: 13px; }
 .logout { margin-top: 18px; }
 .logout button { border: 0; border-radius: 8px; padding: 7px 11px; background: #eef3fa; color: #27456f; font: inherit; cursor: pointer; }
-@media (prefers-color-scheme: dark) { body { background: #0d1420; color: #e6edf7; } main { background: #151f2e; box-shadow: none; } p, dt { color: #9babc2; } .badge { background: #123a2a; color: #72e4ad; } .note { background: #17263b; color: #c1d4ef; } code { background: #202e42; } .logout button { background: #202e42; color: #c1d4ef; } }
+.peers { width: 100%; border-collapse: collapse; margin: 12px 0 6px; font-size: 13px; }
+.peers th, .peers td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e6edf6; vertical-align: top; }
+.peers th { color: #5b6b82; font-size: 12px; font-weight: 600; }
+.muted { color: #7a8aa0; font-size: 12px; }
+.on { color: #147a4b; font-weight: 600; }
+.off { color: #7a8aa0; }
+.peers button { border: 0; border-radius: 7px; padding: 6px 10px; background: #2f7cff; color: #fff; font: inherit; cursor: pointer; }
+.peers button:disabled { opacity: .55; cursor: default; }
+.result { margin: 12px 0 0; padding: 12px; border-radius: 8px; background: #0f1927; color: #e6edf7; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (prefers-color-scheme: dark) { body { background: #0d1420; color: #e6edf7; } main { background: #151f2e; box-shadow: none; } p, dt, .peers th { color: #9babc2; } .badge { background: #123a2a; color: #72e4ad; } .note { background: #17263b; color: #c1d4ef; } code { background: #202e42; } .logout button { background: #202e42; color: #c1d4ef; } .peers th, .peers td { border-color: #26364c; } .muted, .off { color: #7f90a8; } .on { color: #72e4ad; } }
 </style>
 </head>
 <body>
@@ -504,12 +556,63 @@ code { background: #eef3fa; padding: 2px 6px; border-radius: 5px; }
     <dt>WireGuard endpoint</dt><dd>${endpoint}</dd>
     <dt>VPN subnet</dt><dd>${escapeHtml(info.vpnCidr ?? '')}</dd>
     <dt>Server public key</dt><dd>${escapeHtml(info.publicKey ?? '')}</dd>
-    <dt>Connected peers</dt><dd>${peers.length}</dd>
+    <dt>Connected peers</dt><dd>${rows.length}</dd>
     <dt>Join code / password</dt><dd>${info.joinRequired ? 'required — ask the server operator' : 'not required — anyone who can reach this port may join'}</dd>
     <dt>Panel access</dt><dd>${protectedPage ? 'join code / password protected' : 'open — no join code is set'}</dd>
   </dl>
+  <h2>通过 hub 出网 / Egress via hub</h2>
+  ${peerTable}
   <div class="note">Client address example: <code>${endpoint}</code> in the Client tab. ${protectedPage ? 'This page is protected by the join code, which is also the control-panel password.' : 'This page has no password. Set a join code in the WireGuard plugin before exposing this port.'} The control panel uses plain HTTP and never exposes a private key.</div>
   ${protectedPage ? '<form method="post" action="/logout" class="logout"><button type="submit">退出登录 / Sign out</button></form>' : ''}
+  <script>
+(function () {
+  var pre = document.getElementById('egress-result');
+  if (!pre) return;
+  document.addEventListener('click', function (event) {
+    var target = event.target;
+    var button = target && target.closest ? target.closest('button[data-egress-key]') : null;
+    if (!button) return;
+    var key = button.getAttribute('data-egress-key');
+    var enable = button.getAttribute('data-egress-enable') === '1';
+    var label = button.textContent;
+    button.disabled = true;
+    button.textContent = '处理中…';
+    fetch('/peers/egress', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ publicKey: key, enabled: enable })
+    }).then(function (response) {
+      return response.json().then(function (data) { return { ok: response.ok && data.ok, data: data }; });
+    }).then(function (result) {
+      if (!result.ok) {
+        var problem = result.data && result.data.error ? result.data.error : {};
+        pre.textContent = (problem.message || '操作失败') + (problem.hint ? '\\n' + problem.hint : '');
+        pre.hidden = false;
+        button.disabled = false;
+        button.textContent = label;
+        return;
+      }
+      if (result.data.applied === false) {
+        var manual = result.data.manual || {};
+        pre.textContent = (result.data.reason || '需要在成员端手动执行。') + '\\n\\n' + (enable ? manual.enable : manual.disable || '');
+        pre.hidden = false;
+        button.disabled = false;
+        button.textContent = label;
+        return;
+      }
+      pre.textContent = enable ? '已在 hub 和成员两端启用。' : '已在 hub 和成员两端关闭。';
+      pre.hidden = false;
+      window.setTimeout(function () { window.location.reload(); }, 800);
+    }).catch(function () {
+      pre.textContent = '无法连接控制面板，请重试。';
+      pre.hidden = false;
+      button.disabled = false;
+      button.textContent = label;
+    });
+  });
+})();
+  </script>
 </main>
 </body>
 </html>`;

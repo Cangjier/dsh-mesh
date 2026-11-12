@@ -107,3 +107,25 @@ server 成员的 dsh-wireguard 配置：
 - DSH 退出只影响内置面板的入口，不影响 51821 本身。
 
 客户端成员不需要控制面板服务，保持 `externalControlPanel` 为 false 或不配置；它们没有 server 面板。
+
+## 每台设备的「通过 hub 出网」
+
+面板的设备表里，每一行都有一个**通过 hub 出网**开关（`POST /api/dsh-wireguard/peers/egress`，
+body `{"publicKey":"…","enabled":true}`）。它解决的是「成员没有可用公网 IPv4」这一类机器：
+它们能组网、能 ssh，但 `api.deepseek.com` 只有 A 记录，于是每条对话都死在
+`DeepSeek Messages transport failed`。
+
+开关要同时改两端，缺一不可：
+
+- **hub**：`ip_forward=1` + 只针对该设备 `/32` 的 `MASQUERADE`，并重写
+  `dsh-mesh-egress.service` 让它开机自愈。这半边在点了开关后**立即生效**。
+- **成员**：隧道 `AllowedIPs` 加 `0.0.0.0/0`（不加的话 WireGuard 会静默丢掉默认路由送进
+  隧道的数据包），再加一条 metric 更小的默认路由，同样落一个 systemd 单元持久化。
+
+成员那半边，配置过 SSH 的设备由 hub 直接 ssh 过去执行，一步到位；没有 SSH（或连不上）时
+开关仍然记录状态，但面板会把一条 `sudo sh -c '…'`（Windows 上是 `powershell
+-EncodedCommand …`）显示出来让你复制执行——这一步无法省略，因为成员本机的
+`dshwg0.conf` 只有成员自己能改。
+
+默认关闭：没有设备会因为内置默认值而写 `0.0.0.0/0`。代价是开了开关的成员所有 IPv4 流量
+都绕 hub，适合低流量机器；手动兜底脚本仍是 `code/wireguard/egress-via-hub.sh`。

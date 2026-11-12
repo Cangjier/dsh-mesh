@@ -89,3 +89,21 @@ test('accepts IPv6 transport endpoints while keeping the VPN subnet IPv4', () =>
   assert.equal(settings.endpointHost, '2408:400a:109:bf00::1');
   assert.equal(settings.vpnCidr, '10.66.66.0/24');
 });
+
+
+test('client config uses 0.0.0.0/0 only when egress is enabled', () => {
+  const { settings } = normalizeSettings({ endpointHost: '192.168.1.10' });
+  const input = {
+    privateKey: Buffer.alloc(32, 5).toString('base64'),
+    address: '10.66.66.2',
+    settings,
+    serverPublicKey: Buffer.alloc(32, 6).toString('base64'),
+    endpoint: '192.168.1.10:51820',
+    vpnCidr: '10.66.66.0/24',
+  };
+  const plain = buildClientConfig(input);
+  assert.match(plain, /AllowedIPs = 10\.66\.66\.0\/24/);
+  assert.doesNotMatch(plain, /0\.0\.0\.0\/0/);
+  const egress = buildClientConfig({ ...input, egress: true });
+  assert.match(egress, /AllowedIPs = 0\.0\.0\.0\/0/);
+});

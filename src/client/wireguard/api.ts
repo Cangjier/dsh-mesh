@@ -28,8 +28,10 @@ export interface Peer {
   receivedBytes: number;
   sentBytes: number;
   applied: boolean;
+  egress: boolean;
   sshConfigured: boolean;
   sshUser: string | null;
+  platform: 'linux' | 'windows' | null;
 }
 
 export interface ServerState {
@@ -67,6 +69,8 @@ export interface ClientState {
   endpoint: string | null;
   interfaceName: string | null;
   mtu: number;
+  egress: boolean;
+  hubIp: string | null;
   connectedAt: string | null;
   lastHandshakeAt: string | null;
   receivedBytes: number;
@@ -185,7 +189,14 @@ export const api = {
   // body must be an object even for actions that carry no arguments.
   stopServer: () => request('/server/stop', {}),
   removePeer: (publicKey: string) => request('/peers/remove', { publicKey }),
-  configureSsh: (publicKey: string, user: string) => requestPayload<{ state: Snapshot; command: string; commands: { linux: string; windows: string }; publicKey: string }>('/peers/ssh', { publicKey, user }),
+  configureSsh: (publicKey: string, user: string, platform?: 'linux' | 'windows') => requestPayload<{ state: Snapshot; command: string; commands: { linux: string; windows: string }; publicKey: string }>('/peers/ssh', { publicKey, user, platform }),
+  setPeerEgress: (publicKey: string, enabled: boolean) => requestPayload<{
+    state: Snapshot;
+    applied: boolean;
+    egress: boolean;
+    manual?: { enable: string; disable: string };
+    reason?: string;
+  }>('/peers/egress', { publicKey, enabled }),
   connectClient: (values: { serverAddress: string; joinCode: string; name?: string }) => request('/client/connect', values),
   retryClient: () => request('/client/retry', {}),
   disconnectClient: () => request('/client/disconnect', {}),

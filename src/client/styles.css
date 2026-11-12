@@ -423,20 +423,24 @@
   border-radius: 8px;
   border: 1px solid var(--chat-in-border, rgba(0, 0, 0, 0.08));
   background: var(--chat-pane-bg, #f6f6f6);
-  overflow-x: auto;
   font-size: 13px;
   line-height: 1.6;
+  /* Long commands wrap instead of hiding behind a horizontal scrollbar. */
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .md-pre code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  white-space: pre;
+  white-space: inherit;
 }
 
 .md-lang {
-  position: absolute;
-  top: 6px;
-  right: 10px;
+  /* Floated rather than positioned: a wrapped first line then flows beside the
+     label instead of running underneath it. */
+  float: right;
+  margin-left: 10px;
   font-size: 11px;
   opacity: 0.45;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

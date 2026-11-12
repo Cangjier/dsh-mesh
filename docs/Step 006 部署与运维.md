@@ -1,5 +1,32 @@
 # Step 006 部署与运维
 
+## 术语：服务、守护服务、工作进程
+
+本仓库统一口径如下，文档、日志、面板文案都按这个说法。
+
+**服务**：长期驻留、对外提供某项能力的进程。是否在 SCM/systemd 里注册不影响这个称呼——
+注册的算服务，由守护服务拉起的、服务性质的工作进程也算服务。
+
+**守护服务**：只负责生命周期与会话调度的服务，本身不对外提供业务能力。
+
+**工作进程**：服务的实现进程。它可能是 systemd 单元、SCM 服务，也可能是守护服务的子进程。
+
+按这个口径，一台成员的完整组成是：
+
+| 名称 | 类别 | Linux | Windows |
+|---|---|---|---|
+| `dsh-mesh` | 守护服务 | 无（systemd 自己管） | `DSH-Mesh`（SCM 服务） |
+| `gate` | 服务 | `dsh-web-gate.service` | 守护服务的子进程 |
+| `dsh-app`（`dsh --profile web`） | 服务 | gate 的子进程 | gate 的子进程 |
+| `dsh-interop` | 服务 | `dsh-interop.service` | 守护服务的子进程 |
+| `dsh-sdk`（`dsh --profile sdk`） | 工作进程 | interop 的子进程 | interop 的子进程 |
+| `dsh-wireguard-control` | 服务 | `dsh-wireguard-control.service` | 暂未随包提供 |
+
+Windows 上真正注册到 SCM 的只有 `DSH-Mesh` 和 WireGuard 自己的
+`WireGuardTunnel$dshwg0`；`gate` / `dsh-app` / `dsh-interop` 是服务性质的工作进程，
+由守护服务放进交互会话（或会话 0）。Linux 上 `gate` 与 `dsh-interop` 是真实的
+systemd 单元，`dsh-app` 由 gate 拉起。
+
 ## 目录布局
 
 ```

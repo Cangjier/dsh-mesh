@@ -13,8 +13,10 @@ import { fileURLToPath } from 'node:url'
 import {
   createJob,
   defaultJobRoot,
+  learnJob,
   readLogTail,
   readState,
+  resumeJob,
   runJob,
 } from './job.mjs'
 
@@ -97,6 +99,24 @@ async function main() {
     process.stdout.write(`${JSON.stringify(state, null, 2)}\n`)
     return
   }
+  if (command === 'learn') {
+    const dir = String(values.get('job') ?? '')
+    if (dir === '') throw new Error('learn needs --job <dir>')
+    const state = await learnJob(dir, { repositoryRoot: REPOSITORY_ROOT })
+    process.stdout.write(`${JSON.stringify(state, null, 2)}\n`)
+    return
+  }
+  if (command === 'resume') {
+    const dir = String(values.get('job') ?? '')
+    if (dir === '') throw new Error('resume needs --job <dir>')
+    const state = await resumeJob(dir, {
+      repositoryRoot: REPOSITORY_ROOT,
+      proxy: typeof values.get('proxy') === 'string' ? values.get('proxy') : undefined,
+      version: typeof values.get('version') === 'string' ? values.get('version') : undefined,
+    })
+    process.stdout.write(`${JSON.stringify(state, null, 2)}\n`)
+    return
+  }
   if (command === 'logs') {
     const dir = String(values.get('job') ?? '')
     if (dir === '') throw new Error('logs needs --job <dir>')
@@ -113,6 +133,7 @@ async function main() {
     })
     const state = await runJob(job.dir, {
       repositoryRoot: REPOSITORY_ROOT,
+      proxy: typeof values.get('proxy') === 'string' ? values.get('proxy') : undefined,
       planOnly: command === 'plan',
       full: values.get('web-only') === true ? false : undefined,
       install: values.get('no-install') === true ? null : undefined,
@@ -130,12 +151,15 @@ async function main() {
     '  plan    prepare and apply overlays only; write a work order on mismatch',
     '  status  print one job state',
     '  logs    print one job log tail',
+    '  learn   turn the corrected worktree of a job into new overlays',
+    '  resume  continue a job from its existing worktree',
     '',
     'options:',
     '  --source <url|dir>       default: build/recipes.json source',
     '  --ref <branch|tag|sha>   default: master',
     '  --targets <list>         default: linux-x64,win-x64',
     '  --out <dir>              job root (default: ~/.dsh/mesh/build)',
+    '  --proxy <url>            send downloads and npm through an HTTP proxy',
     '  --web-only               package the web payload without app/node/runtime',
     '  --no-install             skip pnpm install',
     '  --build-command <cmd>    override the web build command',

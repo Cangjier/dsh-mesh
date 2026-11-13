@@ -20,6 +20,7 @@ import { gzipSync, gunzipSync } from 'node:zlib'
 import os from 'node:os'
 import path from 'node:path'
 import { collectStaticAssets } from './static-assets.mjs'
+import { createProxyFetch, proxyEnv } from './proxy.mjs'
 
 /** Fixed upstream repository. */
 export const DEFAULT_SOURCE = 'https://github.com/deepseek-ai/deepseek-harness'
@@ -29,6 +30,25 @@ export const DEFAULT_REF = 'master'
 
 /** Default target matrix. */
 export const DEFAULT_TARGETS = Object.freeze(['linux-x64', 'win-x64'])
+
+/**
+ * The fetch and environment a build needs for one outbound proxy.
+ *
+ * Both halves matter: `fetchImpl` carries the source tarball and the Node
+ * runtime, while `env` carries npm and pnpm. A caller that omits `proxy` gets
+ * the global fetch and an unchanged environment.
+ * @param {{proxy?: string|null, env?: NodeJS.ProcessEnv, fetchImpl?: typeof fetch}} options build options.
+ * @returns {{fetchImpl: typeof fetch|undefined, env: NodeJS.ProcessEnv|undefined, proxy: string|null}} resolved pieces.
+ */
+export function proxyFor(options = {}) {
+  const proxy = typeof options.proxy === 'string' && options.proxy.trim() !== '' ? options.proxy.trim() : null
+  if (proxy === null) return { fetchImpl: options.fetchImpl, env: options.env, proxy: null }
+  return {
+    fetchImpl: options.fetchImpl ?? createProxyFetch(proxy),
+    env: proxyEnv(proxy, options.env ?? process.env),
+    proxy,
+  }
+}
 
 /**
  * SHA-256 of one file.
@@ -433,7 +453,7 @@ export async function learnOverlays(options) {
 
 /**
  * Run the web build.
- * @param {{dir: string, log?: (line: string) => void, install?: string[]|null, build?: string[]}} options build input.
+ * @param {{dir: string, log?: (line: string) => void, install?: string[]|null, build?: string[], env?: NodeJS.ProcessEnv}} options build input.
  * @returns {Promise<{ok: boolean, dist: string|null, error?: string}>} outcome.
  */
 export async function runWebBuild(options) {
@@ -449,6 +469,7 @@ export async function runWebBuild(options) {
     const installed = await runCommand(install[0], install.slice(1), {
       cwd: options.dir,
       log,
+      env: options.env,
       shell: needsShell(install[0]),
       timeoutMs: 30 * 60_000,
     })
@@ -460,6 +481,7 @@ export async function runWebBuild(options) {
   const built = await runCommand(build[0], build.slice(1), {
     cwd: options.dir,
     log,
+    env: options.env,
     shell: needsShell(build[0]),
     timeoutMs: 30 * 60_000,
   })
@@ -644,7 +666,8 @@ export async function installNodeRuntime(options) {
   const archive = path.join(options.cacheDir, 'node', archiveName)
   const downloaded = await download(`${base}/${archiveName}`, archive, { fetchImpl: options.fetchImpl, log })
   if (!downloaded) throw new Error(`Node ${options.version} has no ${parsed.os}-${parsed.arch} archive`)
-  const sums = await fetch(`${base}/SHASUMS256.txt`, { redirect: 'follow' })
+  const fetchImpl = options.fetchImpl ?? fetch
+  const sums = await fetchImpl(`${base}/SHASUMS256.txt`, { redirect: 'follow' })
   if (!sums.ok) throw new Error(`cannot read Node SHASUMS256.txt: HTTP ${String(sums.status)}`)
   const text = await sums.text()
   const line = text.split(/\r?\n/u).find(entry => entry.endsWith(` ${archiveName}`))
@@ -665,7 +688,7 @@ export async function installNodeRuntime(options) {
 
 /**
  * Install the DSH npm package for one target into `app/`.
- * @param {{appDir: string, version: string, target: string, log?: (line: string) => void}} options install input.
+ * @param {{appDir: string, version: string, target: string, env?: NodeJS.ProcessEnv, log?: (line: string) => void}} options install input.
  * @returns {Promise<{appDir: string, nodeModules: string}>} installed app.
  */
 export async function installAppDependencies(options) {
@@ -693,6 +716,7 @@ export async function installAppDependencies(options) {
   const result = await runCommand(command, args, {
     cwd: options.appDir,
     log,
+    env: options.env,
     shell: process.platform === 'win32',
     timeoutMs: 45 * 60_000,
   })
@@ -792,6 +816,7 @@ export async function assembleRuntimePackage(options) {
     appDir,
     version: options.dshVersion,
     target: options.target,
+    env: options.env,
     log,
   })
   await patchInstalledClient({ appDir, repositoryRoot: options.repositoryRoot, log })

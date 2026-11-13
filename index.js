@@ -1,14 +1,14 @@
 // src/index.ts
 import { homedir as homedir2 } from "node:os";
-import path9 from "node:path";
+import path11 from "node:path";
 
 // src/lib/service.mjs
-import { mkdir as mkdir5, readFile as readFile7, readdir as readdir5, rm as rm5, stat as stat5, writeFile as writeFile5 } from "node:fs/promises";
+import { mkdir as mkdir5, readFile as readFile8, readdir as readdir5, rm as rm6, stat as stat7, writeFile as writeFile6 } from "node:fs/promises";
 import { readFileSync as readFileSync3, existsSync as existsSync7 } from "node:fs";
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 import os5 from "node:os";
-import path7 from "node:path";
-import { fileURLToPath } from "node:url";
+import path9 from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // code/shared/wireguard.mjs
 import { readFile } from "node:fs/promises";
@@ -297,7 +297,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createWriteStream, existsSync as existsSync2 } from "node:fs";
 import { chmod, cp, mkdir, open, readFile as readFile3, readdir as readdir2, rename, rm, stat, writeFile } from "node:fs/promises";
-import { Readable } from "node:stream";
+import { Readable as Readable2 } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { gzipSync, gunzipSync } from "node:zlib";
 import os2 from "node:os";
@@ -354,10 +354,215 @@ async function collectStaticAssets(gateDirectory) {
   return result;
 }
 
+// code/build/proxy.mjs
+import http from "node:http";
+import https from "node:https";
+import tls from "node:tls";
+import { Readable } from "node:stream";
+var MAX_REDIRECTS = 10;
+function parseProxyUrl(value) {
+  const raw = String(value ?? "").trim();
+  if (raw === "") throw new Error("proxy URL is empty");
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//iu.test(raw) ? raw : `http://${raw}`;
+  let url;
+  try {
+    url = new URL(withScheme);
+  } catch {
+    throw new Error(`proxy is not a URL: ${value}`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`proxy must be http or https, got ${url.protocol}`);
+  }
+  if (url.hostname === "") throw new Error(`proxy has no host: ${value}`);
+  const port = url.port === "" ? url.protocol === "https:" ? 443 : 80 : Number.parseInt(url.port, 10);
+  if (!Number.isSafeInteger(port) || port <= 0 || port > 65535) throw new Error(`proxy has no valid port: ${value}`);
+  const auth = url.username === "" ? null : `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`;
+  return { href: `${url.protocol}//${url.host}`, protocol: url.protocol, hostname: url.hostname.replace(/^\[|\]$/gu, ""), port, auth };
+}
+function proxyEnv(proxyUrl, base = process.env) {
+  const proxy2 = parseProxyUrl(proxyUrl);
+  const noProxy = ["localhost", "127.0.0.1", "::1", "10.66.66.0/24", "*.local", base.NO_PROXY, base.no_proxy].filter((value) => typeof value === "string" && value !== "").join(",");
+  return {
+    ...base,
+    HTTP_PROXY: proxy2.href,
+    HTTPS_PROXY: proxy2.href,
+    ALL_PROXY: proxy2.href,
+    http_proxy: proxy2.href,
+    https_proxy: proxy2.href,
+    all_proxy: proxy2.href,
+    NO_PROXY: noProxy,
+    no_proxy: noProxy,
+    // npm and pnpm read configuration from npm_config_* environment variables;
+    // they do not honour HTTPS_PROXY on their own.
+    npm_config_proxy: proxy2.href,
+    npm_config_https_proxy: proxy2.href,
+    npm_config_noproxy: noProxy
+  };
+}
+function connectTunnel(proxy2, host, port, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const authority = `${host}:${String(port)}`;
+    const request = (proxy2.protocol === "https:" ? https : http).request({
+      host: proxy2.hostname,
+      port: proxy2.port,
+      method: "CONNECT",
+      path: authority,
+      headers: {
+        host: authority,
+        ...proxy2.auth === null ? {} : { "proxy-authorization": `Basic ${Buffer.from(proxy2.auth).toString("base64")}` }
+      },
+      timeout: timeoutMs
+    });
+    request.once("connect", (response, socket) => {
+      if (response.statusCode !== 200) {
+        socket.destroy();
+        reject(new Error(`proxy refused CONNECT ${authority}: HTTP ${String(response.statusCode)}`));
+        return;
+      }
+      socket.setTimeout(0);
+      resolve({ socket, status: response.statusCode });
+    });
+    request.once("timeout", () => request.destroy(new Error(`proxy CONNECT ${authority} timed out`)));
+    request.once("error", reject);
+    request.end();
+  });
+}
+function requestOnce(href, options) {
+  const target = new URL(href);
+  const httpsTarget = target.protocol === "https:";
+  const port = target.port === "" ? httpsTarget ? 443 : 80 : Number.parseInt(target.port, 10);
+  const headers = { host: target.host, ...options.headers };
+  if (!httpsTarget) {
+    return new Promise((resolve, reject) => {
+      const outgoing = http.request({
+        host: options.proxy.hostname,
+        port: options.proxy.port,
+        method: options.method,
+        path: target.href,
+        headers: {
+          ...headers,
+          ...options.proxy.auth === null ? {} : { "proxy-authorization": `Basic ${Buffer.from(options.proxy.auth).toString("base64")}` }
+        },
+        timeout: options.timeoutMs
+      }, (response) => resolve(toResponse(response)));
+      outgoing.once("timeout", () => outgoing.destroy(new Error(`proxy request to ${href} timed out`)));
+      outgoing.once("error", reject);
+      outgoing.end();
+    });
+  }
+  return new Promise((resolve, reject) => {
+    connectTunnel(options.proxy, target.hostname, port, options.timeoutMs).then(({ socket }) => {
+      const secure = tls.connect({ socket, servername: target.hostname });
+      secure.once("error", reject);
+      secure.once("secureConnect", () => {
+        const agent = new https.Agent({ keepAlive: false, maxSockets: 1 });
+        agent.createConnection = (_options, callback) => {
+          callback(null, secure);
+          return secure;
+        };
+        const outgoing = https.request({
+          host: target.hostname,
+          port,
+          path: `${target.pathname}${target.search}`,
+          method: options.method,
+          headers,
+          agent,
+          timeout: options.timeoutMs
+        }, (response) => {
+          response.once("end", () => agent.destroy());
+          resolve(toResponse(response));
+        });
+        outgoing.once("timeout", () => outgoing.destroy(new Error(`proxy request to ${href} timed out`)));
+        outgoing.once("error", reject);
+        outgoing.end();
+      });
+    }).catch(reject);
+  });
+}
+function toResponse(response) {
+  const headers = {};
+  for (const [name, value] of Object.entries(response.headers)) {
+    if (value !== void 0) headers[name.toLowerCase()] = Array.isArray(value) ? value.join(", ") : String(value);
+  }
+  const status = response.statusCode ?? 0;
+  let webBody;
+  return {
+    get body() {
+      webBody ??= Readable.toWeb(response);
+      return webBody;
+    },
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: response.statusMessage ?? "",
+    headers: {
+      get: (name) => headers[String(name).toLowerCase()] ?? null,
+      has: (name) => Object.hasOwn(headers, String(name).toLowerCase()),
+      forEach: (callback) => {
+        for (const [name, value] of Object.entries(headers)) callback(value, name);
+      }
+    },
+    async text() {
+      const chunks = [];
+      for await (const chunk of response) chunks.push(Buffer.from(chunk));
+      return Buffer.concat(chunks).toString("utf8");
+    },
+    async arrayBuffer() {
+      const chunks = [];
+      for await (const chunk of response) chunks.push(Buffer.from(chunk));
+      const buffer = Buffer.concat(chunks);
+      return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    }
+  };
+}
+async function drain(response) {
+  try {
+    await response.text();
+  } catch {
+  }
+}
+function createProxyFetch(proxyUrl, options = {}) {
+  const proxy2 = parseProxyUrl(proxyUrl);
+  return async function proxiedFetch(input, init = {}) {
+    let href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    let method = init.method ?? (typeof input === "string" || input instanceof URL ? "GET" : input.method ?? "GET");
+    const headers = {};
+    const rawHeaders = init.headers ?? (typeof input === "object" && !(input instanceof URL) ? input.headers : void 0);
+    if (rawHeaders !== void 0) {
+      if (typeof rawHeaders.forEach === "function" && !Array.isArray(rawHeaders)) {
+        rawHeaders.forEach((value, name) => {
+          headers[String(name).toLowerCase()] = String(value);
+        });
+      } else if (Array.isArray(rawHeaders)) {
+        for (const [name, value] of rawHeaders) headers[String(name).toLowerCase()] = String(value);
+      } else {
+        for (const [name, value] of Object.entries(rawHeaders)) headers[String(name).toLowerCase()] = String(value);
+      }
+    }
+    for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
+      const response = await requestOnce(href, { proxy: proxy2, method, headers, timeoutMs: options.timeoutMs ?? 6e4 });
+      const location = response.headers.get("location");
+      if (![301, 302, 303, 307, 308].includes(response.status) || location === null) return response;
+      await drain(response);
+      href = new URL(location, href).href;
+      if (response.status === 303) method = "GET";
+    }
+    throw new Error(`too many redirects for ${href}`);
+  };
+}
+
 // code/build/engine.mjs
 var DEFAULT_SOURCE = "https://github.com/deepseek-ai/deepseek-harness";
 var DEFAULT_REF = "master";
 var DEFAULT_TARGETS = Object.freeze(["linux-x64", "win-x64"]);
+function proxyFor(options = {}) {
+  const proxy2 = typeof options.proxy === "string" && options.proxy.trim() !== "" ? options.proxy.trim() : null;
+  if (proxy2 === null) return { fetchImpl: options.fetchImpl, env: options.env, proxy: null };
+  return {
+    fetchImpl: options.fetchImpl ?? createProxyFetch(proxy2),
+    env: proxyEnv(proxy2, options.env ?? process.env),
+    proxy: proxy2
+  };
+}
 async function sha256File(file) {
   const hash = createHash("sha256");
   const handle = await open(file, "r");
@@ -414,7 +619,7 @@ async function download(url, file, options = {}) {
   if (!response.ok || response.body === null) throw new Error(`download failed: ${url} -> HTTP ${String(response.status)}`);
   await mkdir(path3.dirname(file), { recursive: true });
   const temporary = `${file}.part`;
-  await pipeline(Readable.fromWeb(response.body), createWriteStream(temporary));
+  await pipeline(Readable2.fromWeb(response.body), createWriteStream(temporary));
   await rename(temporary, file);
   return true;
 }
@@ -678,6 +883,7 @@ async function runWebBuild(options) {
     const installed = await runCommand(install[0], install.slice(1), {
       cwd: options.dir,
       log,
+      env: options.env,
       shell: needsShell(install[0]),
       timeoutMs: 30 * 6e4
     });
@@ -690,6 +896,7 @@ ${installed.tail.join("\n")}` };
   const built = await runCommand(build[0], build.slice(1), {
     cwd: options.dir,
     log,
+    env: options.env,
     shell: needsShell(build[0]),
     timeoutMs: 30 * 6e4
   });
@@ -816,7 +1023,8 @@ async function installNodeRuntime(options) {
   const archive = path3.join(options.cacheDir, "node", archiveName);
   const downloaded = await download(`${base}/${archiveName}`, archive, { fetchImpl: options.fetchImpl, log });
   if (!downloaded) throw new Error(`Node ${options.version} has no ${parsed.os}-${parsed.arch} archive`);
-  const sums = await fetch(`${base}/SHASUMS256.txt`, { redirect: "follow" });
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const sums = await fetchImpl(`${base}/SHASUMS256.txt`, { redirect: "follow" });
   if (!sums.ok) throw new Error(`cannot read Node SHASUMS256.txt: HTTP ${String(sums.status)}`);
   const text = await sums.text();
   const line = text.split(/\r?\n/u).find((entry) => entry.endsWith(` ${archiveName}`));
@@ -860,6 +1068,7 @@ async function installAppDependencies(options) {
   const result = await runCommand(command, args, {
     cwd: options.appDir,
     log,
+    env: options.env,
     shell: process.platform === "win32",
     timeoutMs: 45 * 6e4
   });
@@ -937,6 +1146,7 @@ async function assembleRuntimePackage(options) {
     appDir,
     version: options.dshVersion,
     target: options.target,
+    env: options.env,
     log
   });
   await patchInstalledClient({ appDir, repositoryRoot: options.repositoryRoot, log });
@@ -988,6 +1198,11 @@ async function createJob(options = {}) {
     targets: options.targets ?? [...DEFAULT_TARGETS],
     createdAt: (/* @__PURE__ */ new Date()).toISOString(),
     updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    // `member` is the build host (null = this machine); `proxy` is the outbound
+    // proxy the downloads go through, so a job can be reproduced as it ran.
+    member: options.member ?? null,
+    proxy: options.proxy ?? null,
+    mode: options.mode ?? "local",
     worktree: null,
     workOrder: null,
     artifacts: [],
@@ -1028,6 +1243,7 @@ async function runJob(dir, options) {
   const repositoryRoot = options.repositoryRoot;
   const recipesPath = options.recipesPath ?? path4.join(repositoryRoot, "build", "recipes.json");
   const overlayRoot = options.overlayRoot ?? path4.join(repositoryRoot, "build", "overlays");
+  const outbound = proxyFor({ proxy: options.proxy, env: options.env, fetchImpl: options.fetchImpl });
   let state = await readState(dir);
   const log = (line) => {
     void appendLog(dir, line);
@@ -1039,10 +1255,12 @@ async function runJob(dir, options) {
       ref: state.ref,
       cacheDir: options.cacheDir ?? defaultCacheDir(),
       workDir: dir,
+      fetchImpl: outbound.fetchImpl,
       log
     });
     state = await updateState(dir, {
       phase: "apply",
+      proxy: outbound.proxy,
       source: prepared.source,
       ref: prepared.ref,
       worktree: prepared.dir,
@@ -1087,7 +1305,8 @@ async function runJob(dir, options) {
       dir: prepared.dir,
       log,
       install: options.install,
-      build: options.build
+      build: options.build,
+      env: outbound.env
     });
     if (!built.ok) {
       state = await updateState(dir, { status: "build-failed", phase: "build", error: built.error ?? "web build failed" });
@@ -1108,6 +1327,8 @@ async function runJob(dir, options) {
         source: state.source,
         ref: state.ref,
         tree: recipes.tree ?? null,
+        fetchImpl: outbound.fetchImpl,
+        env: outbound.env,
         log
       };
       const assembled = full ? await assembleRuntimePackage({
@@ -2370,6 +2591,7 @@ var DeployManager = class {
     this.running = /* @__PURE__ */ new Map();
     this.states = /* @__PURE__ */ new Map();
     this.saves = /* @__PURE__ */ new Map();
+    this.writes = /* @__PURE__ */ new Map();
   }
   /** @returns {Promise<void>} no owned process. */
   async dispose() {
@@ -2636,8 +2858,46 @@ var DeployManager = class {
     });
   }
   async #save(stateFile, state) {
-    await writeFile3(stateFile, `${JSON.stringify(state, null, 2)}
-`, "utf8");
+    const text = `${JSON.stringify(state, null, 2)}
+`;
+    const previous = this.writes.get(stateFile) ?? Promise.resolve();
+    const next = previous.catch(() => {
+    }).then(() => writeFile3(stateFile, text, "utf8"));
+    this.writes.set(stateFile, next.catch(() => {
+    }));
+    await next;
+  }
+  /**
+   * Finalize a job whose runner is gone: the process restarted, or a stale
+   * snapshot survived a crash. A job is only live while its promise is tracked.
+   * @param {object} state job state read from disk.
+   * @returns {Promise<object>} settled state.
+   */
+  async #settle(state) {
+    if (state === null || typeof state !== "object") return state;
+    if (state.status !== "running" || this.running.has(state.id)) return state;
+    const log = await this.logs(state.id, 400).catch(() => "");
+    const tail = log.split("\n").filter((line) => line.trim() !== "").slice(-5).join("\n");
+    if (/deployment succeeded/u.test(tail)) {
+      state.status = "succeeded";
+      state.phase = "done";
+      state.progress = { ...state.progress ?? {}, percent: 100, indeterminate: false };
+      for (const step of state.steps ?? []) {
+        if (step?.status === "running") step.status = "succeeded";
+      }
+    } else if (/deployment failed: (?<reason>.+)$/mu.test(tail)) {
+      state.status = "failed";
+      state.phase = "failed";
+      state.error = state.error ?? (/deployment failed: (?<reason>.+)$/mu.exec(tail)?.groups?.reason?.trim() ?? "deployment failed");
+    } else {
+      state.status = "failed";
+      state.phase = "failed";
+      state.error = state.error ?? "deployment was interrupted before it finished";
+    }
+    state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    await this.#save(path5.join(this.dataDir, state.id, "job.json"), state).catch(() => {
+    });
+    return state;
   }
   /**
    * Wait for one running deployment or rollback job to settle.
@@ -2659,7 +2919,8 @@ var DeployManager = class {
     const live = this.states.get(id);
     if (live !== void 0) return live;
     try {
-      return JSON.parse(await readFile5(path5.join(this.dataDir, id, "job.json"), "utf8"));
+      const stored = JSON.parse(await readFile5(path5.join(this.dataDir, id, "job.json"), "utf8"));
+      return await this.#settle(stored);
     } catch {
       return null;
     }
@@ -2680,7 +2941,8 @@ var DeployManager = class {
     for (const entry of entries) {
       if (!entry.isDirectory() || !entry.name.startsWith("deploy-")) continue;
       try {
-        jobs.push(JSON.parse(await readFile5(path5.join(this.dataDir, entry.name, "job.json"), "utf8")));
+        const stored = JSON.parse(await readFile5(path5.join(this.dataDir, entry.name, "job.json"), "utf8"));
+        jobs.push(await this.#settle(stored));
       } catch {
       }
     }
@@ -2756,11 +3018,378 @@ var DeployManager = class {
   }
 };
 
+// src/lib/egress.mjs
+import { spawn as spawn3 } from "node:child_process";
+import { readFile as readFile6, stat as stat4 } from "node:fs/promises";
+import path6 from "node:path";
+import { fileURLToPath } from "node:url";
+var HERE = path6.dirname(fileURLToPath(import.meta.url));
+var SCRIPT_PATH = path6.resolve(HERE, "..", "..", "code", "shared", "egress-proxy.mjs");
+var REMOTE_SCRIPT = "$HOME/.dsh/mesh/egress-proxy.mjs";
+var LISTEN_TIMEOUT_MS = 2e4;
+function nodeCandidates(appRoot) {
+  const root = String(appRoot ?? "").trim().replace(/[\\/]+$/u, "");
+  return [
+    "$HOME/.dsh/dsh-mesh/current/runtime/node/bin/node",
+    "$HOME/.dsh/dsh-person-web/runtime/node/bin/node",
+    ...root === "" ? [] : [`${root}/runtime/node/bin/node`],
+    "/usr/local/bin/node",
+    "/usr/bin/node"
+  ];
+}
+var EgressProxy = class {
+  /**
+   * @param {{log?: (line: string) => void}} [options] options.
+   */
+  constructor(options = {}) {
+    this.log = options.log ?? (() => {
+    });
+    this.live = /* @__PURE__ */ new Set();
+  }
+  /** Stop every proxy this manager started. */
+  closeAll() {
+    for (const entry of [...this.live]) entry.close();
+    this.live.clear();
+  }
+  /**
+   * Start a proxy on one member.
+   * @param {{plan: {host: string, user?: string|null, port?: number, identityFile?: string|null, appRoot?: string}, member?: object}} options target.
+   * @returns {Promise<{url: string, member: string, close: () => void}>} running proxy.
+   */
+  async start(options) {
+    const plan = { port: 22, ...options.plan };
+    if (plan.host === void 0 || plan.host === "") throw new Error("egress proxy needs a member address");
+    const runner = new SshRunner(plan, { log: (line) => this.log(`egress ${plan.host}: ${line}`) });
+    await this.#install(runner, plan);
+    if (!/^[0-9a-f.:]+$/iu.test(plan.host)) throw new Error(`member address is not an IP: ${plan.host}`);
+    const candidates = ['"$(command -v node 2>/dev/null || true)"', ...nodeCandidates(plan.appRoot).map((value) => `"${value}"`)];
+    const command = [
+      'mkdir -p "$HOME/.dsh/mesh"',
+      "for candidate in \\",
+      ...candidates.map((value) => `  ${value} \\`),
+      "  ; do",
+      '  if [ -n "$candidate" ] && [ -x "$candidate" ]; then',
+      `    exec "$candidate" "$HOME/.dsh/mesh/egress-proxy.mjs" "${plan.host}" 0`,
+      "  fi",
+      "done",
+      'echo "no node runtime on this member" >&2',
+      "exit 3",
+      ""
+    ].join("\n");
+    const child = spawn3("ssh", [...runner.sshOptions(), runner.target(), "bash -s"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true
+    });
+    child.stdin.end(command);
+    const url = await this.#waitForListen(child, plan.host);
+    const entry = {
+      url,
+      close: () => {
+        this.live.delete(entry);
+        try {
+          child.kill("SIGTERM");
+        } catch {
+        }
+      }
+    };
+    this.live.add(entry);
+    this.log(`egress proxy for ${plan.host} is ${url}`);
+    return { ...entry, member: plan.host };
+  }
+  /**
+   * Copy the current proxy script to the member when it is missing or stale.
+   * @param {SshRunner} runner ssh runner.
+   * @param {{host: string}} plan plan.
+   * @returns {Promise<void>}
+   */
+  async #install(runner, plan) {
+    const local = await readFile6(SCRIPT_PATH, "utf8");
+    const info = await stat4(SCRIPT_PATH);
+    const stamp = `${String(info.size)}-${String(info.mtimeMs)}`;
+    const check = await runner.runProcess("ssh", [
+      ...runner.sshOptions(),
+      runner.target(),
+      `test -f ${REMOTE_SCRIPT} && cat ${REMOTE_SCRIPT}`
+    ]).catch(() => ({ stdout: "" }));
+    if (check.stdout === local) return;
+    this.log(`uploading egress proxy to ${plan.host} (${stamp})`);
+    await runner.runProcess("ssh", [
+      ...runner.sshOptions(),
+      runner.target(),
+      `mkdir -p "$HOME/.dsh/mesh" && cat > ${REMOTE_SCRIPT}`
+    ], local);
+  }
+  /**
+   * Wait for the proxy's LISTEN line or an early exit.
+   * @param {import('node:child_process').ChildProcess} child ssh process.
+   * @param {string} host member address.
+   * @returns {Promise<string>} proxy URL.
+   */
+  #waitForListen(child, host) {
+    return new Promise((resolve, reject) => {
+      let buffer = "";
+      let errors = "";
+      const timer = setTimeout(() => {
+        cleanup();
+        try {
+          child.kill("SIGTERM");
+        } catch {
+        }
+        reject(new Error(`egress proxy on ${host} did not report its port within ${String(LISTEN_TIMEOUT_MS)}ms
+${errors.trim()}`));
+      }, LISTEN_TIMEOUT_MS);
+      const cleanup = () => {
+        clearTimeout(timer);
+        child.stdout?.off("data", onOut);
+        child.stderr?.off("data", onErr);
+        child.off("exit", onExit);
+      };
+      const onOut = (chunk) => {
+        buffer += String(chunk);
+        const match = /LISTEN (\d+)/u.exec(buffer);
+        if (match === null) return;
+        cleanup();
+        resolve(`http://${host}:${match[1]}`);
+      };
+      const onErr = (chunk) => {
+        errors += String(chunk);
+      };
+      const onExit = (code) => {
+        cleanup();
+        reject(new Error(`egress proxy on ${host} exited with ${String(code)}
+${errors.trim()}`));
+      };
+      child.stdout?.on("data", onOut);
+      child.stderr?.on("data", onErr);
+      child.once("exit", onExit);
+    });
+  }
+};
+
+// src/lib/remote-build.mjs
+import { createHash as createHash3 } from "node:crypto";
+import { open as open2, rename as rename3, rm as rm4, stat as stat5, writeFile as writeFile4 } from "node:fs/promises";
+import path7 from "node:path";
+var DEFAULT_MESH_REPO = "https://github.com/Cangjier/dsh-mesh.git";
+var REMOTE_SRC = "$HOME/.dsh/mesh/build-src";
+var REMOTE_JOBS = "$HOME/.dsh/mesh/build";
+var REMOTE_BIN = "$HOME/.dsh/mesh/bin";
+var REMOTE_NODE_DIR = "$HOME/.dsh/dsh-mesh/current/runtime/node/bin";
+function phaseFromLine(line) {
+  const text = String(line);
+  if (text.includes("job created") || text.includes("extracting")) return { phase: "prepare", percent: 4 };
+  if (text.includes("applied ") || text.includes("skipped ")) return { phase: "apply", percent: 12 };
+  if (text.includes("needs-fix")) return { phase: "apply", percent: 15, status: "needs-fix" };
+  if (text.includes("$ pnpm install") || text.includes("$ pnpm i")) return { phase: "build", percent: 20 };
+  if (text.includes("installing")) return { phase: "build", percent: 25 };
+  if (text.includes("$ pnpm run build:web") || text.includes("$ pnpm build")) return { phase: "build", percent: 45 };
+  if (text.includes("frontend installed") || text.includes("patching ")) return { phase: "package", percent: 70 };
+  if (text.includes("packaged ")) return { phase: "package", percent: 85 };
+  if (text.includes("build complete")) return { phase: "done", percent: 100 };
+  if (text.includes("failed:")) return { phase: "failed", percent: 100, status: "failed" };
+  return null;
+}
+function remoteBuildScript(options) {
+  const ref = String(options.ref);
+  const targets = options.targets.join(",");
+  const out = `${REMOTE_JOBS}/${options.jobId}`;
+  const heap = Number.isSafeInteger(options.heapMb) && options.heapMb > 0 ? options.heapMb : 2048;
+  const lines = [
+    "set -u",
+    `export PATH="${REMOTE_BIN}:${REMOTE_NODE_DIR}:$PATH"`,
+    "export COREPACK_ENABLE_DOWNLOAD_PROMPT=0",
+    "export CI=1",
+    `export NODE_OPTIONS="--max-old-space-size=${String(heap)}"`,
+    options.proxyUrl ? `export HTTP_PROXY=${quote(options.proxyUrl)} HTTPS_PROXY=${quote(options.proxyUrl)} npm_config_proxy=${quote(options.proxyUrl)} npm_config_https_proxy=${quote(options.proxyUrl)}` : "",
+    `mkdir -p ${REMOTE_BIN} ${out}`,
+    `if [ ! -d "${REMOTE_SRC}/.git" ]; then`,
+    `  echo "cloning ${options.repoUrl ?? DEFAULT_MESH_REPO}"`,
+    `  git clone --depth 1 --branch main ${quote(options.repoUrl ?? DEFAULT_MESH_REPO)} "${REMOTE_SRC}" || { echo "mesh clone failed" >&2; exit 3; }`,
+    "else",
+    `  git -C "${REMOTE_SRC}" fetch --depth 1 origin main && git -C "${REMOTE_SRC}" reset --hard FETCH_HEAD || { echo "mesh update failed" >&2; exit 3; }`,
+    "fi",
+    'corepack enable --install-directory "$HOME/.dsh/mesh/bin" >/dev/null 2>&1 || true',
+    `cd "${REMOTE_SRC}" || { echo "mesh checkout is missing" >&2; exit 3; }`,
+    'echo "mesh head $(git rev-parse --short HEAD)"',
+    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ""}`,
+    "code=$?",
+    `ls -1d "${out}"/* 2>/dev/null | head -n 5`,
+    "exit $code",
+    ""
+  ];
+  return lines.filter((line) => line !== "").join("\n");
+}
+function quote(value) {
+  return `'${String(value).replace(/'/gu, `'\\''`)}'`;
+}
+async function sha256File2(file) {
+  const hash = createHash3("sha256");
+  const handle = await open2(file, "r");
+  try {
+    const buffer = Buffer.alloc(1024 * 1024);
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+  } finally {
+    await handle.close();
+  }
+  return hash.digest("hex");
+}
+var RemoteBuilder = class {
+  /**
+   * @param {{log?: (line: string) => void, packagesDir: string}} options options.
+   */
+  constructor(options) {
+    this.log = options.log ?? (() => {
+    });
+    this.packagesDir = options.packagesDir;
+  }
+  /**
+   * Run one job on a member and settle the local job state.
+   * @param {string} jobDir local job directory.
+   * @param {{plan: object, memberName: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number}} options run options.
+   * @returns {Promise<object>} final local state.
+   */
+  async run(jobDir, options) {
+    const state = await readState(jobDir);
+    const runner = new SshRunner({ port: 22, ...options.plan }, { log: (line) => this.log(`remote ${state.member ?? ""}: ${line}`) });
+    const script = remoteBuildScript({
+      jobId: state.id,
+      ref: state.ref,
+      targets: state.targets,
+      proxyUrl: options.proxyUrl,
+      repoUrl: options.repoUrl,
+      heapMb: options.heapMb
+    });
+    const onLine = (line) => {
+      void appendLog(jobDir, line);
+      const update = phaseFromLine(line);
+      if (update !== null) void this.#progress(jobDir, update);
+    };
+    try {
+      await runner.script(script, "linux", onLine);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await appendLog(jobDir, `member build did not finish: ${message}`);
+      return updateState(jobDir, { status: "failed", phase: "failed", error: message, percent: 100 });
+    }
+    const remote = await this.#readRemoteState(runner, state.id);
+    if (remote === null) {
+      const message = "the member finished without writing a job state; see the log for its output";
+      await appendLog(jobDir, message);
+      return updateState(jobDir, { status: "failed", phase: "failed", error: message, percent: 100 });
+    }
+    if (remote.status !== "done") {
+      const message = typeof remote.error === "string" && remote.error !== "" ? remote.error : `member build ended with status ${String(remote.status)}`;
+      await appendLog(jobDir, `member job ${String(remote.status)}: ${message}`);
+      const status = remote.status === "needs-fix" ? "needs-fix" : "failed";
+      return updateState(jobDir, {
+        status,
+        phase: remote.phase ?? "failed",
+        error: status === "failed" ? message : null,
+        percent: 100,
+        remoteJob: remote.id ?? null,
+        remoteWorktree: remote.worktree ?? null,
+        workOrder: remote.workOrder ?? null,
+        mismatches: remote.mismatches ?? []
+      });
+    }
+    const directories = Array.isArray(remote.artifacts) ? remote.artifacts : [];
+    const artifacts = [];
+    for (const artifact of directories) {
+      const archive = typeof artifact.archive === "string" ? artifact.archive : "";
+      if (archive === "") continue;
+      const local = await this.#pull(runner, archive);
+      const info = await stat5(local);
+      const digest = await sha256File2(local);
+      await writeSidecar(local, digest);
+      artifacts.push({
+        target: artifact.target,
+        archive: local,
+        remoteArchive: archive,
+        bytes: info.size,
+        sha256: digest,
+        manifest: artifact.manifest ?? null
+      });
+      await appendLog(jobDir, `pulled ${path7.basename(local)} (${String(info.size)} bytes, sha256 ${digest.slice(0, 12)}\u2026)`);
+    }
+    return updateState(jobDir, {
+      status: "done",
+      phase: "done",
+      percent: 100,
+      artifacts,
+      remoteJob: remote.id ?? null,
+      version: remote.version ?? null
+    });
+  }
+  /**
+   * Copy one remote archive into the packages directory.
+   * @param {SshRunner} runner ssh runner.
+   * @param {string} remote remote path.
+   * @returns {Promise<string>} local path.
+   */
+  async #pull(runner, remote) {
+    const name = path7.basename(remote);
+    const local = path7.join(this.packagesDir, name);
+    const temporary = `${local}.part`;
+    const args = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-P", String(runner.plan.port ?? 22)];
+    if (runner.plan.identityFile) args.push("-i", runner.plan.identityFile);
+    args.push(`${runner.target()}:${remote}`, temporary);
+    await runner.runProcess("scp", args);
+    await rm4(local, { force: true });
+    await rename3(temporary, local);
+    return local;
+  }
+  /**
+   * Read the member-side job state.
+   * @param {SshRunner} runner ssh runner.
+   * @param {string} jobId gateway job id (also the remote directory name).
+   * @returns {Promise<object|null>} state.
+   */
+  async #readRemoteState(runner, jobId) {
+    try {
+      const { stdout } = await runner.runProcess("ssh", [
+        ...runner.sshOptions(),
+        runner.target(),
+        `cat "${REMOTE_JOBS}/${jobId}"/*/state.json`
+      ]);
+      const parsed = JSON.parse(stdout);
+      if (parsed === null || typeof parsed !== "object") return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * Record a phase change without rewriting state on every log line.
+   * @param {string} jobDir job directory.
+   * @param {{phase: string, percent: number, status?: string}} update update.
+   * @returns {Promise<void>}
+   */
+  async #progress(jobDir, update) {
+    const state = await readState(jobDir).catch(() => null);
+    if (state === null) return;
+    const current = typeof state.percent === "number" ? state.percent : 0;
+    if (update.percent <= current && update.status === void 0) return;
+    await updateState(jobDir, {
+      phase: state.phase === "failed" ? state.phase : update.phase,
+      percent: Math.max(current, update.percent)
+    }).catch(() => {
+    });
+  }
+};
+async function writeSidecar(file, digest) {
+  await writeFile4(`${file}.sha256`, `${digest}  ${path7.basename(file)}
+`, "utf8");
+}
+
 // code/shared/cluster.mjs
-import { createHash as createHash3, createHmac, randomBytes as randomBytes2, timingSafeEqual } from "node:crypto";
+import { createHash as createHash4, createHmac, randomBytes as randomBytes2, timingSafeEqual } from "node:crypto";
 function deriveClusterSecret(password) {
   if (typeof password !== "string" || password === "") return "";
-  return createHash3("sha256").update("dsh-mesh/cluster/v1\0").update(password, "utf8").digest("hex");
+  return createHash4("sha256").update("dsh-mesh/cluster/v1\0").update(password, "utf8").digest("hex");
 }
 var CLUSTER_HEADER = "x-dsh-cluster";
 var VERSION = "v1";
@@ -2774,16 +3403,16 @@ function signClusterRequest(secret, request) {
   const signature = createHmac("sha256", secret).update(payload).digest("base64url");
   return `${VERSION}.${String(timestamp)}.${nonce}.${signature}`;
 }
-function payloadOf(method, path10, timestamp, nonce) {
-  return [VERSION, String(method).toUpperCase(), path10, String(timestamp), nonce].join("\n");
+function payloadOf(method, path12, timestamp, nonce) {
+  return [VERSION, String(method).toUpperCase(), path12, String(timestamp), nonce].join("\n");
 }
 
 // code/build/repack.mjs
 import { execFile } from "node:child_process";
-import { createHash as createHash4 } from "node:crypto";
-import { cp as cp2, mkdir as mkdir4, mkdtemp as mkdtemp2, readFile as readFile6, readdir as readdir4, rm as rm4, stat as stat4, writeFile as writeFile4 } from "node:fs/promises";
+import { createHash as createHash5 } from "node:crypto";
+import { cp as cp2, mkdir as mkdir4, mkdtemp as mkdtemp2, readFile as readFile7, readdir as readdir4, rm as rm5, stat as stat6, writeFile as writeFile5 } from "node:fs/promises";
 import { createReadStream as createReadStream2, existsSync as existsSync5 } from "node:fs";
-import path6 from "node:path";
+import path8 from "node:path";
 import { promisify } from "node:util";
 var run = promisify(execFile);
 var CODE_SCRIPTS = ["install.sh", "start.sh", "stop.sh", "status.sh", "doctor.sh", "install.ps1", "start.ps1", "stop.ps1", "start.cmd", "stop.cmd", "start-stack.ps1"];
@@ -2792,7 +3421,7 @@ var PLUGIN_FILES = ["index.js", "client.js", "cordis.patch.yml", "package.json"]
 var PLUGIN_DIRS = ["locale", "build", "code/build", "code/shared"];
 var CODE_DIRS = ["windows-service", "interop-service", "wireguard"];
 async function clear(target) {
-  await rm4(target, { recursive: true, force: true });
+  await rm5(target, { recursive: true, force: true });
 }
 async function replaceDirectory(from, to) {
   if (!existsSync5(from)) return;
@@ -2807,46 +3436,46 @@ async function replaceFile(from, to) {
 async function countFiles(dir) {
   let total = 0;
   for (const entry of await readdir4(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) total += await countFiles(path6.join(dir, entry.name));
+    if (entry.isDirectory()) total += await countFiles(path8.join(dir, entry.name));
     else if (entry.isFile()) total += 1;
   }
   return total;
 }
 async function repackDirectory(packageDir, repositoryRoot) {
-  const manifestFile = path6.join(packageDir, "manifest.json");
+  const manifestFile = path8.join(packageDir, "manifest.json");
   if (!existsSync5(manifestFile)) throw new Error(`${packageDir} is not an extracted package (no manifest.json)`);
-  await replaceDirectory(path6.join(repositoryRoot, "code", "gate"), path6.join(packageDir, "gate"));
-  await replaceDirectory(path6.join(repositoryRoot, "code", "shared"), path6.join(packageDir, "shared"));
-  await replaceDirectory(path6.join(repositoryRoot, "code", "config"), path6.join(packageDir, "config"));
+  await replaceDirectory(path8.join(repositoryRoot, "code", "gate"), path8.join(packageDir, "gate"));
+  await replaceDirectory(path8.join(repositoryRoot, "code", "shared"), path8.join(packageDir, "shared"));
+  await replaceDirectory(path8.join(repositoryRoot, "code", "config"), path8.join(packageDir, "config"));
   for (const name of CODE_DIRS) {
-    await replaceDirectory(path6.join(repositoryRoot, "code", name), path6.join(packageDir, "code", name));
+    await replaceDirectory(path8.join(repositoryRoot, "code", name), path8.join(packageDir, "code", name));
   }
-  await replaceDirectory(path6.join(repositoryRoot, "docs"), path6.join(packageDir, "docs"));
+  await replaceDirectory(path8.join(repositoryRoot, "docs"), path8.join(packageDir, "docs"));
   for (const name of CODE_SCRIPTS) {
-    await replaceFile(path6.join(repositoryRoot, "code", name), path6.join(packageDir, name));
+    await replaceFile(path8.join(repositoryRoot, "code", name), path8.join(packageDir, name));
   }
   for (const name of ROOT_SCRIPTS) {
-    await replaceFile(path6.join(repositoryRoot, name), path6.join(packageDir, name));
+    await replaceFile(path8.join(repositoryRoot, name), path8.join(packageDir, name));
   }
   for (const name of PLUGIN_FILES) {
-    await replaceFile(path6.join(repositoryRoot, name), path6.join(packageDir, "plugins", "dsh-mesh", name));
+    await replaceFile(path8.join(repositoryRoot, name), path8.join(packageDir, "plugins", "dsh-mesh", name));
   }
   for (const name of PLUGIN_DIRS) {
-    await replaceDirectory(path6.join(repositoryRoot, name), path6.join(packageDir, "plugins", "dsh-mesh", name));
+    await replaceDirectory(path8.join(repositoryRoot, name), path8.join(packageDir, "plugins", "dsh-mesh", name));
   }
-  const manifest = JSON.parse(await readFile6(manifestFile, "utf8"));
-  const staticAssets = await collectStaticAssets(path6.join(packageDir, "gate"));
+  const manifest = JSON.parse(await readFile7(manifestFile, "utf8"));
+  const staticAssets = await collectStaticAssets(path8.join(packageDir, "gate"));
   manifest.staticAssets = staticAssets;
   manifest.builtAt = (/* @__PURE__ */ new Date()).toISOString();
   manifest.repackedFrom = "code/build/repack.mjs";
   manifest.files = await countFiles(packageDir);
-  await writeFile4(manifestFile, `${JSON.stringify(manifest, null, 2)}
+  await writeFile5(manifestFile, `${JSON.stringify(manifest, null, 2)}
 `, "utf8");
-  const clientBytes = (await stat4(path6.join(packageDir, "plugins", "dsh-mesh", "client.js"))).size;
+  const clientBytes = (await stat6(path8.join(packageDir, "plugins", "dsh-mesh", "client.js"))).size;
   return { packageDir, version: manifest.version, target: manifest.target, files: manifest.files, clientBytes };
 }
-async function sha256File2(file) {
-  const hash = createHash4("sha256");
+async function sha256File3(file) {
+  const hash = createHash5("sha256");
   await new Promise((resolve, reject) => {
     const stream = createReadStream2(file);
     stream.on("data", (chunk) => hash.update(chunk));
@@ -2856,7 +3485,7 @@ async function sha256File2(file) {
   return hash.digest("hex");
 }
 function archiveRootName(file) {
-  return path6.basename(file).replace(/\.(tar\.gz|tgz|zip)$/u, "");
+  return path8.basename(file).replace(/\.(tar\.gz|tgz|zip)$/u, "");
 }
 async function extractArchive(file, directory) {
   await mkdir4(directory, { recursive: true });
@@ -2869,9 +3498,9 @@ async function extractArchive(file, directory) {
   } else {
     await run("tar", ["-xzf", file, "-C", directory]);
   }
-  const root = path6.join(directory, archiveRootName(file));
-  if (!existsSync5(path6.join(root, "manifest.json"))) {
-    throw new Error(`archive ${path6.basename(file)} has no ${archiveRootName(file)}/manifest.json`);
+  const root = path8.join(directory, archiveRootName(file));
+  if (!existsSync5(path8.join(root, "manifest.json"))) {
+    throw new Error(`archive ${path8.basename(file)} has no ${archiveRootName(file)}/manifest.json`);
   }
   return root;
 }
@@ -2889,24 +3518,24 @@ async function compressDirectory(parent, name, file) {
 }
 async function repackArchive(file, { repositoryRoot, log = () => {
 } }) {
-  const work = await mkdtemp2(path6.join(path6.dirname(file), ".repack-"));
+  const work = await mkdtemp2(path8.join(path8.dirname(file), ".repack-"));
   try {
-    log(`extracting ${path6.basename(file)}`);
+    log(`extracting ${path8.basename(file)}`);
     const packageDir = await extractArchive(file, work);
     const summary = await repackDirectory(packageDir, repositoryRoot);
     log(`replaced gateway, scripts and plugin files (${String(summary.files)} files in the package)`);
-    const parent = path6.dirname(packageDir);
-    const name = path6.basename(packageDir);
+    const parent = path8.dirname(packageDir);
+    const name = path8.basename(packageDir);
     await compressDirectory(parent, name, file);
-    const bytes = (await stat4(file)).size;
-    const sha256 = await sha256File2(file);
-    await writeFile4(`${file}.sha256`, `${sha256}  ${path6.basename(file)}
+    const bytes = (await stat6(file)).size;
+    const sha256 = await sha256File3(file);
+    await writeFile5(`${file}.sha256`, `${sha256}  ${path8.basename(file)}
 
 `, "utf8");
-    log(`wrote ${path6.basename(file)} (${String(bytes)} bytes)`);
+    log(`wrote ${path8.basename(file)} (${String(bytes)} bytes)`);
     return { package: file, version: summary.version, target: summary.target, bytes, sha256, files: summary.files };
   } finally {
-    await rm4(work, { recursive: true, force: true });
+    await rm5(work, { recursive: true, force: true });
   }
 }
 
@@ -2975,25 +3604,25 @@ function quickSystemInfo(options = {}) {
 }
 
 // src/lib/service.mjs
-var HERE = path7.dirname(fileURLToPath(import.meta.url));
+var HERE2 = path9.dirname(fileURLToPath2(import.meta.url));
 var PROBE_GRACE_MS = 45e3;
 var PROBE_RETRY_MS = 3e3;
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync7(path7.join(current, "build", "recipes.json")) && existsSync7(path7.join(current, "code", "build"))) {
+    if (existsSync7(path9.join(current, "build", "recipes.json")) && existsSync7(path9.join(current, "code", "build"))) {
       return current;
     }
-    const parent = path7.dirname(current);
+    const parent = path9.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return path7.resolve(start, "..", "..");
+  return path9.resolve(start, "..", "..");
 }
-var REPOSITORY_ROOT = findRepositoryRoot(HERE);
+var REPOSITORY_ROOT = findRepositoryRoot(HERE2);
 function packageVersion() {
   try {
-    const parsed = JSON.parse(readFileSync3(path7.join(REPOSITORY_ROOT, "package.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync3(path9.join(REPOSITORY_ROOT, "package.json"), "utf8"));
     return typeof parsed.version === "string" ? parsed.version : "0.0.0";
   } catch {
     return "0.0.0";
@@ -3008,22 +3637,24 @@ var MeshService = class {
     this.config = options.config ?? {};
     this.logLine = options.log ?? (() => {
     });
-    this.jobRoot = path7.join(this.dataDir, "build");
-    this.cacheDir = path7.join(this.dataDir, "cache");
+    this.jobRoot = path9.join(this.dataDir, "build");
+    this.cacheDir = path9.join(this.dataDir, "cache");
     this.version = packageVersion();
     this.repositoryRoot = REPOSITORY_ROOT;
-    this.recipesPath = path7.join(REPOSITORY_ROOT, "build", "recipes.json");
-    this.overlayRoot = path7.join(REPOSITORY_ROOT, "build", "overlays");
-    this.home = path7.dirname(this.dataDir);
-    this.deployRoot = path7.join(this.dataDir, "deploy");
-    this.memberTagsFile = path7.join(this.dataDir, "member-tags.json");
-    this.packagesDir = path7.join(os5.homedir(), ".dsh", "packages");
+    this.recipesPath = path9.join(REPOSITORY_ROOT, "build", "recipes.json");
+    this.overlayRoot = path9.join(REPOSITORY_ROOT, "build", "overlays");
+    this.home = path9.dirname(this.dataDir);
+    this.deployRoot = path9.join(this.dataDir, "deploy");
+    this.memberTagsFile = path9.join(this.dataDir, "member-tags.json");
+    this.packagesDir = path9.join(os5.homedir(), ".dsh", "packages");
     this.deploy = new DeployManager({
       repositoryRoot: REPOSITORY_ROOT,
       dataDir: this.deployRoot,
       log: (line) => this.logLine(`deploy: ${line}`)
     });
     this.running = /* @__PURE__ */ new Map();
+    this.egress = new EgressProxy({ log: (line) => this.logLine(line) });
+    this.remoteBuilder = new RemoteBuilder({ packagesDir: this.packagesDir, log: (line) => this.logLine(line) });
     this.systemCache = null;
     this.probes = /* @__PURE__ */ new Map();
   }
@@ -3036,6 +3667,7 @@ var MeshService = class {
   }
   /** No child process is owned directly; jobs own their own. */
   async dispose() {
+    this.egress.closeAll();
     await this.deploy.dispose();
   }
   /**
@@ -3043,7 +3675,7 @@ var MeshService = class {
    * @returns {Promise<object>} status.
    */
   async status() {
-    const stateFile = path7.join(this.home, "wireguard", "state.json");
+    const stateFile = path9.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     return {
@@ -3105,10 +3737,10 @@ var MeshService = class {
     let host = String(member.ip ?? "");
     if (host === "") throw new Error(`member ${member.id} has no VPN address`);
     if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
-    const path10 = "/__gate/cluster/__gate/session/promote";
-    const response = await fetch(`http://${host}${path10}`, {
+    const path12 = "/__gate/cluster/__gate/session/promote";
+    const response = await fetch(`http://${host}${path12}`, {
       method: "POST",
-      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path10 }) }
+      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path12 }) }
     });
     const text = await response.text();
     if (!response.ok) throw new Error(`member ${member.name} refused the request: HTTP ${String(response.status)} ${text.slice(0, 120)}`);
@@ -3162,7 +3794,7 @@ var MeshService = class {
     return tasks.clearConversations();
   }
   async members() {
-    const stateFile = path7.join(this.home, "wireguard", "state.json");
+    const stateFile = path9.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     const self = {
@@ -3249,7 +3881,7 @@ var MeshService = class {
    */
   async memberTags() {
     try {
-      const parsed = JSON.parse(await readFile7(this.memberTagsFile, "utf8"));
+      const parsed = JSON.parse(await readFile8(this.memberTagsFile, "utf8"));
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
       const tags = {};
       for (const [id, tag] of Object.entries(parsed)) {
@@ -3274,7 +3906,7 @@ var MeshService = class {
     if (label === "") delete tags[memberId];
     else tags[memberId] = label;
     await mkdir5(this.dataDir, { recursive: true });
-    await writeFile5(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
+    await writeFile6(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
 `, "utf8");
     return { ok: true, tags };
   }
@@ -3294,7 +3926,7 @@ var MeshService = class {
     const removed = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path7.join(this.jobRoot, entry.name);
+      const dir = path9.join(this.jobRoot, entry.name);
       let state;
       try {
         state = await readState(dir);
@@ -3303,16 +3935,22 @@ var MeshService = class {
       }
       if (this.running.has(state.id)) continue;
       if (state.id === options.keep) continue;
-      await rm5(path7.join(dir, "src"), { recursive: true, force: true });
-      await rm5(path7.join(dir, "work-order"), { recursive: true, force: true });
-      if (options.keepDist !== true) await rm5(path7.join(dir, "dist"), { recursive: true, force: true });
+      await rm6(path9.join(dir, "src"), { recursive: true, force: true });
+      await rm6(path9.join(dir, "work-order"), { recursive: true, force: true });
+      if (options.keepDist !== true) await rm6(path9.join(dir, "dist"), { recursive: true, force: true });
       removed.push(state.id);
     }
     return removed;
   }
   /**
    * Start one build job in the background.
-   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean}} request build request.
+   *
+   * `member` chooses the build host: empty or `local` runs the engine here,
+   * anything else runs the same engine on that member over SSH and copies the
+   * archives back into `~/.dsh/packages`. `proxyMember` borrows another
+   * member's internet access for the downloads; `proxy` is an explicit HTTP
+   * proxy URL that both the engine and npm use.
+   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean, member?: string, proxy?: string, proxyMember?: string}} request build request.
    * @returns {Promise<object>} the initial job state.
    */
   async startBuild(request = {}) {
@@ -3320,17 +3958,59 @@ var MeshService = class {
     const source = (typeof request.source === "string" && request.source !== "" ? request.source : defaults.build.source) || DEFAULT_SOURCE;
     const ref = (typeof request.ref === "string" && request.ref !== "" ? request.ref : defaults.build.ref) || DEFAULT_REF;
     const targets = Array.isArray(request.targets) && request.targets.length > 0 ? request.targets : defaults.build.targets;
-    const job = await createJob({ root: this.jobRoot, source, ref, targets });
-    this.logLine(`mesh build job ${job.id} created`);
-    const promise = runJob(job.dir, {
-      repositoryRoot: this.repositoryRoot,
-      recipesPath: this.recipesPath,
-      overlayRoot: this.overlayRoot,
-      cacheDir: this.cacheDir,
+    const memberId = typeof request.member === "string" ? request.member.trim() : "";
+    const proxyMemberId = typeof request.proxyMember === "string" ? request.proxyMember.trim() : "";
+    const proxyUrl = typeof request.proxy === "string" ? request.proxy.trim() : "";
+    if (this.running.size > 0) {
+      throw Object.assign(new Error("a build is already running; wait for it to finish"), { status: 409 });
+    }
+    const snapshot = await this.members();
+    const everyone = [snapshot.local, ...snapshot.members].filter((candidate) => candidate !== null && candidate !== void 0);
+    let member = null;
+    if (memberId !== "" && memberId !== "local") {
+      const found = everyone.find((candidate) => candidate.id === memberId || candidate.name === memberId || candidate.ip === memberId);
+      if (found === void 0) throw new Error(`member not found: ${memberId}`);
+      if (found.id !== "local") {
+        if (found.online === false) throw new Error(`member ${found.name} is offline`);
+        const platform = String(found.system?.platform ?? "").toLowerCase();
+        if (platform !== "" && !platform.startsWith("linux")) {
+          throw new Error(`member build needs a Linux member; ${found.name} runs ${String(found.system?.platform)}`);
+        }
+        member = found;
+      }
+    }
+    if (request.planOnly === true && member !== null) throw new Error("plan-only builds run on the local host");
+    const proxyMember = proxyMemberId === "" ? null : everyone.find((candidate) => candidate.id === proxyMemberId || candidate.name === proxyMemberId || candidate.ip === proxyMemberId) ?? null;
+    if (proxyMemberId !== "" && proxyMember === null) throw new Error(`proxy member not found: ${proxyMemberId}`);
+    if (proxyMember !== null && proxyMember.id === "local") {
+      throw new Error("the local host cannot proxy its own build; pick a member");
+    }
+    const job = await createJob({
+      root: this.jobRoot,
+      source,
+      ref,
+      targets,
+      member: member?.id ?? null,
+      proxy: proxyUrl !== "" ? proxyUrl : proxyMember !== null ? `member:${proxyMember.id}` : null,
+      mode: member === null ? "local" : "remote"
+    });
+    if (member !== null) {
+      await updateState(job.dir, {
+        memberName: member.name,
+        memberIp: member.ip,
+        percent: 0,
+        proxyMember: proxyMember?.id ?? null
+      });
+    } else if (proxyMember !== null) {
+      await updateState(job.dir, { proxyMember: proxyMember.id, percent: 0 });
+    }
+    this.logLine(`mesh build job ${job.id} created (${member === null ? "local" : member.name}${proxyMember === null ? "" : `, egress via ${proxyMember.name}`})`);
+    const promise = this.#runBuild(job, {
+      member,
+      proxyMember,
+      proxyUrl,
       planOnly: request.planOnly === true,
-      version: request.version,
-      full: this.config.build?.full !== false,
-      nodeVersion: typeof this.config.build?.nodeVersion === "string" && this.config.build.nodeVersion !== "" ? this.config.build.nodeVersion : void 0
+      version: request.version
     }).catch((error) => {
       this.logLine(`mesh build job ${job.id} crashed: ${error instanceof Error ? error.message : String(error)}`);
     }).finally(() => {
@@ -3338,6 +4018,76 @@ var MeshService = class {
     });
     this.running.set(job.id, promise);
     return { ...job.state, dir: job.dir, running: true };
+  }
+  /**
+   * Run one build job to completion, local or on a member.
+   * @param {{id: string, dir: string}} job new job.
+   * @param {{member: object|null, proxyMember: object|null, proxyUrl: string, planOnly: boolean, version?: string}} options run options.
+   * @returns {Promise<void>}
+   */
+  async #runBuild(job, options) {
+    let egress = null;
+    let proxyUrl = options.proxyUrl !== "" ? options.proxyUrl : null;
+    if (options.proxyMember !== null && (options.member === null || options.member.id !== options.proxyMember.id)) {
+      egress = await this.egress.start({ plan: await this.#memberSshPlan(options.proxyMember), member: options.proxyMember.name });
+      proxyUrl = egress.url;
+      await appendLog(job.dir, `outbound proxy ${proxyUrl} (${options.proxyMember.name})`);
+      await updateState(job.dir, { proxy: proxyUrl, proxyMember: options.proxyMember.id });
+    }
+    try {
+      if (options.member === null) {
+        await runJob(job.dir, {
+          repositoryRoot: this.repositoryRoot,
+          recipesPath: this.recipesPath,
+          overlayRoot: this.overlayRoot,
+          cacheDir: this.cacheDir,
+          planOnly: options.planOnly,
+          version: options.version,
+          proxy: proxyUrl,
+          full: this.config.build?.full !== false,
+          nodeVersion: typeof this.config.build?.nodeVersion === "string" && this.config.build.nodeVersion !== "" ? this.config.build.nodeVersion : void 0
+        });
+        return;
+      }
+      await this.remoteBuilder.run(job.dir, {
+        plan: await this.#memberSshPlan(options.member),
+        memberName: options.member.name,
+        proxyUrl,
+        heapMb: typeof this.config.build?.memberHeapMb === "number" ? this.config.build.memberHeapMb : void 0
+      });
+    } finally {
+      egress?.close();
+    }
+  }
+  /**
+   * SSH coordinates for one member.
+   * @param {object} member member snapshot.
+   * @returns {Promise<{host: string, user: string, port: number, identityFile?: string, appRoot?: string, os: string}>} plan.
+   */
+  async #memberSshPlan(member) {
+    if (member.ip === "") throw new Error(`member ${member.name} has no VPN address`);
+    let user = "root";
+    let identityFile;
+    let port = 22;
+    const { state } = await readWireGuardState({ file: path9.join(this.home, "wireguard", "state.json") });
+    const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
+    if (peer !== void 0 && peer !== null) {
+      if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
+      if (Number.isSafeInteger(peer.sshPort)) port = peer.sshPort;
+      if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
+        const digest = createHash6("sha256").update(peer.publicKey).digest("hex");
+        const candidate = path9.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        if (existsSync7(candidate)) identityFile = candidate;
+      }
+    }
+    return {
+      host: member.ip,
+      user,
+      port,
+      identityFile,
+      appRoot: typeof member.system?.appRoot === "string" ? member.system.appRoot : void 0,
+      os: "linux"
+    };
   }
   /**
    * Run one build to completion.
@@ -3407,8 +4157,8 @@ var MeshService = class {
     const state = await readState(dir);
     return {
       ...state,
-      logFile: path7.join(dir, "build.log"),
-      stateFile: path7.join(dir, "state.json"),
+      logFile: path9.join(dir, "build.log"),
+      stateFile: path9.join(dir, "state.json"),
       logTail: await readLogTail(dir, 60),
       running: this.running.has(id),
       workOrderMarkdown: state.workOrder?.markdown ?? null,
@@ -3426,7 +4176,7 @@ var MeshService = class {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       try {
-        const state = await readState(path7.join(this.jobRoot, entry.name));
+        const state = await readState(path9.join(this.jobRoot, entry.name));
         jobs.push({
           id: state.id,
           status: state.status,
@@ -3434,7 +4184,16 @@ var MeshService = class {
           source: state.source,
           ref: state.ref,
           targets: state.targets,
-          updatedAt: state.updatedAt
+          updatedAt: state.updatedAt,
+          createdAt: state.createdAt,
+          member: state.member ?? null,
+          memberName: state.memberName ?? null,
+          mode: state.mode ?? "local",
+          proxy: state.proxy ?? null,
+          proxyMember: state.proxyMember ?? null,
+          percent: typeof state.percent === "number" ? state.percent : null,
+          version: state.version ?? null,
+          error: state.error ?? null
         });
       } catch {
       }
@@ -3467,7 +4226,7 @@ var MeshService = class {
    * @returns {Promise<object>} recipes.
    */
   async recipes() {
-    const parsed = JSON.parse(await readFile7(this.recipesPath, "utf8"));
+    const parsed = JSON.parse(await readFile8(this.recipesPath, "utf8"));
     return {
       source: parsed.source,
       ref: parsed.ref,
@@ -3490,8 +4249,8 @@ var MeshService = class {
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(entry.name)) continue;
-      const file = path7.join(this.packagesDir, entry.name);
-      const info = await stat5(file).catch(() => null);
+      const file = path9.join(this.packagesDir, entry.name);
+      const info = await stat7(file).catch(() => null);
       if (info === null) continue;
       packages.push({
         name: entry.name,
@@ -3505,6 +4264,31 @@ var MeshService = class {
     return { ok: true, dir: this.packagesDir, packages };
   }
   /**
+   * Delete one package (and its `.sha256` sidecar) from the packages directory.
+   * @param {{name: string}} request package file name.
+   * @returns {Promise<{ok: boolean, removed: string[]}>} removed files.
+   */
+  async removePackage(request) {
+    const name = typeof request?.name === "string" ? request.name.trim() : "";
+    if (name === "" || name !== path9.basename(name) || name.startsWith(".")) {
+      throw new Error("package name is invalid");
+    }
+    if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`);
+    const file = path9.join(this.packagesDir, name);
+    const info = await stat7(file).catch(() => null);
+    if (info === null || !info.isFile()) throw new Error(`package not found: ${name}`);
+    const removed = [];
+    await rm6(file, { force: true });
+    removed.push(file);
+    const sidecar = `${file}.sha256`;
+    if (existsSync7(sidecar)) {
+      await rm6(sidecar, { force: true });
+      removed.push(sidecar);
+    }
+    this.logLine(`removed package ${name}`);
+    return { ok: true, removed };
+  }
+  /**
    * Resolve a package path from an absolute path, `~/.dsh/packages/<name>`,
    * or the repository `dist/<name>`.
    * @param {string} input package path or filename.
@@ -3513,9 +4297,9 @@ var MeshService = class {
   async resolvePackage(input) {
     const raw = typeof input === "string" ? input.trim() : "";
     if (raw === "") throw new Error("package is required");
-    const candidates = path7.isAbsolute(raw) ? [raw] : [path7.join(this.packagesDir, raw), path7.join(this.repositoryRoot, "dist", raw)];
+    const candidates = path9.isAbsolute(raw) ? [raw] : [path9.join(this.packagesDir, raw), path9.join(this.repositoryRoot, "dist", raw)];
     for (const file of candidates) {
-      const info = await stat5(file).catch(() => null);
+      const info = await stat7(file).catch(() => null);
       if (info?.isFile()) return file;
     }
     throw new Error(`package not found: ${raw}`);
@@ -3538,7 +4322,7 @@ var MeshService = class {
     const member = memberId !== "" ? all.find((candidate) => candidate.id === memberId) : all.find((candidate) => candidate.id === host || candidate.name === host || candidate.ip === host);
     if (memberId !== "" && member === void 0) throw new Error(`member not found: ${memberId}`);
     if (member !== void 0) {
-      const os7 = /win(?:dows)?/iu.test(path7.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+      const os7 = /win(?:dows)?/iu.test(path9.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
       const deployRequest = await this.#memberDeployRequest(member, packagePath, os7);
       const started2 = await this.deploy.start({ ...deployRequest, member: member.id });
       return {
@@ -3549,7 +4333,7 @@ var MeshService = class {
       };
     }
     if (host === "") throw new Error("host is required");
-    const os6 = /win(?:dows)?/iu.test(path7.basename(packagePath)) ? "windows" : "linux";
+    const os6 = /win(?:dows)?/iu.test(path9.basename(packagePath)) ? "windows" : "linux";
     const appRoot = os6 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
     const started = await this.deploy.start({ host, package: packagePath, os: os6, appRoot });
     return { ok: true, job: started.job, member: null, packagePath };
@@ -3584,7 +4368,7 @@ var MeshService = class {
     return {
       job,
       member: started.member,
-      logFile: path7.join(this.deployRoot, started.job.id, "deploy.log"),
+      logFile: path9.join(this.deployRoot, started.job.id, "deploy.log"),
       log: await this.deployLogs(started.job.id, 80)
     };
   }
@@ -3599,13 +4383,13 @@ var MeshService = class {
     if (member.ip === "") throw new Error(`member ${member.id} has no VPN address`);
     let user = "root";
     let identityFile;
-    const { state } = await readWireGuardState({ file: path7.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path9.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
-        const digest = createHash5("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path7.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        const digest = createHash6("sha256").update(peer.publicKey).digest("hex");
+        const candidate = path9.join(this.home, "wireguard", "ssh", `${digest}.key`);
         if (existsSync7(candidate)) identityFile = candidate;
       }
     }
@@ -3711,8 +4495,8 @@ var MeshService = class {
    */
   _jobDir(id) {
     if (typeof id !== "string" || !/^[A-Za-z0-9._-]+$/u.test(id)) throw new Error("invalid job id");
-    const dir = path7.resolve(this.jobRoot, id);
-    if (!dir.startsWith(`${path7.resolve(this.jobRoot)}${path7.sep}`)) throw new Error("invalid job id");
+    const dir = path9.resolve(this.jobRoot, id);
+    if (!dir.startsWith(`${path9.resolve(this.jobRoot)}${path9.sep}`)) throw new Error("invalid job id");
     return dir;
   }
 };
@@ -3753,20 +4537,25 @@ function registerApi(ctx, service) {
       try {
         const method = request.method ?? "GET";
         const url = new URL(request.url ?? "/", "http://local.invalid");
-        const path10 = url.pathname.slice(API_PREFIX.length) || "/";
-        if (method === "GET" && path10 === "/status") {
+        const path12 = url.pathname.slice(API_PREFIX.length) || "/";
+        if (method === "GET" && path12 === "/status") {
           writeJson(response, 200, await service.status());
           return;
         }
-        if (method === "GET" && path10 === "/members") {
+        if (method === "GET" && path12 === "/members") {
           writeJson(response, 200, await service.members());
           return;
         }
-        if (method === "GET" && path10 === "/member-tags") {
+        if (method === "GET" && path12 === "/member-tags") {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() });
           return;
         }
-        if (method === "POST" && path10 === "/conversations/send") {
+        if (method === "POST" && path12 === "/packages/delete") {
+          const body = await readJson(request);
+          writeJson(response, 200, await service.removePackage({ name: typeof body.name === "string" ? body.name : "" }));
+          return;
+        }
+        if (method === "POST" && path12 === "/conversations/send") {
           const body = await readJson(request);
           writeJson(response, 200, await service.sendConversation({
             text: typeof body.text === "string" ? body.text : "",
@@ -3774,28 +4563,28 @@ function registerApi(ctx, service) {
           }));
           return;
         }
-        if (method === "POST" && path10 === "/conversations/clear") {
+        if (method === "POST" && path12 === "/conversations/clear") {
           writeJson(response, 200, await service.clearConversations());
           return;
         }
-        if (method === "GET" && path10 === "/conversations") {
+        if (method === "GET" && path12 === "/conversations") {
           writeJson(response, 200, await service.conversations());
           return;
         }
-        if (method === "GET" && path10 === "/jobs") {
+        if (method === "GET" && path12 === "/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() });
           return;
         }
-        if (method === "GET" && path10 === "/packages") {
+        if (method === "GET" && path12 === "/packages") {
           writeJson(response, 200, await service.packages());
           return;
         }
-        if (method === "GET" && path10 === "/deploy/jobs") {
+        if (method === "GET" && path12 === "/deploy/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) });
           return;
         }
         if (method === "GET") {
-          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path10);
+          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path12);
           if (deployRead !== null) {
             const lines = Number.parseInt(url.searchParams.get("lines") ?? "200", 10);
             const job = await service.deployStatus(deployRead[1]);
@@ -3812,7 +4601,7 @@ function registerApi(ctx, service) {
             });
             return;
           }
-          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path10);
+          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path12);
           if (read !== null) {
             if (read[2] === "/log") {
               const lines = Number.parseInt(url.searchParams.get("lines") ?? "80", 10);
@@ -3834,7 +4623,7 @@ function registerApi(ctx, service) {
           writeJson(response, 403, { ok: false, error: { code: "forbidden", message: `Missing the ${AGENT_HEADER} header.` } });
           return;
         }
-        if (path10 === "/deploy") {
+        if (path12 === "/deploy") {
           const body = await readJson(request);
           const result = await service.deployMember({
             member: typeof body.member === "string" ? body.member : void 0,
@@ -3843,12 +4632,12 @@ function registerApi(ctx, service) {
           writeJson(response, 202, result);
           return;
         }
-        if (path10 === "/session/promote") {
+        if (path12 === "/session/promote") {
           const body = await readJson(request);
           writeJson(response, 200, await service.promoteSession(String(body.member ?? "")));
           return;
         }
-        if (path10 === "/member-tags") {
+        if (path12 === "/member-tags") {
           const body = await readJson(request);
           writeJson(response, 200, await service.setMemberTag(
             typeof body.id === "string" ? body.id : "",
@@ -3856,24 +4645,27 @@ function registerApi(ctx, service) {
           ));
           return;
         }
-        if (path10 === "/build") {
+        if (path12 === "/build") {
           const body = await readJson(request);
           const job = await service.startBuild({
             source: typeof body.source === "string" ? body.source : void 0,
             ref: typeof body.ref === "string" ? body.ref : void 0,
             targets: Array.isArray(body.targets) ? body.targets.filter((value) => typeof value === "string") : void 0,
             planOnly: body.planOnly === true,
-            version: typeof body.version === "string" ? body.version : void 0
+            version: typeof body.version === "string" ? body.version : void 0,
+            member: typeof body.member === "string" ? body.member : void 0,
+            proxy: typeof body.proxy === "string" ? body.proxy : void 0,
+            proxyMember: typeof body.proxyMember === "string" ? body.proxyMember : void 0
           });
           writeJson(response, 202, { ok: true, job });
           return;
         }
-        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path10);
+        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path12);
         if (resume !== null) {
           writeJson(response, 202, { ok: true, job: await service.resumeBuild(resume[1]) });
           return;
         }
-        const match = /^\/build\/([^/]+)\/learn$/u.exec(path10);
+        const match = /^\/build\/([^/]+)\/learn$/u.exec(path12);
         if (match !== null) {
           writeJson(response, 200, { ok: true, job: await service.learn(match[1]) });
           return;
@@ -3940,9 +4732,9 @@ function registerWireGuardApi(ctx) {
 
 // src/lib/member-tasks.mjs
 import { randomUUID } from "node:crypto";
-import { mkdir as mkdir6, readFile as readFile8, readdir as readdir6, rename as rename3, writeFile as writeFile6 } from "node:fs/promises";
+import { mkdir as mkdir6, readFile as readFile9, readdir as readdir6, rename as rename4, writeFile as writeFile7 } from "node:fs/promises";
 import { existsSync as existsSync8, readFileSync as readFileSync4 } from "node:fs";
-import path8 from "node:path";
+import path10 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
@@ -3975,7 +4767,7 @@ var MemberTaskService = class {
     this.dataDir = options.dataDir;
     this.logLine = options.log ?? (() => {
     });
-    this.taskRoot = path8.join(this.dataDir, "member-tasks");
+    this.taskRoot = path10.join(this.dataDir, "member-tasks");
     this.tasks = /* @__PURE__ */ new Map();
     this.monitors = /* @__PURE__ */ new Map();
     this.controllers = /* @__PURE__ */ new Map();
@@ -4012,7 +4804,7 @@ var MemberTaskService = class {
     for (const file of files) {
       if (!file.endsWith(".json")) continue;
       try {
-        const task = JSON.parse(await readFile8(path8.join(this.taskRoot, file), "utf8"));
+        const task = JSON.parse(await readFile9(path10.join(this.taskRoot, file), "utf8"));
         if (task?.id === void 0) continue;
         if (task.status === "running" || task.status === "starting") {
           task.status = "interrupted";
@@ -4026,18 +4818,18 @@ var MemberTaskService = class {
   }
   async #save(task) {
     task.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const file = path8.join(this.taskRoot, `${task.id}.json`);
+    const file = path10.join(this.taskRoot, `${task.id}.json`);
     const temporary = `${file}.${process.pid}.tmp`;
     await mkdir6(this.taskRoot, { recursive: true });
-    await writeFile6(temporary, `${JSON.stringify(task, null, 2)}
+    await writeFile7(temporary, `${JSON.stringify(task, null, 2)}
 `, "utf8");
-    await rename3(temporary, file);
+    await rename4(temporary, file);
   }
   async #log(task, line) {
     const text = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
 `;
     try {
-      await writeFile6(path8.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
+      await writeFile7(path10.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
     } catch {
     }
     try {
@@ -4057,9 +4849,9 @@ var MemberTaskService = class {
     if (this.service.config?.interopUseGatePassword !== false) {
       if (process.env.DSH_GATE_PASSWORD) return process.env.DSH_GATE_PASSWORD;
       const candidates = [
-        path8.join(this.service.repositoryRoot, "..", "config", "gate.env"),
-        path8.join(this.service.repositoryRoot, "config", "gate.env"),
-        path8.join(this.service.dataDir, "..", "..", "config", "gate.env")
+        path10.join(this.service.repositoryRoot, "..", "config", "gate.env"),
+        path10.join(this.service.repositoryRoot, "config", "gate.env"),
+        path10.join(this.service.dataDir, "..", "..", "config", "gate.env")
       ];
       for (const file of candidates) {
         const password = envFile(file).DSH_GATE_PASSWORD;
@@ -4506,7 +5298,7 @@ var MemberTaskService = class {
     const task = this.tasks.get(String(taskId));
     if (task === void 0) return "";
     try {
-      const text = await readFile8(path8.join(this.taskRoot, `${task.id}.log`), "utf8");
+      const text = await readFile9(path10.join(this.taskRoot, `${task.id}.log`), "utf8");
       return text.split("\n").slice(-Math.max(1, Math.min(lines, 500))).join("\n");
     } catch {
       return "";
@@ -4581,7 +5373,7 @@ var MemberTaskService = class {
    * @returns {string} log path.
    */
   logPath(taskId) {
-    return path8.join(this.taskRoot, `${String(taskId)}.log`);
+    return path10.join(this.taskRoot, `${String(taskId)}.log`);
   }
 };
 
@@ -5009,8 +5801,8 @@ function formatBytes2(value) {
 // src/index.ts
 var inject = ["webServer"];
 function dataDirectory() {
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path9.join(homedir2(), ".dsh");
-  return path9.join(home, "mesh");
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path11.join(homedir2(), ".dsh");
+  return path11.join(home, "mesh");
 }
 async function apply(ctx, config = {}) {
   const service = new MeshService({

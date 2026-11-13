@@ -21,14 +21,18 @@ import {
   wireGuardIdentity,
 } from '../../code/shared/wireguard.mjs'
 import {
+  appendLog,
   createJob,
   learnJob,
   readLogTail,
   readState,
   runJob,
+  updateState,
 } from '../../code/build/job.mjs'
 import { DEFAULT_REF, DEFAULT_SOURCE } from '../../code/build/engine.mjs'
 import { DeployManager } from '../../code/deploy/engine.mjs'
+import { EgressProxy } from './egress.mjs'
+import { RemoteBuilder } from './remote-build.mjs'
 import { CLUSTER_HEADER, deriveClusterSecret, signClusterRequest } from '../../code/shared/cluster.mjs'
 import { repackArchive } from '../../code/build/repack.mjs'
 import { quickSystemInfo } from '../../code/shared/system-info.mjs'
@@ -102,6 +106,9 @@ export class MeshService {
     })
     /** @type {Map<string, Promise<object>>} */
     this.running = new Map()
+    /** Egress proxies live exactly as long as the build that started them. */
+    this.egress = new EgressProxy({ log: line => this.logLine(line) })
+    this.remoteBuilder = new RemoteBuilder({ packagesDir: this.packagesDir, log: line => this.logLine(line) })
     /** @type {{value: object, expiresAt: number}|null} */
     this.systemCache = null
     /**
@@ -125,6 +132,7 @@ export class MeshService {
 
   /** No child process is owned directly; jobs own their own. */
   async dispose() {
+    this.egress.closeAll()
     await this.deploy.dispose()
   }
 
@@ -418,7 +426,13 @@ export class MeshService {
 
   /**
    * Start one build job in the background.
-   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean}} request build request.
+   *
+   * `member` chooses the build host: empty or `local` runs the engine here,
+   * anything else runs the same engine on that member over SSH and copies the
+   * archives back into `~/.dsh/packages`. `proxyMember` borrows another
+   * member's internet access for the downloads; `proxy` is an explicit HTTP
+   * proxy URL that both the engine and npm use.
+   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean, member?: string, proxy?: string, proxyMember?: string}} request build request.
    * @returns {Promise<object>} the initial job state.
    */
   async startBuild(request = {}) {
@@ -432,17 +446,61 @@ export class MeshService {
     const targets = Array.isArray(request.targets) && request.targets.length > 0
       ? request.targets
       : defaults.build.targets
-    const job = await createJob({ root: this.jobRoot, source, ref, targets })
-    this.logLine(`mesh build job ${job.id} created`)
-    const promise = runJob(job.dir, {
-      repositoryRoot: this.repositoryRoot,
-      recipesPath: this.recipesPath,
-      overlayRoot: this.overlayRoot,
-      cacheDir: this.cacheDir,
+    const memberId = typeof request.member === 'string' ? request.member.trim() : ''
+    const proxyMemberId = typeof request.proxyMember === 'string' ? request.proxyMember.trim() : ''
+    const proxyUrl = typeof request.proxy === 'string' ? request.proxy.trim() : ''
+    if (this.running.size > 0) {
+      throw Object.assign(new Error('a build is already running; wait for it to finish'), { status: 409 })
+    }
+    const snapshot = await this.members()
+    const everyone = [snapshot.local, ...snapshot.members].filter(candidate => candidate !== null && candidate !== undefined)
+    let member = null
+    if (memberId !== '' && memberId !== 'local') {
+      const found = everyone.find(candidate => candidate.id === memberId || candidate.name === memberId || candidate.ip === memberId)
+      if (found === undefined) throw new Error(`member not found: ${memberId}`)
+      if (found.id !== 'local') {
+        if (found.online === false) throw new Error(`member ${found.name} is offline`)
+        const platform = String(found.system?.platform ?? '').toLowerCase()
+        if (platform !== '' && !platform.startsWith('linux')) {
+          throw new Error(`member build needs a Linux member; ${found.name} runs ${String(found.system?.platform)}`)
+        }
+        member = found
+      }
+    }
+    if (request.planOnly === true && member !== null) throw new Error('plan-only builds run on the local host')
+    const proxyMember = proxyMemberId === ''
+      ? null
+      : everyone.find(candidate => candidate.id === proxyMemberId || candidate.name === proxyMemberId || candidate.ip === proxyMemberId) ?? null
+    if (proxyMemberId !== '' && proxyMember === null) throw new Error(`proxy member not found: ${proxyMemberId}`)
+    if (proxyMember !== null && proxyMember.id === 'local') {
+      throw new Error('the local host cannot proxy its own build; pick a member')
+    }
+    const job = await createJob({
+      root: this.jobRoot,
+      source,
+      ref,
+      targets,
+      member: member?.id ?? null,
+      proxy: proxyUrl !== '' ? proxyUrl : proxyMember !== null ? `member:${proxyMember.id}` : null,
+      mode: member === null ? 'local' : 'remote',
+    })
+    if (member !== null) {
+      await updateState(job.dir, {
+        memberName: member.name,
+        memberIp: member.ip,
+        percent: 0,
+        proxyMember: proxyMember?.id ?? null,
+      })
+    } else if (proxyMember !== null) {
+      await updateState(job.dir, { proxyMember: proxyMember.id, percent: 0 })
+    }
+    this.logLine(`mesh build job ${job.id} created (${member === null ? 'local' : member.name}${proxyMember === null ? '' : `, egress via ${proxyMember.name}`})`)
+    const promise = this.#runBuild(job, {
+      member,
+      proxyMember,
+      proxyUrl,
       planOnly: request.planOnly === true,
       version: request.version,
-      full: this.config.build?.full !== false,
-      nodeVersion: typeof this.config.build?.nodeVersion === 'string' && this.config.build.nodeVersion !== '' ? this.config.build.nodeVersion : undefined,
     }).catch((error) => {
       this.logLine(`mesh build job ${job.id} crashed: ${error instanceof Error ? error.message : String(error)}`)
     }).finally(() => {
@@ -450,6 +508,78 @@ export class MeshService {
     })
     this.running.set(job.id, promise)
     return { ...job.state, dir: job.dir, running: true }
+  }
+
+  /**
+   * Run one build job to completion, local or on a member.
+   * @param {{id: string, dir: string}} job new job.
+   * @param {{member: object|null, proxyMember: object|null, proxyUrl: string, planOnly: boolean, version?: string}} options run options.
+   * @returns {Promise<void>}
+   */
+  async #runBuild(job, options) {
+    let egress = null
+    let proxyUrl = options.proxyUrl !== '' ? options.proxyUrl : null
+    if (options.proxyMember !== null && (options.member === null || options.member.id !== options.proxyMember.id)) {
+      egress = await this.egress.start({ plan: await this.#memberSshPlan(options.proxyMember), member: options.proxyMember.name })
+      proxyUrl = egress.url
+      await appendLog(job.dir, `outbound proxy ${proxyUrl} (${options.proxyMember.name})`)
+      await updateState(job.dir, { proxy: proxyUrl, proxyMember: options.proxyMember.id })
+    }
+    try {
+      if (options.member === null) {
+        await runJob(job.dir, {
+          repositoryRoot: this.repositoryRoot,
+          recipesPath: this.recipesPath,
+          overlayRoot: this.overlayRoot,
+          cacheDir: this.cacheDir,
+          planOnly: options.planOnly,
+          version: options.version,
+          proxy: proxyUrl,
+          full: this.config.build?.full !== false,
+          nodeVersion: typeof this.config.build?.nodeVersion === 'string' && this.config.build.nodeVersion !== '' ? this.config.build.nodeVersion : undefined,
+        })
+        return
+      }
+      await this.remoteBuilder.run(job.dir, {
+        plan: await this.#memberSshPlan(options.member),
+        memberName: options.member.name,
+        proxyUrl,
+        heapMb: typeof this.config.build?.memberHeapMb === 'number' ? this.config.build.memberHeapMb : undefined,
+      })
+    } finally {
+      egress?.close()
+    }
+  }
+
+  /**
+   * SSH coordinates for one member.
+   * @param {object} member member snapshot.
+   * @returns {Promise<{host: string, user: string, port: number, identityFile?: string, appRoot?: string, os: string}>} plan.
+   */
+  async #memberSshPlan(member) {
+    if (member.ip === '') throw new Error(`member ${member.name} has no VPN address`)
+    let user = 'root'
+    let identityFile
+    let port = 22
+    const { state } = await readWireGuardState({ file: path.join(this.home, 'wireguard', 'state.json') })
+    const peer = state?.server?.peers?.find(candidate => candidate?.ip === member.ip)
+    if (peer !== undefined && peer !== null) {
+      if (typeof peer.sshUser === 'string' && peer.sshUser !== '') user = peer.sshUser
+      if (Number.isSafeInteger(peer.sshPort)) port = peer.sshPort
+      if (typeof peer.publicKey === 'string' && peer.publicKey !== '') {
+        const digest = createHash('sha256').update(peer.publicKey).digest('hex')
+        const candidate = path.join(this.home, 'wireguard', 'ssh', `${digest}.key`)
+        if (existsSync(candidate)) identityFile = candidate
+      }
+    }
+    return {
+      host: member.ip,
+      user,
+      port,
+      identityFile,
+      appRoot: typeof member.system?.appRoot === 'string' ? member.system.appRoot : undefined,
+      os: 'linux',
+    }
   }
 
   /**
@@ -551,6 +681,15 @@ export class MeshService {
           ref: state.ref,
           targets: state.targets,
           updatedAt: state.updatedAt,
+          createdAt: state.createdAt,
+          member: state.member ?? null,
+          memberName: state.memberName ?? null,
+          mode: state.mode ?? 'local',
+          proxy: state.proxy ?? null,
+          proxyMember: state.proxyMember ?? null,
+          percent: typeof state.percent === 'number' ? state.percent : null,
+          version: state.version ?? null,
+          error: state.error ?? null,
         })
       } catch {
         // A half-created directory is not a job.
@@ -624,6 +763,32 @@ export class MeshService {
     }
     packages.sort((left, right) => right.mtime.localeCompare(left.mtime))
     return { ok: true, dir: this.packagesDir, packages }
+  }
+
+  /**
+   * Delete one package (and its `.sha256` sidecar) from the packages directory.
+   * @param {{name: string}} request package file name.
+   * @returns {Promise<{ok: boolean, removed: string[]}>} removed files.
+   */
+  async removePackage(request) {
+    const name = typeof request?.name === 'string' ? request.name.trim() : ''
+    if (name === '' || name !== path.basename(name) || name.startsWith('.')) {
+      throw new Error('package name is invalid')
+    }
+    if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`)
+    const file = path.join(this.packagesDir, name)
+    const info = await stat(file).catch(() => null)
+    if (info === null || !info.isFile()) throw new Error(`package not found: ${name}`)
+    const removed = []
+    await rm(file, { force: true })
+    removed.push(file)
+    const sidecar = `${file}.sha256`
+    if (existsSync(sidecar)) {
+      await rm(sidecar, { force: true })
+      removed.push(sidecar)
+    }
+    this.logLine(`removed package ${name}`)
+    return { ok: true, removed }
   }
 
   /**

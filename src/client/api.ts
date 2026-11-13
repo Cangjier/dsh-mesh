@@ -130,6 +130,16 @@ export interface BuildJob {
   targets: string[]
   createdAt?: string
   updatedAt: string
+  /** `null` when the build ran on this host, otherwise the member id. */
+  member?: string | null
+  memberName?: string | null
+  memberIp?: string | null
+  mode?: 'local' | 'remote' | string
+  /** Outbound proxy URL the downloads went through, if any. */
+  proxy?: string | null
+  proxyMember?: string | null
+  percent?: number | null
+  version?: string | null
   error?: string | null
   workOrder?: { markdown?: string; json?: string; prompt?: string } | null
   workOrderMarkdown?: string | null
@@ -328,6 +338,14 @@ export const api = {
     return request<PackagesResponse>('/api/dsh-mesh/packages')
   },
 
+  removePackage(name: string): Promise<{ ok: boolean; removed: string[] }> {
+    return request<{ ok: boolean; removed: string[] }>('/api/dsh-mesh/packages/delete', {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: JSON.stringify({ name }),
+    })
+  },
+
   deploy(member: string, packageName: string): Promise<DeployResponse> {
     return request<DeployResponse>('/api/dsh-mesh/deploy', {
       method: 'POST',
@@ -350,7 +368,15 @@ export const api = {
     )
   },
 
-  startBuild(body: { source?: string; ref?: string; targets?: string[]; planOnly?: boolean }): Promise<{ job: BuildJob }> {
+  startBuild(body: {
+    source?: string
+    ref?: string
+    targets?: string[]
+    planOnly?: boolean
+    member?: string
+    proxy?: string
+    proxyMember?: string
+  }): Promise<{ job: BuildJob }> {
     return request<{ job: BuildJob }>('/api/dsh-mesh/build', {
       method: 'POST',
       headers: { 'x-dsh-mesh': '1' },

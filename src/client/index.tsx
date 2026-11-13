@@ -57,6 +57,7 @@ import {
   type SystemInfo,
 } from './api'
 import { WireGuardPanel } from './wireguard'
+import { PackagesPanel } from './packages'
 import { EN as WIREGUARD_EN, dictionary as wireguardDictionary } from './wireguard/i18n'
 
 const NS = 'dsh-mesh'
@@ -916,7 +917,7 @@ function Panel({ ctx }: { ctx: any }) {
   const [progressJob, setProgressJob] = useState<DeployJob | null>(null)
   const [progressLog, setProgressLog] = useState<string[]>([])
   const deployStatusRef = useRef<Record<string, string>>({})
-  const [panelTab, setPanelTab] = useState<'members' | 'network' | 'conversations'>('members')
+  const [panelTab, setPanelTab] = useState<'members' | 'network' | 'conversations' | 'packages'>('members')
   const [networkRefresh, setNetworkRefresh] = useState(0)
   // Bumped by the toolbar buttons; the conversation tab reloads when it changes.
   const [conversationRefresh, setConversationRefresh] = useState(0)
@@ -1348,7 +1349,7 @@ function Panel({ ctx }: { ctx: any }) {
         <Tabs
           className="dsh-pw-tabs"
           activeKey={panelTab}
-          onChange={key => setPanelTab(key as 'members' | 'network' | 'conversations')}
+          onChange={key => setPanelTab(key as 'members' | 'network' | 'conversations' | 'packages')}
           tabBarExtraContent={panelTab === 'conversations' ? (
             <Space size={4}>
               <Tooltip title="清空已完成对话">
@@ -1431,6 +1432,11 @@ function Panel({ ctx }: { ctx: any }) {
                   refreshToken={conversationRefresh}
                 />
               ),
+            },
+            {
+              key: 'packages',
+              label: '包管理',
+              children: <PackagesPanel active={panelTab === 'packages'} members={memberRows} />,
             },
             {
               key: 'network',

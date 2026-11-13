@@ -18,6 +18,7 @@ import {
   DEFAULT_TARGETS,
   applyRecipes,
   archivePackage,
+  proxyFor,
   assembleRuntimePackage,
   assembleWebPackage,
   learnOverlays,
@@ -45,7 +46,7 @@ export function defaultCacheDir() {
 
 /**
  * Create one job directory and its initial state.
- * @param {{root?: string, source?: string, ref?: string, targets?: string[]}} options job input.
+ * @param {{root?: string, source?: string, ref?: string, targets?: string[], member?: string|null, proxy?: string|null, mode?: string}} options job input.
  * @returns {Promise<{id: string, dir: string, state: object}>} new job.
  */
 export async function createJob(options = {}) {
@@ -63,6 +64,11 @@ export async function createJob(options = {}) {
     targets: options.targets ?? [...DEFAULT_TARGETS],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    // `member` is the build host (null = this machine); `proxy` is the outbound
+    // proxy the downloads go through, so a job can be reproduced as it ran.
+    member: options.member ?? null,
+    proxy: options.proxy ?? null,
+    mode: options.mode ?? 'local',
     worktree: null,
     workOrder: null,
     artifacts: [],
@@ -136,13 +142,14 @@ export async function updateState(dir, patch) {
 /**
  * Run the deterministic build pipeline.
  * @param {string} dir job directory.
- * @param {{repositoryRoot: string, recipesPath?: string, overlayRoot?: string, cacheDir?: string, source?: string, ref?: string, targets?: string[], planOnly?: boolean, reuseWorktree?: boolean, install?: string[]|null, build?: string[], version?: string, full?: boolean, nodeVersion?: string}} options build input.
+ * @param {{repositoryRoot: string, recipesPath?: string, overlayRoot?: string, cacheDir?: string, source?: string, ref?: string, targets?: string[], planOnly?: boolean, reuseWorktree?: boolean, install?: string[]|null, build?: string[], version?: string, full?: boolean, nodeVersion?: string, proxy?: string|null, env?: NodeJS.ProcessEnv}} options build input.
  * @returns {Promise<object>} final state.
  */
 export async function runJob(dir, options) {
   const repositoryRoot = options.repositoryRoot
   const recipesPath = options.recipesPath ?? path.join(repositoryRoot, 'build', 'recipes.json')
   const overlayRoot = options.overlayRoot ?? path.join(repositoryRoot, 'build', 'overlays')
+  const outbound = proxyFor({ proxy: options.proxy, env: options.env, fetchImpl: options.fetchImpl })
   let state = await readState(dir)
   const log = (line) => {
     void appendLog(dir, line)
@@ -156,10 +163,12 @@ export async function runJob(dir, options) {
         ref: state.ref,
         cacheDir: options.cacheDir ?? defaultCacheDir(),
         workDir: dir,
+        fetchImpl: outbound.fetchImpl,
         log,
       })
     state = await updateState(dir, {
       phase: 'apply',
+      proxy: outbound.proxy,
       source: prepared.source,
       ref: prepared.ref,
       worktree: prepared.dir,
@@ -205,6 +214,7 @@ export async function runJob(dir, options) {
       log,
       install: options.install,
       build: options.build,
+      env: outbound.env,
     })
     if (!built.ok) {
       state = await updateState(dir, { status: 'build-failed', phase: 'build', error: built.error ?? 'web build failed' })
@@ -225,6 +235,8 @@ export async function runJob(dir, options) {
         source: state.source,
         ref: state.ref,
         tree: recipes.tree ?? null,
+        fetchImpl: outbound.fetchImpl,
+        env: outbound.env,
         log,
       }
       const assembled = full
@@ -278,6 +290,27 @@ export async function learnJob(dir, options) {
   await writeFile(recipesPath, JSON.stringify(learned.recipes, null, 2), 'utf8')
   await appendLog(dir, `learned ${String(learned.learned.length)} overlay(s)`)
   return updateState(dir, { learnedAt: new Date().toISOString(), learned: learned.learned })
+}
+
+/**
+ * Continue a job from its existing worktree.
+ *
+ * This is the second half of the `needs-fix` loop: a caller corrects the
+ * worktree, learns those files into `build/overlays`, then resumes the same
+ * job so the install/build/package phases run on the corrected tree.
+ * @param {string} dir job directory.
+ * @param {object} options same options as {@link runJob}.
+ * @returns {Promise<object>} final state.
+ */
+export async function resumeJob(dir, options) {
+  const state = await readState(dir)
+  if (!existsSync(path.join(dir, 'src'))) {
+    throw new Error(`job ${state.id} has no worktree to resume; start a new build`)
+  }
+  if (state.status === 'needs-fix') {
+    throw new Error(`job ${state.id} still needs its overlays learned before it can resume`)
+  }
+  return runJob(dir, { ...options, reuseWorktree: true })
 }
 
 /**

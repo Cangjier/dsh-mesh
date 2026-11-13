@@ -77,6 +77,11 @@ export function registerApi(ctx, service) {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() })
           return
         }
+        if (method === 'POST' && path === '/packages/delete') {
+          const body = await readJson(request)
+          writeJson(response, 200, await service.removePackage({ name: typeof body.name === 'string' ? body.name : '' }))
+          return
+        }
         if (method === 'POST' && path === '/conversations/send') {
           const body = await readJson(request)
           writeJson(response, 200, await service.sendConversation({
@@ -175,6 +180,9 @@ export function registerApi(ctx, service) {
             targets: Array.isArray(body.targets) ? body.targets.filter(value => typeof value === 'string') : undefined,
             planOnly: body.planOnly === true,
             version: typeof body.version === 'string' ? body.version : undefined,
+            member: typeof body.member === 'string' ? body.member : undefined,
+            proxy: typeof body.proxy === 'string' ? body.proxy : undefined,
+            proxyMember: typeof body.proxyMember === 'string' ? body.proxyMember : undefined,
           })
           writeJson(response, 202, { ok: true, job })
           return

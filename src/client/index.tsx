@@ -917,6 +917,7 @@ function Panel({ ctx }: { ctx: any }) {
   const [progressLog, setProgressLog] = useState<string[]>([])
   const deployStatusRef = useRef<Record<string, string>>({})
   const [panelTab, setPanelTab] = useState<'members' | 'network' | 'conversations'>('members')
+  const [networkRefresh, setNetworkRefresh] = useState(0)
   // Bumped by the toolbar buttons; the conversation tab reloads when it changes.
   const [conversationRefresh, setConversationRefresh] = useState(0)
   const [clearingConversations, setClearingConversations] = useState(false)
@@ -1309,7 +1310,6 @@ function Panel({ ctx }: { ctx: any }) {
             <Tag icon={gateAvailable ? <ApartmentOutlined /> : <WarningOutlined />} color={gateAvailable ? 'green' : 'default'}>
               {gateAvailable ? '网关已连接' : '本机直连'}
             </Tag>
-            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { void load() }}>刷新</Button>
           </div>
         </div>
 
@@ -1369,6 +1369,25 @@ function Panel({ ctx }: { ctx: any }) {
                 />
               </Tooltip>
             </Space>
+          ) : panelTab === 'members' ? (
+            <Tooltip title="刷新成员">
+              <Button
+                type="text"
+                size="small"
+                icon={<ReloadOutlined />}
+                loading={loading}
+                onClick={() => { void load() }}
+              />
+            </Tooltip>
+          ) : panelTab === 'network' ? (
+            <Tooltip title="刷新已加入设备">
+              <Button
+                type="text"
+                size="small"
+                icon={<ReloadOutlined />}
+                onClick={() => setNetworkRefresh(value => value + 1)}
+              />
+            </Tooltip>
           ) : undefined}
           items={[
             {
@@ -1416,7 +1435,17 @@ function Panel({ ctx }: { ctx: any }) {
             {
               key: 'network',
               label: '组网',
-              children: <div className="dsh-pw-tabbody"><WireGuardPanel ctx={ctx} embedded /></div>,
+              children: (
+                <div className="dsh-pw-tabbody">
+                  <WireGuardPanel
+                    ctx={ctx}
+                    embedded
+                    members={memberRows}
+                    gateAvailable={gateAvailable}
+                    refreshToken={networkRefresh}
+                  />
+                </div>
+              ),
             },
           ]}
         />

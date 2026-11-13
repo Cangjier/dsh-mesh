@@ -4,6 +4,7 @@ import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path';
 import { DEFAULT_SETTINGS } from './config';
 import { generateKeyPair, normalizeKey, publicKeyFromPrivate } from './keys';
+import { SSH_USER_PATTERN } from './ssh';
 
 /**
  * @typedef {ReturnType<typeof emptyState>} PluginState
@@ -16,7 +17,7 @@ import { generateKeyPair, normalizeKey, publicKeyFromPrivate } from './keys';
  *   role: 'idle' | 'server' | 'client',
  *   settings: typeof DEFAULT_SETTINGS,
  *   server: { running: boolean, startedAt: string | null, publicKey: string, endpoint: string | null, endpointHost: string | null, controlUrl: string | null, controlPort: number, listenPort: number, vpnCidr: string, interfaceName: string, mtu: number, dns: string, peers: Array<Record<string, unknown>>, warnings: string[], forwarding: boolean | null },
- *   client: { connected: boolean, pending: boolean, publicKey: string | null, name: string | null, serverUrl: string | null, serverHost: string | null, assignedIp: string | null, serverPublicKey: string | null, vpnCidr: string | null, endpoint: string | null, interfaceName: string | null, mtu: number, egress: boolean, hubIp: string | null, joinCode: string | null, connectedAt: string | null, lastHandshakeAt: string | null, receivedBytes: number, sentBytes: number, lastError: string | null, warnings: string[] },
+ *   client: { connected: boolean, pending: boolean, publicKey: string | null, name: string | null, serverUrl: string | null, serverHost: string | null, assignedIp: string | null, serverPublicKey: string | null, vpnCidr: string | null, endpoint: string | null, interfaceName: string | null, mtu: number, egress: boolean, hubIp: string | null, joinCode: string | null, sshToken: string | null, connectedAt: string | null, lastHandshakeAt: string | null, receivedBytes: number, sentBytes: number, lastError: string | null, warnings: string[] },
  *   lastError: string | null,
  *   logs: string[],
  *   updatedAt: string | null
@@ -60,6 +61,7 @@ export function emptyState() {
       egress: false,
       hubIp: null,
       joinCode: null,
+      sshToken: null,
       connectedAt: null,
       lastHandshakeAt: null,
       receivedBytes: 0,
@@ -112,6 +114,15 @@ export function normalizeState(raw) {
             ...peer,
             egress: peer.egress === true,
             platform: peer.platform === 'windows' ? 'windows' : peer.platform === 'linux' ? 'linux' : null,
+            sshUser: typeof peer.sshUser === 'string' && SSH_USER_PATTERN.test(peer.sshUser) ? peer.sshUser : null,
+            sshToken: typeof peer.sshToken === 'string' && peer.sshToken ? peer.sshToken : null,
+            sshInstalled: peer.sshInstalled === true,
+            sshRunning: peer.sshRunning === true,
+            sshReady: peer.sshReady === true,
+            sshVersion: typeof peer.sshVersion === 'string' ? peer.sshVersion.slice(0, 120) : null,
+            sshPort: Number.isInteger(peer.sshPort) && peer.sshPort > 0 && peer.sshPort <= 65535 ? peer.sshPort : 22,
+            sshLastReportAt: typeof peer.sshLastReportAt === 'string' ? peer.sshLastReportAt : null,
+            sshError: typeof peer.sshError === 'string' ? peer.sshError.slice(0, 500) : null,
           }))
           .slice(0, 1024)
         : [],
@@ -138,6 +149,7 @@ export function normalizeState(raw) {
       egress: client.egress === true,
       hubIp: typeof client.hubIp === 'string' ? client.hubIp : null,
       joinCode: typeof client.joinCode === 'string' ? client.joinCode : null,
+      sshToken: typeof client.sshToken === 'string' ? client.sshToken : null,
       connectedAt: typeof client.connectedAt === 'string' ? client.connectedAt : null,
       lastHandshakeAt: typeof client.lastHandshakeAt === 'string' ? client.lastHandshakeAt : null,
       receivedBytes: Number.isSafeInteger(client.receivedBytes) ? client.receivedBytes : 0,

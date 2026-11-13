@@ -58,33 +58,21 @@ export function buildLinuxClientCommand(state: Snapshot, target?: DeploymentTarg
  * @returns {string} one-line PowerShell command.
  */
 export function buildWindowsClientCommand(state: Snapshot, target?: DeploymentTarget): string {
-  const { controlUrl, joinCode, family } = targetOf(state, target);
+  const { controlUrl, joinCode } = targetOf(state, target);
   const quote = (value: string) => value.replace(/'/g, "''");
+  const control = new URL(controlUrl);
+  control.port = '';
+  const gateUrl = control.origin;
+  // One command, no package: the gate-hosted bootstrap installs WireGuard if
+  // needed, joins the mesh, installs OpenSSH, enrolls the gateway key, and
+  // reports SSH readiness. DSH Web is deployed later over SSH.
   const script = `$ErrorActionPreference = 'Stop'
-$control = '${quote(controlUrl)}'
-$code = '${quote(joinCode)}'
-$family = '${quote(family)}'
-$wg = Join-Path $env:ProgramFiles 'WireGuard\\wg.exe'
-if (-not (Test-Path $wg)) { throw 'Install WireGuard for Windows first: https://www.wireguard.com/install/' }
-$key = (& $wg genkey).Trim()
-$pub = ($key | & $wg pubkey).Trim()
-$payload = @{ name = $env:COMPUTERNAME; publicKey = $pub; code = $code; family = $family; platform = 'windows' } | ConvertTo-Json -Compress
-$join = Invoke-RestMethod -Method Post -Uri "$control/join" -ContentType 'application/json' -Body $payload
-if (-not $join.ok) { throw 'Join failed' }
-$conf = Join-Path $env:ProgramData 'WireGuard\\dshwg0.conf'
-New-Item -ItemType Directory -Force (Split-Path $conf) | Out-Null
-$allowed = $join.server.vpnCidr
-if ($join.egress) { $allowed = '0.0.0.0/0' }
-$lines = @('[Interface]', "PrivateKey = $key", "Address = $($join.client.address)", "MTU = $($join.server.mtu)")
-if ($join.server.dns) { $lines += "DNS = $($join.server.dns)" }
-$lines += '', '[Peer]', "PublicKey = $($join.server.publicKey)", "Endpoint = $($join.server.endpoint)", "AllowedIPs = $allowed", 'PersistentKeepalive = 25'
-Set-Content -Path $conf -Value $lines -Encoding ascii
-# WireGuard for Windows installs its routes from AllowedIPs, so 0.0.0.0/0
-# becomes the default route while the tunnel service is up and the config file
-# is the reboot-persistent half. Reinstall the service to apply a changed
-# AllowedIPs on an existing tunnel.
-if ($join.egress) { & (Join-Path $env:ProgramFiles 'WireGuard\\wireguard.exe') /uninstalltunnelservice dshwg0 2>$null }
-& (Join-Path $env:ProgramFiles 'WireGuard\\wireguard.exe') /installtunnelservice $conf`;
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+$path = Join-Path $env:TEMP 'dsh-member.ps1'
+Invoke-WebRequest '${quote(gateUrl)}/__gate/bootstrap/windows-member.ps1' -OutFile $path -UseBasicParsing
+& $path -JoinCode '${quote(joinCode)}' -ServerUrl '${quote(controlUrl)}' -GateUrl '${quote(gateUrl)}'
+`;
   let binary = '';
   for (let index = 0; index < script.length; index += 1) {
     const code = script.charCodeAt(index);

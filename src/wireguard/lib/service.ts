@@ -1,9 +1,10 @@
 /** WireGuard server/client orchestration shared by the panel and control API. */
 
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { access, chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -25,10 +26,15 @@ import { keyFingerprint, normalizeKey } from './keys';
 import { forgetKnownHosts, refreshKnownHosts } from './known-hosts';
 import { detectGlobalIpv6, detectLanAddress, detectPlatform, findExecutable, localHostname, runPrivileged, type PlatformInfo } from './platform';
 import { buildSshAuthorizeCommand, buildWindowsSshAuthorizeCommand, SSH_USER_PATTERN } from './ssh';
+import { authorizeLinuxKey, authorizeWindowsKey, inspectSsh, installWindowsOpenSsh, verifyOpenSshZip, type OpenSshAssetManifest, type SshAgentStatus } from './ssh-agent';
+import { AssetStore } from './static-assets';
 import { emptyState, Store, type PluginState } from './store';
 import { Tunnel } from './tunnel';
 
 const execFileAsync = promisify(execFile);
+
+const SSH_AGENT_INTERVAL_MS = 5 * 60_000;
+const SSH_INSTALL_RETRY_MS = 15 * 60_000;
 
 export interface WireGuardServiceOptions {
   config?: Record<string, unknown>;
@@ -61,6 +67,7 @@ function integerOr(value: unknown, fallback: number): number {
 export class WireGuardService {
   config: Record<string, unknown>;
   readonly store: Store;
+  readonly assets: AssetStore;
   state: PluginState;
   readonly platformFactory: () => Promise<PlatformInfo>;
   readonly tunnelFactory: (platform: PlatformInfo) => any;
@@ -76,10 +83,14 @@ export class WireGuardService {
   tunnel: any;
   platformAt: number;
   lock: Promise<void>;
+  sshAgentTimer: ReturnType<typeof setInterval> | null;
+  sshAgentBusy: boolean;
+  sshAgentLastAttempt: number;
 
   constructor(options: WireGuardServiceOptions) {
     this.config = options.config ?? {};
     this.store = new Store(options.dataDir);
+    this.assets = new AssetStore();
     this.state = this.store.state;
     this.platformFactory = options.platformFactory ?? detectPlatform;
     this.tunnelFactory = options.tunnelFactory ?? ((platform) => new Tunnel({ platform, log: (line) => this.#log(line) }));
@@ -111,6 +122,9 @@ export class WireGuardService {
     this.tunnel = null;
     this.platformAt = 0;
     this.lock = Promise.resolve();
+    this.sshAgentTimer = null;
+    this.sshAgentBusy = false;
+    this.sshAgentLastAttempt = 0;
   }
 
   /** Load state, resolve tools, and reconcile a tunnel left by a previous run. */
@@ -143,6 +157,9 @@ export class WireGuardService {
       await this.#persist();
     } catch (error) {
       this.#log(`could not persist initial state: ${errorMessage(error)}`);
+    }
+    if (this.state.client.serverUrl && (this.state.client.connected || this.state.client.pending)) {
+      this.#startSshAgent();
     }
   }
 
@@ -268,6 +285,13 @@ export class WireGuardService {
       onJoin: (body, remoteAddress) => this.joinPeer(body, remoteAddress),
       onLeave: (body, remoteAddress) => this.leavePeer(body, remoteAddress),
       onSetPeerEgress: (publicKey, enabled) => this.setPeerEgress({ publicKey, enabled }),
+      onSshReport: (body, remoteAddress) => this.reportPeerSsh(body, remoteAddress),
+      getPeerSshKey: (body) => this.getPeerSshKey(body),
+      getOpenSshManifest: (body) => this.getOpenSshManifest(body),
+      getOpenSshAsset: (body) => this.getOpenSshAsset(body),
+      getAssetIndex: (body) => this.getAssetIndex(body),
+      getAssetManifest: (body) => this.getAssetManifest(body),
+      getAssetFile: (body) => this.getAssetFile(body),
       extraHandler: this.controlExtraHandler,
       log: (line) => this.#log(line),
     });
@@ -982,6 +1006,7 @@ export class WireGuardService {
         egress,
       });
       await this.store.writeConfig('client', configText, this.state.settings.interfaceName, this.platform?.isWindows === true);
+      const agentToken = typeof join?.sshToken === 'string' && join.sshToken ? join.sshToken : null;
       this.state.client = {
         ...emptyState().client,
         pending: true,
@@ -998,6 +1023,7 @@ export class WireGuardService {
         egress,
         hubIp,
         joinCode,
+        sshToken: agentToken,
         lastError: null,
       };
       this.state.role = 'client';
@@ -1030,6 +1056,7 @@ export class WireGuardService {
       this.state.lastError = null;
       this.#log(`client connected to ${address.controlUrl} as ${this.state.client.assignedIp}`);
       await this.#persist();
+      if (this.state.client.sshToken) this.#startSshAgent();
       return this.snapshot();
     });
   }
@@ -1073,6 +1100,7 @@ export class WireGuardService {
       client.lastError = null;
       this.state.lastError = null;
       await this.#persist();
+      if (this.state.client.sshToken) this.#startSshAgent();
       return this.snapshot();
     });
   }
@@ -1085,6 +1113,7 @@ export class WireGuardService {
     return this.#serialized(async () => {
       const client = this.state.client;
       if (!client.connected && !client.pending) return this.snapshot();
+      this.#stopSshAgent();
       let downError = null;
       if (this.tunnel && client.interfaceName) {
         try {
@@ -1139,6 +1168,7 @@ export class WireGuardService {
         existing.name = name;
         const platform = body.platform === 'windows' ? 'windows' : body.platform === 'linux' ? 'linux' : null;
         if (platform) existing.platform = platform;
+        this.#ensurePeerSshToken(existing);
         await this.tunnel.addPeer(this.state.server.interfaceName, existing);
         existing.applied = true;
         if (existing.egress === true) {
@@ -1169,9 +1199,18 @@ export class WireGuardService {
         online: false,
         lastHandshakeAt: null,
         sshUser: null,
+        sshToken: null,
+        sshInstalled: false,
+        sshRunning: false,
+        sshReady: false,
+        sshVersion: null,
+        sshPort: 22,
+        sshLastReportAt: null,
+        sshError: null,
         egress: false,
         platform: body.platform === 'windows' ? 'windows' : body.platform === 'linux' ? 'linux' : null,
       };
+      this.#ensurePeerSshToken(peer);
       this.state.server.peers.push(peer);
       try {
         await this.tunnel.addPeer(this.state.server.interfaceName, peer);
@@ -1381,6 +1420,157 @@ export class WireGuardService {
     await rm(`${keyPath}.pub`, { force: true }).catch(() => {});
   }
 
+  /** Create and persist the member agent token on first use. */
+  #ensurePeerSshToken(peer) {
+    if (typeof peer.sshToken !== 'string' || !peer.sshToken) {
+      peer.sshToken = randomBytes(32).toString('base64url');
+    }
+    return peer.sshToken;
+  }
+
+  /** Resolve one peer from its WireGuard key and per-peer agent token. */
+  #peerByToken(publicKey, token) {
+    const key = normalizeKey(publicKey);
+    if (!key) {
+      throw new WireGuardError('invalid_public_key', 'A valid WireGuard public key is required.', { status: 400 });
+    }
+    const peer = this.state.server.peers.find((candidate) => candidate.publicKey === key);
+    const expected = peer && typeof peer.sshToken === 'string' ? peer.sshToken : '';
+    if (!peer || !secretsMatch(String(token ?? ''), expected)) {
+      throw new WireGuardError('invalid_peer_token', 'The member agent token is missing or invalid.', { status: 401 });
+    }
+    return peer;
+  }
+
+  /** Public view of one peer's SSH state; never includes the agent token. */
+  #peerSshView(peer) {
+    return {
+      publicKey: peer.publicKey,
+      name: peer.name,
+      ip: peer.ip,
+      platform: peer.platform === 'windows' ? 'windows' : peer.platform === 'linux' ? 'linux' : null,
+      user: peer.sshUser ?? null,
+      installed: peer.sshInstalled === true,
+      running: peer.sshRunning === true,
+      ready: peer.sshReady === true,
+      version: typeof peer.sshVersion === 'string' ? peer.sshVersion : null,
+      port: integerOr(peer.sshPort, 22),
+      error: typeof peer.sshError === 'string' ? peer.sshError : null,
+      lastReportAt: typeof peer.sshLastReportAt === 'string' ? peer.sshLastReportAt : null,
+    };
+  }
+
+  /**
+   * Record what the member agent found and installed. This is the only writer
+   * of peer.sshUser, so a Windows host no longer has to guess "Administrator".
+   * @param {Record<string, unknown>} body report payload.
+   * @param {string} remoteAddress caller address.
+   * @returns {Promise<Record<string, unknown>>} updated public peer fields.
+   */
+  async reportPeerSsh(body, remoteAddress = '') {
+    return this.#serialized(async () => {
+      const peer = this.#peerByToken(body.publicKey, body.token);
+      const wasReady = peer.sshReady === true;
+      const previousUser = typeof peer.sshUser === 'string' ? peer.sshUser : null;
+      const platform = body.platform === 'windows' ? 'windows' : body.platform === 'linux' ? 'linux' : peer.platform;
+      if (platform) peer.platform = platform;
+      if (typeof body.user === 'string' && body.user.trim()) {
+        const user = body.user.trim();
+        if (!SSH_USER_PATTERN.test(user)) {
+          throw new WireGuardError('invalid_ssh_user', 'The reported SSH username is invalid.', { status: 400 });
+        }
+        peer.sshUser = user;
+      }
+      peer.sshInstalled = body.sshInstalled === true;
+      peer.sshRunning = body.sshRunning === true;
+      const port = integerOr(body.sshPort, 22);
+      peer.sshPort = port >= 1 && port <= 65535 ? port : 22;
+      peer.sshVersion = typeof body.sshVersion === 'string' ? body.sshVersion.trim().slice(0, 120) : null;
+      const reportedError = typeof body.sshError === 'string' ? body.sshError.trim().slice(0, 500) : '';
+      const ready = body.sshReady === true
+        && peer.sshInstalled === true
+        && peer.sshRunning === true
+        && typeof peer.sshUser === 'string'
+        && peer.sshUser !== '';
+      peer.sshReady = ready;
+      peer.sshError = ready ? null : (reportedError || 'SSH is not ready');
+      peer.sshLastReportAt = new Date().toISOString();
+      await this.#persist();
+      const userChanged = previousUser !== (peer.sshUser ?? null);
+      this.#log(`SSH report from ${peer.name} (${peer.ip}) via ${remoteAddress || 'member'}: user=${peer.sshUser ?? '-'} ready=${ready}`);
+      if (ready && (!wasReady || userChanged)) {
+        try {
+          const keys = await this.knownHosts.refresh(peer.ip);
+          this.#log(`refreshed the SSH host key for ${peer.name} (${Array.isArray(keys) ? keys.length : 0} key(s))`);
+        } catch (error) {
+          this.#log(`could not refresh the SSH host key for ${peer.name}: ${errorMessage(error)}`);
+        }
+      }
+      return { peer: this.#peerSshView(peer) };
+    });
+  }
+
+  /**
+   * Return the server's SSH public key for one peer. The member agent installs
+   * this key locally; the private key never leaves the server.
+   * @param {Record<string, unknown>} body public key and agent token.
+   * @returns {Promise<Record<string, unknown>>} public key and target user.
+   */
+  async getPeerSshKey(body) {
+    return this.#serialized(async () => {
+      const peer = this.#peerByToken(body.publicKey, body.token);
+      const publicKey = await this.#ensureSshKey(peer.publicKey);
+      return { publicKey, user: peer.sshUser ?? null, host: peer.ip };
+    });
+  }
+
+  /** List the gateway's static assets for an authenticated member. */
+  async getAssetIndex(body) {
+    this.#peerByToken(body.publicKey, body.token);
+    return { assets: await this.assets.index() };
+  }
+
+  /** Describe one static asset for an authenticated member. */
+  async getAssetManifest(body) {
+    this.#peerByToken(body.publicKey, body.token);
+    return { ...(await this.assets.manifest(String(body.name ?? ''))) } as Record<string, unknown>;
+  }
+
+  /** Resolve one static asset file for an authenticated member. */
+  async getAssetFile(body) {
+    this.#peerByToken(body.publicKey, body.token);
+    return this.assets.file(String(body.name ?? ''), String(body.file ?? ''));
+  }
+
+  /**
+   * Legacy shape for older agents: describe the Windows OpenSSH package.
+   * @param {Record<string, unknown>} body public key and agent token.
+   * @returns {Promise<OpenSshAssetManifest>} package manifest.
+   */
+  async getOpenSshManifest(body) {
+    this.#peerByToken(body.publicKey, body.token);
+    const manifest = await this.assets.manifest('openssh');
+    const asset = manifest.assets.find(item => item.os === 'windows' && item.arch === 'x64') ?? manifest.assets[0];
+    return {
+      name: manifest.name,
+      version: manifest.version,
+      file: asset.file,
+      sha256: asset.sha256,
+      bytes: asset.bytes,
+    };
+  }
+
+  /**
+   * Legacy shape for older agents: resolve the Windows OpenSSH zip.
+   * @param {Record<string, unknown>} body public key and agent token.
+   * @returns {Promise<{ path: string, name: string, size: number, contentType: string, sha256: string }>} package file.
+   */
+  async getOpenSshAsset(body) {
+    this.#peerByToken(body.publicKey, body.token);
+    const asset = await this.assets.first('openssh', 'windows', 'x64');
+    return this.assets.file('openssh', asset.file);
+  }
+
   /**
    * Build the server data returned to a joining client.
    * @param {Record<string, any>} peer assigned peer.
@@ -1402,6 +1592,9 @@ export class WireGuardService {
     const endpoint = selected?.endpoint || server.endpoint;
     return {
       client: { ip: peer.ip, address: `${peer.ip}/32`, name: peer.name },
+      // Per-peer secret used by the member agent for its SSH status/key
+      // reports. It is only returned to the joining peer.
+      sshToken: typeof peer.sshToken === 'string' ? peer.sshToken : null,
       // The member scripts switch AllowedIPs to 0.0.0.0/0 only when this is
       // true; keeping the flag out of `server` makes that switch explicit.
       egress: peer.egress === true,
@@ -1618,6 +1811,13 @@ export class WireGuardService {
           egress: peer.egress === true,
           sshConfigured: Boolean(peer.sshUser),
           sshUser: peer.sshUser ?? null,
+          sshInstalled: peer.sshInstalled === true,
+          sshRunning: peer.sshRunning === true,
+          sshReady: peer.sshReady === true,
+          sshVersion: typeof peer.sshVersion === 'string' ? peer.sshVersion : null,
+          sshPort: integerOr(peer.sshPort, 22),
+          sshLastReportAt: typeof peer.sshLastReportAt === 'string' ? peer.sshLastReportAt : null,
+          sshError: typeof peer.sshError === 'string' ? peer.sshError : null,
           platform: peer.platform === 'windows' ? 'windows' : peer.platform === 'linux' ? 'linux' : null,
         })),
       },
@@ -1637,7 +1837,7 @@ export class WireGuardService {
    * @param {{ method?: string, body?: unknown, timeout?: number }} [options]
    * @returns {Promise<Record<string, any>>} decoded JSON.
    */
-  async #fetchJson(url: string, options: { method?: string; body?: unknown; timeout?: number } = {}): Promise<Record<string, any>> {
+  async #fetchJson(url: string, options: { method?: string; body?: unknown; timeout?: number; headers?: Record<string, string> } = {}): Promise<Record<string, any>> {
     const timeout = options.timeout ?? 8000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -1649,6 +1849,7 @@ export class WireGuardService {
           headers: {
             accept: 'application/json',
             ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
+            ...(options.headers ?? {}),
           },
           body: options.body === undefined ? undefined : JSON.stringify(options.body),
           signal: controller.signal,
@@ -1693,8 +1894,220 @@ export class WireGuardService {
     }
   }
 
+  /** Start the periodic member SSH agent. Safe to call repeatedly. */
+  #startSshAgent() {
+    if (this.sshAgentTimer) return;
+    this.#log('SSH agent started');
+    void this.#runSshAgent();
+    this.sshAgentTimer = setInterval(() => { void this.#runSshAgent(); }, SSH_AGENT_INTERVAL_MS);
+    this.sshAgentTimer.unref?.();
+  }
+
+  /** Stop the periodic member SSH agent. */
+  #stopSshAgent() {
+    if (!this.sshAgentTimer) return;
+    clearInterval(this.sshAgentTimer);
+    this.sshAgentTimer = null;
+    this.#log('SSH agent stopped');
+  }
+
+  /** One guarded agent pass; failures are logged and retried on the next tick. */
+  async #runSshAgent() {
+    if (this.sshAgentBusy) return;
+    this.sshAgentBusy = true;
+    try {
+      await this.#sshAgentTick();
+    } catch (error) {
+      this.#log(`SSH agent: ${errorMessage(error)}`);
+    } finally {
+      this.sshAgentBusy = false;
+    }
+  }
+
+  /** Inspect, auto-install, enroll the key, and report the local SSH state. */
+  async #sshAgentTick() {
+    const client = this.state.client;
+    if (!client.connected || !client.serverUrl || !client.publicKey) return;
+    await this.#detect(false);
+    const platform = this.platform;
+    if (!platform) return;
+    await this.#ensureAgentToken();
+    const token = this.state.client.sshToken;
+    if (!token) throw new Error('the server did not issue an SSH agent token');
+    let status = await inspectSsh(platform);
+    const needsRepair = platform.isWindows && (!status.installed || !status.ready);
+    if (needsRepair && this.now() - this.sshAgentLastAttempt >= SSH_INSTALL_RETRY_MS) {
+      this.sshAgentLastAttempt = this.now();
+      let zipPath = null;
+      try {
+        const serverKey = await this.#fetchPeerSshKey(token);
+        const manifest = await this.#fetchOpenSshManifest(token);
+        zipPath = await this.#downloadOpenSshAsset(token, manifest);
+        await installWindowsOpenSsh(platform, zipPath, serverKey, status.user);
+        status = await inspectSsh(platform);
+      } catch (error) {
+        status.error = `OpenSSH auto-install failed: ${errorMessage(error)}`;
+        this.#log(`SSH agent: ${status.error}`);
+      } finally {
+        if (zipPath) await rm(path.dirname(zipPath), { recursive: true, force: true }).catch(() => {});
+      }
+    }
+    if (status.ready && status.user) {
+      try {
+        const serverKey = await this.#fetchPeerSshKey(token);
+        if (platform.isWindows) await authorizeWindowsKey(platform, serverKey, status.user);
+        else await authorizeLinuxKey(platform, serverKey, status.user);
+      } catch (error) {
+        status.ready = false;
+        status.error = `SSH key enrollment failed: ${errorMessage(error)}`;
+        this.#log(`SSH agent: ${status.error}`);
+      }
+    }
+    await this.#postSshReport(token, platform, status);
+  }
+
+  /** Bootstrap the per-peer token through /join for members that predate it. */
+  async #ensureAgentToken() {
+    const client = this.state.client;
+    if (typeof client.sshToken === 'string' && client.sshToken) return;
+    if (!client.serverUrl || !client.publicKey) throw new Error('the client is not connected to a server');
+    if (!client.joinCode) throw new Error('the saved client has no join code; reconnect to the server to enroll SSH');
+    const platform = this.platform?.isWindows ? 'windows' : 'linux';
+    const join = await this.#fetchJson(`${client.serverUrl}/join`, {
+      method: 'POST',
+      body: {
+        name: client.name ?? localHostname(),
+        publicKey: client.publicKey,
+        code: client.joinCode,
+        family: '',
+        platform,
+      },
+      timeout: 10000,
+    });
+    const token = typeof join.sshToken === 'string' ? join.sshToken : '';
+    if (!token) throw new Error('the server did not return an SSH agent token');
+    await this.#serialized(async () => {
+      if (!this.state.client.sshToken) {
+        this.state.client.sshToken = token;
+        await this.#persist();
+      }
+    });
+    this.#log('SSH agent token enrolled');
+  }
+
+  /** Ask the server for this peer's SSH public key. */
+  async #fetchPeerSshKey(token: string): Promise<string> {
+    const client = this.state.client;
+    if (!client.serverUrl || !client.publicKey) throw new Error('the client is not connected to a server');
+    const result = await this.#fetchJson(`${client.serverUrl}/ssh/key`, {
+      method: 'POST',
+      body: { publicKey: client.publicKey, token },
+      timeout: 12000,
+    });
+    const publicKey = String(result.publicKey ?? '').trim();
+    if (!/^ssh-ed25519 [A-Za-z0-9+/=]+(?: [^\r\n]*)?$/u.test(publicKey)) {
+      throw new Error('the server returned an unexpected SSH public key');
+    }
+    return publicKey;
+  }
+
+  /** Ask the server for the Windows OpenSSH package manifest. */
+  async #fetchOpenSshManifest(token: string): Promise<OpenSshAssetManifest> {
+    const client = this.state.client;
+    if (!client.serverUrl || !client.publicKey) throw new Error('the client is not connected to a server');
+    const query = `publicKey=${encodeURIComponent(client.publicKey)}`;
+    let result: Record<string, any>;
+    try {
+      result = await this.#fetchJson(`${client.serverUrl}/assets/openssh?${query}`, {
+        headers: { 'x-dsh-peer-token': token },
+        timeout: 12000,
+      });
+    } catch {
+      // Older control services only expose the /ssh aliases.
+      result = await this.#fetchJson(`${client.serverUrl}/ssh/manifest`, {
+        method: 'POST',
+        body: { publicKey: client.publicKey, token },
+        timeout: 12000,
+      });
+    }
+    const entries = Array.isArray(result.assets) ? result.assets : [];
+    const selected = entries.find((item: any) => item?.os === 'windows' && item?.arch === 'x64') ?? entries[0] ?? result;
+    const manifest = {
+      name: String(result.name ?? 'openssh'),
+      version: String(result.version ?? 'unknown'),
+      file: String(selected.file ?? ''),
+      sha256: String(selected.sha256 ?? '').toLowerCase(),
+      bytes: Number(selected.bytes),
+    };
+    if (!/^[A-Za-z0-9._-]+\.zip$/u.test(manifest.file)
+      || !/^[0-9a-f]{64}$/u.test(manifest.sha256)
+      || !Number.isSafeInteger(manifest.bytes)
+      || manifest.bytes <= 0) {
+      throw new Error('the server returned an invalid OpenSSH package manifest');
+    }
+    return manifest;
+  }
+
+  /** Download the OpenSSH zip from the control panel and verify its checksum. */
+  async #downloadOpenSshAsset(token: string, manifest: OpenSshAssetManifest): Promise<string> {
+    const client = this.state.client;
+    if (!client.serverUrl || !client.publicKey) throw new Error('the client is not connected to a server');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 90_000);
+    try {
+      const query = `publicKey=${encodeURIComponent(client.publicKey)}`;
+      const generic = `${client.serverUrl}/assets/openssh/${encodeURIComponent(manifest.file)}?${query}`;
+      const legacy = `${client.serverUrl}/ssh/asset?${query}`;
+      const request = (url: string) => this.fetchImpl(url, {
+        headers: { accept: 'application/zip', 'x-dsh-peer-token': token },
+        signal: controller.signal,
+        redirect: 'error',
+      });
+      let response = await request(generic);
+      if (response.status === 404) response = await request(legacy);
+      if (!response.ok) {
+        throw new Error(`the gateway refused the OpenSSH package (HTTP ${response.status})`);
+      }
+      const data = Buffer.from(await response.arrayBuffer());
+      const directory = await mkdtemp(path.join(tmpdir(), 'dsh-openssh-'));
+      const zipPath = path.join(directory, manifest.file);
+      await writeFile(zipPath, data);
+      await verifyOpenSshZip(zipPath, manifest);
+      this.#log(`downloaded OpenSSH ${manifest.version} (${data.length} bytes)`);
+      return zipPath;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Publish the final SSH state to the server. */
+  async #postSshReport(token: string, platform: PlatformInfo, status: SshAgentStatus): Promise<void> {
+    const client = this.state.client;
+    if (!client.serverUrl || !client.publicKey) return;
+    const error = status.ready ? null : (status.error || 'SSH is not ready');
+    await this.#fetchJson(`${client.serverUrl}/ssh/report`, {
+      method: 'POST',
+      body: {
+        publicKey: client.publicKey,
+        token,
+        user: status.user,
+        platform: platform.isWindows ? 'windows' : 'linux',
+        hostname: status.hostname,
+        sshInstalled: status.installed,
+        sshRunning: status.running,
+        sshReady: status.ready,
+        sshPort: status.port,
+        sshVersion: status.version,
+        sshError: error,
+      },
+      timeout: 15000,
+    });
+    this.#log(`SSH agent reported ready=${status.ready} user=${status.user ?? '-'}${error ? ` (${error})` : ''}`);
+  }
+
   /** Stop the control panel; keep or tear down the tunnel according to config. */
   async dispose() {
+    this.#stopSshAgent();
     try {
       if (this.control) await this.control.stop();
     } catch {

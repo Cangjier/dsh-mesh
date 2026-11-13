@@ -1,11 +1,12 @@
 /**
  * Model-visible tools for the mesh plugin.
  *
- * Four tools, one behaviour each:
+ * Six tools, one behaviour each:
  *   build        deterministic source build, waits for the final state
  *   deploy       SSH blue-green deployment, waits for the final state
  *   members      read-only WireGuard member discovery
- *   call_member  delegate / run / continue a conversation on another member
+ *   call_member  start / continue a conversation on another member
+ *   wait_member  bounded wait for one member task
  *
  * @module @local/dsh-mesh/tools
  */
@@ -164,9 +165,9 @@ export function registerTools(ctx, toolsCtx, service) {
     description: [
       '把任务交给另一个 WireGuard 成员上的 DSH 对话。',
       '',
-      '`delegate`：在成员 B 上创建对话并异步执行，立即返回 taskId；B 完成后结果会作为一条新的用户消息写回当前 A 的对话。',
-      '`run`：同步等待 B 完成，直接返回最终文本。',
-      '`send`：向已经创建的成员任务对话继续发消息，并继续等待/通知。',
+      '`delegate`：在成员 B 上创建对话并立即返回 taskId；不会同步等待。',
+      '`send`：向已经创建的成员任务对话继续发消息，立即返回；不会自动等待或通知。',
+      '用 wait_member 等待结果：每次有超时上限，超时会返回提示，可以继续用同一个 taskId 等待。',
       '返回值带 data.logFile，指向该任务的日志文件。',
       '',
       '成员通过 WireGuard 成员发现解析（id/name/IP 均可）；目标 B 的 8765 interop 服务必须可达，token 默认复用网关密码。',
@@ -176,14 +177,14 @@ export function registerTools(ctx, toolsCtx, service) {
       properties: {
         action: {
           type: 'string',
-          enum: ['delegate', 'run', 'send'],
+          enum: ['delegate', 'send'],
           description: '要执行的动作。',
         },
         member: { type: 'string', description: '成员 id、名称、VPN IP 或 http(s) URL。' },
-        prompt: { type: 'string', description: 'delegate/run：交给成员 B 的任务。' },
+        prompt: { type: 'string', description: 'delegate：交给成员 B 的任务。' },
         content: { type: 'string', description: 'send：继续发给成员 B 对话的消息。' },
         taskId: { type: 'string', description: 'send 的任务 id。' },
-        cwd: { type: 'string', description: 'delegate/run：成员 B 上的工作目录。' },
+        cwd: { type: 'string', description: 'delegate：成员 B 上的工作目录。' },
       },
       required: ['action'],
       additionalProperties: false,
@@ -198,28 +199,113 @@ export function registerTools(ctx, toolsCtx, service) {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const action = String(args.action)
-      if (action === 'delegate' || action === 'run') {
+      if (action === 'delegate') {
         if (typeof args.prompt !== 'string' || args.prompt.trim() === '') throw new Error('this action needs prompt')
-        const task = action === 'delegate'
-          ? await memberTasks.start({ member: args.member, prompt: args.prompt, cwd: args.cwd, agent: exec.agent, notify: true })
-          : await memberTasks.run({ member: args.member, prompt: args.prompt, cwd: args.cwd, agent: exec.agent })
+        const task = await memberTasks.start({
+          member: args.member,
+          prompt: args.prompt,
+          cwd: args.cwd,
+          agent: exec.agent,
+          notify: false,
+          signal: exec.signal,
+        })
         const data = { ...task, logFile: memberTasks.logPath(task.id) }
         return {
           ok: task.status !== 'failed',
-          text: action === 'delegate'
-            ? `已交给成员 ${task.member}（${task.memberIp}），taskId ${task.id}，对话 ${task.conversationId}。完成后会自动通知当前对话。\n日志：${data.logFile}`
-            : formatMemberTask(data),
+          text: [
+            `已发起成员任务 ${task.id}：${task.member}（${task.memberIp}），对话 ${task.conversationId}。`,
+            `用 wait_member 等待结果：taskId="${task.id}"，timeoutMs=30000（可按需调大，最大 300000）。`,
+            task.status === 'failed' ? `当前状态：failed，${task.error ?? ''}` : '',
+            `日志：${data.logFile}`,
+          ].filter(line => line !== '').join('\n'),
           data,
         }
       }
       if (action === 'send') {
         if (typeof args.taskId !== 'string' || args.taskId === '') throw new Error('send needs taskId')
         if (typeof args.content !== 'string' || args.content.trim() === '') throw new Error('send needs content')
-        const task = await memberTasks.send(args.taskId, args.content)
+        const task = await memberTasks.send(args.taskId, args.content, exec.signal)
         const data = { ...task, logFile: memberTasks.logPath(task.id) }
-        return { ok: true, text: `已发送到 ${task.member} 的对话 ${task.conversationId}；完成后会继续通知当前对话。\n日志：${data.logFile}`, data }
+        return {
+          ok: true,
+          text: [
+            `已发送到 ${task.member} 的对话 ${task.conversationId}。`,
+            `用 wait_member 等待回复：taskId="${task.id}"，timeoutMs=30000。`,
+            `日志：${data.logFile}`,
+          ].join('\n'),
+          data,
+        }
       }
       throw new Error(`unknown action: ${action}`)
+    },
+  }
+
+  const waitMemberDefinition = {
+    name: 'wait_member',
+    description: [
+      '等待一个由 call_member 发起的成员任务，最多 timeoutMs 毫秒。',
+      '',
+      '完成：返回成员对话的最终文本。',
+      '超时：返回 done=false 和“可以继续调用 wait_member”的提示；用同一个 taskId 再调一次即可。',
+      '失败/中断：返回错误；目标 DSH 重启时可以用 call_member send 继续该对话。',
+      '每次调用有上限（默认 30000，最大 300000 毫秒），不会无限阻塞；用户停止当前对话会中止本次等待。',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'call_member 返回的 taskId。' },
+        timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, description: '本次等待上限，默认 30000 毫秒。' },
+      },
+      required: ['taskId'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{
+        type: 'text',
+        text: typeof value?.text === 'string' ? value.text : JSON.stringify(value, null, 2),
+      }],
+    },
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const timeoutMs = Number.isSafeInteger(args.timeoutMs) ? args.timeoutMs : 30_000
+      const result = await memberTasks.wait(args.taskId, { timeoutMs, signal: exec.signal })
+      const task = result.task
+      const data = { ...task, done: result.done, timedOut: result.timedOut, logFile: memberTasks.logPath(task.id) }
+      if (!result.done) {
+        const effective = Math.min(300_000, Math.max(1000, timeoutMs))
+        return {
+          ok: true,
+          text: [
+            `成员任务 ${task.id} 仍在运行：${task.member}（${task.memberIp}），对话 ${task.conversationId}。`,
+            `可以继续调用 wait_member 等待：taskId="${task.id}"，timeoutMs=${String(effective)}。`,
+            typeof task.lastText === 'string' && task.lastText !== '' ? `最近输出：${task.lastText.slice(0, 500)}` : '',
+            `日志：${data.logFile}`,
+          ].filter(line => line !== '').join('\n'),
+          data,
+        }
+      }
+      if (task.status === 'completed') {
+        return {
+          ok: true,
+          text: [
+            `成员任务 ${task.id} 已完成：${task.member}（${task.memberIp}）。`,
+            '结果：',
+            typeof task.lastText === 'string' && task.lastText !== '' ? task.lastText : '(成员没有返回文本结果)',
+            `日志：${data.logFile}`,
+          ].join('\n'),
+          data,
+        }
+      }
+      return {
+        ok: false,
+        text: [
+          `成员任务 ${task.id} ${task.status}：${task.error ?? 'unknown'}`,
+          task.interrupted === true ? '目标成员的 DSH 重启或运行时退出打断了这一轮；可以用 call_member send 同一个 taskId 继续。' : '',
+          `日志：${data.logFile}`,
+        ].filter(line => line !== '').join('\n'),
+        data,
+      }
     },
   }
 
@@ -287,7 +373,7 @@ export function registerTools(ctx, toolsCtx, service) {
     },
   }
 
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, membersDefinition, repackDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, waitMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool)
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`)

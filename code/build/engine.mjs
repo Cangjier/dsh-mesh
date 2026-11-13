@@ -19,6 +19,7 @@ import { pipeline } from 'node:stream/promises'
 import { gzipSync, gunzipSync } from 'node:zlib'
 import os from 'node:os'
 import path from 'node:path'
+import { collectStaticAssets } from './static-assets.mjs'
 
 /** Fixed upstream repository. */
 export const DEFAULT_SOURCE = 'https://github.com/deepseek-ai/deepseek-harness'
@@ -540,6 +541,7 @@ export async function assembleWebPackage(options) {
   await copyIfExists(path.join(options.repositoryRoot, 'build'), path.join(packageDir, 'plugins', 'dsh-mesh', 'build'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'build'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'build'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'shared'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'shared'))
+  const staticAssets = await collectStaticAssets(path.join(options.repositoryRoot, 'code', 'gate'))
   const manifest = {
     format: 1,
     name: 'dsh-mesh',
@@ -550,6 +552,7 @@ export async function assembleWebPackage(options) {
     ref: options.ref ?? null,
     tree: options.tree ?? null,
     files: (await listFiles(packageDir)).length,
+    staticAssets,
   }
   await writeFile(path.join(packageDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8')
   return { packageDir, manifest }

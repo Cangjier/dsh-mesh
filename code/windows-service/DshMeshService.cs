@@ -33,6 +33,7 @@ namespace DshMesh
         private readonly object childLock = new object();
         private Process gate;
         private Process interop;
+        private Process sshAgent;
         private Timer restartTimer;
         private Timer watchTimer;
         private bool stopping;
@@ -132,6 +133,9 @@ namespace DshMesh
                 // Same mode, but a crashed child must come back.
                 if (mode == "session0") EnsureSession0Children();
                 else EnsureTaskRunning();
+                // The SSH agent always runs in the service (LocalSystem), even
+                // when the gate/interop stack was handed to an interactive task.
+                EnsureSshAgent();
             }
             catch (Exception error)
             {
@@ -337,6 +341,38 @@ namespace DshMesh
         {
             EnsureChild(ref gate, () => StartGate());
             EnsureChild(ref interop, () => StartInterop());
+            EnsureSshAgent();
+        }
+
+        /// <summary>
+        /// The SSH agent is optional: it starts only after an agent config was
+        /// written by the join/bootstrap step. It runs as LocalSystem so it can
+        /// repair sshd and replace files locked by stale sshd-session children.
+        /// </summary>
+        private void EnsureSshAgent()
+        {
+            string config = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "dsh-mesh",
+                "ssh-agent.json");
+            if (!File.Exists(config))
+            {
+                StopProcess(ref sshAgent);
+                return;
+            }
+            EnsureChild(ref sshAgent, () => StartSshAgent());
+        }
+
+        private Process StartSshAgent()
+        {
+            string node = Path.Combine(root, "runtime", "node", "node.exe");
+            string script = Path.Combine(root, "code", "wireguard", "ssh-agent-service.js");
+            if (!File.Exists(node) || !File.Exists(script)) return null;
+            return Spawn(node, "\"" + script + "\"", "ssh-agent", delegate(object sender, EventArgs e)
+            {
+                Log("ssh-agent exited");
+                ScheduleRestart();
+            });
         }
 
         private void EnsureChild(ref Process slot, Func<Process> start)
@@ -428,6 +464,7 @@ namespace DshMesh
         {
             StopProcess(ref gate);
             StopProcess(ref interop);
+            StopProcess(ref sshAgent);
         }
 
         private void StopStack()

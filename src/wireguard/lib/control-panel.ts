@@ -1,6 +1,8 @@
 /** The LAN-facing WireGuard control-panel HTTP service. */
 
 import { randomBytes } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { secretsMatch } from './access';
 import { LINUX_CLIENT_SCRIPT } from './client-script';
@@ -104,6 +106,20 @@ export interface ControlPanelOptions {
   onJoin: (request: Record<string, unknown>, remoteAddress: string) => Promise<Record<string, unknown>>;
   onLeave: (request: Record<string, unknown>, remoteAddress: string) => Promise<Record<string, unknown>>;
   onSetPeerEgress?: (publicKey: string, enabled: boolean) => Promise<Record<string, unknown>>;
+  /** Member agent: publish the local SSH state. */
+  onSshReport?: (request: Record<string, unknown>, remoteAddress: string) => Promise<Record<string, unknown>>;
+  /** Member agent: fetch the server's per-peer public key. */
+  getPeerSshKey?: (request: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  /** Member agent: describe the cached Windows OpenSSH package. */
+  getOpenSshManifest?: (request: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  /** Member agent: resolve the OpenSSH zip for streaming. */
+  getOpenSshAsset?: (request: Record<string, unknown>) => Promise<{ path: string, name: string, size: number, contentType?: string, sha256?: string }>;
+  /** Member agent: list every static asset. */
+  getAssetIndex?: (request: Record<string, unknown>) => Promise<{ assets: Array<Record<string, unknown>> }>;
+  /** Member agent: describe one static asset. */
+  getAssetManifest?: (request: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  /** Member agent: resolve one static asset file for streaming. */
+  getAssetFile?: (request: Record<string, unknown>) => Promise<{ path: string, name: string, size: number, contentType?: string, sha256?: string }>;
   extraHandler?: (request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean> | boolean;
   log?: (message: string) => void;
 }
@@ -198,6 +214,102 @@ export class ControlPanel {
       if (handled) return;
     }
 
+    if (method === 'GET' && (url.pathname === '/assets' || url.pathname.startsWith('/assets/'))) {
+      try {
+        const token = String(request.headers['x-dsh-peer-token'] ?? '');
+        const publicKey = url.searchParams.get('publicKey') ?? '';
+        const parts = url.pathname === '/assets'
+          ? []
+          : url.pathname.slice('/assets/'.length).split('/').map(part => decodeURIComponent(part));
+        if (parts.length > 2 || parts.some(part => part === '')) {
+          throw new WireGuardError('asset_path_invalid', 'Invalid asset path.', { status: 400 });
+        }
+        if (parts.length === 0) {
+          if (!this.options.getAssetIndex) throw new WireGuardError('not_supported', 'This server does not host static assets.', { status: 501 });
+          const result = await this.options.getAssetIndex({ publicKey, token });
+          writeJson(response, 200, { ok: true, ...result });
+          return;
+        }
+        const name = parts[0];
+        if (parts.length === 1) {
+          if (!this.options.getAssetManifest) throw new WireGuardError('not_supported', 'This server does not host static assets.', { status: 501 });
+          const result = await this.options.getAssetManifest({ publicKey, token, name });
+          writeJson(response, 200, { ok: true, ...result });
+          return;
+        }
+        if (!this.options.getAssetFile) throw new WireGuardError('not_supported', 'This server does not host static assets.', { status: 501 });
+        const asset = await this.options.getAssetFile({ publicKey, token, name, file: parts[1] });
+        const info = await stat(asset.path);
+        if (!info.isFile()) throw new WireGuardError('asset_missing', 'The asset is not a regular file.', { status: 503 });
+        response.writeHead(200, {
+          'content-type': asset.contentType ?? 'application/octet-stream',
+          'content-length': info.size,
+          'content-disposition': `attachment; filename="${asset.name.replace(/["\\]/g, '')}"`,
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+          ...(asset.sha256 ? { 'x-dsh-asset-sha256': asset.sha256 } : {}),
+        });
+        await new Promise<void>((resolve, reject) => {
+          const stream = createReadStream(asset.path);
+          stream.once('error', reject);
+          stream.once('end', resolve);
+          stream.pipe(response);
+        });
+      } catch (error) {
+        if (!response.headersSent) this.writeError(response, error);
+        else response.destroy();
+      }
+      return;
+    }
+    if (method === 'POST' && (url.pathname === '/ssh/report' || url.pathname === '/ssh/key' || url.pathname === '/ssh/manifest')) {
+      try {
+        const body = await readJson(request);
+        let result: Record<string, unknown>;
+        if (url.pathname === '/ssh/report') {
+          if (!this.options.onSshReport) throw new WireGuardError('not_supported', 'This server does not accept SSH reports.', { status: 501 });
+          result = await this.options.onSshReport(body, remoteAddress);
+        } else if (url.pathname === '/ssh/key') {
+          if (!this.options.getPeerSshKey) throw new WireGuardError('not_supported', 'This server does not issue SSH keys.', { status: 501 });
+          result = await this.options.getPeerSshKey(body);
+        } else {
+          if (!this.options.getOpenSshManifest) throw new WireGuardError('not_supported', 'This server does not host OpenSSH.', { status: 501 });
+          result = await this.options.getOpenSshManifest(body);
+        }
+        writeJson(response, 200, { ok: true, ...result });
+      } catch (error) {
+        this.writeError(response, error);
+      }
+      return;
+    }
+    if (method === 'GET' && url.pathname === '/ssh/asset') {
+      try {
+        if (!this.options.getOpenSshAsset) throw new WireGuardError('not_supported', 'This server does not host OpenSSH.', { status: 501 });
+        const token = String(request.headers['x-dsh-peer-token'] ?? '');
+        const asset = await this.options.getOpenSshAsset({
+          publicKey: url.searchParams.get('publicKey') ?? '',
+          token,
+        });
+        const info = await stat(asset.path);
+        if (!info.isFile()) throw new WireGuardError('openssh_asset_missing', 'The OpenSSH package is not a regular file.', { status: 503 });
+        response.writeHead(200, {
+          'content-type': 'application/zip',
+          'content-length': info.size,
+          'content-disposition': `attachment; filename="${asset.name.replace(/["\\]/g, '')}"`,
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        });
+        await new Promise<void>((resolve, reject) => {
+          const stream = createReadStream(asset.path);
+          stream.once('error', reject);
+          stream.once('end', resolve);
+          stream.pipe(response);
+        });
+      } catch (error) {
+        if (!response.headersSent) this.writeError(response, error);
+        else response.destroy();
+      }
+      return;
+    }
     if (method === 'POST' && url.pathname === '/login') {
       await this.handleLogin(request, response);
       return;

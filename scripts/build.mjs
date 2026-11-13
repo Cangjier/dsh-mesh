@@ -48,6 +48,25 @@ async function buildControlService() {
   await writeFile(path.join(root, 'code', 'wireguard', 'control-service.js'), code, 'utf8')
 }
 
+async function buildSshAgentService() {
+  const result = await build({
+    entryPoints: [path.join(root, 'src/wireguard/ssh-agent-service.ts')],
+    write: false,
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node20',
+    packages: 'external',
+    sourcemap: false,
+    legalComments: 'none',
+    logLevel: 'info',
+  })
+  if (result.errors.length > 0) throw new Error('SSH agent service build failed')
+  const code = result.outputFiles?.[0]?.text
+  if (!code) throw new Error('SSH agent service build produced no output')
+  await writeFile(path.join(root, 'code', 'wireguard', 'ssh-agent-service.js'), code, 'utf8')
+}
+
 async function buildClient() {
   const result = await build({
     entryPoints: [path.join(root, 'src/client/index.tsx')],
@@ -87,5 +106,6 @@ const wants = (name) => requested.size === 0 || requested.has(name)
 
 if (wants('host')) await buildHost()
 if (wants('control')) await buildControlService()
+if (wants('ssh-agent')) await buildSshAgentService()
 if (wants('client')) await buildClient()
-console.log(`Built ${[...requested.size === 0 ? ['host', 'control', 'client'] : requested].join(', ')}`)
+console.log(`Built ${[...requested.size === 0 ? ['host', 'control', 'ssh-agent', 'client'] : requested].join(', ')}`)

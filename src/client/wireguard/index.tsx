@@ -57,6 +57,8 @@ import {
 } from './api';
 import { buildLinuxClientCommand, buildLinuxClientSimpleCommand, buildWindowsClientCommand, LINUX_CLIENT_RESTART_COMMAND } from './deploy';
 import { dictionary, EN, interpolate, type MessageKey } from './i18n';
+import type { Member } from '../api';
+import { DirectLinksModal, type DirectLinkPeer } from '../hysteria';
 
 const NS = 'dsh-wireguard';
 const PANEL_ID = 'wireguard';
@@ -641,6 +643,9 @@ function ClientDeployScript({ state, t }: { state: Snapshot; t: T }) {
           {copied ? t('service.deployCopied') : t('service.deployCopy')}
         </Button>
       </Space>
+      {system === 'windows' ? (
+        <Alert type="info" showIcon style={{ marginTop: 12 }} message={t('service.deployWindowsNote')} />
+      ) : null}
       {!target.available ? (
         <Alert type="warning" showIcon style={{ marginTop: 12 }} message={t('service.deployUnavailable')} />
       ) : null}
@@ -676,6 +681,8 @@ function RunningService({
   onRemove,
   onConfigureSsh,
   onSetEgress,
+  members,
+  gateAvailable,
 }: {
   state: Snapshot;
   t: T;
@@ -684,10 +691,13 @@ function RunningService({
   onRemove: (publicKey: string) => void;
   onConfigureSsh: (publicKey: string, user: string, platform: 'linux' | 'windows') => Promise<{ linux: string; windows: string } | undefined>;
   onSetEgress: (publicKey: string, enabled: boolean) => Promise<EgressOutcome | undefined>;
+  members: Member[];
+  gateAvailable: boolean;
 }) {
   const server: ServerState = state.server;
   const controlUrl = server.controlUrl || '';
   const [sshPeer, setSshPeer] = useState<Peer | null>(null);
+  const [directPeer, setDirectPeer] = useState<Peer | null>(null);
   const [sshUser, setSshUser] = useState('root');
   const [sshPlatform, setSshPlatform] = useState<'linux' | 'windows'>('linux');
   const [sshCommands, setSshCommands] = useState<{ linux: string; windows: string } | null>(null);
@@ -775,20 +785,33 @@ function RunningService({
     {
       title: t('service.peerActions'),
       key: 'actions',
-      width: 110,
+      width: 190,
       align: 'right',
       render: (_value, peer) => (
         <Space size={2}>
           <Button
             type="text"
             size="small"
+            icon={<LinkOutlined />}
+            title={t('service.direct')}
+            onClick={() => setDirectPeer(peer)}
+          >
+            {t('service.direct')}
+          </Button>
+          <Button
+            type="text"
+            size="small"
             icon={<KeyOutlined />}
-            title={peer.sshConfigured ? t('service.sshConfigured', { user: peer.sshUser || '' }) : t('service.sshAction')}
-            style={peer.sshConfigured ? { color: '#52c41a' } : undefined}
+            title={peer.sshReady
+              ? t('service.sshReady', { user: peer.sshUser || '' })
+              : peer.sshInstalled
+                ? `${t('service.sshUnhealthy')}${peer.sshError ? `: ${peer.sshError}` : ''}`
+                : t('service.sshNotInstalled')}
+            style={peer.sshReady ? { color: '#52c41a' } : peer.sshInstalled ? { color: '#faad14' } : undefined}
             onClick={() => {
               setSshPeer(peer);
-              setSshUser(peer.sshUser || 'root');
-              setSshPlatform('linux');
+              setSshUser(peer.sshUser || (peer.platform === 'windows' ? 'Administrator' : 'root'));
+              setSshPlatform(peer.platform === 'windows' ? 'windows' : 'linux');
               setSshCommands(null);
               setSshError('');
               setSshCopied(false);
@@ -910,6 +933,15 @@ function RunningService({
         destroyOnHidden
       >
         <Typography.Paragraph type="secondary">{t('service.sshHelp')}</Typography.Paragraph>
+        <Alert
+          type={sshPeer?.sshReady ? 'success' : 'info'}
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={sshPeer?.sshReady
+            ? t('service.sshReady', { user: sshPeer.sshUser || '' })
+            : t('service.sshAutoHelp')}
+          description={sshPeer?.sshError || undefined}
+        />
         <Typography.Text strong>{t('service.sshUser')}</Typography.Text>
         <Input
           value={sshUser}
@@ -980,6 +1012,13 @@ function RunningService({
           {sshCommands === null ? t('service.sshGenerate') : t('service.sshCopy')}
         </Button>
       </Modal>
+      <DirectLinksModal
+        open={directPeer !== null}
+        peer={directPeer === null ? null : { name: directPeer.name, ip: directPeer.ip, platform: directPeer.platform } satisfies DirectLinkPeer}
+        members={members}
+        gateAvailable={gateAvailable}
+        onClose={() => setDirectPeer(null)}
+      />
       <Modal
         open={egressOutcome !== null}
         title={t('service.egressTitle')}
@@ -1197,12 +1236,36 @@ function ClientPending({
   );
 }
 
-export function WireGuardPanel({ ctx, embedded = false, t: providedT }: { ctx: any; embedded?: boolean; t?: (key: string) => string }) {
+export function WireGuardPanel({
+  ctx,
+  embedded = false,
+  t: providedT,
+  members = [],
+  gateAvailable = false,
+  refreshToken = 0,
+}: {
+  ctx: any;
+  embedded?: boolean;
+  t?: (key: string) => string;
+  members?: Member[];
+  gateAvailable?: boolean;
+  refreshToken?: number;
+}) {
   const t = useT(ctx, providedT);
   const mode = useThemeMode(ctx);
   const controller = useController(ctx);
   const { state, loading, refreshing, error, busy } = controller;
   const [tab, setTab] = useState<TabKey>('service');
+  const lastRefreshToken = useRef(0);
+
+  // The mesh tab bar owns the refresh icon; only the active click should hit
+  // the host, so compare against the last token instead of the controller
+  // identity (which changes after every state update).
+  useEffect(() => {
+    if (refreshToken === 0 || refreshToken === lastRefreshToken.current) return;
+    lastRefreshToken.current = refreshToken;
+    void controller.refresh(false);
+  }, [refreshToken, controller]);
 
   useEffect(() => {
     if (state?.role === 'client') setTab('client');
@@ -1222,6 +1285,8 @@ export function WireGuardPanel({ ctx, embedded = false, t: providedT }: { ctx: a
         onRemove={(publicKey) => void controller.removePeer(publicKey)}
         onConfigureSsh={controller.configureSsh}
         onSetEgress={controller.setPeerEgress}
+        members={members}
+        gateAvailable={gateAvailable}
       />
     ) : (
       <ServiceForm

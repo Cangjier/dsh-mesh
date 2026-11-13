@@ -31,6 +31,13 @@ export interface Peer {
   egress: boolean;
   sshConfigured: boolean;
   sshUser: string | null;
+  sshInstalled: boolean;
+  sshRunning: boolean;
+  sshReady: boolean;
+  sshVersion: string | null;
+  sshPort: number;
+  sshLastReportAt: string | null;
+  sshError: string | null;
   platform: 'linux' | 'windows' | null;
 }
 

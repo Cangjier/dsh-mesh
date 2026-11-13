@@ -20,6 +20,7 @@ import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node
 import { createReadStream, existsSync } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
+import { collectStaticAssets } from './static-assets.mjs'
 
 const run = promisify(execFile)
 
@@ -110,6 +111,8 @@ export async function repackDirectory(packageDir, repositoryRoot) {
     await replaceDirectory(path.join(repositoryRoot, name), path.join(packageDir, 'plugins', 'dsh-mesh', name))
   }
   const manifest = JSON.parse(await readFile(manifestFile, 'utf8'))
+  const staticAssets = await collectStaticAssets(path.join(packageDir, 'gate'))
+  manifest.staticAssets = staticAssets
   manifest.builtAt = new Date().toISOString()
   manifest.repackedFrom = 'code/build/repack.mjs'
   manifest.files = await countFiles(packageDir)

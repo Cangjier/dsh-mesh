@@ -1,13 +1,14 @@
 /** Best-effort, user-initiated WireGuard installation for Windows and Linux. */
 
 import { createWriteStream } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { copyFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WireGuardError } from './errors';
 import { detectPlatform, findExecutable, run, type PlatformInfo } from './platform';
+import { AssetStore } from './static-assets';
 
 const WINDOWS_INSTALLER_URL = 'https://download.wireguard.com/windows-client/wireguard-installer.exe';
 const WINDOWS_INSTALLER_MAX_BYTES = 128 * 1024 * 1024;
@@ -85,14 +86,32 @@ async function waitForTools(): Promise<PlatformInfo> {
   return latest;
 }
 
+/** Locate the gateway's bundled WireGuard installer, when the package has one. */
+async function bundledWireGuardInstaller(): Promise<string | null> {
+  try {
+    const store = new AssetStore();
+    const asset = await store.first('wireguard', 'windows', 'x64');
+    if (asset.kind !== 'installer') return null;
+    return (await store.file('wireguard', asset.file)).path;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Install the official WireGuard client on Windows. When Harness is elevated
  * the installer runs silently; otherwise it is launched through UAC so the
  * user explicitly authorizes the system change.
  */
 async function installWindows(platform: PlatformInfo, dataDir: string, log: (line: string) => void): Promise<InstallOutcome> {
-  const installerPath = path.join(dataDir, 'wireguard-installer.exe');
-  try {
+  let installerPath = path.join(dataDir, 'wireguard-installer.exe');
+  const bundled = await bundledWireGuardInstaller();
+  if (bundled !== null) {
+    installerPath = path.join(dataDir, path.basename(bundled));
+    log(`using the bundled WireGuard installer at ${installerPath}`);
+    await mkdir(path.dirname(installerPath), { recursive: true });
+    await copyFile(bundled, installerPath);
+  } else try {
     log(`downloading WireGuard installer to ${installerPath}`);
     await download(WINDOWS_INSTALLER_URL, installerPath);
   } catch (downloadError) {
@@ -115,20 +134,25 @@ async function installWindows(platform: PlatformInfo, dataDir: string, log: (lin
     }
     throw downloadError;
   }
+  const isMsi = installerPath.toLowerCase().endsWith('.msi');
   if (platform.admin) {
     try {
-      await run(installerPath, ['/S'], { timeout: INSTALL_TIMEOUT_MS });
+      if (isMsi) await run('msiexec.exe', ['/i', installerPath, '/qn', '/norestart', 'DO_NOT_LAUNCH=1'], { timeout: INSTALL_TIMEOUT_MS });
+      else await run(installerPath, ['/S'], { timeout: INSTALL_TIMEOUT_MS });
       log('WireGuard installer completed silently');
     } catch (error) {
       throw new WireGuardError('install_failed', 'The WireGuard installer exited with an error.', {
         status: 500,
         hint: 'Run the downloaded installer manually, or install WireGuard from the official website and press Recheck.',
-        command: `"${installerPath}" /S`,
+        command: isMsi ? `msiexec /i "${installerPath}" /qn /norestart` : `"${installerPath}" /S`,
         details: { cause: error instanceof Error ? error.message : String(error) },
       });
     }
   } else {
-    const script = `$p = Start-Process -FilePath '${installerPath.replace(/'/g, "''")}' -ArgumentList '/S' -Verb RunAs -Wait -PassThru; exit $p.ExitCode`;
+    const command = isMsi
+      ? `$p = Start-Process -FilePath 'msiexec.exe' -ArgumentList '/i','${installerPath.replace(/'/g, "''")}','/qn','/norestart','DO_NOT_LAUNCH=1' -Verb RunAs -Wait -PassThru; exit $p.ExitCode`
+      : `$p = Start-Process -FilePath '${installerPath.replace(/'/g, "''")}' -ArgumentList '/S' -Verb RunAs -Wait -PassThru; exit $p.ExitCode`;
+    const script = command;
     try {
       await run('powershell.exe', ['-NoProfile', '-Command', script], { timeout: INSTALL_TIMEOUT_MS });
       log('WireGuard installer accepted the UAC prompt');

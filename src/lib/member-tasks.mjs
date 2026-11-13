@@ -58,6 +58,8 @@ export class MemberTaskService {
     this.taskRoot = path.join(this.dataDir, 'member-tasks')
     this.tasks = new Map()
     this.monitors = new Map()
+    /** @type {Map<string, AbortController>} per-task cancellation for the in-flight wait */
+    this.controllers = new Map()
     /** Cached `{ id, name, ip }` of this machine, filled by the first member lookup. */
     this.identity = null
     this.loaded = false
@@ -66,6 +68,9 @@ export class MemberTaskService {
 
   async dispose() {
     this.disposed = true
+    for (const controller of this.controllers.values()) {
+      try { controller.abort(new Error('the plugin stopped')) } catch { }
+    }
     for (const task of this.tasks.values()) {
       if (task.status === 'running' || task.status === 'starting') {
         task.status = 'interrupted'
@@ -172,10 +177,17 @@ export class MemberTaskService {
     }
   }
 
-  async #request(baseUrl, method, endpoint, body, timeoutMs = 30_000) {
+  async #request(baseUrl, method, endpoint, body, timeoutMs = 30_000, signal) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error('timeout')), Math.max(1000, timeoutMs))
     timer.unref?.()
+    const forwardAbort = () => {
+      controller.abort(signal?.reason instanceof Error ? signal.reason : new Error('aborted'))
+    }
+    if (signal !== undefined) {
+      if (signal.aborted) forwardAbort()
+      else signal.addEventListener('abort', forwardAbort, { once: true })
+    }
     let response
     try {
       response = await fetch(`${baseUrl}${endpoint}`, {
@@ -189,6 +201,7 @@ export class MemberTaskService {
       })
     } finally {
       clearTimeout(timer)
+      signal?.removeEventListener('abort', forwardAbort)
     }
     const text = await response.text()
     let parsed = null
@@ -211,12 +224,14 @@ export class MemberTaskService {
    * @param {number} [budgetMs] how long to keep waiting.
    * @returns {Promise<any>} the request result.
    */
-  async #waitForRuntime(attempt, budgetMs = 90_000) {
+  async #waitForRuntime(attempt, budgetMs = 90_000, signal) {
     const deadline = Date.now() + budgetMs
     for (;;) {
+      if (signal?.aborted) throw new Error('tool call aborted')
       try {
         return await attempt()
       } catch (error) {
+        if (signal?.aborted) throw new Error('tool call aborted')
         const message = error instanceof Error ? error.message : String(error)
         const starting = /SDK runtime is not ready|sdk_unavailable|SDK runtime is still starting/iu.test(message)
         if (!starting || Date.now() >= deadline) throw error
@@ -225,7 +240,7 @@ export class MemberTaskService {
     }
   }
 
-  async start({ member, prompt, cwd, agent, notify = true }) {
+  async start({ member, prompt, cwd, agent, notify = true, signal }) {
     await this.#ensureLoaded()
     if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('prompt is required')
     if (agent === undefined || agent === null) throw new Error('delegation must be called from a DSH conversation')
@@ -238,7 +253,9 @@ export class MemberTaskService {
       ...(typeof cwd === 'string' && cwd !== '' ? { cwd } : {}),
     }
     const created = await this.#waitForRuntime(
-      () => this.#request(target.baseUrl, 'POST', '/v1/conversations', payload, 60_000),
+      () => this.#request(target.baseUrl, 'POST', '/v1/conversations', payload, 60_000, signal),
+      90_000,
+      signal,
     )
     const conversation = created.conversation
     if (conversation === undefined || typeof conversation.id !== 'string') throw new Error('member interop did not return a conversation id')
@@ -264,6 +281,7 @@ export class MemberTaskService {
       originAgentId: String(agent.id ?? ''),
       originSessionId: String(agent.session?.id ?? ''),
     }
+    this.controllers.set(task.id, new AbortController())
     this.tasks.set(task.id, task)
     await this.#save(task)
     await this.#log(task, `created ${conversation.id} on ${target.baseUrl}`)
@@ -273,19 +291,43 @@ export class MemberTaskService {
     return task
   }
 
-  async run(options) {
-    const task = await this.start({ ...options, notify: false })
-    await this.monitors.get(task.id)
-    return this.tasks.get(task.id) ?? task
+  /**
+   * Wait for one task up to a bounded timeout. The task monitor keeps running
+   * in the background, so a timeout only ends this caller's wait; the caller
+   * can call wait again with the same id.
+   * @param {string} taskId task id returned by call_member.
+   * @param {{timeoutMs?: number, signal?: AbortSignal}} [options] wait options.
+   * @returns {Promise<{done: boolean, timedOut: boolean, task: object}>} outcome.
+   */
+  async wait(taskId, options = {}) {
+    await this.#ensureLoaded()
+    const id = String(taskId ?? '')
+    if (id === '') throw new Error('taskId is required')
+    const timeoutMs = Math.max(1000, Math.min(Number.isSafeInteger(options.timeoutMs) ? options.timeoutMs : 30_000, 300_000))
+    const signal = options.signal
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      if (signal?.aborted) throw new Error('tool call aborted')
+      const task = this.tasks.get(id)
+      if (task === undefined) throw new Error(`member task not found: ${id}`)
+      if (task.status === 'completed' || task.status === 'failed' || task.status === 'interrupted') {
+        return { done: true, timedOut: false, task }
+      }
+      const left = deadline - Date.now()
+      if (left <= 0) return { done: false, timedOut: true, task }
+      await new Promise(resolve => setTimeout(resolve, Math.min(500, left)))
+    }
   }
 
-  async send(taskId, content) {
+  async send(taskId, content, signal) {
     await this.#ensureLoaded()
     const task = this.tasks.get(String(taskId))
     if (task === undefined) throw new Error('member task not found')
     if (typeof content !== 'string' || content.trim() === '') throw new Error('content is required')
     const result = await this.#waitForRuntime(
-      () => this.#request(task.baseUrl, 'POST', `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content }, 30_000),
+      () => this.#request(task.baseUrl, 'POST', `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content }, 30_000, signal),
+      90_000,
+      signal,
     )
     task.status = 'running'
     task.error = null
@@ -295,7 +337,7 @@ export class MemberTaskService {
     task.notified = false
     task.notifiedAt = null
     task.notifyError = null
-    task.notify = true
+    task.notify = false
     await this.#save(task)
     await this.#log(task, `message queued: ${result?.receipt?.messageId ?? 'unknown'}`)
     if (!this.monitors.has(task.id)) {
@@ -392,7 +434,9 @@ export class MemberTaskService {
   }
 
   async #monitor(task) {
+    const signal = this.controllers.get(task.id)?.signal
     while (!this.disposed && (task.status === 'running' || task.status === 'starting')) {
+      if (signal?.aborted) break
       task.attempts += 1
       try {
         const result = await this.#request(
@@ -401,6 +445,7 @@ export class MemberTaskService {
           `/v1/conversations/${encodeURIComponent(task.conversationId)}/wait`,
           { timeoutMs: WAIT_TIMEOUT_MS },
           WAIT_TIMEOUT_MS + 10_000,
+          signal,
         )
         if (result.timedOut === true) {
           task.status = 'running'
@@ -441,6 +486,7 @@ export class MemberTaskService {
           : 'running'
         if (task.status === 'completed' || task.status === 'failed') break
       } catch (error) {
+        if (signal?.aborted || task.status === 'interrupted') break
         task.error = error instanceof Error ? error.message : String(error)
         await this.#log(task, `wait failed: ${task.error}`)
         if (LOST_CONVERSATION.test(task.error)) {
@@ -455,6 +501,7 @@ export class MemberTaskService {
         await new Promise(resolve => setTimeout(resolve, Math.min(2_000 * task.attempts, 15_000)))
       }
     }
+    this.controllers.delete(task.id)
     if (this.disposed && task.status === 'running') {
       task.status = 'interrupted'
       task.error = 'the plugin stopped before the member conversation completed'

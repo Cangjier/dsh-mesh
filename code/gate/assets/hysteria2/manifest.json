@@ -1,0 +1,26 @@
+{
+  "format": 1,
+  "name": "hysteria2",
+  "version": "v2.13.0",
+  "generatedAt": "2026-11-13T02:13:58.073279+00:00",
+  "assets": [
+    {
+      "os": "linux",
+      "arch": "x64",
+      "kind": "binary",
+      "file": "hysteria-linux-amd64",
+      "bytes": 23924898,
+      "sha256": "907ba8c9693edb104b20582681fb7dc15639d5b64a9cbb616a7b539190a86691",
+      "contentType": "application/octet-stream"
+    },
+    {
+      "os": "windows",
+      "arch": "x64",
+      "kind": "binary",
+      "file": "hysteria-windows-amd64.exe",
+      "bytes": 24407552,
+      "sha256": "162ef8fe55dc7ec810dda662908f8e65ec36bd6da39cb87c3bd66184ab68f067",
+      "contentType": "application/octet-stream"
+    }
+  ]
+}

@@ -38,6 +38,8 @@ import { fileURLToPath } from 'node:url'
 import { loginPage, page, accountLoginPage, PAGE_CSP } from './pages.mjs'
 import { AccountLogin } from './account-login.mjs'
 import { InteractiveBrowser } from './windows-browser.mjs'
+import { HysteriaService } from './hysteria.mjs'
+import { StaticAssets } from './static-assets.mjs'
 import { CLUSTER_PREFIX, MemberService } from './members.mjs'
 import { deriveClusterSecret } from '../shared/cluster.mjs'
 import { TARGET_COOKIE } from '../shared/wireguard.mjs'
@@ -1092,6 +1094,21 @@ const members = new MemberService({
   now: Date.now,
 })
 
+/** Shared read-only installers served under /__gate/assets. */
+const staticAssets = new StaticAssets({ log })
+
+/**
+ * Hysteria2 direct links. The gateway owns the SSH side; the panel only
+ * selects two members and watches the job.
+ */
+const hysteria = new HysteriaService({
+  home: env('DSH_HOME', path.join(os.homedir(), '.dsh')),
+  stateFile: path.join(env('DSH_HOME', path.join(os.homedir(), '.dsh')), 'wireguard', 'state.json'),
+  log,
+  isAdmitted,
+  snapshot: () => members.snapshot(),
+})
+
 /** A short page telling the visitor DSH is still coming up. */
 function sendStarting(res) {
   sendHtml(res, 503, page({
@@ -1268,6 +1285,12 @@ const PUBLIC_ASSETS = new Set(['/manifest.webmanifest', '/favicon.ico', '/robots
  */
 const HTTPS_REDIRECT_EXEMPT = [
   /^\/__gate\/cluster(?:\/|$)/u,
+  // A fresh member has no gate cookie yet, so bootstrap downloads must work
+  // over plain HTTP; the files are checksum-verified installers.
+  /^\/__gate\/assets(?:\/|$)/u,
+  /^\/__gate\/bootstrap(?:\/|$)/u,
+  /^\/__gate\/openssh\/(?:manifest|asset)(?:\/|$)/u,
+  /^\/__gate\/hysteria\/(?:assets|asset\/)/u,
   /^\/__gate\/health$/u,
   /^\/__gate\/member$/u,
   /^\/\.well-known\/acme-challenge\//u,
@@ -1368,6 +1391,25 @@ async function dispatch(req, res) {
   }
 
   if (isGatePath(pathname)) {
+    if (pathname === '/__gate/bootstrap/windows-member.ps1') {
+      // A fresh Windows host has no package and no SSH yet. This script only
+      // needs PowerShell, downloads WireGuard/OpenSSH from the public asset
+      // routes, joins the tunnel, installs the gateway key, and reports back.
+      const script = await readFile(path.join(HERE, 'bootstrap', 'windows-member.ps1'), 'utf8')
+      res.writeHead(200, {
+        'content-type': 'text/plain; charset=utf-8',
+        'content-length': Buffer.byteLength(script),
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+      })
+      res.end(script)
+      return
+    }
+    // Installation binaries are public; configuration endpoints below are not.
+    if (await staticAssets.handle(req, res, url)) return
+    if (pathname === '/__gate/hysteria' || pathname.startsWith('/__gate/hysteria/')) {
+      if (await hysteria.handle(req, res, url)) return
+    }
     if (await members.handle(req, res, url)) return
     if (pathname.startsWith('/__gate/account-login')) {
       await handleAccountLogin(req, res, pathname)

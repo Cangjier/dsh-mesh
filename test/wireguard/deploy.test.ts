@@ -163,14 +163,14 @@ test('keeps bracketed IPv6 endpoints intact in the deployment command', () => {
 });
 
 
-test('Windows deploy switches AllowedIPs and reinstalls the tunnel only for egress', () => {
+test('Windows deploy downloads the gate-hosted bootstrap that installs SSH too', () => {
   const command = buildWindowsClientCommand(runningState());
   assert.equal(command.includes('\n'), false);
   assert.match(command, /^powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand /);
   const encoded = command.split(' ').pop() ?? '';
   const script = Buffer.from(encoded, 'base64').toString('utf16le');
-  assert.match(script, /platform = 'windows'/);
-  assert.match(script, /if \(\$join\.egress\) \{ \$allowed = '0\.0\.0\.0\/0' \}/);
-  assert.match(script, /AllowedIPs = \$allowed/);
-  assert.match(script, /if \(\$join\.egress\) \{ & .*\/uninstalltunnelservice dshwg0 2>\$null \}/);
+  assert.match(script, /__gate\/bootstrap\/windows-member\.ps1/);
+  assert.match(script, /-JoinCode 'secret-code'/);
+  assert.match(script, /-ServerUrl 'http:\/\/vpn\.example\.com:51821'/);
+  assert.match(script, /-GateUrl 'http:\/\/vpn\.example\.com'/);
 });

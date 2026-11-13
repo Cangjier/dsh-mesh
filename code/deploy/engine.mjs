@@ -1470,6 +1470,8 @@ export class DeployManager {
     this.states = new Map()
     /** @type {Map<string, number>} last progress flush per job */
     this.saves = new Map()
+    /** @type {Map<string, Promise<void>>} per-file write chain, so a late progress write cannot win */
+    this.writes = new Map()
   }
 
   /** @returns {Promise<void>} no owned process. */
@@ -1757,7 +1759,46 @@ export class DeployManager {
   }
 
   async #save(stateFile, state) {
-    await writeFile(stateFile, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+    const text = `${JSON.stringify(state, null, 2)}\n`
+    // Writes are chained per file: progress flushes are fire-and-forget, and
+    // without ordering a slow one can land after the final snapshot and turn a
+    // finished job back into "running".
+    const previous = this.writes.get(stateFile) ?? Promise.resolve()
+    const next = previous.catch(() => {}).then(() => writeFile(stateFile, text, 'utf8'))
+    this.writes.set(stateFile, next.catch(() => {}))
+    await next
+  }
+
+  /**
+   * Finalize a job whose runner is gone: the process restarted, or a stale
+   * snapshot survived a crash. A job is only live while its promise is tracked.
+   * @param {object} state job state read from disk.
+   * @returns {Promise<object>} settled state.
+   */
+  async #settle(state) {
+    if (state === null || typeof state !== 'object') return state
+    if (state.status !== 'running' || this.running.has(state.id)) return state
+    const log = await this.logs(state.id, 400).catch(() => '')
+    const tail = log.split('\n').filter(line => line.trim() !== '').slice(-5).join('\n')
+    if (/deployment succeeded/u.test(tail)) {
+      state.status = 'succeeded'
+      state.phase = 'done'
+      state.progress = { ...(state.progress ?? {}), percent: 100, indeterminate: false }
+      for (const step of state.steps ?? []) {
+        if (step?.status === 'running') step.status = 'succeeded'
+      }
+    } else if (/deployment failed: (?<reason>.+)$/mu.test(tail)) {
+      state.status = 'failed'
+      state.phase = 'failed'
+      state.error = state.error ?? (/deployment failed: (?<reason>.+)$/mu.exec(tail)?.groups?.reason?.trim() ?? 'deployment failed')
+    } else {
+      state.status = 'failed'
+      state.phase = 'failed'
+      state.error = state.error ?? 'deployment was interrupted before it finished'
+    }
+    state.updatedAt = new Date().toISOString()
+    await this.#save(path.join(this.dataDir, state.id, 'job.json'), state).catch(() => {})
+    return state
   }
 
   /**
@@ -1781,7 +1822,8 @@ export class DeployManager {
     const live = this.states.get(id)
     if (live !== undefined) return live
     try {
-      return JSON.parse(await readFile(path.join(this.dataDir, id, 'job.json'), 'utf8'))
+      const stored = JSON.parse(await readFile(path.join(this.dataDir, id, 'job.json'), 'utf8'))
+      return await this.#settle(stored)
     } catch {
       return null
     }
@@ -1803,7 +1845,8 @@ export class DeployManager {
     for (const entry of entries) {
       if (!entry.isDirectory() || !entry.name.startsWith('deploy-')) continue
       try {
-        jobs.push(JSON.parse(await readFile(path.join(this.dataDir, entry.name, 'job.json'), 'utf8')))
+        const stored = JSON.parse(await readFile(path.join(this.dataDir, entry.name, 'job.json'), 'utf8'))
+        jobs.push(await this.#settle(stored))
       } catch {
         // A job directory without a readable state is not worth reporting.
       }

@@ -1,0 +1,17 @@
+{
+  "format": 1,
+  "name": "openssh",
+  "version": "9.5.0.0p1-Beta",
+  "generatedAt": "2026-11-13T09:15:00.000000+00:00",
+  "assets": [
+    {
+      "os": "windows",
+      "arch": "x64",
+      "kind": "archive",
+      "file": "OpenSSH-Win64.zip",
+      "bytes": 4856219,
+      "sha256": "bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c",
+      "contentType": "application/zip"
+    }
+  ]
+}

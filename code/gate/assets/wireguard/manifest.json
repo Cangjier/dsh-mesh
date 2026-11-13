@@ -1,0 +1,17 @@
+{
+  "format": 1,
+  "name": "wireguard",
+  "version": "0.5.3",
+  "generatedAt": "2026-11-13T06:20:00.000000+00:00",
+  "assets": [
+    {
+      "os": "windows",
+      "arch": "x64",
+      "kind": "installer",
+      "file": "wireguard-amd64-0.5.3.msi",
+      "bytes": 2842624,
+      "sha256": "76fcec042c5989c5b816cd32eaed1e5b1c3b998a4b1c9eca55f299e3314ef7e4",
+      "contentType": "application/x-msi"
+    }
+  ]
+}

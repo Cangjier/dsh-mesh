@@ -358,6 +358,40 @@ export const api = {
     })
   },
 
+  hysteriaAssets(): Promise<HysteriaAssets> {
+    return request<HysteriaAssets>('/__gate/hysteria/assets')
+  },
+
+  hysteriaJobs(): Promise<{ ok: boolean; jobs: HysteriaJob[] }> {
+    return request<{ ok: boolean; jobs: HysteriaJob[] }>('/__gate/hysteria/jobs')
+  },
+
+  hysteriaJob(id: string, lines = 200): Promise<{ ok: boolean; job: HysteriaJob; lines: string[] }> {
+    return request<{ ok: boolean; job: HysteriaJob; lines: string[] }>(
+      `/__gate/hysteria/jobs/${encodeURIComponent(id)}?lines=${String(lines)}`,
+    )
+  },
+
+  hysteriaLinks(): Promise<{ ok: boolean; links: HysteriaLink[] }> {
+    return request<{ ok: boolean; links: HysteriaLink[] }>('/__gate/hysteria/links')
+  },
+
+  hysteriaRemove(body: { server: string; client: string }): Promise<{ ok: boolean; links: HysteriaLink[]; errors?: string[] }> {
+    return request<{ ok: boolean; links: HysteriaLink[]; errors?: string[] }>('/__gate/hysteria/remove', {
+      method: 'POST',
+      headers: { 'x-dsh-gate': '1' },
+      body: JSON.stringify(body),
+    })
+  },
+
+  hysteriaConfigure(body: HysteriaConfigureBody): Promise<{ ok: boolean; job: HysteriaJob }> {
+    return request<{ ok: boolean; job: HysteriaJob }>('/__gate/hysteria/configure', {
+      method: 'POST',
+      headers: { 'x-dsh-gate': '1' },
+      body: JSON.stringify(body),
+    })
+  },
+
   promoteSession(member: string): Promise<{ ok: boolean; member: { id: string; name: string; ip: string }; status: Record<string, unknown> | null }> {
     return request('/api/dsh-mesh/session/promote', {
       method: 'POST',
@@ -408,4 +442,66 @@ export const api = {
       headers: { 'x-dsh-mesh': '1' },
     })
   },
+}
+
+export interface HysteriaAsset {
+  os: string
+  arch: string
+  file: string
+  bytes: number
+  sha256: string
+}
+
+export interface HysteriaAssets {
+  ok: boolean
+  version?: string
+  dir?: string
+  error?: string
+  assets?: HysteriaAsset[]
+}
+
+export interface HysteriaStep {
+  key: string
+  label: string
+  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  startedAt: string | null
+  finishedAt: string | null
+  detail: string
+  progress?: { done: number; total: number; percent: number } | null
+}
+
+export interface HysteriaJob {
+  id: string
+  createdAt: string
+  updatedAt?: string
+  status: 'running' | 'succeeded' | 'failed' | string
+  phase: string
+  mode: 'tun' | 'socks' | string
+  port: number
+  bandwidth: number
+  server: { id: string; name: string; ip: string; os: string; host: string }
+  client: { id: string; name: string; ip: string; os: string; host: string }
+  error: string | null
+  warning?: string | null
+  steps?: HysteriaStep[]
+  progress?: DeployProgress
+}
+
+export interface HysteriaLink {
+  server: { id: string; name: string; ip: string; os: string; host: string }
+  client: { id: string; name: string; ip: string; os: string; host: string }
+  publicHost: string
+  port: number
+  mode: string
+  bandwidth: number
+  updatedAt: string
+}
+
+export interface HysteriaConfigureBody {
+  server: string
+  client: string
+  port: number
+  mode: 'tun' | 'socks'
+  bandwidth: number
+  serverHost?: string
 }

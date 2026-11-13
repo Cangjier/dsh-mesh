@@ -241,6 +241,130 @@ EOF
   fi
 fi
 
+# --- SSH access for the gateway -------------------------------------------
+# The Windows bootstrap installs OpenSSH too; Linux must do the same so the
+# gateway can deploy DSH over SSH right after the mesh join.
+log "Configuring SSH access for the gateway"
+SSH_TOKEN=$(json_str "$JOIN" sshToken)
+SSH_ERROR=""
+SSH_INSTALLED=0
+SSH_RUNNING=0
+SSH_READY=0
+SSH_VERSION=""
+SERVER_SSH_KEY=""
+
+find_sshd() {
+  if command -v sshd >/dev/null 2>&1; then command -v sshd; return 0; fi
+  for candidate in /usr/sbin/sshd /usr/local/sbin/sshd /usr/bin/sshd; do
+    if [ -x "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
+  done
+  return 1
+}
+
+SSHD_BIN=$(find_sshd || true)
+if [ -z "$SSHD_BIN" ]; then
+  log "SSH: openssh-server is missing; installing it"
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server || SSH_ERROR="apt-get install openssh-server failed"
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y openssh-server || SSH_ERROR="dnf install openssh-server failed"
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y openssh-server || SSH_ERROR="yum install openssh-server failed"
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --needed --noconfirm openssh || SSH_ERROR="pacman install openssh failed"
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install openssh || SSH_ERROR="zypper install openssh failed"
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache openssh || SSH_ERROR="apk add openssh failed"
+  else
+    SSH_ERROR="unknown package manager; install openssh-server manually"
+  fi
+  SSHD_BIN=$(find_sshd || true)
+fi
+if [ -n "$SSHD_BIN" ]; then
+  SSH_INSTALLED=1
+fi
+
+if [ "$SSH_INSTALLED" -eq 1 ]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable --now sshd >/dev/null 2>&1 || systemctl enable --now ssh >/dev/null 2>&1 || true
+  elif command -v service >/dev/null 2>&1; then
+    service sshd start >/dev/null 2>&1 || service ssh start >/dev/null 2>&1 || true
+  fi
+  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ':22 '; then
+    SSH_RUNNING=1
+  elif command -v netstat >/dev/null 2>&1 && netstat -ltn 2>/dev/null | grep -q ':22 '; then
+    SSH_RUNNING=1
+  elif pgrep -x sshd >/dev/null 2>&1; then
+    SSH_RUNNING=1
+  fi
+fi
+
+if [ -n "$SSH_TOKEN" ]; then
+  KEY_RESP=$(curl -sS -X POST -H 'content-type: application/json' --data '{"publicKey":"'"$PUBLIC_KEY"'","token":"'"$SSH_TOKEN"'"}' "$CONTROL_URL/ssh/key" 2>/dev/null || true)
+  SERVER_SSH_KEY=$(json_str "$KEY_RESP" publicKey)
+else
+  if [ -z "$SSH_ERROR" ]; then SSH_ERROR="the join response did not include an SSH token"; fi
+fi
+if [ -n "$SERVER_SSH_KEY" ]; then
+  mkdir -p /root/.ssh
+  chmod 700 /root/.ssh
+  touch /root/.ssh/authorized_keys
+  chmod 600 /root/.ssh/authorized_keys
+  if ! grep -qxF "$SERVER_SSH_KEY" /root/.ssh/authorized_keys 2>/dev/null; then
+    printf '%s\n' "$SERVER_SSH_KEY" >> /root/.ssh/authorized_keys
+  fi
+  log "SSH: gateway key installed for root"
+else
+  if [ -z "$SSH_ERROR" ]; then SSH_ERROR="gateway did not return an SSH public key"; fi
+fi
+
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi 'active'; then
+  ufw allow 22/tcp >/dev/null 2>&1 || true
+fi
+if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+  firewall-cmd --permanent --add-service=ssh >/dev/null 2>&1 || true
+  firewall-cmd --reload >/dev/null 2>&1 || true
+fi
+
+if [ -n "$SSHD_BIN" ]; then
+  # Some images disable root logins; keep key-only root access for the gateway.
+  if "$SSHD_BIN" -T 2>/dev/null | grep -qi '^permitrootlogin no'; then
+    mkdir -p /etc/ssh/sshd_config.d
+    printf '%s\n' 'PermitRootLogin prohibit-password' > /etc/ssh/sshd_config.d/99-dsh-mesh.conf
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1 || true
+    fi
+  fi
+  if command -v restorecon >/dev/null 2>&1; then
+    restorecon -R /root/.ssh >/dev/null 2>&1 || true
+  fi
+  SSH_VERSION=$("$SSHD_BIN" -V 2>&1 | head -n 1 || true)
+fi
+if [ -z "$SSH_VERSION" ]; then
+  SSH_VERSION="OpenSSH"
+fi
+
+if [ "$SSH_INSTALLED" -eq 1 ] && [ "$SSH_RUNNING" -eq 1 ] && [ -n "$SERVER_SSH_KEY" ]; then
+  SSH_READY=1
+  log "SSH: ready on port 22 for root"
+else
+  if [ -z "$SSH_ERROR" ]; then SSH_ERROR="sshd is not listening on port 22"; fi
+  log "SSH: not ready ($SSH_ERROR)"
+fi
+
+if [ -n "$SSH_TOKEN" ]; then
+  if [ "$SSH_READY" -eq 1 ]; then
+    REPORT=$(curl -sS -X POST -H 'content-type: application/json' --data '{"publicKey":"'"$PUBLIC_KEY"'","token":"'"$SSH_TOKEN"'","user":"root","platform":"linux","hostname":"'"$NAME"'","sshInstalled":true,"sshRunning":true,"sshReady":true,"sshPort":22,"sshVersion":"'"$SSH_VERSION"'","sshError":null}' "$CONTROL_URL/ssh/report" 2>/dev/null || true)
+  else
+    REPORT=$(curl -sS -X POST -H 'content-type: application/json' --data '{"publicKey":"'"$PUBLIC_KEY"'","token":"'"$SSH_TOKEN"'","user":"root","platform":"linux","hostname":"'"$NAME"'","sshInstalled":false,"sshRunning":false,"sshReady":false,"sshPort":22,"sshVersion":"'"$SSH_VERSION"'","sshError":"SSH setup did not complete; see the deploy log"}' "$CONTROL_URL/ssh/report" 2>/dev/null || true)
+  fi
+  if ! printf '%s' "$REPORT" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
+    log "SSH: report was not accepted: $REPORT"
+  fi
+fi
+
 log "Connected successfully"
 log "VPN address: $ADDRESS"
 log "WireGuard endpoint: $ENDPOINT"

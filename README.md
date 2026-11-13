@@ -4,12 +4,58 @@
 
 这个仓库现在同时是：
 
-- **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `build` / `deploy` / `members` / `call_member` 工具。
+- **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` 工具。
 - **可观察的部署**：点「部署」后按钮变为「正在部署」，随时点开查看上传进度（字节、速度、剩余时间）、上传/解压准备/切换重启三步状态与远端脚本日志尾部，结束后直接给出成功或失败原因。
 - **网关**：`code/gate/`，负责密码门、反向代理、成员 cluster 认证、目标 cookie。
 - **构建引擎**：`code/build/`，从 DSH GitHub 源码确定性地应用覆盖层、构建 Web 前端、按目标系统和架构打包。
 - **WireGuard 控制服务源码**：`src/wireguard/`（引擎 + 51821 面板），`pnpm build` 会把 `code/wireguard/control-service.js` 从源码重建；引擎测试在 `test/wireguard/`，用 `pnpm test:wireguard` 跑。
+- **成员 SSH 自注册**：成员上的 WireGuard 控制服务会定期检查本机 OpenSSH，把真实的 Windows/Linux 登录用户、sshd 状态和版本回报给服务端；Windows 没装 sshd 时从网关统一静态资源 `gate/assets/openssh/` 下载并安装，随后自动写入服务端公钥。服务端不再需要人工猜 `Administrator`/`root`。
+- **统一静态资源**：hysteria2、OpenSSH、WireGuard 安装包都放在 `gate/assets/<name>/`，由同一个 `StaticAssets` 服务通过 `/__gate/assets/*` 暴露；Windows 成员首次引导时如果没装 WireGuard，会从 `gate/assets/wireguard/` 取 MSI 静默安装，再自动加入隧道。
 - **文档集**：Step 001–010，记录每个坑和对应检查。
+
+## 统一静态资源
+
+每个资源一个目录，目录里的 `manifest.json` 描述版本和文件校验值：
+
+```text
+gate/assets/hysteria2/manifest.json
+gate/assets/openssh/manifest.json
+gate/assets/wireguard/manifest.json
+```
+
+网关只暴露一组只读路由：
+
+```text
+GET /__gate/assets                     # 所有资源的索引
+GET /__gate/assets/<name>              # 单个 manifest
+GET /__gate/assets/<name>/<file>       # 下载文件
+```
+
+安装包不属于敏感配置，因此这组路由不要求网关登录 cookie；这样一台还没加入 WireGuard 的新机器也能先下载 WireGuard 安装包。文件下载响应带 `x-dsh-asset-sha256`，成员脚本会先校验再安装。
+
+旧的 `/__gate/hysteria/*` 和 `/__gate/openssh/*` 仍然兼容，但都转发到同一个资源存储。控制服务（51821）也提供同样的 `/assets/*` 路由，并用 peer token 鉴权；成员的 OpenSSH 自动安装优先走这里，失败时再回退旧的 `/ssh/*` 别名。
+
+## Windows 成员首次引导（组网阶段，不需要 DSH 包）
+
+组网和部署 DSH Web 是两件事。新 Windows 机器只需要 PowerShell：
+
+```powershell
+$p = "$env:TEMP\dsh-member.ps1"
+Invoke-WebRequest "http://8.140.245.107/__gate/bootstrap/windows-member.ps1" -OutFile $p -UseBasicParsing
+powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
+```
+
+这条命令会：
+
+1. 没有 WireGuard 时，从 `gate/assets/wireguard/` 下载 MSI、校验 SHA-256、静默安装；
+2. 生成或复用 `dshwg0` 配置，调用 `POST /join`，安装 WireGuard 隧道；
+3. 没有 OpenSSH 时，从 `gate/assets/openssh/` 下载 zip、校验、安装 `sshd`；
+4. 从网关取得 SSH 公钥，写入 `administrators_authorized_keys` 和当前用户；
+5. 启动 `sshd`、加防火墙规则，并 `POST /ssh/report` 回报用户/版本/ready。
+
+完成后服务端就能通过 SSH（默认 22）部署 DSH Web 包。DSH-Mesh 包不再参与组网；包里的 `install-ssh-agent.ps1` 只是后期需要常驻 agent 时的可选补充。
+
+默认控制地址 `http://8.140.245.107:51821`、网关 `http://8.140.245.107`；私有部署时用 `-ServerUrl`、`-GateUrl` 覆盖。`-Force` 会重新生成 WireGuard 密钥并重新加入。
 
 ## 三个功能
 
@@ -59,7 +105,7 @@
 
 ### 6. 成员任务：A 操作 B 的对话并回调主对话
 
-- 新工具 `call_member`：`delegate` / `run` / `send`。
+- 新工具 `call_member`：`delegate` / `send`（只发起，立即返回 taskId）；`wait_member` 有界等待。
 - A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话并等待；`run` 可直接同步等待最终结果。
 - B 完成后，A 的插件用 `agent.followup()` 把结果写回 **A 的同一个会话**；A 正忙就排到下一轮，空闲就唤醒一个 turn，类似子代理完成通知。
 - 不需要 B 主动访问 A；A 轮询 B，避免回调端口/NAT 问题。
@@ -220,7 +266,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
-| `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` 工具 |
+| `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` 工具 |
 | `src/client/index.tsx` | 侧边栏「DSH 成员」面板 |
 | `code/gate/server.mjs` | 网关：密码门、目标路由、反向代理、WebSocket |
 | `code/gate/members.mjs` | 成员发现、`/__gate/select`、cluster 代理、cookie 隔离 |
@@ -243,7 +289,8 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `deploy` | SSH 蓝绿部署到成员 |
 | `repack` | 用当前仓库刷新已有离线包：只替换 `gate/`、`shared/`、`config/`、`code/*`、根脚本和 `plugins/dsh-mesh/`，DSH 主体（`app/`、`web/`、`runtime/`）复用，最后更新 `.sha256` |
 | `members` | WireGuard 成员发现 |
-| `call_member` | 把任务转给其他成员 |
+| `call_member` | 在成员上发起/继续对话，返回 taskId |
+| `wait_member` | 有界等待成员任务，超时返回继续等待提示 |
 
 ## 约定与限制
 

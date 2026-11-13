@@ -142,7 +142,7 @@ export async function updateState(dir, patch) {
 /**
  * Run the deterministic build pipeline.
  * @param {string} dir job directory.
- * @param {{repositoryRoot: string, recipesPath?: string, overlayRoot?: string, cacheDir?: string, source?: string, ref?: string, targets?: string[], planOnly?: boolean, reuseWorktree?: boolean, install?: string[]|null, build?: string[], version?: string, full?: boolean, nodeVersion?: string, proxy?: string|null, env?: NodeJS.ProcessEnv}} options build input.
+ * @param {{repositoryRoot: string, recipesPath?: string, overlayRoot?: string, cacheDir?: string, source?: string, ref?: string, targets?: string[], planOnly?: boolean, reuseWorktree?: boolean, install?: string[]|null, build?: string[], prebuild?: boolean, version?: string, full?: boolean, nodeVersion?: string, proxy?: string|null, env?: NodeJS.ProcessEnv}} options build input.
  * @returns {Promise<object>} final state.
  */
 export async function runJob(dir, options) {
@@ -215,6 +215,7 @@ export async function runJob(dir, options) {
       install: options.install,
       build: options.build,
       env: outbound.env,
+      prebuild: options.prebuild,
     })
     if (!built.ok) {
       state = await updateState(dir, { status: 'build-failed', phase: 'build', error: built.error ?? 'web build failed' })

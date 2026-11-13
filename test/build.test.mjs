@@ -18,6 +18,7 @@ import {
   writeWorkOrder,
 } from '../code/build/engine.mjs'
 import { createJob, learnJob, readState, resumeJob, writeState } from '../code/build/job.mjs'
+import { buildWebWorkerPackages } from '../code/build/engine.mjs'
 
 /**
  * Create a temporary directory.
@@ -282,4 +283,31 @@ test('learn marks a needs-fix job learned so the CLI can resume it', async () =>
     build: ['node', '-e', 'process.exit(0)'],
   })
   assert.equal(resumed.status, 'build-failed')
+})
+
+test('webworker prebuild runs tsdown only for packages that exist', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('the fixture uses a shell script as a pnpm shim')
+    return
+  }
+  const root = await tempDir()
+  const bin = path.join(root, 'bin')
+  const calls = path.join(root, 'calls.txt')
+  await write(path.join(bin, 'pnpm'), `#!/bin/sh\necho "$@" >> ${calls}\nexit 0\n`)
+  await (await import('node:fs/promises')).chmod(path.join(bin, 'pnpm'), 0o755)
+  // Only the runtime package is present: the packer must be skipped, not fail.
+  await mkdir(path.join(root, 'packages/experimental/webworker-runtime'), { recursive: true })
+  const previous = process.env.PATH
+  process.env.PATH = `${bin}:${previous ?? ''}`
+  try {
+    const result = await buildWebWorkerPackages({ dir: root, log: () => {} })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.built, ['@deepseek-ai/dsh-experimental-webworker-runtime'])
+    const invoked = await readFile(calls, 'utf8')
+    assert.match(invoked, /--filter @deepseek-ai\/dsh-experimental-webworker-runtime exec tsdown/u)
+    assert.doesNotMatch(invoked, /webworker-packer/u)
+  } finally {
+    process.env.PATH = previous
+    await rm(root, { recursive: true, force: true })
+  }
 })

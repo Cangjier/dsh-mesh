@@ -872,6 +872,31 @@ async function learnOverlays(options) {
   }
   return { ok: true, learned, recipes: options.recipes };
 }
+async function buildWebWorkerPackages(options) {
+  const log = options.log ?? (() => {
+  });
+  const built = [];
+  for (const name of ["@deepseek-ai/dsh-experimental-webworker-runtime", "@deepseek-ai/dsh-experimental-webworker-packer"]) {
+    const packageDir = path3.join(options.dir, "packages", "experimental", name.replace("@deepseek-ai/dsh-experimental-", ""));
+    if (!existsSync2(packageDir)) {
+      log(`skipping ${name}: not in this revision`);
+      continue;
+    }
+    log(`$ pnpm --filter ${name} exec tsdown`);
+    const result = await runCommand("pnpm", ["--filter", name, "exec", "tsdown"], {
+      cwd: options.dir,
+      log,
+      env: options.env,
+      timeoutMs: 10 * 6e4
+    });
+    if (!result.ok) {
+      return { ok: false, built, error: `building ${name} failed (exit ${String(result.code)})
+${result.tail.join("\n")}` };
+    }
+    built.push(name);
+  }
+  return { ok: true, built };
+}
 async function runWebBuild(options) {
   const log = options.log ?? (() => {
   });
@@ -891,6 +916,10 @@ async function runWebBuild(options) {
       return { ok: false, dist: null, error: `dependency installation failed (exit ${String(installed.code)})
 ${installed.tail.join("\n")}` };
     }
+  }
+  if (options.prebuild !== false) {
+    const prepared = await buildWebWorkerPackages({ dir: options.dir, log, env: options.env });
+    if (!prepared.ok) return { ok: false, dist: null, error: prepared.error ?? "webworker prebuild failed" };
   }
   log(`$ ${build.join(" ")}`);
   const built = await runCommand(build[0], build.slice(1), {
@@ -1306,7 +1335,8 @@ async function runJob(dir, options) {
       log,
       install: options.install,
       build: options.build,
-      env: outbound.env
+      env: outbound.env,
+      prebuild: options.prebuild
     });
     if (!built.ok) {
       state = await updateState(dir, { status: "build-failed", phase: "build", error: built.error ?? "web build failed" });

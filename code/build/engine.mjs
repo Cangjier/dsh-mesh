@@ -452,8 +452,45 @@ export async function learnOverlays(options) {
 }
 
 /**
+ * Build the workspace packages the web frontend imports as build output.
+ *
+ * `apps/web` now imports `@deepseek-ai/dsh-experimental-webworker-runtime/worker`,
+ * whose `exports` point at `lib/*.js` — files produced by that package's own
+ * `tsdown` run, not by `vite build`. Upstream's `build:web` script does not
+ * build them, so a clean source tree fails with "Rollup failed to resolve
+ * import ... /worker?worker". The fix upstream itself uses in `build:preview`
+ * is to run `tsdown` in those packages first; this does the same, and skips a
+ * package that does not exist in older refs.
+ * @param {{dir: string, log?: (line: string) => void, env?: NodeJS.ProcessEnv}} options input.
+ * @returns {Promise<{ok: boolean, error?: string, built: string[]}>} outcome.
+ */
+export async function buildWebWorkerPackages(options) {
+  const log = options.log ?? (() => {})
+  const built = []
+  for (const name of ['@deepseek-ai/dsh-experimental-webworker-runtime', '@deepseek-ai/dsh-experimental-webworker-packer']) {
+    const packageDir = path.join(options.dir, 'packages', 'experimental', name.replace('@deepseek-ai/dsh-experimental-', ''))
+    if (!existsSync(packageDir)) {
+      log(`skipping ${name}: not in this revision`)
+      continue
+    }
+    log(`$ pnpm --filter ${name} exec tsdown`)
+    const result = await runCommand('pnpm', ['--filter', name, 'exec', 'tsdown'], {
+      cwd: options.dir,
+      log,
+      env: options.env,
+      timeoutMs: 10 * 60_000,
+    })
+    if (!result.ok) {
+      return { ok: false, built, error: `building ${name} failed (exit ${String(result.code)})\n${result.tail.join('\n')}` }
+    }
+    built.push(name)
+  }
+  return { ok: true, built }
+}
+
+/**
  * Run the web build.
- * @param {{dir: string, log?: (line: string) => void, install?: string[]|null, build?: string[], env?: NodeJS.ProcessEnv}} options build input.
+ * @param {{dir: string, log?: (line: string) => void, install?: string[]|null, build?: string[], env?: NodeJS.ProcessEnv, prebuild?: boolean}} options build input.
  * @returns {Promise<{ok: boolean, dist: string|null, error?: string}>} outcome.
  */
 export async function runWebBuild(options) {
@@ -476,6 +513,10 @@ export async function runWebBuild(options) {
     if (!installed.ok) {
       return { ok: false, dist: null, error: `dependency installation failed (exit ${String(installed.code)})\n${installed.tail.join('\n')}` }
     }
+  }
+  if (options.prebuild !== false) {
+    const prepared = await buildWebWorkerPackages({ dir: options.dir, log, env: options.env })
+    if (!prepared.ok) return { ok: false, dist: null, error: prepared.error ?? 'webworker prebuild failed' }
   }
   log(`$ ${build.join(' ')}`)
   const built = await runCommand(build[0], build.slice(1), {

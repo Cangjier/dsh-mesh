@@ -39,10 +39,11 @@ import { loginPage, page, accountLoginPage, PAGE_CSP } from './pages.mjs'
 import { AccountLogin } from './account-login.mjs'
 import { InteractiveBrowser } from './windows-browser.mjs'
 import { HysteriaService } from './hysteria.mjs'
+import { PackageUploads } from './packages.mjs'
 import { StaticAssets } from './static-assets.mjs'
 import { CLUSTER_PREFIX, MemberService } from './members.mjs'
 import { deriveClusterSecret } from '../shared/cluster.mjs'
-import { TARGET_COOKIE } from '../shared/wireguard.mjs'
+import { TARGET_COOKIE, readWireGuardState } from '../shared/wireguard.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = path.resolve(HERE, '..')
@@ -1109,6 +1110,23 @@ const hysteria = new HysteriaService({
   snapshot: () => members.snapshot(),
 })
 
+/**
+ * Member-to-gateway package uploads. The mesh prefix comes from the WireGuard
+ * state so a non-default `vpnCidr` is honoured; the default covers the moment
+ * before the state file is readable.
+ */
+const packageUploads = new PackageUploads({
+  password: CONFIG.password,
+  packagesDir: path.join(os.homedir(), '.dsh', 'packages'),
+  log,
+})
+void readWireGuardState({ file: path.join(env('DSH_HOME', path.join(os.homedir(), '.dsh')), 'wireguard', 'state.json') })
+  .then(result => {
+    const cidr = result?.state?.settings?.vpnCidr ?? result?.state?.server?.vpnCidr
+    if (typeof cidr === 'string') packageUploads.setCidr(cidr)
+  })
+  .catch(() => {})
+
 /** A short page telling the visitor DSH is still coming up. */
 function sendStarting(res) {
   sendHtml(res, 503, page({
@@ -1291,6 +1309,9 @@ const HTTPS_REDIRECT_EXEMPT = [
   /^\/__gate\/bootstrap(?:\/|$)/u,
   /^\/__gate\/openssh\/(?:manifest|asset)(?:\/|$)/u,
   /^\/__gate\/hysteria\/(?:assets|asset\/)/u,
+  // Members upload over the WireGuard tunnel, which is already encrypted; the
+  // public certificate on this host does not cover the VPN address.
+  /^\/__gate\/packages(?:\/|$)/u,
   /^\/__gate\/health$/u,
   /^\/__gate\/member$/u,
   /^\/\.well-known\/acme-challenge\//u,
@@ -1407,6 +1428,9 @@ async function dispatch(req, res) {
     }
     // Installation binaries are public; configuration endpoints below are not.
     if (await staticAssets.handle(req, res, url)) return
+    if (pathname === '/__gate/packages' || pathname.startsWith('/__gate/packages/')) {
+      if (await packageUploads.handle(req, res, url)) return
+    }
     if (pathname === '/__gate/hysteria' || pathname.startsWith('/__gate/hysteria/')) {
       if (await hysteria.handle(req, res, url)) return
     }

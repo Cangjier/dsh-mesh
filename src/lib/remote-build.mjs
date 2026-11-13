@@ -137,6 +137,13 @@ export class RemoteBuilder {
   constructor(options) {
     this.log = options.log ?? (() => {})
     this.packagesDir = options.packagesDir
+    /**
+     * One queue for every state write this builder makes. A progress snapshot
+     * and the final result must never race: the last write has to be the one
+     * that says the job is done.
+     * @type {Promise<unknown>}
+     */
+    this.writes = Promise.resolve()
   }
 
   /**
@@ -147,6 +154,7 @@ export class RemoteBuilder {
    */
   async run(jobDir, options) {
     const state = await readState(jobDir)
+    await this.#update(jobDir, { status: 'running', phase: 'prepare', percent: 1, error: null })
     const runner = new SshRunner({ port: 22, ...options.plan }, { log: line => this.log(`remote ${state.member ?? ''}: ${line}`) })
     const script = remoteBuildScript({
       jobId: state.id,
@@ -156,29 +164,32 @@ export class RemoteBuilder {
       repoUrl: options.repoUrl,
       heapMb: options.heapMb,
     })
+    let percent = 1
     const onLine = (line) => {
       void appendLog(jobDir, line)
       const update = phaseFromLine(line)
-      if (update !== null) void this.#progress(jobDir, update)
+      if (update === null || update.percent <= percent) return
+      percent = update.percent
+      void this.#update(jobDir, { phase: update.phase, percent })
     }
     try {
       await runner.script(script, 'linux', onLine)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await appendLog(jobDir, `member build did not finish: ${message}`)
-      return updateState(jobDir, { status: 'failed', phase: 'failed', error: message, percent: 100 })
+      return this.#update(jobDir, { status: 'failed', phase: 'failed', error: message, percent: 100 })
     }
     const remote = await this.#readRemoteState(runner, state.id)
     if (remote === null) {
       const message = 'the member finished without writing a job state; see the log for its output'
       await appendLog(jobDir, message)
-      return updateState(jobDir, { status: 'failed', phase: 'failed', error: message, percent: 100 })
+      return this.#update(jobDir, { status: 'failed', phase: 'failed', error: message, percent: 100 })
     }
     if (remote.status !== 'done') {
       const message = typeof remote.error === 'string' && remote.error !== '' ? remote.error : `member build ended with status ${String(remote.status)}`
       await appendLog(jobDir, `member job ${String(remote.status)}: ${message}`)
       const status = remote.status === 'needs-fix' ? 'needs-fix' : 'failed'
-      return updateState(jobDir, {
+      return this.#update(jobDir, {
         status,
         phase: remote.phase ?? 'failed',
         error: status === 'failed' ? message : null,
@@ -208,7 +219,7 @@ export class RemoteBuilder {
       })
       await appendLog(jobDir, `pulled ${path.basename(local)} (${String(info.size)} bytes, sha256 ${digest.slice(0, 12)}…)`)
     }
-    return updateState(jobDir, {
+    return this.#update(jobDir, {
       status: 'done',
       phase: 'done',
       percent: 100,
@@ -256,20 +267,15 @@ export class RemoteBuilder {
   }
 
   /**
-   * Record a phase change without rewriting state on every log line.
+   * Serialize one state write behind the ones already queued.
    * @param {string} jobDir job directory.
-   * @param {{phase: string, percent: number, status?: string}} update update.
-   * @returns {Promise<void>}
+   * @param {object} patch fields.
+   * @returns {Promise<object>} the new state.
    */
-  async #progress(jobDir, update) {
-    const state = await readState(jobDir).catch(() => null)
-    if (state === null) return
-    const current = typeof state.percent === 'number' ? state.percent : 0
-    if (update.percent <= current && update.status === undefined) return
-    await updateState(jobDir, {
-      phase: state.phase === 'failed' ? state.phase : update.phase,
-      percent: Math.max(current, update.percent),
-    }).catch(() => {})
+  #update(jobDir, patch) {
+    const next = this.writes.then(() => updateState(jobDir, patch))
+    this.writes = next.catch(() => {})
+    return next
   }
 }
 

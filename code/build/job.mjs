@@ -289,7 +289,11 @@ export async function learnJob(dir, options) {
   })
   await writeFile(recipesPath, JSON.stringify(learned.recipes, null, 2), 'utf8')
   await appendLog(dir, `learned ${String(learned.learned.length)} overlay(s)`)
-  return updateState(dir, { learnedAt: new Date().toISOString(), learned: learned.learned })
+  // `learned` is its own status: the overlays now describe the corrected
+  // worktree, so `resume` must accept the job even though its last run stopped
+  // at `needs-fix`. Leaving the old status in place made the CLI's learn →
+  // resume pair fail even though the plugin's build tool worked.
+  return updateState(dir, { status: 'learned', learnedAt: new Date().toISOString(), learned: learned.learned })
 }
 
 /**
@@ -308,7 +312,7 @@ export async function resumeJob(dir, options) {
     throw new Error(`job ${state.id} has no worktree to resume; start a new build`)
   }
   if (state.status === 'needs-fix') {
-    throw new Error(`job ${state.id} still needs its overlays learned before it can resume`)
+    throw new Error(`job ${state.id} still needs its overlays learned before it can resume (run learn first)`)
   }
   return runJob(dir, { ...options, reuseWorktree: true })
 }

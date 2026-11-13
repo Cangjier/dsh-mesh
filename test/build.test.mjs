@@ -17,6 +17,7 @@ import {
   tarballUrls,
   writeWorkOrder,
 } from '../code/build/engine.mjs'
+import { createJob, learnJob, readState, resumeJob, writeState } from '../code/build/job.mjs'
 
 /**
  * Create a temporary directory.
@@ -238,4 +239,47 @@ test('assembleWebPackage copies the web payload, gate, and plugin', async () => 
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('learn marks a needs-fix job learned so the CLI can resume it', async () => {
+  const root = await tempDir()
+  const overlayRoot = path.join(root, 'build', 'overlays')
+  const target = 'packages/client/login/src/client/index.ts'
+  const marker = 'dsh-mesh overlay: login'
+  const overlay = `// ${marker}\nexport const login = true\n`
+  await write(path.join(overlayRoot, target), overlay)
+  await write(path.join(root, 'build', 'recipes.json'), JSON.stringify({
+    format: 1,
+    source: 'https://github.com/example/dsh',
+    ref: 'master',
+    tree: null,
+    steps: [{
+      id: 'account-login',
+      title: '登录',
+      doc: 'docs/step.md',
+      files: [{ path: target, baseSha256: 'a'.repeat(64), overlay: target, marker }],
+    }],
+  }, null, 2))
+  const job = await createJob({ root: path.join(root, 'jobs'), source: 'https://github.com/example/dsh', ref: 'master', targets: ['linux-x64'] })
+  const worktree = path.join(job.dir, 'src')
+  await write(path.join(worktree, target), overlay)
+  await writeState(job.dir, {
+    ...(await readState(job.dir)),
+    status: 'needs-fix',
+    phase: 'apply',
+    worktree,
+    mismatches: [{ path: target, actual: null }],
+  })
+  await assert.rejects(resumeJob(job.dir, { repositoryRoot: root }), /learn first/u)
+  const learned = await learnJob(job.dir, { repositoryRoot: root })
+  assert.equal(learned.status, 'learned')
+  assert.ok(learned.learnedAt)
+  // Resume now gets past the guard and fails later in the pipeline (there is
+  // no web build here), which is the behaviour the CLI documents.
+  const resumed = await resumeJob(job.dir, {
+    repositoryRoot: root,
+    install: null,
+    build: ['node', '-e', 'process.exit(0)'],
+  })
+  assert.equal(resumed.status, 'build-failed')
 })

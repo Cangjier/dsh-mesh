@@ -2,7 +2,7 @@
   "format": 1,
   "source": "https://github.com/deepseek-ai/deepseek-harness",
   "ref": "master",
-  "tree": "fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159",
+  "tree": "39163dd30f703a79079e2d2446545cff3c453738",
   "notes": "Source-level equivalents of the built-bundle patches in code/gate/patch-picker.mjs and patch-login.mjs. Overlays are full replacement files; baseSha256 pins the pristine input so a new upstream revision produces a work order instead of a silent half-patch.",
   "steps": [
     {
@@ -25,7 +25,7 @@
       "files": [
         {
           "path": "packages/client/ui-settings-account/src/client/index.ts",
-          "baseSha256": "40d8c63acf8e7d24bde89dcab0870049b83baf9c36bb2805679ff3866dee4ff3",
+          "baseSha256": "12c90db629da9117078be19462186033a157625503ab985dfb1e2ef1dc8ef478",
           "overlay": "packages/client/ui-settings-account/src/client/index.ts",
           "marker": "dsh-mesh overlay: login"
         },

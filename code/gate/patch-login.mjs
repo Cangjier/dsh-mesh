@@ -65,6 +65,28 @@ if (original.includes('dsh-gate-account-login')) {
   process.exit(0)
 }
 
+// Minified release bundles collapse whitespace: the same two edits use compact
+// anchors. Desktop mode and the surrounding account state are untouched.
+const minifiedBranch = 'if(desktop)await request();else await browser.start(request,()=>snapshot.view)'
+const minifiedVisible = 'loginVisible:true,loginFailed:false'
+if (original.includes(minifiedBranch)) {
+  const branchCount = original.split(minifiedBranch).length - 1
+  if (branchCount !== 1) {
+    console.error(`expected exactly one match, found ${String(branchCount)}`)
+    process.exit(1)
+  }
+  if (!original.includes(minifiedVisible)) {
+    console.error('could not find the login-visible publish')
+    process.exit(1)
+  }
+  let patchedMin = original.replace(minifiedBranch, `if(desktop)await request();else ${OVERLAY}`)
+  patchedMin = patchedMin.replace(minifiedVisible, 'loginVisible:false,loginFailed:false')
+  copyFileSync(file, `${file}.orig`)
+  writeFileSync(file, patchedMin, 'utf8')
+  console.log('patched (minified); backup at', `${file}.orig`)
+  process.exit(0)
+}
+
 // 1. The hosted overlay replaces the platform pop-up flow.
 const pattern = /([ \t]*)if \(desktop\) await request\(\);\r?\n([ \t]*)else await browser\.start\(request, \(\) => snapshot\.view\);/
 const matches = [...original.matchAll(new RegExp(pattern.source, 'g'))]

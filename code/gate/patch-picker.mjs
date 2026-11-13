@@ -69,6 +69,33 @@ const CLOSE_BUTTON = `(0, react_jsx_runtime.jsx)("button", {
 								children: "×"
 							})`
 
+// Minified release bundles collapse whitespace and use backtick strings. The
+// same overlay edits are expressed against that token stream below.
+const MIN_SPINNER = `(0,react_jsx_runtime.jsx)("svg",{width:18,height:18,viewBox:"0 0 24 24","aria-label":t("browser.loading"),children:(0,react_jsx_runtime.jsx)("circle",{cx:12,cy:12,r:9,fill:"none",stroke:"currentColor",strokeWidth:2.5,strokeDasharray:"42 14",strokeLinecap:"round",children:(0,react_jsx_runtime.jsx)("animateTransform",{attributeName:"transform",type:"rotate",from:"0 12 12",to:"360 12 12",dur:"0.9s",repeatCount:"indefinite"})})})`
+
+const MIN_CLOSE = `(0,react_jsx_runtime.jsx)("button",{type:"button","aria-label":"关闭",title:"关闭",className:DirectoryBrowser_module_css_default.crumbEditZone,onClick:()=>{onClose()},style:{position:"absolute",top:18,right:13,height:28,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,lineHeight:1,cursor:"pointer",background:"transparent",border:0,color:"inherit",padding:0,zIndex:2},children:"×"})`
+
+/**
+ * Replace exactly one occurrence, failing loudly otherwise.
+ * @param {string} text source text.
+ * @param {string} find exact anchor.
+ * @param {string} replace replacement.
+ * @param {string} label what the anchor is.
+ * @returns {string} updated text.
+ */
+function replaceOnce(text, find, replace, label) {
+  const at = text.indexOf(find)
+  if (at === -1) {
+    console.error(`anchor not found: ${label}`)
+    process.exit(1)
+  }
+  if (text.indexOf(find, at + 1) !== -1) {
+    console.error(`anchor is not unique: ${label}`)
+    process.exit(1)
+  }
+  return text.slice(0, at) + replace + text.slice(at + find.length)
+}
+
 let code = readFileSync(file, 'utf8')
 if (code.includes('dsh-picker-patched')) {
   console.log('already patched')
@@ -76,6 +103,56 @@ if (code.includes('dsh-picker-patched')) {
 }
 
 const steps = []
+
+// A minified bundle is the same component tree with whitespace collapsed and
+// backtick strings, so the same edits have a compact anchor set.
+const MIN_LOADING = 'className:clsx(DirectoryBrowser_module_css_default.status,DirectoryBrowser_module_css_default.loadingFloat),role:`status`,children:t(`browser.loading`)'
+
+if (code.includes(MIN_LOADING)) {
+  code = replaceOnce(code, 'name:homeLabel,', 'name:listing.home,', 'home crumb label')
+  steps.push('home crumb shows the full path')
+
+  code = replaceOnce(code,
+    'className:DirectoryBrowser_module_css_default.content,',
+    'className:DirectoryBrowser_module_css_default.content,style:{position:"relative"},',
+    'dialog content container')
+
+  code = replaceOnce(code,
+    MIN_LOADING,
+    'className:DirectoryBrowser_module_css_default.status,style:{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",padding:0,margin:0,boxSizing:"border-box",pointerEvents:"none",zIndex:3},role:`status`,children:' + MIN_SPINNER,
+    'loading indicator')
+  steps.push('loading indicator is a centred spinner')
+
+  code = replaceOnce(code,
+    'className:DirectoryBrowser_module_css_default.header,',
+    'className:DirectoryBrowser_module_css_default.header,style:{position:"relative"},',
+    'dialog header container')
+
+  code = replaceOnce(code,
+    'children:t(`browser.title`)}),(0,react_jsx_runtime.jsx)(`div`,{className:DirectoryBrowser_module_css_default.crumbBar,',
+    `children:t(\`browser.title\`)}),${MIN_CLOSE},(0,react_jsx_runtime.jsx)(\`div\`,{className:DirectoryBrowser_module_css_default.crumbBar,`,
+    'dialog header')
+  steps.push('close button at the top right')
+
+  code = replaceOnce(code,
+    'children:visible.map(entry=>{',
+    'children:visible.length===0&&busy!==true?(0,react_jsx_runtime.jsx)("div",{className:DirectoryBrowser_module_css_default.status,style:{padding:"18px 14px",opacity:.55,fontSize:13},children:filterPrefix?"没有匹配的文件夹":"此文件夹为空"}):visible.map(entry=>{',
+    'level column children')
+  steps.push('empty folder shows a hint')
+
+  code = replaceOnce(code,
+    'setPathDraft(null);setSelected(entry);setChild(null);setLoading(true);',
+    'setPathDraft(null);setSelected(entry);setLoading(true);',
+    'select() child reset')
+  steps.push('picking a folder keeps the right column')
+
+  code = `/* dsh-picker-patched */\n${code}`
+  copyFileSync(file, `${file}.orig`)
+  writeFileSync(file, code, 'utf8')
+  console.log(`patched (minified): ${steps.join('; ')}`)
+  console.log('backup at', `${file}.orig`)
+  process.exit(0)
+}
 
 // 1. Home crumb: the label becomes the absolute path the host reported.
 const homeBefore = code

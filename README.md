@@ -57,7 +57,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 
 默认控制地址 `http://8.140.245.107:51821`、网关 `http://8.140.245.107`；私有部署时用 `-ServerUrl`、`-GateUrl` 覆盖。`-Force` 会重新生成 WireGuard 密钥并重新加入。
 
-## 三个功能
+## 主要功能
 
 ### 1. 发现 dsh-wireguard 局域网里的 DSH
 
@@ -73,11 +73,32 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - 按 `build/recipes.json` 应用源码覆盖层；每个覆盖层记录 pristine 文件的 SHA-256。
 - 覆盖层失配时**不继续构建**，写出 `work-order.md` / `subagent-prompt.txt`；DSH 用 subagent 修好工作树后，再次调用 `build { jobId }`，由构建自动固化覆盖层并复用工作树继续。
 - build 完成后清理更早 job 的 `src/`、`work-order/` 和 `dist/`，保留当前 job 的产物以及所有 job 的 `state.json` / `build.log`；`keepDist: true` 可保留更早 job 的 `dist/`。
+- **在成员上编译**：`member` 指定编译成员（Linux），网关通过 SSH 在成员的 dsh-mesh 检出里跑同一套 `code/build` 引擎，日志流回面板，产物自动拉回网关的 `~/.dsh/packages`。
+- **外网代理**：`proxyMember` 让指定成员临时启动一个只绑定其组网地址的 HTTP 代理（`code/shared/egress-proxy.mjs`），源码下载、Node 运行时和 npm 都走它；编译结束即关闭。也可以直接给 `proxy: "http://host:port"`。经 WireGuard 转发通常比成员直连慢，成员本身网络好时不必开代理。
+- **前置编译步骤**：干净工作树下 `apps/web` 依赖 workspace 里 `lib/` 产物（`dsh-client-web`、`ui-theme` 的 CSS、webworker 运行时等），`build/recipes.json` 的 `prepare` 会在 `pnpm run build:web` 之前执行这些命令（CLI 用 `--prepare` 覆盖）。
 - Web 构建成功后按目标打包：
   - **完整包**（默认）：`app/`（`@deepseek-ai/dsh` + 目标原生依赖）、`runtime/node/`、`gate/`、`shared/`、`plugin/`、安装脚本。
   - **只 Web 包**（`--web-only`）：只含 `web/` 前端产物，便于覆盖已有安装。
 
-### 3. 点击成员，切换当前页面
+### 3. 包管理（面板 Tab）
+
+「包管理」把编译和分发放在一个页面：
+
+- **编译**：选择编译成员（默认本机，Linux 成员可选）、外网代理（直连 / 经成员 / 自定义 URL）、源码引用（默认 `master`，可填提交号）和目标平台（linux-x64 / win-x64）。点「编译」后任务在后台跑，页面按阶段显示进度。
+- **编译任务**：保留最近任务的成员、引用、目标、进度和时间；「日志」弹层实时跟随 `build.log`。
+- **部署包**：列出 `~/.dsh/packages` 里的包（平台、大小、时间），可直接删除；成员编译出的产物也会出现在这里，接着就能对成员「部署」。
+
+成员也可以自己把产物推给网关（只接受组网来源，需要网关口令）：
+
+```bash
+PW=$(grep '^DSH_GATE_PASSWORD=' ~/.dsh/dsh-mesh/shared/config/gate.env | cut -d= -f2-)
+curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
+  "http://10.66.66.1/__gate/packages/upload?name=dsh-mesh.tar.gz&sha256=$(sha256sum dsh-mesh.tar.gz | cut -d' ' -f1)"
+```
+
+上传按流式写入 `.part` 再原子改名，校验和一致才落盘，并在旁边写 `.sha256`。
+
+### 4. 点击成员，切换当前页面
 
 - 面板点击「切换」→ `POST /__gate/select {id}` → 网关设置 `dsh_gate_target` cookie → reload。
 - 之后所有请求（HTML、assets、API、WebSocket）都由同一个网关按 cookie 选择上游：
@@ -86,7 +107,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - **不再使用 `#member=id`**：URL 片段不会发给服务器，方案已移除。
 - cookie 是浏览器级的，所以**一个浏览器同时只有一个活动成员**；两个标签页切不同成员会互相覆盖。
 
-### 4. 通过 SSH 蓝绿部署成员
+### 5. 通过 SSH 蓝绿部署成员
 
 - `deploy` 从 A 通过 SSH 部署 B：先把包解压到新的 `releases/<release>`，建立 `shared/config|data|home|workspace` 链接，更新服务定义，全部准备好后才切换 `current`。
 - 重启顺序强制为 `control → dsh → gate`；**网关永远最后**，因为用户可能正通过 B 的网关操作 A，B 的网关先重启会切断这条路径。
@@ -94,7 +115,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - 健康检查失败自动切回 `previous` 并重启；`rollback` 可手动回滚。
 - 成功激活后只保留最近 3 个 release，`current`/`previous` 指向的目录永不删除。
 
-### 5. 独立 DSH 交互 HTTP 服务
+### 6. 独立 DSH 交互 HTTP 服务
 
 - `code/interop-service/server.mjs`：独立进程，默认 `127.0.0.1:8765`。
 - 内部拉起 `dsh --profile sdk`，通过原生 stdio JSON-RPC 创建/驱动/等待对话。
@@ -103,7 +124,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - Bearer token；Windows 服务 `DSH-Interop` / Linux `dsh-interop.service`，和网关、DSH、51821 控制面板互不依赖。
 - 详见 [Step 013](docs/Step%20013%20独立DSH交互HTTP服务.md)。
 
-### 6. 成员任务：A 操作 B 的对话并回调主对话
+### 7. 成员任务：A 操作 B 的对话并回调主对话
 
 - 新工具 `call_member`：`delegate` / `send`（只发起，立即返回 taskId）；`wait_member` 有界等待。
 - A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话并等待；`run` 可直接同步等待最终结果。
@@ -181,6 +202,9 @@ build { "planOnly": true }                         # 只检查覆盖层
 build { "ref": "master", "targets": ["linux-x64"] }
 build { "jobId": "<needs-fix-job-id>" }            # 固化工作树修改并继续
 build { "keepDist": true }                         # 保留更早 build 的 dist
+build { "member": "10.66.66.2" }                   # 在成员上编译并把产物拉回本机
+build { "member": "10.66.66.2", "proxyMember": "10.66.66.3" }  # 借成员的网络下载
+build { "member": "10.66.66.2", "proxy": "http://10.66.66.2:8888" }
 ```
 
 构建是同步的：结束后返回 `data.logFile` / `data.stateFile`。build 完成后默认清理更早 job 的
@@ -194,10 +218,13 @@ build { "keepDist": true }                         # 保留更早 build 的 dist
 命令行：
 
 ```bash
-node code/build/cli.mjs build
+node code/build/cli.mjs build --targets linux-x64,win-x64
+node code/build/cli.mjs build --ref <sha> --proxy http://host:port --prepare "pnpm run build:artifacts"
 node code/build/cli.mjs plan
 node code/build/cli.mjs status --job <job-dir>
 node code/build/cli.mjs logs --job <job-dir>
+node code/build/cli.mjs learn --job <job-dir>      # 把改好的工作树固化成覆盖层
+node code/build/cli.mjs resume --job <job-dir>     # 复用工作树继续构建
 ```
 
 首次真实构建需要网络、`pnpm`、`npm` 和足够磁盘（完整包每个目标约 0.7–1 GB 依赖 + Node 运行时）。如果上游源码已经变了，第一次会按设计返回 needs-fix 工作单，而不是假装成功。构建会执行源码仓库的 `pnpm install` / build 脚本；只对可信源码使用。

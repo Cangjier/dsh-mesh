@@ -490,7 +490,7 @@ export async function buildWebWorkerPackages(options) {
 
 /**
  * Run the web build.
- * @param {{dir: string, log?: (line: string) => void, install?: string[]|null, build?: string[], env?: NodeJS.ProcessEnv, prebuild?: boolean}} options build input.
+ * @param {{dir: string, log?: (line: string) => void, install?: string[]|null, build?: string[], prepare?: string[][]|null, env?: NodeJS.ProcessEnv, prebuild?: boolean}} options build input.
  * @returns {Promise<{ok: boolean, dist: string|null, error?: string}>} outcome.
  */
 export async function runWebBuild(options) {
@@ -517,6 +517,21 @@ export async function runWebBuild(options) {
   if (options.prebuild !== false) {
     const prepared = await buildWebWorkerPackages({ dir: options.dir, log, env: options.env })
     if (!prepared.ok) return { ok: false, dist: null, error: prepared.error ?? 'webworker prebuild failed' }
+  }
+  // A recipe can name commands that must run before the web build (a clean
+  // upstream tree needs its client packages compiled first, for example).
+  for (const command of options.prepare ?? []) {
+    if (command.length === 0) continue
+    log(`$ ${command.join(' ')}`)
+    const prepared = await runCommand(command[0], command.slice(1), {
+      cwd: options.dir,
+      log,
+      env: options.env,
+      timeoutMs: 60 * 60_000,
+    })
+    if (!prepared.ok) {
+      return { ok: false, dist: null, error: `prepare step failed (exit ${String(prepared.code)}): ${command.join(' ')}\n${prepared.tail.join('\n')}` }
+    }
   }
   log(`$ ${build.join(' ')}`)
   const built = await runCommand(build[0], build.slice(1), {

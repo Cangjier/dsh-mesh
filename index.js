@@ -921,6 +921,20 @@ ${installed.tail.join("\n")}` };
     const prepared = await buildWebWorkerPackages({ dir: options.dir, log, env: options.env });
     if (!prepared.ok) return { ok: false, dist: null, error: prepared.error ?? "webworker prebuild failed" };
   }
+  for (const command of options.prepare ?? []) {
+    if (command.length === 0) continue;
+    log(`$ ${command.join(" ")}`);
+    const prepared = await runCommand(command[0], command.slice(1), {
+      cwd: options.dir,
+      log,
+      env: options.env,
+      timeoutMs: 60 * 6e4
+    });
+    if (!prepared.ok) {
+      return { ok: false, dist: null, error: `prepare step failed (exit ${String(prepared.code)}): ${command.join(" ")}
+${prepared.tail.join("\n")}` };
+    }
+  }
   log(`$ ${build.join(" ")}`);
   const built = await runCommand(build[0], build.slice(1), {
     cwd: options.dir,
@@ -1335,6 +1349,7 @@ async function runJob(dir, options) {
       log,
       install: options.install,
       build: options.build,
+      prepare: options.prepare ?? (Array.isArray(recipes.prepare) ? recipes.prepare : null),
       env: outbound.env,
       prebuild: options.prebuild
     });

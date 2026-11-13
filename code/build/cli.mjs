@@ -131,12 +131,14 @@ async function main() {
       ref,
       targets,
     })
+    const prepareCommand = commandArg(values.get('prepare'))
     const state = await runJob(job.dir, {
       repositoryRoot: REPOSITORY_ROOT,
       proxy: typeof values.get('proxy') === 'string' ? values.get('proxy') : undefined,
       planOnly: command === 'plan',
       full: values.get('web-only') === true ? false : undefined,
       prebuild: values.get('no-prebuild') === true ? false : undefined,
+      prepare: prepareCommand === undefined ? undefined : [prepareCommand],
       install: values.get('no-install') === true ? null : undefined,
       build: commandArg(values.get('build-command')),
       version: typeof values.get('version') === 'string' ? values.get('version') : undefined,
@@ -164,6 +166,7 @@ async function main() {
     '  --web-only               package the web payload without app/node/runtime',
     '  --no-install             skip pnpm install',
     '  --no-prebuild            skip the workspace tsdown prebuild',
+    '  --prepare <cmd>          run one command before the web build',
     '  --build-command <cmd>    override the web build command',
     '  --version <version>      package version override',
     '',

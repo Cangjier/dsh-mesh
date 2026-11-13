@@ -311,3 +311,29 @@ test('webworker prebuild runs tsdown only for packages that exist', async (t) =>
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('recipe prepare steps run before the web build', async () => {
+  const root = await tempDir()
+  const marker = path.join(root, 'prepared.txt')
+  const dist = path.join(root, 'apps', 'web', 'dist')
+  await write(path.join(dist, 'index.html'), '<html></html>')
+  await write(path.join(root, 'build', 'recipes.json'), JSON.stringify({
+    format: 1,
+    source: 'https://github.com/example/dsh',
+    ref: 'master',
+    tree: null,
+    prepare: [['node', '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ok')`]],
+    steps: [],
+  }, null, 2))
+  const result = await runWebBuild({
+    dir: root,
+    prepare: [['node', '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ok')`]],
+    install: null,
+    prebuild: false,
+    build: ['node', '-e', 'process.exit(0)'],
+    log: () => {},
+  })
+  assert.equal(result.ok, true)
+  assert.equal(await readFile(marker, 'utf8'), 'ok')
+  await rm(root, { recursive: true, force: true })
+})

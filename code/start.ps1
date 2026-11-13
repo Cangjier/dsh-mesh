@@ -25,5 +25,26 @@ $server = Join-Path $Root 'gate\server.mjs'
 if (-not (Test-Path $server)) {
   throw "Missing $server. Extract the full package first."
 }
+# Task Scheduler ends the task host but leaves the node children listening on
+# the stack ports, and a failed promotion can leave a second stack behind. Free
+# the ports before starting: a leftover node on one of them is always stale.
+$ownedPorts = 80, 8765, 31280
+foreach ($port in $ownedPorts) {
+  $owners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique)
+  foreach ($owner in $owners) {
+    if (-not $owner -or $owner -eq $PID) { continue }
+    $process = Get-Process -Id $owner -ErrorAction SilentlyContinue
+    if ($process -and $process.ProcessName -eq 'node') {
+      & cmd.exe /c "taskkill /PID $owner /T /F >nul 2>&1"
+    }
+  }
+}
+for ($i = 0; $i -lt 30; $i++) {
+  $busy = @(Get-NetTCPConnection -LocalPort $ownedPorts -State Listen -ErrorAction SilentlyContinue)
+  if ($busy.Count -eq 0) { break }
+  Start-Sleep -Milliseconds 500
+}
+
 Write-Host "Starting DSH Person Web with $node"
 & $node $server

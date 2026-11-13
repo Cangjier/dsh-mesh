@@ -252,7 +252,7 @@ namespace DshMesh
             string script = Path.Combine(root, "start-stack.ps1");
             if (!File.Exists(script)) { Log("missing " + script); return false; }
             EndTask();
-            string taskCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"";
+            string taskCommand = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"";
             int created = Run(Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
                 "/Create /F /TN \"" + StackTask + "\" /TR \"" + taskCommand + "\" /SC ONCE /ST 00:00 /RU \"" + user + "\" /IT /RL HIGHEST");
             if (created != 0) { Log("schtasks create failed with " + created); return false; }

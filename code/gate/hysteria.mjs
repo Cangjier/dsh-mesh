@@ -824,12 +824,14 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
             await new Promise(resolve => setTimeout(resolve, 1000))
           }
           routed = routed && (await tunnelReachable())
+          if (routed) await ensureRouteTask(clientTarget, server.ip)
         }
         if (!connected) {
           warning = 'TUN 模式未建立，已回退 SOCKS5'
           await log(warning)
           usedMode = 'socks'
           await restoreRoute()
+          await removeRouteTask(clientTarget)
           await writeClientConfig(false)
           await installClient(false)
           connected = await waitConnected()
@@ -838,6 +840,7 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
           await log(warning)
           usedMode = 'socks'
           await restoreRoute()
+          await removeRouteTask(clientTarget)
           await writeClientConfig(false)
           await installClient(false)
           connected = await waitConnected()
@@ -977,6 +980,48 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
   }
 }
 
+/** Recreate the tun route after a reboot: the tun adapter gets a new index. */
+async function ensureRouteTask(target, serverIp) {
+  if (target.os !== 'windows') return
+  const script = `$target = '${serverIp}'
+for ($i = 0; $i -lt 300; $i++) {
+  $idx = (Get-NetAdapter -Name 'hysteria2' -ErrorAction SilentlyContinue).ifIndex
+  if ($idx) {
+    if (-not (Get-NetRoute -DestinationPrefix "$target/32" -InterfaceIndex $idx -ErrorAction SilentlyContinue)) {
+      New-NetRoute -DestinationPrefix "$target/32" -InterfaceIndex $idx -NextHop 0.0.0.0 -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
+    }
+    break
+  }
+  Start-Sleep -Seconds 1
+}
+`
+  const name = `hysteria-route-${Date.now().toString(36)}.ps1`
+  const local = path.join(tmpdir(), name)
+  await writeFile(local, `\uFEFF${script}`, 'utf8')
+  try {
+    await uploadFile(target, local, 'C:\\ProgramData\\hysteria2\\client-route.ps1')
+  } catch {
+    return
+  } finally {
+    await rm(local, { force: true }).catch(() => {})
+  }
+  await runScript(target, `$ErrorActionPreference='Stop'
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\\ProgramData\\hysteria2\\client-route.ps1"'
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(10))
+Unregister-ScheduledTask -TaskName 'hysteria2-client-route' -Confirm:$false -ErrorAction SilentlyContinue
+Register-ScheduledTask -TaskName 'hysteria2-client-route' -Action $action -Trigger $trigger -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
+`, () => {}).catch(() => {})
+}
+
+/** Drop the boot task that re-creates the tun route. */
+async function removeRouteTask(target) {
+  if (target.os !== 'windows') return
+  await runScript(target, `$ErrorActionPreference='Continue'
+Unregister-ScheduledTask -TaskName 'hysteria2-client-route' -Confirm:$false -ErrorAction SilentlyContinue
+`, () => {}).catch(() => {})
+}
+
 /** Stop and unregister the hysteria2 service or scheduled task for one role. */
 async function stopHysteria(target, role) {
   try {
@@ -987,6 +1032,7 @@ async function stopHysteria(target, role) {
     await runScript(target, `$ErrorActionPreference='Continue'
 Stop-ScheduledTask -TaskName 'hysteria2-${role}' -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'hysteria2-${role}' -Confirm:$false -ErrorAction SilentlyContinue
+${role === 'client' ? "Unregister-ScheduledTask -TaskName 'hysteria2-client-route' -Confirm:$false -ErrorAction SilentlyContinue" : ''}
 Get-Process hysteria -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 `, () => {})
   } catch {

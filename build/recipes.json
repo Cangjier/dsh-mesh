@@ -37,5 +37,20 @@
         }
       ]
     }
-  ]
+  ],
+  "prepare": [
+    [
+      "pnpm",
+      "exec",
+      "tsx",
+      "scripts/compile-referenced-projects.ts",
+      "host-libraries"
+    ],
+    [
+      "pnpm",
+      "run",
+      "build:lib:client"
+    ]
+  ],
+  "prepareNotes": "A clean upstream tree has apps/web importing workspace build output (dsh-client-web, the ui-theme CSS, the webworker runtime), and upstream's build:web does not build it. The host library pass produces the Host declarations the client tsc needs; build:lib:client then emits the client bundles. Desktop/native steps are skipped: they are unrelated to the web payload and the desktop bundle needs git metadata a tarball does not carry."
 }

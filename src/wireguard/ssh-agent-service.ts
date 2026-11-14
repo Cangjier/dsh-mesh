@@ -12,11 +12,15 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/pro
 import { tmpdir, hostname as osHostname } from 'node:os';
 import path from 'node:path';
 import { detectPlatform, run } from './lib/platform';
+import { gatewaySshConfigBlock } from './lib/member-ssh';
 import {
   authorizeLinuxKey,
   authorizeWindowsKey,
+  ensureMemberKey,
   inspectSsh,
+  installGatewaySshAccess,
   installWindowsOpenSsh,
+  memberSshPaths,
   verifyOpenSshZip,
   type OpenSshAssetManifest,
   type SshAgentStatus,
@@ -232,6 +236,41 @@ async function report(config: AgentConfig, status: SshAgentStatus): Promise<void
   await log(`reported ready=${String(status.ready)} user=${status.user ?? '-'}${error ? ` error=${error}` : ''}`);
 }
 
+/**
+ * Install this member's own key on the gateway so `ssh dsh-gateway` works from
+ * here too. Independent of the member's sshd, so it runs even when that fails.
+ * @param config agent configuration with a valid token.
+ * @param platform resolved platform.
+ * @param status last inspection result, for the account to write files as.
+ * @returns nothing; failures are logged and retried on the next tick.
+ */
+async function enrollReverse(config: AgentConfig, platform: Awaited<ReturnType<typeof detectPlatform>>, status: SshAgentStatus): Promise<void> {
+  try {
+    const paths = memberSshPaths(platform, status.user);
+    const identity = await ensureMemberKey(platform, paths, { comment: `dsh-mesh@${status.hostname}`, user: status.user });
+    const data = await httpJson(config, '/ssh/authorize', {
+      publicKey: config.publicKey,
+      token: config.token,
+      sshPublicKey: identity.publicKey,
+    });
+    const host = String(data.host ?? '').trim();
+    if (!host) throw new Error('the gateway did not report its VPN address');
+    const user = String(data.user ?? 'root').trim() || 'root';
+    const port = Number.isSafeInteger(data.port) && data.port > 0 ? data.port : 22;
+    const hostKeys = Array.isArray(data.hostKeys) ? data.hostKeys.filter((item: unknown) => typeof item === 'string') : [];
+    const configText = typeof data.sshConfig === 'string' && data.sshConfig.trim()
+      ? data.sshConfig
+      : gatewaySshConfigBlock({ host, user, port });
+    const knownHostsText = typeof data.knownHostsB64 === 'string' && data.knownHostsB64
+      ? Buffer.from(data.knownHostsB64, 'base64').toString('utf8')
+      : hostKeys.map((item: string) => `${host} ${item}`).join('\n') + (hostKeys.length ? '\n' : '');
+    await installGatewaySshAccess(platform, paths, { host, user, port, configText, knownHostsText }, { user: status.user });
+    await log(`reverse SSH ready: ${user}@${host}:${port} (key ${paths.privateKey})`);
+  } catch (error) {
+    await log(`reverse SSH enrollment failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 async function tick(config: AgentConfig): Promise<AgentConfig> {
   const platform = await detectPlatform();
   let status = await inspectSsh(platform);
@@ -272,6 +311,7 @@ async function tick(config: AgentConfig): Promise<AgentConfig> {
       await log(status.error);
     }
   }
+  await enrollReverse(config, platform, status);
   await report(config, status);
   return config;
 }

@@ -110,6 +110,8 @@ export interface ControlPanelOptions {
   onSshReport?: (request: Record<string, unknown>, remoteAddress: string) => Promise<Record<string, unknown>>;
   /** Member agent: fetch the server's per-peer public key. */
   getPeerSshKey?: (request: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  /** Member agent: publish its own public key so it can log in to this host. */
+  onAuthorizeMemberKey?: (request: Record<string, unknown>, remoteAddress: string) => Promise<Record<string, unknown>>;
   /** Member agent: describe the cached Windows OpenSSH package. */
   getOpenSshManifest?: (request: Record<string, unknown>) => Promise<Record<string, unknown>>;
   /** Member agent: resolve the OpenSSH zip for streaming. */
@@ -261,7 +263,7 @@ export class ControlPanel {
       }
       return;
     }
-    if (method === 'POST' && (url.pathname === '/ssh/report' || url.pathname === '/ssh/key' || url.pathname === '/ssh/manifest')) {
+    if (method === 'POST' && (url.pathname === '/ssh/report' || url.pathname === '/ssh/key' || url.pathname === '/ssh/authorize' || url.pathname === '/ssh/manifest')) {
       try {
         const body = await readJson(request);
         let result: Record<string, unknown>;
@@ -271,6 +273,9 @@ export class ControlPanel {
         } else if (url.pathname === '/ssh/key') {
           if (!this.options.getPeerSshKey) throw new WireGuardError('not_supported', 'This server does not issue SSH keys.', { status: 501 });
           result = await this.options.getPeerSshKey(body);
+        } else if (url.pathname === '/ssh/authorize') {
+          if (!this.options.onAuthorizeMemberKey) throw new WireGuardError('not_supported', 'This server does not accept member SSH keys.', { status: 501 });
+          result = await this.options.onAuthorizeMemberKey(body, remoteAddress);
         } else {
           if (!this.options.getOpenSshManifest) throw new WireGuardError('not_supported', 'This server does not host OpenSSH.', { status: 501 });
           result = await this.options.getOpenSshManifest(body);

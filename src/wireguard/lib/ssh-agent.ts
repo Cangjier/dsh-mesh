@@ -2,10 +2,18 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { connect } from 'node:net';
-import { tmpdir, hostname as osHostname, userInfo } from 'node:os';
+import { homedir, tmpdir, hostname as osHostname, userInfo } from 'node:os';
 import path from 'node:path';
+import {
+  gatewaySshConfigBlock,
+  GATEWAY_BLOCK_NAME,
+  MEMBER_KEY_NAME,
+  mergeKnownHosts,
+  mergeManagedBlock,
+  parseSshPublicKey,
+} from './member-ssh';
 import { findExecutable, run, runPrivileged, type PlatformInfo } from './platform';
 import { SSH_USER_PATTERN } from './ssh';
 
@@ -362,6 +370,191 @@ try {
 } finally {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }`;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Reverse direction: the member's own identity and its gateway login.
+ *
+ * Enrollment is symmetric now. The gateway keeps the peer's public key in
+ * authorized_keys and the member keeps the private key here, so `ssh
+ * dsh-gateway` works from the member without any token or password.
+ * ------------------------------------------------------------------------- */
+
+const WINDOWS_KEYGEN_CANDIDATES = [
+  path.join(WINDOWS_INSTALL_DIR, 'ssh-keygen.exe'),
+  'C:\\Windows\\System32\\OpenSSH\\ssh-keygen.exe',
+];
+const LINUX_KEYGEN_CANDIDATES = [
+  '/usr/bin/ssh-keygen',
+  '/usr/sbin/ssh-keygen',
+  '/usr/local/bin/ssh-keygen',
+];
+const LINUX_KEY_CANDIDATES = ['/usr/bin/ssh', '/usr/local/bin/ssh'];
+
+export interface MemberSshPaths {
+  /** `~/.ssh` of the account that will actually run ssh. */
+  dir: string;
+  privateKey: string;
+  publicKey: string;
+  config: string;
+  knownHosts: string;
+}
+
+export interface GatewaySshAccess {
+  host: string;
+  user: string;
+  port: number;
+  /** Managed config block, already rendered by the gateway. */
+  configText: string;
+  /** known_hosts lines for the gateway, already rendered by the gateway. */
+  knownHostsText: string;
+}
+
+/**
+ * Resolve the member account's home directory. On Windows the mesh service
+ * runs as LocalSystem, whose own profile is useless to the operator, so the
+ * detected interactive account wins.
+ * @param platform resolved platform.
+ * @param user account the gateway logs in as.
+ * @returns absolute home directory.
+ */
+export function memberHomeDirectory(platform: PlatformInfo, user: string | null): string {
+  if (!platform.isWindows) return homedir();
+  const account = user && SSH_USER_PATTERN.test(user) ? user : null;
+  if (!account) return homedir();
+  const drive = String(process.env.SystemDrive || 'C:').replace(/[\\/]+$/u, '');
+  return path.win32.join(`${drive}\\`, 'Users', account);
+}
+
+/**
+ * Key, config, and known_hosts locations for the member's reverse identity.
+ * @param platform resolved platform.
+ * @param user account the gateway logs in as.
+ * @returns absolute paths.
+ */
+export function memberSshPaths(platform: PlatformInfo, user: string | null): MemberSshPaths {
+  const join = platform.isWindows ? path.win32.join : path.posix.join;
+  const dir = join(memberHomeDirectory(platform, user), '.ssh');
+  return {
+    dir,
+    privateKey: join(dir, MEMBER_KEY_NAME),
+    publicKey: join(dir, `${MEMBER_KEY_NAME}.pub`),
+    config: join(dir, 'config'),
+    knownHosts: join(dir, 'known_hosts'),
+  };
+}
+
+/** Best-effort POSIX mode; Windows ignores it. */
+async function chmodQuiet(target: string, mode: number): Promise<void> {
+  try {
+    await chmod(target, mode);
+  } catch {
+    // Windows ignores POSIX modes and some filesystems reject chmod.
+  }
+}
+
+/** Give the target Windows account full control of a file the service wrote. */
+async function grantWindowsControl(target: string, user: string | null): Promise<void> {
+  if (!user || !SSH_USER_PATTERN.test(user)) return;
+  try {
+    await run('icacls', [target, '/grant', `${user}:F`], { timeout: 15000 });
+  } catch {
+    // A LocalSystem-owned file is still readable through Administrators.
+  }
+}
+
+/**
+ * Create the member's Ed25519 identity if it does not exist yet.
+ * @param platform resolved platform.
+ * @param paths resolved member paths.
+ * @param options key comment and the account that should own the file.
+ * @returns the public key and whether it was generated now.
+ */
+export async function ensureMemberKey(
+  platform: PlatformInfo,
+  paths: MemberSshPaths,
+  options: { comment: string; user?: string | null },
+): Promise<{ publicKey: string; created: boolean }> {
+  const keygen = findExecutable('ssh-keygen', platform.isWindows ? WINDOWS_KEYGEN_CANDIDATES : LINUX_KEYGEN_CANDIDATES);
+  if (!keygen) throw new Error('OpenSSH ssh-keygen was not found on this member.');
+  await mkdir(paths.dir, { recursive: true, mode: 0o700 });
+  await chmodQuiet(paths.dir, 0o700);
+  let created = false;
+  if (!existsSync(paths.privateKey)) {
+    await run(keygen, ['-q', '-t', 'ed25519', '-N', '', '-C', options.comment.slice(0, 80), '-f', paths.privateKey], { timeout: 20000 });
+    created = true;
+    await chmodQuiet(paths.privateKey, 0o600);
+    await grantWindowsControl(paths.privateKey, options.user ?? null);
+  }
+  let publicKey = '';
+  if (existsSync(paths.publicKey)) {
+    publicKey = (await readFile(paths.publicKey, 'utf8')).trim();
+  }
+  if (!parseSshPublicKey(publicKey)) {
+    // A missing .pub is common after a partial copy; derive it from the key.
+    const derived = await run(keygen, ['-y', '-f', paths.privateKey], { timeout: 15000 });
+    publicKey = String(derived.stdout ?? '').trim();
+  }
+  const parsed = parseSshPublicKey(publicKey);
+  if (!parsed) throw new Error('Could not read the member SSH public key.');
+  if (!existsSync(paths.publicKey)) {
+    await writeFile(paths.publicKey, `${parsed.text}\n`, { encoding: 'utf8', mode: 0o644 });
+    await grantWindowsControl(paths.publicKey, options.user ?? null);
+  }
+  return { publicKey: parsed.text, created };
+}
+
+/**
+ * Install the gateway login: one managed ~/.ssh/config block plus the
+ * gateway's host keys, so the first connection is not a trust prompt.
+ * @param platform resolved platform.
+ * @param paths resolved member paths.
+ * @param access gateway address and pre-rendered text.
+ * @param options account that should own the rewritten files.
+ * @returns nothing; failures surface to the caller.
+ */
+export async function installGatewaySshAccess(
+  platform: PlatformInfo,
+  paths: MemberSshPaths,
+  access: GatewaySshAccess,
+  options: { user?: string | null } = {},
+): Promise<void> {
+  const readOrEmpty = async (file: string) => {
+    try {
+      return await readFile(file, 'utf8');
+    } catch {
+      return '';
+    }
+  };
+  const config = mergeManagedBlock(await readOrEmpty(paths.config), GATEWAY_BLOCK_NAME, access.configText);
+  await writeFile(paths.config, config, { encoding: 'utf8', mode: 0o600 });
+  await chmodQuiet(paths.config, 0o600);
+  await grantWindowsControl(paths.config, options.user ?? null);
+  const keys = access.knownHostsText.split(/\r?\n/u).filter((line) => line.trim() !== '');
+  if (keys.length > 0) {
+    const knownHosts = mergeKnownHosts(await readOrEmpty(paths.knownHosts), access.host, access.port, keys);
+    if (knownHosts) {
+      await writeFile(paths.knownHosts, knownHosts, { encoding: 'utf8', mode: 0o600 });
+      await chmodQuiet(paths.knownHosts, 0o600);
+      await grantWindowsControl(paths.knownHosts, options.user ?? null);
+    }
+  }
+}
+
+/**
+ * The exact `ssh` invocation the operator can paste on the member.
+ * @param access gateway coordinates.
+ * @returns one-line command.
+ */
+export function gatewaySshCommand(access: { host: string; user: string; port: number }): string {
+  const port = Number.isSafeInteger(access.port) && access.port > 0 ? access.port : 22;
+  const portArg = port === 22 ? '' : ` -p ${port}`;
+  return `ssh${portArg} -i ~/.ssh/${MEMBER_KEY_NAME} ${access.user}@${access.host}`;
+}
+
+/** Build the managed config block for a gateway, for callers without a response. */
+export function gatewayBlock(host: string, user: string, port: number): string {
+  return gatewaySshConfigBlock({ host, user, port });
 }
 
 /** Run the Windows OpenSSH installer with the cached asset. */

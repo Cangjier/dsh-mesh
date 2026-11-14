@@ -97,9 +97,13 @@ for tool in wg wg-quick ip curl; do
 done
 
 PRIVATE_KEY=""
+EXISTING_ENDPOINT=""
 if [ -f "$CONF" ]; then
   log "Existing config found: $CONF"
   PRIVATE_KEY=$(sed -n 's/^PrivateKey[[:space:]]*=[[:space:]]*//p' "$CONF" | head -n 1)
+  # A member that joined over IPv6 may only be able to reach the hub over IPv6.
+  # Re-running the join script must not silently downgrade it to IPv4.
+  EXISTING_ENDPOINT=$(sed -n 's/^Endpoint[[:space:]]*=[[:space:]]*//p' "$CONF" | head -n 1)
 fi
 PUBLIC_KEY=""
 if [ -n "$PRIVATE_KEY" ]; then
@@ -141,6 +145,10 @@ if printf '%s' "$JOIN" | grep -Eq '"egress"[[:space:]]*:[[:space:]]*true'; then
   EGRESS=1
 fi
 
+if [ -z "$FAMILY" ] && [ -n "$EXISTING_ENDPOINT" ]; then
+  ENDPOINT=$EXISTING_ENDPOINT
+  log "Keeping the existing endpoint: $ENDPOINT"
+fi
 if [ -z "$ADDRESS" ] || [ -z "$SERVER_KEY" ] || [ -z "$ENDPOINT" ] || [ -z "$VPN_CIDR" ]; then
   die "The server response is incomplete: $JOIN"
 fi
@@ -210,8 +218,16 @@ fi
 if [ "$EGRESS" -eq 1 ]; then
   log "Installing IPv4 egress persistence via $HUB_IP"
   UNIT=/etc/systemd/system/dsh-mesh-egress.service
+  # wg-quick already routes 0.0.0.0/0 into table 51820 (the not-fwmark rule),
+  # which leaves the main table's physical default free for the endpoint.
+  # Adding a main-table default via $HUB_IP makes the hub unreachable:
+  # the handshake packets fall through to that very route and loop back into
+  # the tunnel. Keep the tunnel default out of the main table.
   wg set "$IFACE" peer "$SERVER_KEY" allowed-ips 0.0.0.0/0
-  ip route replace default via "$HUB_IP" dev "$IFACE" metric 50
+  ip route del default via "$HUB_IP" dev "$IFACE" 2>/dev/null || true
+  if ! ip route show table 51820 2>/dev/null | grep -q '^default'; then
+    log "WARNING: wg-quick did not install the table-51820 default; egress may not work"
+  fi
   if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
     cat >"$UNIT" <<EOF
 [Unit]
@@ -222,9 +238,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# 0.0.0.0/0 has to be in the peer's AllowedIPs or the tunnel silently drops
-# every packet that the default route sends into it.
-ExecStart=/bin/sh -c 'wg set $IFACE peer $SERVER_KEY allowed-ips 0.0.0.0/0; ip route replace default via $HUB_IP dev $IFACE metric 50'
+# 0.0.0.0/0 has to be in the peer's AllowedIPs or wg-quick never creates the
+# table-51820 default that carries egress. The main table stays untouched so
+# the WireGuard endpoint itself keeps using the physical route.
+ExecStart=/bin/sh -c 'wg set $IFACE peer $SERVER_KEY allowed-ips 0.0.0.0/0; ip route del default via $HUB_IP dev $IFACE 2>/dev/null || true'
 ExecStop=/bin/sh -c 'ip route del default via $HUB_IP dev $IFACE 2>/dev/null || true'
 
 [Install]
@@ -354,6 +371,79 @@ else
   log "SSH: not ready ($SSH_ERROR)"
 fi
 
+# --- SSH access back to the gateway ----------------------------------------
+# Enrollment is symmetric. The member keeps its own Ed25519 identity, and the
+# gateway only stores the public half, pinned to this VPN address, so
+# "ssh dsh-gateway" works from here without a password or an agent.
+REVERSE_KEY="/root/.ssh/id_ed25519_dsh_mesh"
+REVERSE_READY=0
+REVERSE_ERROR=""
+if [ -n "$SSH_TOKEN" ]; then
+  log "SSH: preparing the member key for the gateway"
+  mkdir -p /root/.ssh
+  chmod 700 /root/.ssh
+  if [ ! -f "$REVERSE_KEY" ]; then
+    if command -v ssh-keygen >/dev/null 2>&1; then
+      ssh-keygen -q -t ed25519 -N '' -C "dsh-mesh@$NAME" -f "$REVERSE_KEY" >/dev/null 2>&1 || REVERSE_ERROR="ssh-keygen failed"
+      chmod 600 "$REVERSE_KEY" 2>/dev/null || true
+    else
+      REVERSE_ERROR="ssh-keygen is missing"
+    fi
+  fi
+  MEMBER_KEY=""
+  if [ -f "$REVERSE_KEY.pub" ]; then
+    MEMBER_KEY=$(head -n 1 "$REVERSE_KEY.pub")
+  fi
+  if [ -n "$MEMBER_KEY" ]; then
+    AUTHORIZE=$(curl -sS -X POST -H 'content-type: application/json' --data '{"publicKey":"'"$PUBLIC_KEY"'","token":"'"$SSH_TOKEN"'","sshPublicKey":"'"$MEMBER_KEY"'"}' "$CONTROL_URL/ssh/authorize" 2>/dev/null || true)
+    GW_HOST=$(json_str "$AUTHORIZE" host)
+    GW_USER=$(json_str "$AUTHORIZE" user)
+    GW_PORT=$(json_num "$AUTHORIZE" port)
+    GW_CONFIG=$(json_str "$AUTHORIZE" sshConfigB64)
+    GW_KNOWN=$(json_str "$AUTHORIZE" knownHostsB64)
+    [ -n "$GW_USER" ] || GW_USER=root
+    [ -n "$GW_PORT" ] || GW_PORT=22
+    if [ -n "$GW_HOST" ]; then
+      # Keep the rest of ~/.ssh/config: only the managed block is replaced.
+      touch /root/.ssh/config
+      chmod 600 /root/.ssh/config
+      awk '/^# >>> dsh-mesh:gateway >>>$/{skip=1;next} /^# <<< dsh-mesh:gateway <<<$/{skip=0;next} skip!=1{print}' /root/.ssh/config > /root/.ssh/config.dsh-mesh
+      cat /root/.ssh/config.dsh-mesh > /root/.ssh/config
+      rm -f /root/.ssh/config.dsh-mesh
+      if [ -n "$GW_CONFIG" ] && command -v base64 >/dev/null 2>&1; then
+        printf '%s' "$GW_CONFIG" | base64 -d >> /root/.ssh/config
+      else
+        {
+          echo "Host dsh-gateway $GW_HOST"
+          echo "  HostName $GW_HOST"
+          echo "  User $GW_USER"
+          echo "  Port $GW_PORT"
+          echo "  IdentityFile ~/.ssh/id_ed25519_dsh_mesh"
+          echo "  IdentitiesOnly yes"
+          echo "  StrictHostKeyChecking accept-new"
+        } >> /root/.ssh/config
+      fi
+      if [ -n "$GW_KNOWN" ] && command -v base64 >/dev/null 2>&1; then
+        touch /root/.ssh/known_hosts
+        chmod 600 /root/.ssh/known_hosts
+        printf '%s' "$GW_KNOWN" | base64 -d >> /root/.ssh/known_hosts
+      fi
+      REVERSE_READY=1
+      log "SSH: reverse access ready ($GW_USER@$GW_HOST:$GW_PORT, key $REVERSE_KEY)"
+    else
+      if [ -z "$REVERSE_ERROR" ]; then
+        REVERSE_ERROR="the gateway did not authorize the member key: $AUTHORIZE"
+      fi
+      log "SSH: reverse access failed ($REVERSE_ERROR)"
+    fi
+  else
+    if [ -z "$REVERSE_ERROR" ]; then REVERSE_ERROR="no member public key"; fi
+    log "SSH: reverse access failed ($REVERSE_ERROR)"
+  fi
+else
+  log "SSH: reverse access skipped (no agent token)"
+fi
+
 if [ -n "$SSH_TOKEN" ]; then
   if [ "$SSH_READY" -eq 1 ]; then
     REPORT=$(curl -sS -X POST -H 'content-type: application/json' --data '{"publicKey":"'"$PUBLIC_KEY"'","token":"'"$SSH_TOKEN"'","user":"root","platform":"linux","hostname":"'"$NAME"'","sshInstalled":true,"sshRunning":true,"sshReady":true,"sshPort":22,"sshVersion":"'"$SSH_VERSION"'","sshError":null}' "$CONTROL_URL/ssh/report" 2>/dev/null || true)
@@ -369,6 +459,11 @@ log "Connected successfully"
 log "VPN address: $ADDRESS"
 log "WireGuard endpoint: $ENDPOINT"
 log "Config: $CONF"
+if [ "$REVERSE_READY" -eq 1 ]; then
+  log "Gateway SSH: ssh dsh-gateway (key $REVERSE_KEY)"
+else
+  log "Gateway SSH: not installed ($REVERSE_ERROR)"
+fi
 log "Disconnect: sudo wg-quick down $IFACE"
 if command -v wg >/dev/null 2>&1; then
   log "Interface status:"

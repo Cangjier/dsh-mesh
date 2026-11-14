@@ -451,15 +451,64 @@ function Report-Ssh($publicKey, $token) {
   if (-not $result.ok) { throw 'The gateway rejected the SSH report.' }
 }
 
+function Write-ManagedBlock([string]$Path, [string]$Name, [string]$Block) {
+  # Own one marker-delimited block of ~/.ssh/config and leave the rest alone.
+  $text = ''
+  if (Test-Path -LiteralPath $Path) { $text = [IO.File]::ReadAllText($Path) }
+  $escaped = [regex]::Escape($Name)
+  $pattern = "(?ms)^# >>> $escaped >>>\r?\n.*?^# <<< $escaped <<<\r?\n?"
+  $text = [regex]::Replace($text, $pattern, '').TrimEnd("`r", "`n")
+  if ($text.Length -gt 0) { $text += "`n" }
+  [IO.File]::WriteAllText($Path, $text + $Block.TrimEnd("`r", "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
+}
+
+function Install-ReverseSsh($publicKey, $token) {
+  # Enrollment is symmetric: the member keeps its own identity and the gateway
+  # stores only the public half, pinned to this member's VPN address.
+  Write-Host 'Preparing this member''s own SSH key for the gateway...'
+  $dir = Join-Path $env:USERPROFILE '.ssh'
+  New-Item -ItemType Directory -Force $dir | Out-Null
+  $key = Join-Path $dir 'id_ed25519_dsh_mesh'
+  $keygen = Join-Path $env:ProgramFiles 'OpenSSH\ssh-keygen.exe'
+  if (-not (Test-Path $keygen)) { $keygen = Join-Path $env:WINDIR 'System32\OpenSSH\ssh-keygen.exe' }
+  if (-not (Test-Path $keygen)) { throw 'OpenSSH ssh-keygen.exe was not found.' }
+  if (-not (Test-Path $key)) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $keygen -q -t ed25519 -N '""' -C "dsh-mesh@$env:COMPUTERNAME" -f $key 2>&1 | Out-Null } finally { $ErrorActionPreference = $previous }
+    if (-not (Test-Path $key)) { throw "ssh-keygen did not create $key" }
+  }
+  $memberKey = ((Get-Content -LiteralPath "$key.pub" -Raw) -split "`r?`n")[0].Trim()
+  if ($memberKey -notmatch '^ssh-ed25519 ') { throw 'The member SSH public key is invalid.' }
+  $payload = @{ publicKey = $publicKey; token = $token; sshPublicKey = $memberKey } | ConvertTo-Json -Compress
+  $result = Invoke-RestMethod -Method Post -Uri "$($ServerUrl.TrimEnd('/'))/ssh/authorize" -ContentType 'application/json' -Body $payload -TimeoutSec 30
+  if (-not $result.ok -or -not $result.host) { throw 'The gateway rejected the member SSH key.' }
+  $configPath = Join-Path $dir 'config'
+  $configText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$result.sshConfigB64))
+  Write-ManagedBlock $configPath 'dsh-mesh:gateway' $configText
+  $knownText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$result.knownHostsB64))
+  if ($knownText.Trim()) {
+    $knownPath = Join-Path $dir 'known_hosts'
+    $existing = if (Test-Path $knownPath) { @(Get-Content -LiteralPath $knownPath) } else { @() }
+    $target = [string]$result.host
+    $kept = @($existing | Where-Object { $_.Trim() -ne '' -and -not (@($target, "[$target]:22") -contains $_.Trim().Split(' ')[0]) })
+    $lines = @($kept) + @($knownText.Trim() -split "`r?`n")
+    Set-Content -LiteralPath $knownPath -Value $lines -Encoding ascii
+  }
+  Write-Host "Gateway SSH key installed for $env:USERNAME ($key)"
+}
+
 Assert-Admin
 Install-WireGuard
 $keys = Get-WireGuardKeys
 $joined = Join-Mesh $keys
 $serverKey = Get-ServerSshKey $keys.public $joined.token
 Install-OpenSsh $serverKey
+Install-ReverseSsh $keys.public $joined.token
 Report-Ssh $keys.public $joined.token
 
 Write-Host ''
 Write-Host "Ready: SSH is listening on port 22 for user $env:USERNAME."
 Write-Host "WireGuard: $($keys.public)"
 Write-Host "Gateway SSH key installed in $sshDir\administrators_authorized_keys"
+Write-Host "This member can now run: ssh dsh-gateway"

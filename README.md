@@ -9,6 +9,7 @@
 - **网关**：`code/gate/`，负责密码门、反向代理、成员 cluster 认证、目标 cookie。
 - **构建引擎**：`code/build/`，从 DSH GitHub 源码确定性地应用覆盖层、构建 Web 前端、按目标系统和架构打包。
 - **WireGuard 控制服务源码**：`src/wireguard/`（引擎 + 51821 面板），`pnpm build` 会把 `code/wireguard/control-service.js` 从源码重建；引擎测试在 `test/wireguard/`，用 `pnpm test:wireguard` 跑。
+- **入网即双向 SSH**：成员入网时除了让网关拿到自己的公钥，还会生成一把自己的 `id_ed25519_dsh_mesh` 并交给网关；网关只在 `authorized_keys` 里保留公钥，并用成员的 VPN 地址做 `from=` 限制，成员上直接 `ssh dsh-gateway` 即可回到网关，无需密码或手工配置。
 - **成员 SSH 自注册**：成员上的 WireGuard 控制服务会定期检查本机 OpenSSH，把真实的 Windows/Linux 登录用户、sshd 状态和版本回报给服务端；Windows 没装 sshd 时从网关统一静态资源 `gate/assets/openssh/` 下载并安装，随后自动写入服务端公钥。服务端不再需要人工猜 `Administrator`/`root`。
 - **统一静态资源**：hysteria2、OpenSSH、WireGuard 安装包都放在 `gate/assets/<name>/`，由同一个 `StaticAssets` 服务通过 `/__gate/assets/*` 暴露；Windows 成员首次引导时如果没装 WireGuard，会从 `gate/assets/wireguard/` 取 MSI 静默安装，再自动加入隧道。
 - **文档集**：Step 001–015，记录每个坑和对应检查。
@@ -51,9 +52,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 2. 生成或复用 `dshwg0` 配置，调用 `POST /join`，安装 WireGuard 隧道；
 3. 没有 OpenSSH 时，从 `gate/assets/openssh/` 下载 zip、校验、安装 `sshd`；
 4. 从网关取得 SSH 公钥，写入 `administrators_authorized_keys` 和当前用户；
-5. 启动 `sshd`、加防火墙规则，并 `POST /ssh/report` 回报用户/版本/ready。
+5. 生成成员自己的 `id_ed25519_dsh_mesh`，把公钥 `POST /ssh/authorize` 交给网关，写 `~/.ssh/config` 的 `dsh-gateway` 块和 `known_hosts`；
+6. 启动 `sshd`、加防火墙规则，并 `POST /ssh/report` 回报用户/版本/ready。
 
-完成后服务端就能通过 SSH（默认 22）部署 DSH Web 包。DSH-Mesh 包不再参与组网；包里的 `install-ssh-agent.ps1` 只是后期需要常驻 agent 时的可选补充。
+完成后两个方向都通了：服务端能通过 SSH（默认 22）部署 DSH Web 包，成员上也能直接 `ssh dsh-gateway` 回到网关（公钥用成员的 VPN 地址做 `from=` 限制）。DSH-Mesh 包不再参与组网；包里的 `install-ssh-agent.ps1` 只是后期需要常驻 agent 时的可选补充。
 
 默认控制地址 `http://8.140.245.107:51821`、网关 `http://8.140.245.107`；私有部署时用 `-ServerUrl`、`-GateUrl` 覆盖。`-Force` 会重新生成 WireGuard 密钥并重新加入。
 
@@ -281,6 +283,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 013 独立DSH交互HTTP服务](docs/Step%20013%20独立DSH交互HTTP服务.md) | 独立 8765、SDK stdio、创建/等待/通知/事件/回调 |
 | [Step 014 成员任务插件与主对话回调](docs/Step%20014%20成员任务插件与主对话回调.md) | `call_member`、成员发现、后台等待、agent.followup 通知 |
 | [Step 015 面板事件推送](docs/Step%20015%20面板事件推送.md) | SSE 通道、`fs.watch` 任务目录、面板零轮询 |
+| [Step 016 入网即双向 SSH](docs/Step%20016%20入网即双向SSH.md) | 成员自带密钥、`from=` 限制、`/ssh/authorize`、托管 config 块、撤销 |
 
 ## 代码位置
 

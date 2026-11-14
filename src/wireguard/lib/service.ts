@@ -2,9 +2,9 @@
 
 import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -24,9 +24,30 @@ import { installWireGuard as installPlatformWireGuard } from './installer';
 import { allocatePeerIp, ipv4ToString, isUsableHost, parseCidr, parseIpv4 } from './ip';
 import { keyFingerprint, normalizeKey } from './keys';
 import { forgetKnownHosts, refreshKnownHosts } from './known-hosts';
+import {
+  encodeText,
+  formatAuthorizedKeyLine,
+  gatewaySshConfigBlock,
+  parseSshPublicKey,
+  removeAuthorizedKeyTag,
+  sshKeyFingerprint,
+  upsertAuthorizedKey,
+} from './member-ssh';
 import { detectGlobalIpv6, detectLanAddress, detectPlatform, findExecutable, localHostname, runPrivileged, type PlatformInfo } from './platform';
 import { buildSshAuthorizeCommand, buildWindowsSshAuthorizeCommand, SSH_USER_PATTERN } from './ssh';
-import { authorizeLinuxKey, authorizeWindowsKey, inspectSsh, installWindowsOpenSsh, verifyOpenSshZip, type OpenSshAssetManifest, type SshAgentStatus } from './ssh-agent';
+import {
+  authorizeLinuxKey,
+  authorizeWindowsKey,
+  ensureMemberKey,
+  gatewaySshCommand,
+  inspectSsh,
+  installGatewaySshAccess,
+  installWindowsOpenSsh,
+  memberSshPaths,
+  verifyOpenSshZip,
+  type OpenSshAssetManifest,
+  type SshAgentStatus,
+} from './ssh-agent';
 import { AssetStore } from './static-assets';
 import { emptyState, Store, type PluginState } from './store';
 import { Tunnel } from './tunnel';
@@ -53,6 +74,12 @@ export interface WireGuardServiceOptions {
   commandRunner?: (command: string, args: readonly string[], options: { platform: PlatformInfo; timeout?: number }) => Promise<{ stdout: string; stderr: string }>;
   /** SSH execution for the member half, overridable in tests. */
   sshRunner?: (input: { host: string; user: string; keyPath: string; command: string; timeout: number }) => Promise<{ stdout: string; stderr: string }>;
+  /** authorized_keys the gateway accepts member logins in, overridable in tests. */
+  authorizedKeysPath?: string;
+  /** sshd host-key `.pub` files to advertise, overridable in tests. */
+  hostKeyFiles?: string[];
+  /** Account a member logs in as on the gateway. Defaults to root. */
+  reverseSshUser?: string;
 }
 
 function errorMessage(error: unknown): string {
@@ -61,6 +88,27 @@ function errorMessage(error: unknown): string {
 
 function integerOr(value: unknown, fallback: number): number {
   return Number.isSafeInteger(value) ? (value as number) : fallback;
+}
+
+/**
+ * Where a member login lands on the gateway. Windows OpenSSH reads the
+ * Administrators file for admin accounts and ignores `~/.ssh/authorized_keys`,
+ * so the two platforms must be distinguished here rather than at call sites.
+ * @returns absolute authorized_keys path.
+ */
+function defaultAuthorizedKeysPath(): string {
+  if (process.platform === 'win32') {
+    return path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'ssh', 'administrators_authorized_keys');
+  }
+  return path.join(homedir(), '.ssh', 'authorized_keys');
+}
+
+/** Directories that hold sshd host-key `.pub` files on each platform. */
+function defaultHostKeyDirectories(): string[] {
+  if (process.platform === 'win32') {
+    return [path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'ssh')];
+  }
+  return ['/etc/ssh'];
 }
 
 /** One Host-side WireGuard service per plugin instance. */
@@ -79,6 +127,12 @@ export class WireGuardService {
   knownHosts: { refresh: (host: string) => Promise<unknown>; forget: (host: string) => Promise<void> };
   readonly commandRunner: NonNullable<WireGuardServiceOptions['commandRunner']>;
   readonly sshRunner: NonNullable<WireGuardServiceOptions['sshRunner']>;
+  /** authorized_keys that accepts member logins on the gateway. */
+  readonly authorizedKeysPath: string;
+  /** sshd host-key files whose public halves are advertised to members. */
+  readonly hostKeyFiles: string[];
+  /** Account members log in as on the gateway. */
+  readonly reverseSshUser: string;
   platform: PlatformInfo | null;
   tunnel: any;
   platformAt: number;
@@ -122,6 +176,10 @@ export class WireGuardService {
     this.tunnel = null;
     this.platformAt = 0;
     this.lock = Promise.resolve();
+    this.authorizedKeysPath = options.authorizedKeysPath ?? defaultAuthorizedKeysPath();
+    this.hostKeyFiles = options.hostKeyFiles ?? [];
+    const configuredUser = typeof options.reverseSshUser === 'string' ? options.reverseSshUser.trim() : '';
+    this.reverseSshUser = SSH_USER_PATTERN.test(configuredUser) ? configuredUser : 'root';
     this.sshAgentTimer = null;
     this.sshAgentBusy = false;
     this.sshAgentLastAttempt = 0;
@@ -287,6 +345,7 @@ export class WireGuardService {
       onSetPeerEgress: (publicKey, enabled) => this.setPeerEgress({ publicKey, enabled }),
       onSshReport: (body, remoteAddress) => this.reportPeerSsh(body, remoteAddress),
       getPeerSshKey: (body) => this.getPeerSshKey(body),
+      onAuthorizeMemberKey: (body, remoteAddress) => this.authorizeMemberKey(body, remoteAddress),
       getOpenSshManifest: (body) => this.getOpenSshManifest(body),
       getOpenSshAsset: (body) => this.getOpenSshAsset(body),
       getAssetIndex: (body) => this.getAssetIndex(body),
@@ -433,6 +492,7 @@ export class WireGuardService {
       online: peer.online === true,
       egress: peer.egress === true,
       sshConfigured: typeof peer.sshUser === 'string' && peer.sshUser !== '',
+      reverseReady: Boolean(peer.reverseKey && peer.reverseKey.fingerprint),
       platform: peer.platform === 'windows' ? 'windows' : peer.platform === 'linux' ? 'linux' : null,
     }));
   }
@@ -456,6 +516,9 @@ export class WireGuardService {
       seen.add(publicKey);
       seen.add(ip);
       peers.push({
+        // Keep every field the state file carries (SSH report, egress,
+        // reverse key); only the address-bearing fields are normalized here.
+        ...raw,
         publicKey,
         ip,
         name: normalizeDeviceName(raw.name, 'client'),
@@ -1247,6 +1310,7 @@ export class WireGuardService {
         await this.tunnel.removePeer(this.state.server.interfaceName, publicKey);
       }
       this.state.server.peers = this.state.server.peers.filter((candidate) => candidate.publicKey !== publicKey);
+      await this.#removeReverseKey(peer);
       if (peer.egress === true) await this.#cleanupPeerEgress(peer);
       await this.#safeRewriteServerConfig();
       await this.#persist();
@@ -1271,6 +1335,7 @@ export class WireGuardService {
       }
       this.state.server.peers = this.state.server.peers.filter((candidate) => candidate.publicKey !== key);
       await this.#removeSshKey(key);
+      await this.#removeReverseKey(peer);
       if (peer.egress === true) await this.#cleanupPeerEgress(peer);
       try {
         await this.knownHosts.forget(peer.ip);
@@ -1457,6 +1522,8 @@ export class WireGuardService {
       port: integerOr(peer.sshPort, 22),
       error: typeof peer.sshError === 'string' ? peer.sshError : null,
       lastReportAt: typeof peer.sshLastReportAt === 'string' ? peer.sshLastReportAt : null,
+      // The other direction: the member logging in to this gateway.
+      reverse: this.#reverseSshView(peer),
     };
   }
 
@@ -1522,6 +1589,218 @@ export class WireGuardService {
       const publicKey = await this.#ensureSshKey(peer.publicKey);
       return { publicKey, user: peer.sshUser ?? null, host: peer.ip };
     });
+  }
+
+  /**
+   * Accept a member's own public key so it can log in to the gateway. This is
+   * the mirror image of {@link getPeerSshKey}: the member owns the private key,
+   * and only the public half ever crosses the wire. The entry is pinned to the
+   * member's VPN address with `from=`.
+   * @param {Record<string, unknown>} body peer public key, agent token, and ssh public key.
+   * @param {string} remoteAddress caller address, for the audit log.
+   * @returns {Promise<Record<string, unknown>>} gateway coordinates and host keys.
+   */
+  async authorizeMemberKey(body, remoteAddress = '') {
+    return this.#serialized(async () => {
+      const peer = this.#peerByToken(body.publicKey, body.token);
+      const key = parseSshPublicKey(body.sshPublicKey ?? body.memberPublicKey);
+      if (!key) {
+        throw new WireGuardError('invalid_ssh_key', 'The member SSH public key is invalid.', {
+          status: 400,
+          hint: 'Send an OpenSSH public key such as "ssh-ed25519 AAAA...".',
+        });
+      }
+      // The member has no business receiving this gateway's whole snapshot.
+      const { state: _state, ...result } = await this.#installMemberKey(peer, key, `member ${remoteAddress || ''}`.trim());
+      return result;
+    });
+  }
+
+  /**
+   * Panel variant of {@link authorizeMemberKey}: the operator pastes the public
+   * key that a member generated locally. Passing an empty key revokes the
+   * member's login instead.
+   * @param {Record<string, unknown>} input peer public key and optional ssh public key.
+   * @returns {Promise<Record<string, unknown>>} snapshot and the reverse view.
+   */
+  async setPeerReverseKey(input) {
+    return this.#serialized(async () => {
+      const publicKey = normalizeKey(input.publicKey);
+      if (!publicKey) {
+        throw new WireGuardError('invalid_public_key', 'A valid WireGuard public key is required.', { status: 400 });
+      }
+      const peer = this.state.server.peers.find((candidate) => candidate.publicKey === publicKey);
+      if (!peer) {
+        throw new WireGuardError('peer_not_found', 'That device has not joined this server.', { status: 404 });
+      }
+      const raw = typeof input.sshPublicKey === 'string' ? input.sshPublicKey.trim() : '';
+      if (!raw) {
+        await this.#removeReverseKey(peer);
+        await this.#persist();
+        this.#log(`revoked the member SSH key for ${peer.name} (${peer.ip})`);
+        return { state: this.snapshot(), reverse: this.#reverseSshView(peer) };
+      }
+      const key = parseSshPublicKey(raw);
+      if (!key) {
+        throw new WireGuardError('invalid_ssh_key', 'That is not an OpenSSH public key.', {
+          status: 400,
+          hint: 'Paste the contents of ~/.ssh/id_ed25519_dsh_mesh.pub, starting with "ssh-ed25519".',
+        });
+      }
+      const result = await this.#installMemberKey(peer, key, 'panel');
+      return { state: result.state, reverse: result.reverse };
+    });
+  }
+
+  /**
+   * Write one member's public key into authorized_keys, restricted to its VPN
+   * address, and record the result on the peer.
+   * @param {Record<string, any>} peer target peer.
+   * @param {import('./member-ssh').SshPublicKey} key parsed member key.
+   * @param {string} source audit label.
+   * @returns {Promise<Record<string, unknown>>} install result for the member.
+   */
+  async #installMemberKey(peer, key, source) {
+    const host = this.state.settings.serverIp;
+    const port = 22;
+    const user = this.reverseSshUser;
+    const entry = formatAuthorizedKeyLine({ key, from: peer.ip, tag: peer.ip, comment: key.comment });
+    await this.#writeAuthorizedKeys((current) => upsertAuthorizedKey(current, entry, peer.ip));
+    const reverse = {
+      publicKey: key.text,
+      fingerprint: sshKeyFingerprint(key),
+      from: peer.ip,
+      user,
+      port,
+      host,
+      installedAt: new Date().toISOString(),
+      comment: key.comment || null,
+    };
+    peer.reverseKey = reverse;
+    await this.#persist();
+    this.#log(`authorized the member SSH key for ${peer.name} (${peer.ip}) from ${source || 'member'}`);
+    const hostKeys = await this.#ownHostKeys();
+    const knownHostsText = hostKeys.map((item) => `${host} ${item}`).join('\n');
+    return {
+      state: this.snapshot(),
+      reverse: this.#reverseSshView(peer),
+      authorized: true,
+      host,
+      user,
+      port,
+      from: peer.ip,
+      fingerprint: reverse.fingerprint,
+      hostKeys,
+      command: gatewaySshCommand({ host, user, port }),
+      sshConfig: gatewaySshConfigBlock({ host, user, port }),
+      sshConfigB64: encodeText(`${gatewaySshConfigBlock({ host, user, port })}\n`),
+      knownHostsB64: encodeText(knownHostsText ? `${knownHostsText}\n` : ''),
+    };
+  }
+
+  /**
+   * Replace the managed authorized_keys file contents. The rewrite is atomic so
+   * a crash cannot leave the gateway without its own login keys.
+   * @param {(text: string) => string} change receives the current text.
+   * @returns {Promise<void>}
+   */
+  async #writeAuthorizedKeys(change) {
+    const file = this.authorizedKeysPath;
+    await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    let current = '';
+    try {
+      current = await readFile(file, 'utf8');
+    } catch {
+      // A missing file simply starts empty.
+    }
+    const next = change(current);
+    if (next === current) return;
+    const temporary = `${file}.tmp-${process.pid}-${Date.now()}`;
+    await writeFile(temporary, next, { encoding: 'utf8', mode: 0o600 });
+    try {
+      await chmod(temporary, 0o600);
+    } catch {
+      // Windows ignores POSIX modes.
+    }
+    await rename(temporary, file);
+  }
+
+  /**
+   * Revoke a peer's reverse login when the peer leaves or is removed.
+   * @param {Record<string, any>} peer peer being removed.
+   * @returns {Promise<void>}
+   */
+  async #removeReverseKey(peer) {
+    if (!peer?.reverseKey) return;
+    try {
+      await this.#writeAuthorizedKeys((current) => removeAuthorizedKeyTag(current, peer.ip));
+    } catch (error) {
+      this.#log(`could not revoke the SSH login of ${peer.name} (${peer.ip}): ${errorMessage(error)}`);
+    }
+    peer.reverseKey = null;
+  }
+
+  /**
+   * The host keys the gateway offers, so a member can pin known_hosts during
+   * enrollment instead of answering a trust prompt.
+   * @returns {Promise<string[]>} `type base64` lines, ed25519 first.
+   */
+  async #ownHostKeys() {
+    let files = this.hostKeyFiles.filter((file) => typeof file === 'string' && file !== '');
+    if (files.length === 0) {
+      for (const directory of defaultHostKeyDirectories()) {
+        let names: string[] = [];
+        try {
+          names = await readdir(directory);
+        } catch {
+          continue;
+        }
+        for (const name of names) {
+          if (/^ssh_host_.*_key\.pub$/u.test(name)) files.push(path.join(directory, name));
+        }
+      }
+    }
+    files = files.sort((left, right) => Number(!left.includes('ed25519')) - Number(!right.includes('ed25519')));
+    const keys: string[] = [];
+    for (const file of files) {
+      try {
+        const line = (await readFile(file, 'utf8')).split(/\r?\n/u).find((item) => item.trim() !== '');
+        const parsed = parseSshPublicKey(line ?? '');
+        if (parsed) keys.push(parsed.text);
+      } catch {
+        // Fall through to the live scan below.
+      }
+    }
+    if (keys.length > 0) return keys;
+    try {
+      const scan = await execFileAsync('ssh-keyscan', ['-T', '5', '-p', '22', '127.0.0.1'], { timeout: 15_000, windowsHide: true });
+      const scanned = [];
+      for (const line of String(scan.stdout ?? '').split(/\r?\n/u)) {
+        const parsed = parseSshPublicKey(line);
+        if (parsed) scanned.push(parsed.text);
+      }
+      return scanned;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Public view of one peer's member-to-gateway login. */
+  #reverseSshView(peer) {
+    const reverse = peer.reverseKey && typeof peer.reverseKey === 'object' ? peer.reverseKey : null;
+    const host = this.state.settings.serverIp;
+    const user = typeof reverse?.user === 'string' && SSH_USER_PATTERN.test(reverse.user) ? reverse.user : this.reverseSshUser;
+    const port = integerOr(reverse?.port, 22);
+    return {
+      ready: typeof reverse?.fingerprint === 'string' && reverse.fingerprint !== '',
+      host,
+      user,
+      port,
+      from: typeof reverse?.from === 'string' ? reverse.from : peer.ip,
+      fingerprint: typeof reverse?.fingerprint === 'string' ? reverse.fingerprint : null,
+      installedAt: typeof reverse?.installedAt === 'string' ? reverse.installedAt : null,
+      command: gatewaySshCommand({ host, user, port }),
+    };
   }
 
   /** List the gateway's static assets for an authenticated member. */
@@ -1818,6 +2097,7 @@ export class WireGuardService {
           sshPort: integerOr(peer.sshPort, 22),
           sshLastReportAt: typeof peer.sshLastReportAt === 'string' ? peer.sshLastReportAt : null,
           sshError: typeof peer.sshError === 'string' ? peer.sshError : null,
+          reverse: this.#reverseSshView(peer),
           platform: peer.platform === 'windows' ? 'windows' : peer.platform === 'linux' ? 'linux' : null,
         })),
       },
@@ -1963,7 +2243,88 @@ export class WireGuardService {
         this.#log(`SSH agent: ${status.error}`);
       }
     }
+    // The reverse direction does not depend on this member's sshd: it is the
+    // member logging in to the gateway, so it runs even when sshd is broken.
+    try {
+      const reverse = await this.#enrollReverseSsh(token, platform, status.user);
+      this.#setClientReverse(reverse);
+    } catch (error) {
+      const message = errorMessage(error);
+      this.#log(`SSH agent: reverse enrollment failed: ${message}`);
+      this.#setClientReverse({ ...(this.state.client.reverseSsh ?? {}), ready: false, error: message });
+    }
     await this.#postSshReport(token, platform, status);
+  }
+
+  /**
+   * Persist the member's gateway login state, but only when it changed so the
+   * five-minute agent does not rewrite state.json on every tick.
+   * @param {Record<string, any>} reverse local reverse-SSH view.
+   * @returns {void}
+   */
+  #setClientReverse(reverse) {
+    const next = { ...reverse, updatedAt: new Date().toISOString() };
+    const previous = this.state.client.reverseSsh;
+    const strip = (value) => {
+      if (!value) return '';
+      const { updatedAt: _updatedAt, ...rest } = value;
+      return JSON.stringify(rest);
+    };
+    this.state.client.reverseSsh = next;
+    if (strip(previous) === strip(next)) return;
+    void this.#persist().catch((error) => this.#log(`could not persist the reverse SSH state: ${errorMessage(error)}`));
+  }
+
+  /**
+   * Enroll this member's own key with the gateway so `ssh dsh-gateway` works
+   * from here. Idempotent: the gateway replaces the line tagged with our VPN
+   * address, and an existing local key is reused.
+   * @param {string} token per-peer agent token.
+   * @param {PlatformInfo} platform resolved platform.
+   * @param {string | null} user account that should own the local files.
+   * @returns {Promise<Record<string, any>>} what was installed.
+   */
+  async #enrollReverseSsh(token, platform, user) {
+    const client = this.state.client;
+    if (!client.serverUrl || !client.publicKey) throw new Error('the client is not connected to a server');
+    const paths = memberSshPaths(platform, user);
+    const identity = await ensureMemberKey(platform, paths, { comment: `dsh-mesh@${localHostname()}`, user });
+    const result = await this.#fetchJson(`${client.serverUrl}/ssh/authorize`, {
+      method: 'POST',
+      body: { publicKey: client.publicKey, token, sshPublicKey: identity.publicKey },
+      timeout: 15000,
+    });
+    const host = String(result.host ?? '').trim();
+    if (!host) throw new Error('the gateway did not report its VPN address');
+    const loginUser = String(result.user ?? 'root').trim() || 'root';
+    const port = integerOr(result.port, 22);
+    const hostKeys = Array.isArray(result.hostKeys) ? result.hostKeys.filter((item) => typeof item === 'string') : [];
+    const configText = typeof result.sshConfig === 'string' && result.sshConfig.trim()
+      ? result.sshConfig
+      : gatewaySshConfigBlock({ host, user: loginUser, port });
+    let knownHostsText = '';
+    if (typeof result.knownHostsB64 === 'string' && result.knownHostsB64) {
+      knownHostsText = Buffer.from(result.knownHostsB64, 'base64').toString('utf8');
+    }
+    if (!knownHostsText.trim() && hostKeys.length > 0) {
+      knownHostsText = `${hostKeys.map((item) => `${host} ${item}`).join('\n')}\n`;
+    }
+    await installGatewaySshAccess(platform, paths, { host, user: loginUser, port, configText, knownHostsText }, { user });
+    const fingerprint = typeof result.fingerprint === 'string' ? result.fingerprint : sshKeyFingerprint(identity.publicKey);
+    this.#log(`reverse SSH ready: ${loginUser}@${host}:${port} via ${paths.privateKey}`);
+    return {
+      ready: true,
+      host,
+      user: loginUser,
+      port,
+      from: typeof result.from === 'string' ? result.from : null,
+      fingerprint,
+      keyPath: paths.privateKey,
+      configPath: paths.config,
+      command: gatewaySshCommand({ host, user: loginUser, port }),
+      installedAt: new Date().toISOString(),
+      error: null,
+    };
   }
 
   /** Bootstrap the per-peer token through /join for members that predate it. */

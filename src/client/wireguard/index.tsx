@@ -51,6 +51,7 @@ import {
   ApiError,
   type ClientState,
   type Peer,
+  type ReverseSsh,
   type ServerState,
   type Settings,
   type Snapshot,
@@ -219,6 +220,27 @@ function useController(ctx: any) {
     }
   }, []);
 
+  const setPeerReverse = useCallback(async (publicKey: string, sshPublicKey: string) => {
+    setBusy('reverse');
+    try {
+      const result = await api.setPeerReverse(publicKey, sshPublicKey);
+      if (alive.current) {
+        setState(result.state);
+        setError(null);
+        setRetries(0);
+      }
+      return result.reverse;
+    } catch (failure) {
+      if (alive.current) {
+        setError(failure instanceof ApiError ? failure : new ApiError({ code: 'unknown', message: String(failure) }, 0));
+        if (failure instanceof ApiError && failure.state) setState(failure.state);
+      }
+      return undefined;
+    } finally {
+      if (alive.current) setBusy('');
+    }
+  }, []);
+
   const setPeerEgress = useCallback(async (publicKey: string, enabled: boolean) => {
     setBusy('egress');
     try {
@@ -254,11 +276,12 @@ function useController(ctx: any) {
     stopServer: () => action('stop', api.stopServer),
     removePeer: (publicKey: string) => action('remove', () => api.removePeer(publicKey)),
     configureSsh,
+    setPeerReverse,
     setPeerEgress,
     connectClient: (values: { serverAddress: string; joinCode: string; name?: string }) => action('connect', () => api.connectClient(values)),
     retryClient: () => action('retry', api.retryClient),
     disconnectClient: () => action('disconnect', api.disconnectClient),
-  }), [state, loading, refreshing, error, busy, refresh, action, configureSsh, setPeerEgress]);
+  }), [state, loading, refreshing, error, busy, refresh, action, configureSsh, setPeerReverse, setPeerEgress]);
 }
 
 function statusOf(state: Snapshot): { color: string; textKey: MessageKey } {
@@ -680,6 +703,7 @@ function RunningService({
   onStop,
   onRemove,
   onConfigureSsh,
+  onSetPeerReverse,
   onSetEgress,
   members,
   gateAvailable,
@@ -690,6 +714,7 @@ function RunningService({
   onStop: () => void;
   onRemove: (publicKey: string) => void;
   onConfigureSsh: (publicKey: string, user: string, platform: 'linux' | 'windows') => Promise<{ linux: string; windows: string } | undefined>;
+  onSetPeerReverse: (publicKey: string, sshPublicKey: string) => Promise<ReverseSsh | undefined>;
   onSetEgress: (publicKey: string, enabled: boolean) => Promise<EgressOutcome | undefined>;
   members: Member[];
   gateAvailable: boolean;
@@ -703,6 +728,8 @@ function RunningService({
   const [sshCommands, setSshCommands] = useState<{ linux: string; windows: string } | null>(null);
   const [sshError, setSshError] = useState('');
   const [sshCopied, setSshCopied] = useState(false);
+  const [reverseText, setReverseText] = useState('');
+  const [reverseMessage, setReverseMessage] = useState('');
   const [egressOutcome, setEgressOutcome] = useState<{ peer: Peer; enabled: boolean; result: EgressOutcome } | null>(null);
   const [egressCopied, setEgressCopied] = useState(false);
   const egressCommand = egressOutcome
@@ -724,7 +751,12 @@ function RunningService({
       width: 220,
       render: (_value, peer) => (
         <Space direction="vertical" size={0}>
-          <Typography.Text strong>{peer.name}</Typography.Text>
+          <Space size={6}>
+            <Typography.Text strong>{peer.name}</Typography.Text>
+            {peer.reverse?.ready ? (
+              <Tag color="green" bordered={false} style={{ fontSize: 11, marginInlineEnd: 0 }}>{t('service.reverseTag')}</Tag>
+            ) : null}
+          </Space>
           <Typography.Text type="secondary" className="dsh-wg-mono">{peer.publicKeyFingerprint}</Typography.Text>
         </Space>
       ),
@@ -933,6 +965,80 @@ function RunningService({
         destroyOnHidden
       >
         <Typography.Paragraph type="secondary">{t('service.sshHelp')}</Typography.Paragraph>
+        <Card size="small" className="dsh-wg-card" style={{ marginBottom: 12 }} title={t('service.reverseTitle')}>
+          <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 12 }}>
+            {t('service.reverseHelp')}
+          </Typography.Paragraph>
+          {sshPeer?.reverse?.ready ? (
+            <Space direction="vertical" size={4} style={{ width: '100%' }}>
+              <Typography.Text>
+                {t('service.reverseReady', {
+                  user: sshPeer.reverse.user,
+                  host: sshPeer.reverse.host,
+                  port: String(sshPeer.reverse.port),
+                })}
+              </Typography.Text>
+              <pre className="dsh-wg-command" style={{ margin: 0 }}>{sshPeer.reverse.command}</pre>
+              {sshPeer.reverse.fingerprint ? (
+                <Typography.Text type="secondary" className="dsh-wg-mono" style={{ fontSize: 11 }}>
+                  {sshPeer.reverse.fingerprint}
+                </Typography.Text>
+              ) : null}
+              <Button
+                size="small"
+                type="link"
+                danger
+                style={{ padding: 0 }}
+                loading={busy === 'reverse'}
+                onClick={async () => {
+                  if (!sshPeer) return;
+                  if (await onSetPeerReverse(sshPeer.publicKey, '')) {
+                    setReverseMessage('');
+                    setSshPeer(null);
+                  }
+                }}
+              >
+                {t('service.reverseRevoke')}
+              </Button>
+            </Space>
+          ) : (
+            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+              <Typography.Text type="warning" style={{ fontSize: 12 }}>{t('service.reversePending')}</Typography.Text>
+              <Input.TextArea
+                value={reverseText}
+                onChange={(event) => {
+                  setReverseText(event.target.value);
+                  setReverseMessage('');
+                }}
+                placeholder={t('service.reversePaste')}
+                autoSize={{ minRows: 2, maxRows: 4 }}
+              />
+              <Button
+                size="small"
+                loading={busy === 'reverse'}
+                onClick={async () => {
+                  if (!sshPeer) return;
+                  const key = reverseText.trim();
+                  if (!/^ssh-(ed25519|rsa) /u.test(key) && !/^ecdsa-sha2-/u.test(key)) {
+                    setReverseMessage(t('service.reverseInvalid'));
+                    return;
+                  }
+                  const next = await onSetPeerReverse(sshPeer.publicKey, key);
+                  if (!next) {
+                    setReverseMessage(t('service.reverseInvalid'));
+                    return;
+                  }
+                  setReverseText('');
+                  setReverseMessage(t('service.reverseDone'));
+                  setSshPeer({ ...sshPeer, reverse: next });
+                }}
+              >
+                {t('service.reverseAuthorize')}
+              </Button>
+              {reverseMessage ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>{reverseMessage}</Typography.Text> : null}
+            </Space>
+          )}
+        </Card>
         <Alert
           type={sshPeer?.sshReady ? 'success' : 'info'}
           showIcon
@@ -1174,6 +1280,24 @@ function ClientConnected({
             ↓ {formatBytes(client.receivedBytes)} · ↑ {formatBytes(client.sentBytes)}
           </Typography.Text>
         </Descriptions.Item>
+        <Descriptions.Item label={t('service.reverseTitle')} span={2}>
+          {client.reverseSsh?.ready ? (
+            <Space direction="vertical" size={2}>
+              <Typography.Text>
+                {t('service.reverseReady', {
+                  user: client.reverseSsh.user || 'root',
+                  host: client.reverseSsh.host || '',
+                  port: String(client.reverseSsh.port || 22),
+                })}
+              </Typography.Text>
+              <CopyText value={client.reverseSsh.command || ''} t={t} code />
+            </Space>
+          ) : (
+            <Typography.Text type="secondary">
+              {client.reverseSsh?.error || t('service.reversePending')}
+            </Typography.Text>
+          )}
+        </Descriptions.Item>
       </Descriptions>
 
       <Popconfirm
@@ -1284,6 +1408,7 @@ export function WireGuardPanel({
         onStop={() => void controller.stopServer()}
         onRemove={(publicKey) => void controller.removePeer(publicKey)}
         onConfigureSsh={controller.configureSsh}
+        onSetPeerReverse={controller.setPeerReverse}
         onSetEgress={controller.setPeerEgress}
         members={members}
         gateAvailable={gateAvailable}

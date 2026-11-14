@@ -38,7 +38,20 @@ export interface Peer {
   sshPort: number;
   sshLastReportAt: string | null;
   sshError: string | null;
+  /** The other direction: this member logging in to the gateway. */
+  reverse: ReverseSsh;
   platform: 'linux' | 'windows' | null;
+}
+
+export interface ReverseSsh {
+  ready: boolean;
+  host: string;
+  user: string;
+  port: number;
+  from: string;
+  fingerprint: string | null;
+  installedAt: string | null;
+  command: string;
 }
 
 export interface ServerState {
@@ -78,6 +91,21 @@ export interface ClientState {
   mtu: number;
   egress: boolean;
   hubIp: string | null;
+  /** Member-to-gateway SSH access installed by the agent. */
+  reverseSsh: {
+    ready: boolean;
+    host: string | null;
+    user: string | null;
+    port: number;
+    from: string | null;
+    fingerprint: string | null;
+    keyPath: string | null;
+    configPath: string | null;
+    command: string | null;
+    installedAt: string | null;
+    updatedAt: string | null;
+    error: string | null;
+  } | null;
   connectedAt: string | null;
   lastHandshakeAt: string | null;
   receivedBytes: number;
@@ -197,6 +225,8 @@ export const api = {
   stopServer: () => request('/server/stop', {}),
   removePeer: (publicKey: string) => request('/peers/remove', { publicKey }),
   configureSsh: (publicKey: string, user: string, platform?: 'linux' | 'windows') => requestPayload<{ state: Snapshot; command: string; commands: { linux: string; windows: string }; publicKey: string }>('/peers/ssh', { publicKey, user, platform }),
+  /** Paste a member's own public key (or '' to revoke it). */
+  setPeerReverse: (publicKey: string, sshPublicKey: string) => requestPayload<{ state: Snapshot; reverse: ReverseSsh }>('/peers/reverse', { publicKey, sshPublicKey }),
   setPeerEgress: (publicKey: string, enabled: boolean) => requestPayload<{
     state: Snapshot;
     applied: boolean;

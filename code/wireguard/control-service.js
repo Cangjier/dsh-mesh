@@ -1,5 +1,5 @@
 // src/wireguard/control-service.ts
-import { homedir as homedir2 } from "node:os";
+import { homedir as homedir4 } from "node:os";
 import path8 from "node:path";
 
 // src/wireguard/lib/constants.ts
@@ -112,6 +112,7 @@ function createHttpApiHandler(service2) {
       else if (path9 === `${API_PREFIX}/server/stop`) result = await service2.stopServer();
       else if (path9 === `${API_PREFIX}/peers/remove`) result = await service2.removePeer(String(body.publicKey ?? ""));
       else if (path9 === `${API_PREFIX}/peers/ssh`) result = await service2.configurePeerSsh(body);
+      else if (path9 === `${API_PREFIX}/peers/reverse`) result = await service2.setPeerReverseKey(body);
       else if (path9 === `${API_PREFIX}/peers/egress`) result = await service2.setPeerEgress(body);
       else if (path9 === `${API_PREFIX}/client/connect`) result = await service2.connectClient(body);
       else if (path9 === `${API_PREFIX}/client/retry`) result = await service2.retryClient();
@@ -162,10 +163,10 @@ function createControlExtraHandler(service2) {
 
 // src/wireguard/lib/service.ts
 import { execFile as execFile3 } from "node:child_process";
-import { createHash as createHash3, randomBytes as randomBytes3 } from "node:crypto";
-import { access, chmod as chmod2, mkdir as mkdir4, mkdtemp as mkdtemp2, readFile as readFile4, rm as rm3, writeFile as writeFile3 } from "node:fs/promises";
+import { createHash as createHash4, randomBytes as randomBytes3 } from "node:crypto";
+import { access, chmod as chmod3, mkdir as mkdir5, mkdtemp as mkdtemp2, readFile as readFile4, readdir as readdir2, rename as rename2, rm as rm3, writeFile as writeFile3 } from "node:fs/promises";
 import { isIP as isIP2 } from "node:net";
-import { tmpdir as tmpdir2 } from "node:os";
+import { homedir as homedir3, tmpdir as tmpdir2 } from "node:os";
 import path7 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { promisify as promisify2 } from "node:util";
@@ -525,9 +526,13 @@ for tool in wg wg-quick ip curl; do
 done
 
 PRIVATE_KEY=""
+EXISTING_ENDPOINT=""
 if [ -f "$CONF" ]; then
   log "Existing config found: $CONF"
   PRIVATE_KEY=$(sed -n 's/^PrivateKey[[:space:]]*=[[:space:]]*//p' "$CONF" | head -n 1)
+  # A member that joined over IPv6 may only be able to reach the hub over IPv6.
+  # Re-running the join script must not silently downgrade it to IPv4.
+  EXISTING_ENDPOINT=$(sed -n 's/^Endpoint[[:space:]]*=[[:space:]]*//p' "$CONF" | head -n 1)
 fi
 PUBLIC_KEY=""
 if [ -n "$PRIVATE_KEY" ]; then
@@ -569,6 +574,10 @@ if printf '%s' "$JOIN" | grep -Eq '"egress"[[:space:]]*:[[:space:]]*true'; then
   EGRESS=1
 fi
 
+if [ -z "$FAMILY" ] && [ -n "$EXISTING_ENDPOINT" ]; then
+  ENDPOINT=$EXISTING_ENDPOINT
+  log "Keeping the existing endpoint: $ENDPOINT"
+fi
 if [ -z "$ADDRESS" ] || [ -z "$SERVER_KEY" ] || [ -z "$ENDPOINT" ] || [ -z "$VPN_CIDR" ]; then
   die "The server response is incomplete: $JOIN"
 fi
@@ -638,8 +647,16 @@ fi
 if [ "$EGRESS" -eq 1 ]; then
   log "Installing IPv4 egress persistence via $HUB_IP"
   UNIT=/etc/systemd/system/dsh-mesh-egress.service
+  # wg-quick already routes 0.0.0.0/0 into table 51820 (the not-fwmark rule),
+  # which leaves the main table's physical default free for the endpoint.
+  # Adding a main-table default via $HUB_IP makes the hub unreachable:
+  # the handshake packets fall through to that very route and loop back into
+  # the tunnel. Keep the tunnel default out of the main table.
   wg set "$IFACE" peer "$SERVER_KEY" allowed-ips 0.0.0.0/0
-  ip route replace default via "$HUB_IP" dev "$IFACE" metric 50
+  ip route del default via "$HUB_IP" dev "$IFACE" 2>/dev/null || true
+  if ! ip route show table 51820 2>/dev/null | grep -q '^default'; then
+    log "WARNING: wg-quick did not install the table-51820 default; egress may not work"
+  fi
   if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
     cat >"$UNIT" <<EOF
 [Unit]
@@ -650,9 +667,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# 0.0.0.0/0 has to be in the peer's AllowedIPs or the tunnel silently drops
-# every packet that the default route sends into it.
-ExecStart=/bin/sh -c 'wg set $IFACE peer $SERVER_KEY allowed-ips 0.0.0.0/0; ip route replace default via $HUB_IP dev $IFACE metric 50'
+# 0.0.0.0/0 has to be in the peer's AllowedIPs or wg-quick never creates the
+# table-51820 default that carries egress. The main table stays untouched so
+# the WireGuard endpoint itself keeps using the physical route.
+ExecStart=/bin/sh -c 'wg set $IFACE peer $SERVER_KEY allowed-ips 0.0.0.0/0; ip route del default via $HUB_IP dev $IFACE 2>/dev/null || true'
 ExecStop=/bin/sh -c 'ip route del default via $HUB_IP dev $IFACE 2>/dev/null || true'
 
 [Install]
@@ -782,6 +800,79 @@ else
   log "SSH: not ready ($SSH_ERROR)"
 fi
 
+# --- SSH access back to the gateway ----------------------------------------
+# Enrollment is symmetric. The member keeps its own Ed25519 identity, and the
+# gateway only stores the public half, pinned to this VPN address, so
+# "ssh dsh-gateway" works from here without a password or an agent.
+REVERSE_KEY="/root/.ssh/id_ed25519_dsh_mesh"
+REVERSE_READY=0
+REVERSE_ERROR=""
+if [ -n "$SSH_TOKEN" ]; then
+  log "SSH: preparing the member key for the gateway"
+  mkdir -p /root/.ssh
+  chmod 700 /root/.ssh
+  if [ ! -f "$REVERSE_KEY" ]; then
+    if command -v ssh-keygen >/dev/null 2>&1; then
+      ssh-keygen -q -t ed25519 -N '' -C "dsh-mesh@$NAME" -f "$REVERSE_KEY" >/dev/null 2>&1 || REVERSE_ERROR="ssh-keygen failed"
+      chmod 600 "$REVERSE_KEY" 2>/dev/null || true
+    else
+      REVERSE_ERROR="ssh-keygen is missing"
+    fi
+  fi
+  MEMBER_KEY=""
+  if [ -f "$REVERSE_KEY.pub" ]; then
+    MEMBER_KEY=$(head -n 1 "$REVERSE_KEY.pub")
+  fi
+  if [ -n "$MEMBER_KEY" ]; then
+    AUTHORIZE=$(curl -sS -X POST -H 'content-type: application/json' --data '{"publicKey":"'"$PUBLIC_KEY"'","token":"'"$SSH_TOKEN"'","sshPublicKey":"'"$MEMBER_KEY"'"}' "$CONTROL_URL/ssh/authorize" 2>/dev/null || true)
+    GW_HOST=$(json_str "$AUTHORIZE" host)
+    GW_USER=$(json_str "$AUTHORIZE" user)
+    GW_PORT=$(json_num "$AUTHORIZE" port)
+    GW_CONFIG=$(json_str "$AUTHORIZE" sshConfigB64)
+    GW_KNOWN=$(json_str "$AUTHORIZE" knownHostsB64)
+    [ -n "$GW_USER" ] || GW_USER=root
+    [ -n "$GW_PORT" ] || GW_PORT=22
+    if [ -n "$GW_HOST" ]; then
+      # Keep the rest of ~/.ssh/config: only the managed block is replaced.
+      touch /root/.ssh/config
+      chmod 600 /root/.ssh/config
+      awk '/^# >>> dsh-mesh:gateway >>>$/{skip=1;next} /^# <<< dsh-mesh:gateway <<<$/{skip=0;next} skip!=1{print}' /root/.ssh/config > /root/.ssh/config.dsh-mesh
+      cat /root/.ssh/config.dsh-mesh > /root/.ssh/config
+      rm -f /root/.ssh/config.dsh-mesh
+      if [ -n "$GW_CONFIG" ] && command -v base64 >/dev/null 2>&1; then
+        printf '%s' "$GW_CONFIG" | base64 -d >> /root/.ssh/config
+      else
+        {
+          echo "Host dsh-gateway $GW_HOST"
+          echo "  HostName $GW_HOST"
+          echo "  User $GW_USER"
+          echo "  Port $GW_PORT"
+          echo "  IdentityFile ~/.ssh/id_ed25519_dsh_mesh"
+          echo "  IdentitiesOnly yes"
+          echo "  StrictHostKeyChecking accept-new"
+        } >> /root/.ssh/config
+      fi
+      if [ -n "$GW_KNOWN" ] && command -v base64 >/dev/null 2>&1; then
+        touch /root/.ssh/known_hosts
+        chmod 600 /root/.ssh/known_hosts
+        printf '%s' "$GW_KNOWN" | base64 -d >> /root/.ssh/known_hosts
+      fi
+      REVERSE_READY=1
+      log "SSH: reverse access ready ($GW_USER@$GW_HOST:$GW_PORT, key $REVERSE_KEY)"
+    else
+      if [ -z "$REVERSE_ERROR" ]; then
+        REVERSE_ERROR="the gateway did not authorize the member key: $AUTHORIZE"
+      fi
+      log "SSH: reverse access failed ($REVERSE_ERROR)"
+    fi
+  else
+    if [ -z "$REVERSE_ERROR" ]; then REVERSE_ERROR="no member public key"; fi
+    log "SSH: reverse access failed ($REVERSE_ERROR)"
+  fi
+else
+  log "SSH: reverse access skipped (no agent token)"
+fi
+
 if [ -n "$SSH_TOKEN" ]; then
   if [ "$SSH_READY" -eq 1 ]; then
     REPORT=$(curl -sS -X POST -H 'content-type: application/json' --data '{"publicKey":"'"$PUBLIC_KEY"'","token":"'"$SSH_TOKEN"'","user":"root","platform":"linux","hostname":"'"$NAME"'","sshInstalled":true,"sshRunning":true,"sshReady":true,"sshPort":22,"sshVersion":"'"$SSH_VERSION"'","sshError":null}' "$CONTROL_URL/ssh/report" 2>/dev/null || true)
@@ -797,6 +888,11 @@ log "Connected successfully"
 log "VPN address: $ADDRESS"
 log "WireGuard endpoint: $ENDPOINT"
 log "Config: $CONF"
+if [ "$REVERSE_READY" -eq 1 ]; then
+  log "Gateway SSH: ssh dsh-gateway (key $REVERSE_KEY)"
+else
+  log "Gateway SSH: not installed ($REVERSE_ERROR)"
+fi
 log "Disconnect: sudo wg-quick down $IFACE"
 if command -v wg >/dev/null 2>&1; then
   log "Interface status:"
@@ -985,7 +1081,7 @@ var ControlPanel = class {
       }
       return;
     }
-    if (method === "POST" && (url.pathname === "/ssh/report" || url.pathname === "/ssh/key" || url.pathname === "/ssh/manifest")) {
+    if (method === "POST" && (url.pathname === "/ssh/report" || url.pathname === "/ssh/key" || url.pathname === "/ssh/authorize" || url.pathname === "/ssh/manifest")) {
       try {
         const body = await readJson2(request);
         let result;
@@ -995,6 +1091,9 @@ var ControlPanel = class {
         } else if (url.pathname === "/ssh/key") {
           if (!this.options.getPeerSshKey) throw new WireGuardError("not_supported", "This server does not issue SSH keys.", { status: 501 });
           result = await this.options.getPeerSshKey(body);
+        } else if (url.pathname === "/ssh/authorize") {
+          if (!this.options.onAuthorizeMemberKey) throw new WireGuardError("not_supported", "This server does not accept member SSH keys.", { status: 501 });
+          result = await this.options.onAuthorizeMemberKey(body, remoteAddress);
         } else {
           if (!this.options.getOpenSshManifest) throw new WireGuardError("not_supported", "This server does not host OpenSSH.", { status: 501 });
           result = await this.options.getOpenSshManifest(body);
@@ -2236,6 +2335,124 @@ async function forgetKnownHosts(host, port = 22, options = {}) {
   }
 }
 
+// src/wireguard/lib/member-ssh.ts
+import { createHash as createHash2 } from "node:crypto";
+var MEMBER_KEY_NAME = "id_ed25519_dsh_mesh";
+var GATEWAY_BLOCK_NAME = "dsh-mesh:gateway";
+var AUTHORIZED_KEY_TAG_PREFIX = "dsh-mesh:";
+var SSH_KEY_TYPES = /* @__PURE__ */ new Set([
+  "ssh-ed25519",
+  "ssh-rsa",
+  "ecdsa-sha2-nistp256",
+  "ecdsa-sha2-nistp384",
+  "ecdsa-sha2-nistp521",
+  "sk-ssh-ed25519@openssh.com",
+  "sk-ecdsa-sha2-nistp256@openssh.com"
+]);
+function parseSshPublicKey(value) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!text || /[\r\n]/u.test(text)) return null;
+  const parts = text.split(/\s+/u);
+  if (parts.length < 2) return null;
+  const [type, base64] = parts;
+  if (!SSH_KEY_TYPES.has(type)) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/u.test(base64) || base64.length < 32 || base64.length > 4096) return null;
+  const comment = parts.slice(2).join(" ").slice(0, 128);
+  return { type, base64, comment, text: `${type} ${base64}` };
+}
+function sshKeyFingerprint(publicKey) {
+  const parsed = typeof publicKey === "string" ? parseSshPublicKey(publicKey) : publicKey;
+  const base64 = parsed?.base64 ?? "";
+  if (!base64) return "";
+  const digest = createHash2("sha256").update(Buffer.from(base64, "base64")).digest("base64");
+  return `SHA256:${digest.replace(/=+$/u, "")}`;
+}
+function formatAuthorizedKeyLine(options) {
+  const parsed = typeof options.key === "string" ? parseSshPublicKey(options.key) : options.key;
+  if (!parsed) throw new Error("Unexpected SSH public key format.");
+  const comment = (options.comment ?? "").replace(/[\r\n]/gu, " ").trim().slice(0, 100);
+  const tag = options.tag ? `${AUTHORIZED_KEY_TAG_PREFIX}${options.tag}` : "";
+  const suffix = tag || comment ? ` ${[tag, comment].filter(Boolean).join(" ")}` : "";
+  const from = options.from ? `from="${options.from.replace(/["\\]/gu, "")}" ` : "";
+  return `${from}${parsed.text}${suffix}`;
+}
+function authorizedKeyHasTag(line, tag) {
+  const token = `${AUTHORIZED_KEY_TAG_PREFIX}${tag}`;
+  const fields = line.trim().split(/\s+/u);
+  return fields.length > 2 && fields.slice(2).includes(token);
+}
+function removeAuthorizedKeyTag(text, tag) {
+  const kept = String(text ?? "").split(/\r?\n/u).filter((line) => line.trim() !== "" && !authorizedKeyHasTag(line, tag));
+  return kept.length === 0 ? "" : `${kept.join("\n")}
+`;
+}
+function upsertAuthorizedKey(text, entry, tag) {
+  const kept = removeAuthorizedKeyTag(text, tag);
+  return `${kept}${entry.trim()}
+`;
+}
+function gatewaySshConfigBlock(options) {
+  const host = options.host.trim();
+  const user = options.user.trim();
+  const port = Number.isSafeInteger(options.port) && options.port > 0 ? Number(options.port) : 22;
+  return [
+    `# >>> ${GATEWAY_BLOCK_NAME} >>>`,
+    `Host dsh-gateway ${host}`,
+    `  HostName ${host}`,
+    `  User ${user}`,
+    `  Port ${port}`,
+    `  IdentityFile ~/.ssh/${MEMBER_KEY_NAME}`,
+    "  IdentitiesOnly yes",
+    "  StrictHostKeyChecking accept-new",
+    `# <<< ${GATEWAY_BLOCK_NAME} <<<`
+  ].join("\n");
+}
+function mergeManagedBlock(text, name, block) {
+  const begin = `# >>> ${name} >>>`;
+  const end = `# <<< ${name} <<<`;
+  const lines = String(text ?? "").split(/\r?\n/u);
+  const kept = [];
+  let inside = false;
+  for (const line of lines) {
+    if (line.trim() === begin) {
+      inside = true;
+      continue;
+    }
+    if (inside) {
+      if (line.trim() === end) inside = false;
+      continue;
+    }
+    kept.push(line);
+  }
+  while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
+  const body = block.includes(begin) ? block : `${begin}
+${block}
+${end}`;
+  return `${[...kept, ...body.split(/\r?\n/u)].join("\n")}
+`;
+}
+function knownHostsTarget(host, port = 22) {
+  return port === 22 ? host : `[${host}]:${port}`;
+}
+function mergeKnownHosts(text, host, port, keys) {
+  const target = knownHostsTarget(host, port);
+  const kept = String(text ?? "").split(/\r?\n/u).filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    const first = trimmed.split(/\s+/u)[0];
+    return first !== target && first !== host;
+  });
+  const entries = keys.map((key) => parseSshPublicKey(key)).filter((key) => key !== null).map((key) => `${target} ${key.text}`);
+  if (entries.length === 0) return kept.length === 0 ? "" : `${kept.join("\n")}
+`;
+  return `${[...kept, ...entries].join("\n")}
+`;
+}
+function encodeText(text) {
+  return Buffer.from(text, "utf8").toString("base64");
+}
+
 // src/wireguard/lib/ssh.ts
 var SSH_USER_PATTERN = /^[A-Za-z_][A-Za-z0-9_-]{0,31}$/;
 function buildSshAuthorizeCommand(user, publicKey) {
@@ -2275,11 +2492,11 @@ Write-Output 'SSH public key installed for Windows user ' + $user`;
 }
 
 // src/wireguard/lib/ssh-agent.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { existsSync as existsSync2 } from "node:fs";
-import { mkdtemp, readFile as readFile2, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir as mkdir3, mkdtemp, readFile as readFile2, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
-import { tmpdir, hostname as osHostname2, userInfo } from "node:os";
+import { homedir as homedir2, tmpdir, hostname as osHostname2, userInfo } from "node:os";
 import path5 from "node:path";
 var WINDOWS_INSTALL_DIR = "C:\\Program Files\\OpenSSH";
 var WINDOWS_SSHD_CANDIDATES = [
@@ -2497,7 +2714,7 @@ async function verifyOpenSshZip(file, manifest) {
   if (data.length !== manifest.bytes) {
     throw new Error(`OpenSSH asset size mismatch (${data.length} != ${manifest.bytes}).`);
   }
-  const digest = createHash2("sha256").update(data).digest("hex");
+  const digest = createHash3("sha256").update(data).digest("hex");
   if (digest !== manifest.sha256.toLowerCase()) {
     throw new Error("OpenSSH asset checksum mismatch.");
   }
@@ -2577,6 +2794,102 @@ try {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }`;
 }
+var WINDOWS_KEYGEN_CANDIDATES = [
+  path5.join(WINDOWS_INSTALL_DIR, "ssh-keygen.exe"),
+  "C:\\Windows\\System32\\OpenSSH\\ssh-keygen.exe"
+];
+var LINUX_KEYGEN_CANDIDATES = [
+  "/usr/bin/ssh-keygen",
+  "/usr/sbin/ssh-keygen",
+  "/usr/local/bin/ssh-keygen"
+];
+function memberHomeDirectory(platform, user) {
+  if (!platform.isWindows) return homedir2();
+  const account = user && SSH_USER_PATTERN.test(user) ? user : null;
+  if (!account) return homedir2();
+  const drive = String(process.env.SystemDrive || "C:").replace(/[\\/]+$/u, "");
+  return path5.win32.join(`${drive}\\`, "Users", account);
+}
+function memberSshPaths(platform, user) {
+  const join = platform.isWindows ? path5.win32.join : path5.posix.join;
+  const dir = join(memberHomeDirectory(platform, user), ".ssh");
+  return {
+    dir,
+    privateKey: join(dir, MEMBER_KEY_NAME),
+    publicKey: join(dir, `${MEMBER_KEY_NAME}.pub`),
+    config: join(dir, "config"),
+    knownHosts: join(dir, "known_hosts")
+  };
+}
+async function chmodQuiet(target, mode) {
+  try {
+    await chmod(target, mode);
+  } catch {
+  }
+}
+async function grantWindowsControl(target, user) {
+  if (!user || !SSH_USER_PATTERN.test(user)) return;
+  try {
+    await run("icacls", [target, "/grant", `${user}:F`], { timeout: 15e3 });
+  } catch {
+  }
+}
+async function ensureMemberKey(platform, paths, options) {
+  const keygen = findExecutable("ssh-keygen", platform.isWindows ? WINDOWS_KEYGEN_CANDIDATES : LINUX_KEYGEN_CANDIDATES);
+  if (!keygen) throw new Error("OpenSSH ssh-keygen was not found on this member.");
+  await mkdir3(paths.dir, { recursive: true, mode: 448 });
+  await chmodQuiet(paths.dir, 448);
+  let created = false;
+  if (!existsSync2(paths.privateKey)) {
+    await run(keygen, ["-q", "-t", "ed25519", "-N", "", "-C", options.comment.slice(0, 80), "-f", paths.privateKey], { timeout: 2e4 });
+    created = true;
+    await chmodQuiet(paths.privateKey, 384);
+    await grantWindowsControl(paths.privateKey, options.user ?? null);
+  }
+  let publicKey = "";
+  if (existsSync2(paths.publicKey)) {
+    publicKey = (await readFile2(paths.publicKey, "utf8")).trim();
+  }
+  if (!parseSshPublicKey(publicKey)) {
+    const derived = await run(keygen, ["-y", "-f", paths.privateKey], { timeout: 15e3 });
+    publicKey = String(derived.stdout ?? "").trim();
+  }
+  const parsed = parseSshPublicKey(publicKey);
+  if (!parsed) throw new Error("Could not read the member SSH public key.");
+  if (!existsSync2(paths.publicKey)) {
+    await writeFile(paths.publicKey, `${parsed.text}
+`, { encoding: "utf8", mode: 420 });
+    await grantWindowsControl(paths.publicKey, options.user ?? null);
+  }
+  return { publicKey: parsed.text, created };
+}
+async function installGatewaySshAccess(platform, paths, access2, options = {}) {
+  const readOrEmpty = async (file) => {
+    try {
+      return await readFile2(file, "utf8");
+    } catch {
+      return "";
+    }
+  };
+  const config = mergeManagedBlock(await readOrEmpty(paths.config), GATEWAY_BLOCK_NAME, access2.configText);
+  await writeFile(paths.config, config, { encoding: "utf8", mode: 384 });
+  await chmodQuiet(paths.config, 384);
+  await grantWindowsControl(paths.config, options.user ?? null);
+  const keys = access2.knownHostsText.split(/\r?\n/u).filter((line) => line.trim() !== "");
+  if (keys.length > 0) {
+    const knownHosts = mergeKnownHosts(await readOrEmpty(paths.knownHosts), access2.host, access2.port, keys);
+    if (knownHosts) {
+      await writeFile(paths.knownHosts, knownHosts, { encoding: "utf8", mode: 384 });
+      await chmodQuiet(paths.knownHosts, 384);
+      await grantWindowsControl(paths.knownHosts, options.user ?? null);
+    }
+  }
+}
+function gatewaySshCommand(access2) {
+  const port = Number.isSafeInteger(access2.port) && access2.port > 0 ? access2.port : 22;
+  const portArg = port === 22 ? "" : ` -p ${port}`;
+  return `ssh${portArg} -i ~/.ssh/${MEMBER_KEY_NAME} ${access2.user}@${access2.host}`;
+}
 async function installWindowsOpenSsh(platform, zipPath, publicKey, user) {
   if (!platform.isWindows) throw new Error("OpenSSH auto-install is only implemented for Windows.");
   const directory = await mkdtemp(path5.join(tmpdir(), "dsh-ssh-install-"));
@@ -2603,7 +2916,7 @@ ${result.stderr}`.trim();
 }
 
 // src/wireguard/lib/store.ts
-import { chmod, mkdir as mkdir3, readFile as readFile3, rename, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import { chmod as chmod2, mkdir as mkdir4, readFile as readFile3, rename, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import path6 from "node:path";
 function emptyState() {
   return {
@@ -2644,6 +2957,9 @@ function emptyState() {
       hubIp: null,
       joinCode: null,
       sshToken: null,
+      // Member-to-gateway SSH access installed by the agent; null until the
+      // gateway has accepted this member's own public key.
+      reverseSsh: null,
       connectedAt: null,
       lastHandshakeAt: null,
       receivedBytes: 0,
@@ -2694,7 +3010,18 @@ function normalizeState(raw) {
         sshVersion: typeof peer.sshVersion === "string" ? peer.sshVersion.slice(0, 120) : null,
         sshPort: Number.isInteger(peer.sshPort) && peer.sshPort > 0 && peer.sshPort <= 65535 ? peer.sshPort : 22,
         sshLastReportAt: typeof peer.sshLastReportAt === "string" ? peer.sshLastReportAt : null,
-        sshError: typeof peer.sshError === "string" ? peer.sshError.slice(0, 500) : null
+        sshError: typeof peer.sshError === "string" ? peer.sshError.slice(0, 500) : null,
+        // The member's own key, authorized for this VPN address only.
+        reverseKey: peer.reverseKey && typeof peer.reverseKey === "object" ? {
+          publicKey: typeof peer.reverseKey.publicKey === "string" ? peer.reverseKey.publicKey : "",
+          fingerprint: typeof peer.reverseKey.fingerprint === "string" ? peer.reverseKey.fingerprint : "",
+          from: typeof peer.reverseKey.from === "string" ? peer.reverseKey.from : peer.ip,
+          user: typeof peer.reverseKey.user === "string" ? peer.reverseKey.user : null,
+          port: Number.isInteger(peer.reverseKey.port) ? peer.reverseKey.port : 22,
+          host: typeof peer.reverseKey.host === "string" ? peer.reverseKey.host : null,
+          installedAt: typeof peer.reverseKey.installedAt === "string" ? peer.reverseKey.installedAt : null,
+          comment: typeof peer.reverseKey.comment === "string" ? peer.reverseKey.comment.slice(0, 128) : null
+        } : null
       })).slice(0, 1024) : [],
       warnings: Array.isArray(server.warnings) ? server.warnings.filter((item) => typeof item === "string").slice(0, 20) : [],
       forwarding: typeof server.forwarding === "boolean" ? server.forwarding : null
@@ -2720,6 +3047,20 @@ function normalizeState(raw) {
       hubIp: typeof client.hubIp === "string" ? client.hubIp : null,
       joinCode: typeof client.joinCode === "string" ? client.joinCode : null,
       sshToken: typeof client.sshToken === "string" ? client.sshToken : null,
+      reverseSsh: client.reverseSsh && typeof client.reverseSsh === "object" ? {
+        ready: client.reverseSsh.ready === true,
+        host: typeof client.reverseSsh.host === "string" ? client.reverseSsh.host : null,
+        user: typeof client.reverseSsh.user === "string" ? client.reverseSsh.user : null,
+        port: Number.isInteger(client.reverseSsh.port) ? client.reverseSsh.port : 22,
+        from: typeof client.reverseSsh.from === "string" ? client.reverseSsh.from : null,
+        fingerprint: typeof client.reverseSsh.fingerprint === "string" ? client.reverseSsh.fingerprint : null,
+        keyPath: typeof client.reverseSsh.keyPath === "string" ? client.reverseSsh.keyPath : null,
+        configPath: typeof client.reverseSsh.configPath === "string" ? client.reverseSsh.configPath : null,
+        command: typeof client.reverseSsh.command === "string" ? client.reverseSsh.command : null,
+        installedAt: typeof client.reverseSsh.installedAt === "string" ? client.reverseSsh.installedAt : null,
+        updatedAt: typeof client.reverseSsh.updatedAt === "string" ? client.reverseSsh.updatedAt : null,
+        error: typeof client.reverseSsh.error === "string" ? client.reverseSsh.error.slice(0, 500) : null
+      } : null,
       connectedAt: typeof client.connectedAt === "string" ? client.connectedAt : null,
       lastHandshakeAt: typeof client.lastHandshakeAt === "string" ? client.lastHandshakeAt : null,
       receivedBytes: Number.isSafeInteger(client.receivedBytes) ? client.receivedBytes : 0,
@@ -2745,9 +3086,9 @@ var Store = class {
     this.existed = false;
   }
   async init() {
-    await mkdir3(this.dataDir, { recursive: true, mode: 448 });
+    await mkdir4(this.dataDir, { recursive: true, mode: 448 });
     try {
-      await chmod(this.dataDir, 448);
+      await chmod2(this.dataDir, 448);
     } catch {
     }
     this.state = await this.load();
@@ -2784,7 +3125,7 @@ var Store = class {
 `, { encoding: "utf8", mode: 384 });
     await rename(temporary, this.statePath);
     try {
-      await chmod(this.statePath, 384);
+      await chmod2(this.statePath, 384);
     } catch {
     }
   }
@@ -2800,7 +3141,7 @@ var Store = class {
       const normalized = normalizeKey(stored);
       if (normalized) {
         try {
-          await chmod(privateKeyPath, 384);
+          await chmod2(privateKeyPath, 384);
         } catch {
         }
         return { privateKey: normalized, publicKey: publicKeyFromPrivate(normalized), privateKeyPath };
@@ -2818,7 +3159,7 @@ var Store = class {
     await writeFile2(privateKeyPath, `${pair.privateKey}
 `, { encoding: "utf8", mode: 384 });
     try {
-      await chmod(privateKeyPath, 384);
+      await chmod2(privateKeyPath, 384);
     } catch {
     }
     return { ...pair, privateKeyPath };
@@ -2847,7 +3188,7 @@ var Store = class {
     const target = this.configPath(role, interfaceName, windows);
     await writeFile2(target, text, { encoding: "utf8", mode: 384 });
     try {
-      await chmod(target, 384);
+      await chmod2(target, 384);
     } catch {
     }
   }
@@ -3175,6 +3516,18 @@ function errorMessage(error) {
 function integerOr(value, fallback) {
   return Number.isSafeInteger(value) ? value : fallback;
 }
+function defaultAuthorizedKeysPath() {
+  if (process.platform === "win32") {
+    return path7.join(process.env.ProgramData ?? "C:\\ProgramData", "ssh", "administrators_authorized_keys");
+  }
+  return path7.join(homedir3(), ".ssh", "authorized_keys");
+}
+function defaultHostKeyDirectories() {
+  if (process.platform === "win32") {
+    return [path7.join(process.env.ProgramData ?? "C:\\ProgramData", "ssh")];
+  }
+  return ["/etc/ssh"];
+}
 var WireGuardService = class {
   config;
   store;
@@ -3190,6 +3543,12 @@ var WireGuardService = class {
   knownHosts;
   commandRunner;
   sshRunner;
+  /** authorized_keys that accepts member logins on the gateway. */
+  authorizedKeysPath;
+  /** sshd host-key files whose public halves are advertised to members. */
+  hostKeyFiles;
+  /** Account members log in as on the gateway. */
+  reverseSshUser;
   platform;
   tunnel;
   platformAt;
@@ -3235,6 +3594,10 @@ var WireGuardService = class {
     this.tunnel = null;
     this.platformAt = 0;
     this.lock = Promise.resolve();
+    this.authorizedKeysPath = options.authorizedKeysPath ?? defaultAuthorizedKeysPath();
+    this.hostKeyFiles = options.hostKeyFiles ?? [];
+    const configuredUser = typeof options.reverseSshUser === "string" ? options.reverseSshUser.trim() : "";
+    this.reverseSshUser = SSH_USER_PATTERN.test(configuredUser) ? configuredUser : "root";
     this.sshAgentTimer = null;
     this.sshAgentBusy = false;
     this.sshAgentLastAttempt = 0;
@@ -3389,6 +3752,7 @@ var WireGuardService = class {
       onSetPeerEgress: (publicKey, enabled) => this.setPeerEgress({ publicKey, enabled }),
       onSshReport: (body, remoteAddress) => this.reportPeerSsh(body, remoteAddress),
       getPeerSshKey: (body) => this.getPeerSshKey(body),
+      onAuthorizeMemberKey: (body, remoteAddress) => this.authorizeMemberKey(body, remoteAddress),
       getOpenSshManifest: (body) => this.getOpenSshManifest(body),
       getOpenSshAsset: (body) => this.getOpenSshAsset(body),
       getAssetIndex: (body) => this.getAssetIndex(body),
@@ -3527,6 +3891,7 @@ var WireGuardService = class {
       online: peer.online === true,
       egress: peer.egress === true,
       sshConfigured: typeof peer.sshUser === "string" && peer.sshUser !== "",
+      reverseReady: Boolean(peer.reverseKey && peer.reverseKey.fingerprint),
       platform: peer.platform === "windows" ? "windows" : peer.platform === "linux" ? "linux" : null
     }));
   }
@@ -3549,6 +3914,9 @@ var WireGuardService = class {
       seen.add(publicKey);
       seen.add(ip);
       peers.push({
+        // Keep every field the state file carries (SSH report, egress,
+        // reverse key); only the address-bearing fields are normalized here.
+        ...raw,
         publicKey,
         ip,
         name: normalizeDeviceName(raw.name, "client"),
@@ -4299,6 +4667,7 @@ var WireGuardService = class {
         await this.tunnel.removePeer(this.state.server.interfaceName, publicKey);
       }
       this.state.server.peers = this.state.server.peers.filter((candidate) => candidate.publicKey !== publicKey);
+      await this.#removeReverseKey(peer);
       if (peer.egress === true) await this.#cleanupPeerEgress(peer);
       await this.#safeRewriteServerConfig();
       await this.#persist();
@@ -4322,6 +4691,7 @@ var WireGuardService = class {
       }
       this.state.server.peers = this.state.server.peers.filter((candidate) => candidate.publicKey !== key);
       await this.#removeSshKey(key);
+      await this.#removeReverseKey(peer);
       if (peer.egress === true) await this.#cleanupPeerEgress(peer);
       try {
         await this.knownHosts.forget(peer.ip);
@@ -4379,7 +4749,7 @@ var WireGuardService = class {
    * @returns {string} private-key path under the plugin data directory.
    */
   #sshKeyPath(peerPublicKey) {
-    const digest = createHash3("sha256").update(peerPublicKey).digest("hex");
+    const digest = createHash4("sha256").update(peerPublicKey).digest("hex");
     return path7.join(this.store.dataDir, "ssh", `${digest}.key`);
   }
   /**
@@ -4391,16 +4761,16 @@ var WireGuardService = class {
     const keyPath = this.#sshKeyPath(peerPublicKey);
     const publicPath = `${keyPath}.pub`;
     const directory = path7.dirname(keyPath);
-    await mkdir4(directory, { recursive: true, mode: 448 });
+    await mkdir5(directory, { recursive: true, mode: 448 });
     try {
-      await chmod2(directory, 448);
+      await chmod3(directory, 448);
     } catch {
     }
     try {
       const existing = (await readFile4(publicPath, "utf8")).trim();
       if (existing) {
         try {
-          await chmod2(keyPath, 384);
+          await chmod3(keyPath, 384);
         } catch {
         }
         return existing;
@@ -4416,7 +4786,7 @@ var WireGuardService = class {
           await writeFile3(publicPath, `${publicKey2}
 `, { encoding: "utf8", mode: 420 });
           try {
-            await chmod2(keyPath, 384);
+            await chmod3(keyPath, 384);
           } catch {
           }
           return publicKey2;
@@ -4442,7 +4812,7 @@ var WireGuardService = class {
       throw new WireGuardError("ssh_keygen_failed", "SSH key generation produced no public key.", { status: 500 });
     }
     try {
-      await chmod2(keyPath, 384);
+      await chmod3(keyPath, 384);
     } catch {
     }
     return publicKey;
@@ -4493,7 +4863,9 @@ var WireGuardService = class {
       version: typeof peer.sshVersion === "string" ? peer.sshVersion : null,
       port: integerOr(peer.sshPort, 22),
       error: typeof peer.sshError === "string" ? peer.sshError : null,
-      lastReportAt: typeof peer.sshLastReportAt === "string" ? peer.sshLastReportAt : null
+      lastReportAt: typeof peer.sshLastReportAt === "string" ? peer.sshLastReportAt : null,
+      // The other direction: the member logging in to this gateway.
+      reverse: this.#reverseSshView(peer)
     };
   }
   /**
@@ -4553,6 +4925,209 @@ var WireGuardService = class {
       const publicKey = await this.#ensureSshKey(peer.publicKey);
       return { publicKey, user: peer.sshUser ?? null, host: peer.ip };
     });
+  }
+  /**
+   * Accept a member's own public key so it can log in to the gateway. This is
+   * the mirror image of {@link getPeerSshKey}: the member owns the private key,
+   * and only the public half ever crosses the wire. The entry is pinned to the
+   * member's VPN address with `from=`.
+   * @param {Record<string, unknown>} body peer public key, agent token, and ssh public key.
+   * @param {string} remoteAddress caller address, for the audit log.
+   * @returns {Promise<Record<string, unknown>>} gateway coordinates and host keys.
+   */
+  async authorizeMemberKey(body, remoteAddress = "") {
+    return this.#serialized(async () => {
+      const peer = this.#peerByToken(body.publicKey, body.token);
+      const key = parseSshPublicKey(body.sshPublicKey ?? body.memberPublicKey);
+      if (!key) {
+        throw new WireGuardError("invalid_ssh_key", "The member SSH public key is invalid.", {
+          status: 400,
+          hint: 'Send an OpenSSH public key such as "ssh-ed25519 AAAA...".'
+        });
+      }
+      const { state: _state, ...result } = await this.#installMemberKey(peer, key, `member ${remoteAddress || ""}`.trim());
+      return result;
+    });
+  }
+  /**
+   * Panel variant of {@link authorizeMemberKey}: the operator pastes the public
+   * key that a member generated locally. Passing an empty key revokes the
+   * member's login instead.
+   * @param {Record<string, unknown>} input peer public key and optional ssh public key.
+   * @returns {Promise<Record<string, unknown>>} snapshot and the reverse view.
+   */
+  async setPeerReverseKey(input) {
+    return this.#serialized(async () => {
+      const publicKey = normalizeKey(input.publicKey);
+      if (!publicKey) {
+        throw new WireGuardError("invalid_public_key", "A valid WireGuard public key is required.", { status: 400 });
+      }
+      const peer = this.state.server.peers.find((candidate) => candidate.publicKey === publicKey);
+      if (!peer) {
+        throw new WireGuardError("peer_not_found", "That device has not joined this server.", { status: 404 });
+      }
+      const raw = typeof input.sshPublicKey === "string" ? input.sshPublicKey.trim() : "";
+      if (!raw) {
+        await this.#removeReverseKey(peer);
+        await this.#persist();
+        this.#log(`revoked the member SSH key for ${peer.name} (${peer.ip})`);
+        return { state: this.snapshot(), reverse: this.#reverseSshView(peer) };
+      }
+      const key = parseSshPublicKey(raw);
+      if (!key) {
+        throw new WireGuardError("invalid_ssh_key", "That is not an OpenSSH public key.", {
+          status: 400,
+          hint: 'Paste the contents of ~/.ssh/id_ed25519_dsh_mesh.pub, starting with "ssh-ed25519".'
+        });
+      }
+      const result = await this.#installMemberKey(peer, key, "panel");
+      return { state: result.state, reverse: result.reverse };
+    });
+  }
+  /**
+   * Write one member's public key into authorized_keys, restricted to its VPN
+   * address, and record the result on the peer.
+   * @param {Record<string, any>} peer target peer.
+   * @param {import('./member-ssh').SshPublicKey} key parsed member key.
+   * @param {string} source audit label.
+   * @returns {Promise<Record<string, unknown>>} install result for the member.
+   */
+  async #installMemberKey(peer, key, source) {
+    const host = this.state.settings.serverIp;
+    const port = 22;
+    const user = this.reverseSshUser;
+    const entry = formatAuthorizedKeyLine({ key, from: peer.ip, tag: peer.ip, comment: key.comment });
+    await this.#writeAuthorizedKeys((current) => upsertAuthorizedKey(current, entry, peer.ip));
+    const reverse = {
+      publicKey: key.text,
+      fingerprint: sshKeyFingerprint(key),
+      from: peer.ip,
+      user,
+      port,
+      host,
+      installedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      comment: key.comment || null
+    };
+    peer.reverseKey = reverse;
+    await this.#persist();
+    this.#log(`authorized the member SSH key for ${peer.name} (${peer.ip}) from ${source || "member"}`);
+    const hostKeys = await this.#ownHostKeys();
+    const knownHostsText = hostKeys.map((item) => `${host} ${item}`).join("\n");
+    return {
+      state: this.snapshot(),
+      reverse: this.#reverseSshView(peer),
+      authorized: true,
+      host,
+      user,
+      port,
+      from: peer.ip,
+      fingerprint: reverse.fingerprint,
+      hostKeys,
+      command: gatewaySshCommand({ host, user, port }),
+      sshConfig: gatewaySshConfigBlock({ host, user, port }),
+      sshConfigB64: encodeText(`${gatewaySshConfigBlock({ host, user, port })}
+`),
+      knownHostsB64: encodeText(knownHostsText ? `${knownHostsText}
+` : "")
+    };
+  }
+  /**
+   * Replace the managed authorized_keys file contents. The rewrite is atomic so
+   * a crash cannot leave the gateway without its own login keys.
+   * @param {(text: string) => string} change receives the current text.
+   * @returns {Promise<void>}
+   */
+  async #writeAuthorizedKeys(change) {
+    const file = this.authorizedKeysPath;
+    await mkdir5(path7.dirname(file), { recursive: true, mode: 448 });
+    let current = "";
+    try {
+      current = await readFile4(file, "utf8");
+    } catch {
+    }
+    const next = change(current);
+    if (next === current) return;
+    const temporary = `${file}.tmp-${process.pid}-${Date.now()}`;
+    await writeFile3(temporary, next, { encoding: "utf8", mode: 384 });
+    try {
+      await chmod3(temporary, 384);
+    } catch {
+    }
+    await rename2(temporary, file);
+  }
+  /**
+   * Revoke a peer's reverse login when the peer leaves or is removed.
+   * @param {Record<string, any>} peer peer being removed.
+   * @returns {Promise<void>}
+   */
+  async #removeReverseKey(peer) {
+    if (!peer?.reverseKey) return;
+    try {
+      await this.#writeAuthorizedKeys((current) => removeAuthorizedKeyTag(current, peer.ip));
+    } catch (error) {
+      this.#log(`could not revoke the SSH login of ${peer.name} (${peer.ip}): ${errorMessage(error)}`);
+    }
+    peer.reverseKey = null;
+  }
+  /**
+   * The host keys the gateway offers, so a member can pin known_hosts during
+   * enrollment instead of answering a trust prompt.
+   * @returns {Promise<string[]>} `type base64` lines, ed25519 first.
+   */
+  async #ownHostKeys() {
+    let files = this.hostKeyFiles.filter((file) => typeof file === "string" && file !== "");
+    if (files.length === 0) {
+      for (const directory of defaultHostKeyDirectories()) {
+        let names = [];
+        try {
+          names = await readdir2(directory);
+        } catch {
+          continue;
+        }
+        for (const name of names) {
+          if (/^ssh_host_.*_key\.pub$/u.test(name)) files.push(path7.join(directory, name));
+        }
+      }
+    }
+    files = files.sort((left, right) => Number(!left.includes("ed25519")) - Number(!right.includes("ed25519")));
+    const keys = [];
+    for (const file of files) {
+      try {
+        const line = (await readFile4(file, "utf8")).split(/\r?\n/u).find((item) => item.trim() !== "");
+        const parsed = parseSshPublicKey(line ?? "");
+        if (parsed) keys.push(parsed.text);
+      } catch {
+      }
+    }
+    if (keys.length > 0) return keys;
+    try {
+      const scan = await execFileAsync2("ssh-keyscan", ["-T", "5", "-p", "22", "127.0.0.1"], { timeout: 15e3, windowsHide: true });
+      const scanned = [];
+      for (const line of String(scan.stdout ?? "").split(/\r?\n/u)) {
+        const parsed = parseSshPublicKey(line);
+        if (parsed) scanned.push(parsed.text);
+      }
+      return scanned;
+    } catch {
+      return [];
+    }
+  }
+  /** Public view of one peer's member-to-gateway login. */
+  #reverseSshView(peer) {
+    const reverse = peer.reverseKey && typeof peer.reverseKey === "object" ? peer.reverseKey : null;
+    const host = this.state.settings.serverIp;
+    const user = typeof reverse?.user === "string" && SSH_USER_PATTERN.test(reverse.user) ? reverse.user : this.reverseSshUser;
+    const port = integerOr(reverse?.port, 22);
+    return {
+      ready: typeof reverse?.fingerprint === "string" && reverse.fingerprint !== "",
+      host,
+      user,
+      port,
+      from: typeof reverse?.from === "string" ? reverse.from : peer.ip,
+      fingerprint: typeof reverse?.fingerprint === "string" ? reverse.fingerprint : null,
+      installedAt: typeof reverse?.installedAt === "string" ? reverse.installedAt : null,
+      command: gatewaySshCommand({ host, user, port })
+    };
   }
   /** List the gateway's static assets for an authenticated member. */
   async getAssetIndex(body) {
@@ -4836,6 +5411,7 @@ var WireGuardService = class {
           sshPort: integerOr(peer.sshPort, 22),
           sshLastReportAt: typeof peer.sshLastReportAt === "string" ? peer.sshLastReportAt : null,
           sshError: typeof peer.sshError === "string" ? peer.sshError : null,
+          reverse: this.#reverseSshView(peer),
           platform: peer.platform === "windows" ? "windows" : peer.platform === "linux" ? "linux" : null
         }))
       },
@@ -4979,7 +5555,83 @@ var WireGuardService = class {
         this.#log(`SSH agent: ${status.error}`);
       }
     }
+    try {
+      const reverse = await this.#enrollReverseSsh(token, platform, status.user);
+      this.#setClientReverse(reverse);
+    } catch (error) {
+      const message = errorMessage(error);
+      this.#log(`SSH agent: reverse enrollment failed: ${message}`);
+      this.#setClientReverse({ ...this.state.client.reverseSsh ?? {}, ready: false, error: message });
+    }
     await this.#postSshReport(token, platform, status);
+  }
+  /**
+   * Persist the member's gateway login state, but only when it changed so the
+   * five-minute agent does not rewrite state.json on every tick.
+   * @param {Record<string, any>} reverse local reverse-SSH view.
+   * @returns {void}
+   */
+  #setClientReverse(reverse) {
+    const next = { ...reverse, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+    const previous = this.state.client.reverseSsh;
+    const strip = (value) => {
+      if (!value) return "";
+      const { updatedAt: _updatedAt, ...rest } = value;
+      return JSON.stringify(rest);
+    };
+    this.state.client.reverseSsh = next;
+    if (strip(previous) === strip(next)) return;
+    void this.#persist().catch((error) => this.#log(`could not persist the reverse SSH state: ${errorMessage(error)}`));
+  }
+  /**
+   * Enroll this member's own key with the gateway so `ssh dsh-gateway` works
+   * from here. Idempotent: the gateway replaces the line tagged with our VPN
+   * address, and an existing local key is reused.
+   * @param {string} token per-peer agent token.
+   * @param {PlatformInfo} platform resolved platform.
+   * @param {string | null} user account that should own the local files.
+   * @returns {Promise<Record<string, any>>} what was installed.
+   */
+  async #enrollReverseSsh(token, platform, user) {
+    const client = this.state.client;
+    if (!client.serverUrl || !client.publicKey) throw new Error("the client is not connected to a server");
+    const paths = memberSshPaths(platform, user);
+    const identity = await ensureMemberKey(platform, paths, { comment: `dsh-mesh@${localHostname()}`, user });
+    const result = await this.#fetchJson(`${client.serverUrl}/ssh/authorize`, {
+      method: "POST",
+      body: { publicKey: client.publicKey, token, sshPublicKey: identity.publicKey },
+      timeout: 15e3
+    });
+    const host = String(result.host ?? "").trim();
+    if (!host) throw new Error("the gateway did not report its VPN address");
+    const loginUser = String(result.user ?? "root").trim() || "root";
+    const port = integerOr(result.port, 22);
+    const hostKeys = Array.isArray(result.hostKeys) ? result.hostKeys.filter((item) => typeof item === "string") : [];
+    const configText = typeof result.sshConfig === "string" && result.sshConfig.trim() ? result.sshConfig : gatewaySshConfigBlock({ host, user: loginUser, port });
+    let knownHostsText = "";
+    if (typeof result.knownHostsB64 === "string" && result.knownHostsB64) {
+      knownHostsText = Buffer.from(result.knownHostsB64, "base64").toString("utf8");
+    }
+    if (!knownHostsText.trim() && hostKeys.length > 0) {
+      knownHostsText = `${hostKeys.map((item) => `${host} ${item}`).join("\n")}
+`;
+    }
+    await installGatewaySshAccess(platform, paths, { host, user: loginUser, port, configText, knownHostsText }, { user });
+    const fingerprint = typeof result.fingerprint === "string" ? result.fingerprint : sshKeyFingerprint(identity.publicKey);
+    this.#log(`reverse SSH ready: ${loginUser}@${host}:${port} via ${paths.privateKey}`);
+    return {
+      ready: true,
+      host,
+      user: loginUser,
+      port,
+      from: typeof result.from === "string" ? result.from : null,
+      fingerprint,
+      keyPath: paths.privateKey,
+      configPath: paths.config,
+      command: gatewaySshCommand({ host, user: loginUser, port }),
+      installedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      error: null
+    };
   }
   /** Bootstrap the per-peer token through /join for members that predate it. */
   async #ensureAgentToken() {
@@ -5150,7 +5802,7 @@ var WireGuardService = class {
 };
 
 // src/wireguard/control-service.ts
-var home = process.env.DSH_HOME && process.env.DSH_HOME.trim() ? process.env.DSH_HOME.trim() : path8.join(homedir2(), ".dsh");
+var home = process.env.DSH_HOME && process.env.DSH_HOME.trim() ? process.env.DSH_HOME.trim() : path8.join(homedir4(), ".dsh");
 var service = new WireGuardService({
   config: {
     externalControlPanel: true,

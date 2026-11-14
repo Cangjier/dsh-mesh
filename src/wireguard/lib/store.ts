@@ -17,7 +17,7 @@ import { SSH_USER_PATTERN } from './ssh';
  *   role: 'idle' | 'server' | 'client',
  *   settings: typeof DEFAULT_SETTINGS,
  *   server: { running: boolean, startedAt: string | null, publicKey: string, endpoint: string | null, endpointHost: string | null, controlUrl: string | null, controlPort: number, listenPort: number, vpnCidr: string, interfaceName: string, mtu: number, dns: string, peers: Array<Record<string, unknown>>, warnings: string[], forwarding: boolean | null },
- *   client: { connected: boolean, pending: boolean, publicKey: string | null, name: string | null, serverUrl: string | null, serverHost: string | null, assignedIp: string | null, serverPublicKey: string | null, vpnCidr: string | null, endpoint: string | null, interfaceName: string | null, mtu: number, egress: boolean, hubIp: string | null, joinCode: string | null, sshToken: string | null, connectedAt: string | null, lastHandshakeAt: string | null, receivedBytes: number, sentBytes: number, lastError: string | null, warnings: string[] },
+ *   client: { connected: boolean, pending: boolean, publicKey: string | null, name: string | null, serverUrl: string | null, serverHost: string | null, assignedIp: string | null, serverPublicKey: string | null, vpnCidr: string | null, endpoint: string | null, interfaceName: string | null, mtu: number, egress: boolean, hubIp: string | null, joinCode: string | null, sshToken: string | null, reverseSsh: Record<string, any> | null, connectedAt: string | null, lastHandshakeAt: string | null, receivedBytes: number, sentBytes: number, lastError: string | null, warnings: string[] },
  *   lastError: string | null,
  *   logs: string[],
  *   updatedAt: string | null
@@ -62,6 +62,9 @@ export function emptyState() {
       hubIp: null,
       joinCode: null,
       sshToken: null,
+      // Member-to-gateway SSH access installed by the agent; null until the
+      // gateway has accepted this member's own public key.
+      reverseSsh: null,
       connectedAt: null,
       lastHandshakeAt: null,
       receivedBytes: 0,
@@ -123,6 +126,19 @@ export function normalizeState(raw) {
             sshPort: Number.isInteger(peer.sshPort) && peer.sshPort > 0 && peer.sshPort <= 65535 ? peer.sshPort : 22,
             sshLastReportAt: typeof peer.sshLastReportAt === 'string' ? peer.sshLastReportAt : null,
             sshError: typeof peer.sshError === 'string' ? peer.sshError.slice(0, 500) : null,
+            // The member's own key, authorized for this VPN address only.
+            reverseKey: peer.reverseKey && typeof peer.reverseKey === 'object'
+              ? {
+                publicKey: typeof peer.reverseKey.publicKey === 'string' ? peer.reverseKey.publicKey : '',
+                fingerprint: typeof peer.reverseKey.fingerprint === 'string' ? peer.reverseKey.fingerprint : '',
+                from: typeof peer.reverseKey.from === 'string' ? peer.reverseKey.from : peer.ip,
+                user: typeof peer.reverseKey.user === 'string' ? peer.reverseKey.user : null,
+                port: Number.isInteger(peer.reverseKey.port) ? peer.reverseKey.port : 22,
+                host: typeof peer.reverseKey.host === 'string' ? peer.reverseKey.host : null,
+                installedAt: typeof peer.reverseKey.installedAt === 'string' ? peer.reverseKey.installedAt : null,
+                comment: typeof peer.reverseKey.comment === 'string' ? peer.reverseKey.comment.slice(0, 128) : null,
+              }
+              : null,
           }))
           .slice(0, 1024)
         : [],
@@ -150,6 +166,22 @@ export function normalizeState(raw) {
       hubIp: typeof client.hubIp === 'string' ? client.hubIp : null,
       joinCode: typeof client.joinCode === 'string' ? client.joinCode : null,
       sshToken: typeof client.sshToken === 'string' ? client.sshToken : null,
+      reverseSsh: client.reverseSsh && typeof client.reverseSsh === 'object'
+        ? {
+          ready: client.reverseSsh.ready === true,
+          host: typeof client.reverseSsh.host === 'string' ? client.reverseSsh.host : null,
+          user: typeof client.reverseSsh.user === 'string' ? client.reverseSsh.user : null,
+          port: Number.isInteger(client.reverseSsh.port) ? client.reverseSsh.port : 22,
+          from: typeof client.reverseSsh.from === 'string' ? client.reverseSsh.from : null,
+          fingerprint: typeof client.reverseSsh.fingerprint === 'string' ? client.reverseSsh.fingerprint : null,
+          keyPath: typeof client.reverseSsh.keyPath === 'string' ? client.reverseSsh.keyPath : null,
+          configPath: typeof client.reverseSsh.configPath === 'string' ? client.reverseSsh.configPath : null,
+          command: typeof client.reverseSsh.command === 'string' ? client.reverseSsh.command : null,
+          installedAt: typeof client.reverseSsh.installedAt === 'string' ? client.reverseSsh.installedAt : null,
+          updatedAt: typeof client.reverseSsh.updatedAt === 'string' ? client.reverseSsh.updatedAt : null,
+          error: typeof client.reverseSsh.error === 'string' ? client.reverseSsh.error.slice(0, 500) : null,
+        }
+        : null,
       connectedAt: typeof client.connectedAt === 'string' ? client.connectedAt : null,
       lastHandshakeAt: typeof client.lastHandshakeAt === 'string' ? client.lastHandshakeAt : null,
       receivedBytes: Number.isSafeInteger(client.receivedBytes) ? client.receivedBytes : 0,

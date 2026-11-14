@@ -85,6 +85,7 @@ export function createHttpApiHandler(service) {
       else if (path === `${API_PREFIX}/server/stop`) result = await service.stopServer();
       else if (path === `${API_PREFIX}/peers/remove`) result = await service.removePeer(String(body.publicKey ?? ''));
       else if (path === `${API_PREFIX}/peers/ssh`) result = await service.configurePeerSsh(body);
+      else if (path === `${API_PREFIX}/peers/reverse`) result = await service.setPeerReverseKey(body);
       else if (path === `${API_PREFIX}/peers/egress`) result = await service.setPeerEgress(body);
       else if (path === `${API_PREFIX}/client/connect`) result = await service.connectClient(body);
       else if (path === `${API_PREFIX}/client/retry`) result = await service.retryClient();

@@ -1,5 +1,5 @@
 // src/wireguard/ssh-agent-service.ts
-import { appendFile, mkdir, mkdtemp as mkdtemp2, readFile as readFile2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import { appendFile, mkdir as mkdir2, mkdtemp as mkdtemp2, readFile as readFile2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir as tmpdir2, hostname as osHostname2 } from "node:os";
 import path3 from "node:path";
 
@@ -190,12 +190,94 @@ ${error.stdout}` : String(error);
   }
 }
 
+// src/wireguard/lib/member-ssh.ts
+var MEMBER_KEY_NAME = "id_ed25519_dsh_mesh";
+var GATEWAY_BLOCK_NAME = "dsh-mesh:gateway";
+var SSH_KEY_TYPES = /* @__PURE__ */ new Set([
+  "ssh-ed25519",
+  "ssh-rsa",
+  "ecdsa-sha2-nistp256",
+  "ecdsa-sha2-nistp384",
+  "ecdsa-sha2-nistp521",
+  "sk-ssh-ed25519@openssh.com",
+  "sk-ecdsa-sha2-nistp256@openssh.com"
+]);
+function parseSshPublicKey(value) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!text || /[\r\n]/u.test(text)) return null;
+  const parts = text.split(/\s+/u);
+  if (parts.length < 2) return null;
+  const [type, base64] = parts;
+  if (!SSH_KEY_TYPES.has(type)) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/u.test(base64) || base64.length < 32 || base64.length > 4096) return null;
+  const comment = parts.slice(2).join(" ").slice(0, 128);
+  return { type, base64, comment, text: `${type} ${base64}` };
+}
+function gatewaySshConfigBlock(options) {
+  const host = options.host.trim();
+  const user = options.user.trim();
+  const port = Number.isSafeInteger(options.port) && options.port > 0 ? Number(options.port) : 22;
+  return [
+    `# >>> ${GATEWAY_BLOCK_NAME} >>>`,
+    `Host dsh-gateway ${host}`,
+    `  HostName ${host}`,
+    `  User ${user}`,
+    `  Port ${port}`,
+    `  IdentityFile ~/.ssh/${MEMBER_KEY_NAME}`,
+    "  IdentitiesOnly yes",
+    "  StrictHostKeyChecking accept-new",
+    `# <<< ${GATEWAY_BLOCK_NAME} <<<`
+  ].join("\n");
+}
+function mergeManagedBlock(text, name, block) {
+  const begin = `# >>> ${name} >>>`;
+  const end = `# <<< ${name} <<<`;
+  const lines = String(text ?? "").split(/\r?\n/u);
+  const kept = [];
+  let inside = false;
+  for (const line of lines) {
+    if (line.trim() === begin) {
+      inside = true;
+      continue;
+    }
+    if (inside) {
+      if (line.trim() === end) inside = false;
+      continue;
+    }
+    kept.push(line);
+  }
+  while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
+  const body = block.includes(begin) ? block : `${begin}
+${block}
+${end}`;
+  return `${[...kept, ...body.split(/\r?\n/u)].join("\n")}
+`;
+}
+function knownHostsTarget(host, port = 22) {
+  return port === 22 ? host : `[${host}]:${port}`;
+}
+function mergeKnownHosts(text, host, port, keys) {
+  const target = knownHostsTarget(host, port);
+  const kept = String(text ?? "").split(/\r?\n/u).filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    const first = trimmed.split(/\s+/u)[0];
+    return first !== target && first !== host;
+  });
+  const entries = keys.map((key) => parseSshPublicKey(key)).filter((key) => key !== null).map((key) => `${target} ${key.text}`);
+  if (entries.length === 0) return kept.length === 0 ? "" : `${kept.join("\n")}
+`;
+  return `${[...kept, ...entries].join("\n")}
+`;
+}
+
 // src/wireguard/lib/ssh-agent.ts
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
-import { tmpdir, hostname as osHostname, userInfo } from "node:os";
+import { homedir, tmpdir, hostname as osHostname, userInfo } from "node:os";
 import path2 from "node:path";
 
 // src/wireguard/lib/ssh.ts
@@ -498,6 +580,97 @@ try {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }`;
 }
+var WINDOWS_KEYGEN_CANDIDATES = [
+  path2.join(WINDOWS_INSTALL_DIR, "ssh-keygen.exe"),
+  "C:\\Windows\\System32\\OpenSSH\\ssh-keygen.exe"
+];
+var LINUX_KEYGEN_CANDIDATES = [
+  "/usr/bin/ssh-keygen",
+  "/usr/sbin/ssh-keygen",
+  "/usr/local/bin/ssh-keygen"
+];
+function memberHomeDirectory(platform, user) {
+  if (!platform.isWindows) return homedir();
+  const account = user && SSH_USER_PATTERN.test(user) ? user : null;
+  if (!account) return homedir();
+  const drive = String(process.env.SystemDrive || "C:").replace(/[\\/]+$/u, "");
+  return path2.win32.join(`${drive}\\`, "Users", account);
+}
+function memberSshPaths(platform, user) {
+  const join = platform.isWindows ? path2.win32.join : path2.posix.join;
+  const dir = join(memberHomeDirectory(platform, user), ".ssh");
+  return {
+    dir,
+    privateKey: join(dir, MEMBER_KEY_NAME),
+    publicKey: join(dir, `${MEMBER_KEY_NAME}.pub`),
+    config: join(dir, "config"),
+    knownHosts: join(dir, "known_hosts")
+  };
+}
+async function chmodQuiet(target, mode) {
+  try {
+    await chmod(target, mode);
+  } catch {
+  }
+}
+async function grantWindowsControl(target, user) {
+  if (!user || !SSH_USER_PATTERN.test(user)) return;
+  try {
+    await run("icacls", [target, "/grant", `${user}:F`], { timeout: 15e3 });
+  } catch {
+  }
+}
+async function ensureMemberKey(platform, paths, options) {
+  const keygen = findExecutable("ssh-keygen", platform.isWindows ? WINDOWS_KEYGEN_CANDIDATES : LINUX_KEYGEN_CANDIDATES);
+  if (!keygen) throw new Error("OpenSSH ssh-keygen was not found on this member.");
+  await mkdir(paths.dir, { recursive: true, mode: 448 });
+  await chmodQuiet(paths.dir, 448);
+  let created = false;
+  if (!existsSync(paths.privateKey)) {
+    await run(keygen, ["-q", "-t", "ed25519", "-N", "", "-C", options.comment.slice(0, 80), "-f", paths.privateKey], { timeout: 2e4 });
+    created = true;
+    await chmodQuiet(paths.privateKey, 384);
+    await grantWindowsControl(paths.privateKey, options.user ?? null);
+  }
+  let publicKey = "";
+  if (existsSync(paths.publicKey)) {
+    publicKey = (await readFile(paths.publicKey, "utf8")).trim();
+  }
+  if (!parseSshPublicKey(publicKey)) {
+    const derived = await run(keygen, ["-y", "-f", paths.privateKey], { timeout: 15e3 });
+    publicKey = String(derived.stdout ?? "").trim();
+  }
+  const parsed = parseSshPublicKey(publicKey);
+  if (!parsed) throw new Error("Could not read the member SSH public key.");
+  if (!existsSync(paths.publicKey)) {
+    await writeFile(paths.publicKey, `${parsed.text}
+`, { encoding: "utf8", mode: 420 });
+    await grantWindowsControl(paths.publicKey, options.user ?? null);
+  }
+  return { publicKey: parsed.text, created };
+}
+async function installGatewaySshAccess(platform, paths, access, options = {}) {
+  const readOrEmpty = async (file) => {
+    try {
+      return await readFile(file, "utf8");
+    } catch {
+      return "";
+    }
+  };
+  const config = mergeManagedBlock(await readOrEmpty(paths.config), GATEWAY_BLOCK_NAME, access.configText);
+  await writeFile(paths.config, config, { encoding: "utf8", mode: 384 });
+  await chmodQuiet(paths.config, 384);
+  await grantWindowsControl(paths.config, options.user ?? null);
+  const keys = access.knownHostsText.split(/\r?\n/u).filter((line) => line.trim() !== "");
+  if (keys.length > 0) {
+    const knownHosts = mergeKnownHosts(await readOrEmpty(paths.knownHosts), access.host, access.port, keys);
+    if (knownHosts) {
+      await writeFile(paths.knownHosts, knownHosts, { encoding: "utf8", mode: 384 });
+      await chmodQuiet(paths.knownHosts, 384);
+      await grantWindowsControl(paths.knownHosts, options.user ?? null);
+    }
+  }
+}
 async function installWindowsOpenSsh(platform, zipPath, publicKey, user) {
   if (!platform.isWindows) throw new Error("OpenSSH auto-install is only implemented for Windows.");
   const directory = await mkdtemp(path2.join(tmpdir(), "dsh-ssh-install-"));
@@ -542,7 +715,7 @@ async function log(line) {
 `;
   process.stdout.write(text);
   try {
-    await mkdir(path3.dirname(logPath), { recursive: true });
+    await mkdir2(path3.dirname(logPath), { recursive: true });
     await appendFile(logPath, text, "utf8");
   } catch {
   }
@@ -563,7 +736,7 @@ async function loadConfig() {
   };
 }
 async function saveConfig(config) {
-  await mkdir(path3.dirname(configPath), { recursive: true });
+  await mkdir2(path3.dirname(configPath), { recursive: true });
   await writeFile2(configPath, `${JSON.stringify(config, null, 2)}
 `, { encoding: "utf8", mode: 384 });
 }
@@ -714,6 +887,28 @@ async function report(config, status) {
   });
   await log(`reported ready=${String(status.ready)} user=${status.user ?? "-"}${error ? ` error=${error}` : ""}`);
 }
+async function enrollReverse(config, platform, status) {
+  try {
+    const paths = memberSshPaths(platform, status.user);
+    const identity = await ensureMemberKey(platform, paths, { comment: `dsh-mesh@${status.hostname}`, user: status.user });
+    const data = await httpJson(config, "/ssh/authorize", {
+      publicKey: config.publicKey,
+      token: config.token,
+      sshPublicKey: identity.publicKey
+    });
+    const host = String(data.host ?? "").trim();
+    if (!host) throw new Error("the gateway did not report its VPN address");
+    const user = String(data.user ?? "root").trim() || "root";
+    const port = Number.isSafeInteger(data.port) && data.port > 0 ? data.port : 22;
+    const hostKeys = Array.isArray(data.hostKeys) ? data.hostKeys.filter((item) => typeof item === "string") : [];
+    const configText = typeof data.sshConfig === "string" && data.sshConfig.trim() ? data.sshConfig : gatewaySshConfigBlock({ host, user, port });
+    const knownHostsText = typeof data.knownHostsB64 === "string" && data.knownHostsB64 ? Buffer.from(data.knownHostsB64, "base64").toString("utf8") : hostKeys.map((item) => `${host} ${item}`).join("\n") + (hostKeys.length ? "\n" : "");
+    await installGatewaySshAccess(platform, paths, { host, user, port, configText, knownHostsText }, { user: status.user });
+    await log(`reverse SSH ready: ${user}@${host}:${port} (key ${paths.privateKey})`);
+  } catch (error) {
+    await log(`reverse SSH enrollment failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 async function tick(config) {
   const platform = await detectPlatform();
   let status = await inspectSsh(platform);
@@ -754,6 +949,7 @@ async function tick(config) {
       await log(status.error);
     }
   }
+  await enrollReverse(config, platform, status);
   await report(config, status);
   return config;
 }

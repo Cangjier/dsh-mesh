@@ -65,6 +65,7 @@ function runningState(overrides: Partial<Snapshot> = {}): Snapshot {
       mtu: 1420,
       egress: false,
       hubIp: null,
+      reverseSsh: null,
       connectedAt: null,
       lastHandshakeAt: null,
       receivedBytes: 0,

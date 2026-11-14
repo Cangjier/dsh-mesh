@@ -3299,6 +3299,8 @@ function windowsBuildScript(options) {
   ];
   return [
     "$ErrorActionPreference = 'Stop'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
     "$root = Join-Path $env:USERPROFILE '.dsh\\mesh'",
     "$src = Join-Path $root 'build-src'",
     "$bin = Join-Path $root 'bin'",
@@ -3341,6 +3343,14 @@ function windowsBuildScript(options) {
 }
 function quotePs(value) {
   return `'${String(value).replace(/'/gu, "''")}'`;
+}
+function decodeWindowsState(stdout) {
+  const runs = String(stdout).match(/[A-Za-z0-9+/=]{16,}/gu) ?? [];
+  const encoded = runs.reduce((best, run2) => run2.length > best.length ? run2 : best, "");
+  const text = Buffer.from(encoded, "base64").toString("utf8");
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  return JSON.parse(start >= 0 && end > start ? text.slice(start, end + 1) : text);
 }
 function powershellCommand(script) {
   const encoded = Buffer.from(script, "utf16le").toString("base64");
@@ -3489,12 +3499,15 @@ var RemoteBuilder = class {
   async #readRemoteState(runner, jobId, windows = false) {
     try {
       const command = windows ? powershellCommand([
+        "$ProgressPreference = 'SilentlyContinue'",
         `$out = Join-Path $env:USERPROFILE '.dsh\\mesh\\build\\${jobId}'`,
         "$file = Get-ChildItem -Path $out -Filter state.json -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1",
-        "if ($file) { Get-Content -Raw -LiteralPath $file.FullName }"
+        // The file is UTF-8 with Chinese doc names; emitting its bytes as
+        // base64 avoids the Windows console code page entirely.
+        "if ($file) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($file.FullName)) }"
       ].join("; ")) : `cat "${REMOTE_JOBS}/${jobId}"/*/state.json`;
       const { stdout } = await runner.runProcess("ssh", [...runner.sshOptions(), runner.target(), command]);
-      const parsed = JSON.parse(stdout);
+      const parsed = windows ? decodeWindowsState(stdout) : JSON.parse(stdout);
       if (parsed === null || typeof parsed !== "object") return null;
       return parsed;
     } catch {

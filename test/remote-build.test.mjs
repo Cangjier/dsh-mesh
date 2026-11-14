@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { phaseFromLine, powershellCommand, remoteBuildScript, windowsBuildScript } from '../src/lib/remote-build.mjs'
+import { decodeWindowsState, phaseFromLine, powershellCommand, remoteBuildScript, windowsBuildScript } from '../src/lib/remote-build.mjs'
 
 test('phaseFromLine follows the engine markers', () => {
   assert.deepEqual(phaseFromLine('job created'), { phase: 'prepare', percent: 4 })
@@ -92,4 +92,12 @@ test('resolveEgressScript finds the script in source and bundled layouts', async
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('decodeWindowsState survives noise and non-ASCII state', () => {
+  const state = { id: 'job-9', status: 'needs-fix', mismatches: [{ doc: 'docs/Step 005 账号登录前端补丁.md' }] }
+  const encoded = Buffer.from(JSON.stringify(state, null, 2), 'utf8').toString('base64')
+  const decoded = decodeWindowsState(`#< CLIXML\r\n${encoded}\r\n`)
+  assert.equal(decoded.id, 'job-9')
+  assert.equal(decoded.mismatches[0].doc, 'docs/Step 005 账号登录前端补丁.md')
 })

@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+#
+# 平铺安装（网关这种 <root>/config/gate.env + start.sh 的布局）的就地升级。
+#
+# 平铺安装没有 releases/current 可以原子切换，所以升级方式是把新包的文件覆盖到
+# 现有安装目录，保留 config/data/home/workspace，然后重写 profile 接线与 systemd
+# 单元，让 dsh-web-app / dsh-web-gate / control / interop 重启到新版本。
+#
+# 调用方是 code/deploy/runner.mjs：它跑在独立的 systemd 临时单元里，所以本脚本
+# 重启 dsh-web / gate 不会把升级本身打断。脚本的 stdout/stderr 就是面板里的日志。
+#
+#   bash code/deploy/upgrade-local.sh --app-root /root/.dsh/dsh-person-web \
+#        --dsh-home /root/.dsh/dsh-web-linux/data/home --port 80
+#
+#   --no-restart   只做备份、覆盖与接线，不动服务（用于验证脚本本身）
+#
+set -euo pipefail
+
+APP_ROOT=""
+JOB_DIR=""
+DSH_HOME_OVERRIDE=""
+PORT_OVERRIDE=""
+INTEROP_TOKEN_OVERRIDE=""
+NO_RESTART=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --app-root) APP_ROOT=$2; shift 2 ;;
+    --job-dir) JOB_DIR=$2; shift 2 ;;
+    --dsh-home) DSH_HOME_OVERRIDE=$2; shift 2 ;;
+    --port) PORT_OVERRIDE=$2; shift 2 ;;
+    --interop-token) INTEROP_TOKEN_OVERRIDE=$2; shift 2 ;;
+    --no-restart) NO_RESTART=1; shift ;;
+    *) echo "unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+say() { printf '==> %s\n' "$*"; }
+warn() { printf '[warn] %s\n' "$*" >&2; }
+die() { printf '[error] %s\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" = 0 ] || die '升级需要 root（要重写 systemd 单元）'
+[ -n "$APP_ROOT" ] || die '--app-root is required'
+STAGE=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+ENV_FILE="$APP_ROOT/config/gate.env"
+[ -f "$ENV_FILE" ] || die "不是已安装的平铺目录：缺少 $ENV_FILE"
+[ -d "$APP_ROOT/plugins/dsh-mesh" ] || die "缺少 $APP_ROOT/plugins/dsh-mesh"
+[ -f "$STAGE/manifest.json" ] || die "部署包不完整：缺少 $STAGE/manifest.json"
+[ -f "$STAGE/start.sh" ] || die "部署包不完整：缺少 $STAGE/start.sh"
+
+NODE="$STAGE/runtime/node/bin/node"
+[ -x "$NODE" ] || NODE="$APP_ROOT/runtime/node/bin/node"
+[ -x "$NODE" ] || NODE=$(command -v node || true)
+[ -n "$NODE" ] && [ -x "$NODE" ] || die '找不到可执行的 node'
+
+env_get() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n1; }
+INTEROP_ENV="$APP_ROOT/config/interop.env"
+interop_get() {
+  if [ -f "$INTEROP_ENV" ]; then sed -n "s/^$1=//p" "$INTEROP_ENV" | tail -n1; fi
+}
+
+OLD_HOME=$(env_get DSH_HOME)
+OLD_WORKDIR=$(env_get DSH_WORKDIR)
+GATE_PASSWORD=$(env_get DSH_GATE_PASSWORD)
+DSH_HOME=${DSH_HOME_OVERRIDE:-${OLD_HOME:-$APP_ROOT/home}}
+WORKDIR=${OLD_WORKDIR:-$APP_ROOT/workspace}
+PORT=${PORT_OVERRIDE:-$(env_get DSH_GATE_PORT)}
+PORT=${PORT:-80}
+PROFILE="$DSH_HOME/profiles/web"
+
+I_BIND=$(interop_get DSH_INTEROP_BIND); I_BIND=${I_BIND:-127.0.0.1}
+I_PORT=$(interop_get DSH_INTEROP_PORT); I_PORT=${I_PORT:-8765}
+I_PROVIDER=$(interop_get DSH_INTEROP_PROVIDER); I_PROVIDER=${I_PROVIDER:-deepseek-account}
+I_MODEL=$(interop_get DSH_INTEROP_MODEL); I_MODEL=${I_MODEL:-deepseek-flash}
+I_APPROVE=$(interop_get DSH_INTEROP_APPROVE); I_APPROVE=${I_APPROVE:-1}
+I_USE_GATE=$(interop_get DSH_INTEROP_USE_GATE_PASSWORD); I_USE_GATE=${I_USE_GATE:-0}
+I_TOKEN=${INTEROP_TOKEN_OVERRIDE:-$(interop_get DSH_INTEROP_TOKEN)}
+I_TOKEN=${I_TOKEN:-$GATE_PASSWORD}
+
+say "升级 $APP_ROOT（DSH_HOME=$DSH_HOME，端口 $PORT）"
+say "新包 $STAGE"
+
+# ── 1. 备份 ────────────────────────────────────────────────────────────────
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP="$APP_ROOT/.upgrade-backup/$STAMP"
+mkdir -p "$BACKUP"
+for item in config manifest.json install.sh start.sh start-dsh.sh start-interop.sh code gate plugins locale docs package.json deploy cordis.patch.yml; do
+  if [ -e "$APP_ROOT/$item" ]; then
+    cp -a "$APP_ROOT/$item" "$BACKUP/" 2>/dev/null || warn "备份 $item 失败（继续）"
+  fi
+done
+cp -a "$PROFILE/package.json" "$BACKUP/profile-package.json" 2>/dev/null || true
+cp -a "$PROFILE/cordis.patch.yml" "$BACKUP/profile-cordis.patch.yml" 2>/dev/null || true
+say "备份到 $BACKUP"
+
+restore() {
+  warn '开始回滚到升级前的文件'
+  for item in config code gate plugins locale docs package.json manifest.json start.sh start-dsh.sh start-interop.sh install.sh deploy; do
+    if [ -e "$BACKUP/$item" ]; then
+      rm -rf "${APP_ROOT:?}/$item"
+      cp -a "$BACKUP/$item" "$APP_ROOT/" 2>/dev/null || warn "恢复 $item 失败"
+    fi
+  done
+  if [ -f "$BACKUP/profile-package.json" ]; then
+    cp -a "$BACKUP/profile-package.json" "$PROFILE/package.json" 2>/dev/null || true
+  fi
+  if [ -f "$BACKUP/profile-cordis.patch.yml" ]; then
+    cp -a "$BACKUP/profile-cordis.patch.yml" "$PROFILE/cordis.patch.yml" 2>/dev/null || true
+  fi
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl restart dsh-web-app.service dsh-web-gate.service dsh-wireguard-control.service 2>/dev/null || true
+  systemctl restart dsh-interop.service 2>/dev/null || true
+}
+
+# ── 2. 覆盖文件 ────────────────────────────────────────────────────────────
+say '复制新版本文件（保留 config/data/home/workspace）'
+if ! ( cd "$STAGE" && tar -cf - \
+    --exclude=./config --exclude=./data --exclude=./home --exclude=./workspace \
+    --exclude=./deploy --exclude=./logs --exclude=./.upgrade-backup \
+    --exclude='./*.log' . ) | tar -xf - -C "$APP_ROOT"; then
+  restore
+  die '复制新版本文件失败'
+fi
+chmod +x "$APP_ROOT"/*.sh 2>/dev/null || true
+chmod +x "$APP_ROOT/code/wireguard/"*.sh "$APP_ROOT/code/dsh-service/"*.sh 2>/dev/null || true
+
+# ── 3. 接线：gate.env 与 profile ───────────────────────────────────────────
+say '重写 gate.env 与 profile 接线'
+"$NODE" "$APP_ROOT/code/deploy/wire-profile.mjs" \
+  --root "$APP_ROOT" \
+  --profile "$PROFILE" \
+  --env "$ENV_FILE" \
+  --dsh-home "$DSH_HOME" \
+  --workdir "$WORKDIR" \
+  --port "$PORT" \
+  --token "$I_TOKEN" || { restore; die 'profile 接线失败'; }
+
+if [ "$NO_RESTART" = "1" ]; then
+  say '--no-restart：跳过服务重装与重启'
+  exit 0
+fi
+
+# ── 4. 重装 systemd 单元并重启 ─────────────────────────────────────────────
+say '重装 DSH app + gateway 服务（会重启 dsh-web-app / dsh-web-gate）'
+if ! bash "$APP_ROOT/code/dsh-service/install-split.sh"; then
+  restore
+  die 'install-split.sh 失败'
+fi
+
+say '重装 WireGuard 控制服务（51821）'
+if ! bash "$APP_ROOT/code/wireguard/install-control-service.sh" \
+    --root "$APP_ROOT/code/wireguard" \
+    --dsh-home "$DSH_HOME" \
+    --node "$NODE"; then
+  restore
+  die 'install-control-service.sh 失败'
+fi
+systemctl restart dsh-wireguard-control.service || warn 'control service 未能重启'
+
+say '重装 interop 服务'
+INTEROP_ARGS=(--root "$APP_ROOT" --dsh-home "$DSH_HOME" --port "$I_PORT" --bind "$I_BIND"
+  --provider "$I_PROVIDER" --model "$I_MODEL" --node "$NODE")
+if [ "$I_APPROVE" = "1" ]; then INTEROP_ARGS+=(--approve); fi
+if [ "$I_USE_GATE" = "1" ]; then INTEROP_ARGS+=(--use-gate-password); else INTEROP_ARGS+=(--token "$I_TOKEN"); fi
+if ! bash "$APP_ROOT/install-interop-service.sh" "${INTEROP_ARGS[@]}"; then
+  restore
+  die 'install-interop-service.sh 失败'
+fi
+
+# ── 5. 健康检查 ────────────────────────────────────────────────────────────
+say '健康检查'
+gate_ok=0
+for _ in $(seq 1 45); do
+  if curl -fsS "http://127.0.0.1:$PORT/__gate/health" >/dev/null 2>&1; then gate_ok=1; break; fi
+  sleep 2
+done
+if [ "$gate_ok" != "1" ]; then
+  journalctl -u dsh-web-gate.service -n 60 --no-pager 2>/dev/null || true
+  restore
+  die "网关健康检查失败（http://127.0.0.1:$PORT/__gate/health）"
+fi
+control_ok=0
+for _ in $(seq 1 30); do
+  if curl -fsS 'http://127.0.0.1:51821/api/dsh-wireguard/health' >/dev/null 2>&1; then control_ok=1; break; fi
+  sleep 2
+done
+if [ "$control_ok" != "1" ]; then
+  journalctl -u dsh-wireguard-control.service -n 40 --no-pager 2>/dev/null || true
+  restore
+  die '控制服务（51821）健康检查失败'
+fi
+say '网关与控制服务都健康'
+
+# ── 6. 只保留最近 3 份升级备份 ─────────────────────────────────────────────
+mapfile -t BACKUPS < <(ls -1dt "$APP_ROOT/.upgrade-backup"/* 2>/dev/null || true)
+for ((i=3; i<${#BACKUPS[@]}; i++)); do
+  rm -rf "${BACKUPS[$i]}" || true
+done
+
+say "升级完成：$APP_ROOT（备份 $BACKUP）"

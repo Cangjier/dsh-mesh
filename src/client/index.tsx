@@ -29,6 +29,7 @@ import {
   ArrowLeftOutlined,
   DeleteOutlined,
   CloudDownloadOutlined,
+  CloudUploadOutlined,
   EditOutlined,
   InfoCircleOutlined,
   LoadingOutlined,
@@ -118,7 +119,10 @@ function memberAppRoot(member: Member | null): string {
   if (member === null) return ''
   const system = memberSystem(member)
   const root = system?.appRoot?.trim() ?? ''
-  if (root !== '') return root
+  // A blue-green member reports the release it runs from (`<root>/current`,
+  // a symlink); the operator thinks in terms of the install root, and that is
+  // the directory an upgrade replaces.
+  if (root !== '') return root.replace(/[\\/]current$/u, '')
   const home = system?.home?.trim() ?? ''
   if (home === '') return ''
   const base = home.replace(/[\\/]+$/u, '')
@@ -250,6 +254,9 @@ function mergeDeployJobs(previous: DeployJob[], incoming: DeployJob[]): DeployJo
 function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] }) {
   // Older hosts returned the log as one string; never assume the array shape.
   const logLines = Array.isArray(lines) ? lines : String(lines ?? '').split(/\r?\n/u)
+  // An upgrade and a first install run the same phases; only the wording
+  // differs, and the operator needs to know which one is happening.
+  const action = job.mode === 'upgrade' ? '升级' : '部署'
   const progress = job.progress
   const total = progress?.totalBytes ?? 0
   const bytes = progress?.bytes ?? 0
@@ -271,10 +278,10 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
     <Space direction="vertical" size={14} style={{ width: '100%' }}>
       <Space size={8} wrap>
         {running
-          ? <Tag color="processing">部署中 {deployPercent(job)}%</Tag>
+          ? <Tag color="processing">{action}中 {deployPercent(job)}%</Tag>
           : job.status === 'succeeded'
-            ? <Tag color="success">部署成功</Tag>
-            : <Tag color="error">部署失败</Tag>}
+            ? <Tag color="success">{action}成功</Tag>
+            : <Tag color="error">{action}失败</Tag>}
         <Typography.Text type="secondary" className="dsh-pw-mono">{job.id}</Typography.Text>
         <Typography.Text type="secondary">
           {job.target.os === 'windows' ? 'Windows' : 'Linux'} · {job.target.host}
@@ -328,8 +335,8 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
           }
         })}
       />
-      {job.status === 'failed' ? <Alert type="error" showIcon message="部署失败" description={job.error ?? '未知错误'} /> : null}
-      {job.status === 'succeeded' ? <Alert type="success" showIcon message="部署完成" description={`健康检查通过，发布 ${job.release}`} /> : null}
+      {job.status === 'failed' ? <Alert type="error" showIcon message={`${action}失败`} description={job.error ?? '未知错误'} /> : null}
+      {job.status === 'succeeded' ? <Alert type="success" showIcon message={`${action}完成`} description={`健康检查通过，发布 ${job.release}`} /> : null}
       <div>
         <Typography.Text strong>日志</Typography.Text>
         <pre className="dsh-pw-deploy-log">{logLines.length > 0 ? logLines.slice(-200).join('\n') : '等待日志…'}</pre>
@@ -928,6 +935,9 @@ function Panel({ ctx }: { ctx: any }) {
   const [startingHint, setStartingHint] = useState('')
   const [startupRetry, setStartupRetry] = useState(0)
   const [deployTarget, setDeployTarget] = useState<Member | null>(null)
+  // The same dialog installs a fresh member and upgrades an existing one; the
+  // intent only decides the wording and which API is called.
+  const [deployIntent, setDeployIntent] = useState<'install' | 'upgrade'>('install')
   const [packages, setPackages] = useState<PackageInfo[]>([])
   const [packagesDir, setPackagesDir] = useState('')
   const [packagesLoading, setPackagesLoading] = useState(false)
@@ -1058,11 +1068,11 @@ function Panel({ ctx }: { ctx: any }) {
       const previous = deployStatusRef.current[job.id]
       deployStatusRef.current[job.id] = job.status
       if (previous === 'running' && job.status === 'succeeded') {
-        messageApi.success(`部署完成：${job.release}`)
+        messageApi.success(`${job.mode === 'upgrade' ? '升级' : '部署'}完成：${job.release}`)
         finished = true
       }
       if (previous === 'running' && job.status === 'failed') {
-        messageApi.error(`部署失败：${job.error ?? job.id}`)
+        messageApi.error(`${job.mode === 'upgrade' ? '升级' : '部署'}失败：${job.error ?? job.id}`)
         finished = true
       }
     }
@@ -1158,8 +1168,9 @@ function Panel({ ctx }: { ctx: any }) {
     }
   }, [])
 
-  const openDeploy = useCallback((member: Member) => {
+  const openDeploy = useCallback((member: Member, intent: 'install' | 'upgrade') => {
     setDeployTarget(member)
+    setDeployIntent(intent)
     setPackages([])
     setPackagesDir('')
     setPackagesError('')
@@ -1171,73 +1182,93 @@ function Panel({ ctx }: { ctx: any }) {
     if (deployTarget === null || selectedPackage === undefined) return
     setBusy(deployTarget.id)
     try {
-      const result = await api.deploy(deployTarget.id, selectedPackage)
+      const result = deployIntent === 'upgrade'
+        ? await api.upgrade(deployTarget.id, selectedPackage)
+        : await api.deploy(deployTarget.id, selectedPackage)
       setDeployTarget(null)
       setError(null)
       setDeployJobs(current => [result.job, ...current.filter(job => job.id !== result.job.id)])
       openProgress(result.job)
-      messageApi.info(`部署已开始：${result.job.id}`)
+      messageApi.info(`${deployIntent === 'upgrade' ? '升级' : '部署'}已开始：${result.job.id}`)
     } catch (failure) {
+      // The dialog closes only on success, so the reason has to be visible on
+      // top of it; the page banner sits behind the mask.
       setError(errorText(failure))
+      void messageApi.error(errorText(failure))
     } finally {
       setBusy('')
     }
-  }, [deployTarget, selectedPackage, messageApi, openProgress])
+  }, [deployIntent, deployTarget, selectedPackage, messageApi, openProgress])
 
   const columns: ColumnsType<Member> = useMemo(() => {
     const actionColumn: ColumnsType<Member>[number] = {
       title: '操作',
       key: 'action',
-      // Wide enough for the running-deploy pill (spinner + "正在部署 62%");
-      // a percentage forces the label onto a second line otherwise.
-      width: screens.lg === true ? 160 : 140,
+      // Wide enough for the running pill (spinner + "正在升级 62%") and for
+      // 切换 + 升级 next to each other; a narrower column wraps the label.
+      width: screens.lg === true ? 186 : 150,
       align: 'right',
       render: (_value, member) => {
-        const runningJob = deployJobs.find(job => job.status === 'running'
+        // `queued` is the second between the panel writing the job and its
+        // detached runner reporting in: it still owns the member.
+        const activeJob = deployJobs.find(job => (job.status === 'running' || job.status === 'queued')
           && (job.member === member.id || job.target?.host === member.ip))
-        if (runningJob !== undefined) {
+        if (activeJob !== undefined) {
           return (
             <Button
               size="small"
               icon={<LoadingOutlined />}
-              onClick={() => openProgress(runningJob)}
+              onClick={() => openProgress(activeJob)}
             >
-              正在部署 {deployPercent(runningJob)}%
+              {activeJob.mode === 'upgrade' ? '正在升级' : '正在部署'} {deployPercent(activeJob)}%
             </Button>
           )
         }
-        if (member.id === currentTarget) return <Tag color="blue">当前</Tag>
-        if (member.dsh && gateAvailable && member.port !== null) {
-          return (
-            <Button
-              size="small"
-              icon={<SwapOutlined />}
-              loading={busy === member.id}
-              onClick={() => { void switchMember(member) }}
-            >
-              切换
-            </Button>
-          )
-        }
-        if (!member.dsh) {
-          return (
-            <Button
-              size="small"
-              icon={<CloudDownloadOutlined />}
-              onClick={() => openDeploy(member)}
-            >
-              部署
-            </Button>
-          )
-        }
-        return <Typography.Text type="secondary">—</Typography.Text>
+        // Every installed member — including this machine — can be upgraded
+        // from here; an installed member also keeps its 切换 button.
+        const installed = member.dsh || member.kind === 'self'
+        const canSwitch = member.dsh && gateAvailable && member.port !== null && member.id !== currentTarget
+        return (
+          <span className="dsh-pw-member-actions">
+            {member.id === currentTarget ? <Tag color="blue">当前</Tag> : null}
+            {canSwitch ? (
+              <Button
+                size="small"
+                icon={<SwapOutlined />}
+                loading={busy === member.id}
+                onClick={() => { void switchMember(member) }}
+              >
+                切换
+              </Button>
+            ) : null}
+            {installed ? (
+              <Tooltip title="选择部署包，把这一台升级到该版本">
+                <Button
+                  size="small"
+                  icon={<CloudUploadOutlined />}
+                  onClick={() => openDeploy(member, 'upgrade')}
+                >
+                  升级
+                </Button>
+              </Tooltip>
+            ) : (
+              <Button
+                size="small"
+                icon={<CloudDownloadOutlined />}
+                onClick={() => openDeploy(member, 'install')}
+              >
+                部署
+              </Button>
+            )}
+          </span>
+        )
       },
     }
     const base: ColumnsType<Member> = [
       {
         title: '成员',
         key: 'member',
-        width: screens.lg === true ? '15%' : 200,
+        width: screens.lg === true ? '14%' : 170,
         render: (_value, member) => (
           <span className="dsh-pw-member">
             <Tooltip title={member.name}>
@@ -1306,11 +1337,14 @@ function Panel({ ctx }: { ctx: any }) {
       {
         title: '系统',
         key: 'system',
-        width: screens.lg === true ? '39%' : 260,
+        // Percentages plus the fixed action width must fit the card, or the
+        // browser steals the difference from the action column and the two
+        // buttons wrap onto a second line.
+        width: screens.lg === true ? '28%' : 240,
         responsive: ['lg'],
         render: (_value, member) => (
           <Tooltip title={<pre style={{ margin: 0, fontFamily: 'inherit', whiteSpace: 'pre-wrap' }}>{systemDetails(member)}</pre>}>
-            <Typography.Text style={{ fontSize: 12 }}>{systemText(member)}</Typography.Text>
+            <Typography.Text className="dsh-pw-member-system" style={{ fontSize: 12 }}>{systemText(member)}</Typography.Text>
           </Tooltip>
         ),
       },
@@ -1622,8 +1656,8 @@ function Panel({ ctx }: { ctx: any }) {
 
       <Modal
         open={deployTarget !== null}
-        title={`部署到 ${deployTarget?.name ?? ''}`}
-        okText="开始部署"
+        title={`${deployIntent === 'upgrade' ? '升级' : '部署到'} ${deployTarget?.name ?? ''}`}
+        okText={deployIntent === 'upgrade' ? '开始升级' : '开始部署'}
         cancelText="取消"
         confirmLoading={busy !== ''}
         okButtonProps={{ disabled: selectedPackage === undefined }}
@@ -1633,20 +1667,29 @@ function Panel({ ctx }: { ctx: any }) {
       >
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            部署包来自本机：<span className="dsh-pw-mono">{packagesDir || '~/.dsh/packages'}</span>
+            {deployIntent === 'upgrade' ? '升级包来自本机：' : '部署包来自本机：'}
+            <span className="dsh-pw-mono">{packagesDir || '~/.dsh/packages'}</span>
           </Typography.Text>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            部署到成员目录：<span className="dsh-pw-mono">{memberAppRoot(deployTarget) || '沿用成员现有安装目录（部署时自动探测）'}</span>
+            目标安装目录：<span className="dsh-pw-mono">{memberAppRoot(deployTarget) || '沿用成员现有安装目录（部署时自动探测）'}</span>
             {deployTarget?.system?.home !== undefined && deployTarget.system.home !== ''
               ? `（~：${deployTarget.system.home}）`
               : ''}
           </Typography.Text>
+          <Alert
+            type="info"
+            showIcon
+            message={deployTarget?.kind === 'self' ? '本机升级会重启当前面板所在的服务' : '升级在独立进程里执行'}
+            description={deployTarget?.kind === 'self'
+              ? '升级进程用 systemd 临时单元单独运行，dsh-web / gate 重启不会打断它；本页面会断开约 30–60 秒，之后自动恢复并显示升级结果。'
+              : '升级进程与面板进程分离：面板或网关重启都不会中断升级；成员服务重启期间面板会短暂断开。'}
+          />
           {deployTarget !== null ? (() => {
             const job = latestJobOf(deployTarget)
             if (job === undefined) return null
             return (
               <Space size={8} wrap>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>最近一次部署：</Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>最近一次部署/升级：</Typography.Text>
                 <Tag color={job.status === 'succeeded' ? 'success' : job.status === 'failed' ? 'error' : 'processing'}>
                   {job.status === 'succeeded' ? '成功' : job.status === 'failed' ? '失败' : '进行中'}
                 </Tag>
@@ -1696,7 +1739,7 @@ function Panel({ ctx }: { ctx: any }) {
 
       <Modal
         open={progressJob !== null}
-        title={`部署进度 · ${
+        title={`${progressJob?.mode === 'upgrade' ? '升级' : '部署'}进度 · ${
           progressJob === null
             ? ''
             : memberRows.find(row => row.id === progressJob.member || row.ip === progressJob.target.host)?.name

@@ -23,11 +23,11 @@ function apiCaller(service) {
     },
   }
   registerApi(ctx, service)
-  return async (method, url) => {
-    const request = Readable.from([])
+  return async (method, url, body) => {
+    const request = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
     request.method = method
     request.url = url
-    request.headers = {}
+    request.headers = { 'x-dsh-mesh': '1' }
     let settled
     const response = {
       statusCode: 0,
@@ -72,4 +72,37 @@ test('deploy job routes expose progress and the log tail', async () => {
   const missing = await call('GET', '/api/dsh-mesh/deploy/deploy-nope')
   assert.equal(missing.status, 404)
   assert.equal(missing.body.ok, false)
+})
+
+test('the panel can upgrade a member with a chosen package', async () => {
+  const calls = []
+  const call = apiCaller({
+    async upgradeMember(request) {
+      calls.push(request)
+      return { ok: true, job: { id: 'deploy-up', status: 'queued' }, member: { id: '10.66.66.2' }, layout: 'bluegreen' }
+    },
+  })
+  const response = await call('POST', '/api/dsh-mesh/upgrade', { member: '10.66.66.2', package: 'dsh-mesh-0.2.3-linux-x64.tar.gz' })
+  assert.equal(response.status, 202)
+  assert.equal(response.body.job.id, 'deploy-up')
+  assert.deepEqual(calls, [{ member: '10.66.66.2', package: 'dsh-mesh-0.2.3-linux-x64.tar.gz' }])
+})
+
+test('build logs can be cleared one job or in bulk', async () => {
+  const cleared = []
+  const call = apiCaller({
+    async clearBuildLog(id) {
+      cleared.push(id)
+      return { ok: true, id }
+    },
+    async clearFinishedBuildLogs() {
+      return { ok: true, cleared: ['job-a', 'job-b'] }
+    },
+  })
+  const one = await call('POST', '/api/dsh-mesh/build/job-a/log/clear', {})
+  assert.equal(one.status, 200)
+  assert.deepEqual(cleared, ['job-a'])
+  const all = await call('POST', '/api/dsh-mesh/build/logs/clear', {})
+  assert.equal(all.status, 200)
+  assert.deepEqual(all.body.cleared, ['job-a', 'job-b'])
 })

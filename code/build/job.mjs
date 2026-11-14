@@ -121,7 +121,11 @@ export async function appendLog(dir, line) {
 export async function readLogTail(dir, lines = 80) {
   try {
     const text = await readFile(path.join(dir, 'build.log'), 'utf8')
-    return text.trimEnd().split(/\r?\n/u).slice(-lines)
+    const trimmed = text.trimEnd()
+    // A cleared or not-yet-written log is empty, not one blank line: the panel
+    // decides between "等待日志" and "日志已清空" from the count.
+    if (trimmed === '') return []
+    return trimmed.split(/\r?\n/u).slice(-lines)
   } catch {
     return []
   }

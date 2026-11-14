@@ -112,6 +112,22 @@
   max-width: 100%;
 }
 
+.dsh-pw-member-system {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-pw-member-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  align-items: center;
+}
+
 .dsh-pw-member-name {
   display: inline-block;
   overflow: hidden;

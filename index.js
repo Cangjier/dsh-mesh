@@ -4,7 +4,8 @@ import path13 from "node:path";
 
 // src/lib/service.mjs
 import { mkdir as mkdir5, readFile as readFile8, readdir as readdir5, rm as rm6, stat as stat7, writeFile as writeFile6 } from "node:fs/promises";
-import { readFileSync as readFileSync3, existsSync as existsSync8 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync3, realpathSync } from "node:fs";
+import { spawn as spawn4 } from "node:child_process";
 import { createHash as createHash6 } from "node:crypto";
 import os5 from "node:os";
 import path9 from "node:path";
@@ -1277,7 +1278,9 @@ async function appendLog(dir, line) {
 async function readLogTail(dir, lines = 80) {
   try {
     const text = await readFile4(path4.join(dir, "build.log"), "utf8");
-    return text.trimEnd().split(/\r?\n/u).slice(-lines);
+    const trimmed = text.trimEnd();
+    if (trimmed === "") return [];
+    return trimmed.split(/\r?\n/u).slice(-lines);
   } catch {
     return [];
   }
@@ -1444,9 +1447,9 @@ import { createHash as createHash2 } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { spawn as spawn2 } from "node:child_process";
 import { existsSync as existsSync4, readFileSync } from "node:fs";
-import { copyFile, link, mkdir as mkdir3, mkdtemp, readFile as readFile5, readdir as readdir3, rm as rm3, stat as stat3, writeFile as writeFile3 } from "node:fs/promises";
+import { copyFile, link, mkdir as mkdir3, mkdtemp, readFile as readFile5, readdir as readdir3, rename as rename3, rm as rm3, stat as stat3, writeFile as writeFile3 } from "node:fs/promises";
 import { isIP as isIP2 } from "node:net";
-import { homedir, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import path5 from "node:path";
 var EXTRACT_CHECKPOINT = 1e3;
 var DEFAULT_APP_ROOT = {
@@ -1657,6 +1660,54 @@ function initialDeploySteps() {
     { key: "activate", label: "\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null }
   ];
 }
+var RUNNER_START_GRACE_MS = 45e3;
+var RUNNER_STALE_MS = 12e4;
+function newJobId() {
+  return `deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+function jobPaths(dir) {
+  return {
+    dir,
+    state: path5.join(dir, "job.json"),
+    log: path5.join(dir, "deploy.log"),
+    runner: path5.join(dir, "runner.json"),
+    request: path5.join(dir, "request.json")
+  };
+}
+async function writeDeployState(dir, state) {
+  const file = path5.join(dir, "job.json");
+  const tmp = `${file}.${process.pid}.tmp`;
+  await mkdir3(dir, { recursive: true });
+  await writeFile3(tmp, `${JSON.stringify(state, null, 2)}
+`, "utf8");
+  await rename3(tmp, file);
+}
+async function appendDeployLog(dir, line) {
+  await mkdir3(dir, { recursive: true });
+  await writeFile3(path5.join(dir, "deploy.log"), `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
+`, { encoding: "utf8", flag: "a" });
+}
+async function runnerStatus(dir) {
+  let runner = null;
+  try {
+    runner = JSON.parse(await readFile5(path5.join(dir, "runner.json"), "utf8"));
+  } catch {
+    runner = null;
+  }
+  if (runner === null || typeof runner !== "object") return { alive: false, runner: null };
+  const pid = Number(runner.pid);
+  if (runner.host === hostname() && Number.isInteger(pid) && pid > 0) {
+    try {
+      process.kill(pid, 0);
+      return { alive: true, runner };
+    } catch (error) {
+      return { alive: error?.code === "EPERM", runner };
+    }
+  }
+  const beat = Date.parse(String(runner.heartbeatAt ?? runner.startedAt ?? ""));
+  if (Number.isFinite(beat) && Date.now() - beat < RUNNER_STALE_MS) return { alive: true, runner };
+  return { alive: false, runner };
+}
 function hashFile(file) {
   return new Promise((resolve, reject) => {
     const hash = createHash2("sha256");
@@ -1672,6 +1723,11 @@ function normalizeOs(value) {
     return text.startsWith("win") ? "windows" : "linux";
   }
   throw new Error('os must be "linux" or "windows"');
+}
+function normalizeInstallRoot(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (text === "") return "";
+  return text.replace(/[\\/]+current$/iu, "").replace(/[\\/]+$/u, "");
 }
 function inferRole(name) {
   const text = String(name).toLowerCase();
@@ -1746,7 +1802,7 @@ async function buildDeployPlan(options) {
   if (!/^[A-Za-z0-9._-]{3,80}$/.test(release)) {
     throw new Error("release must be 3-80 chars of letters, digits, dot, underscore or dash");
   }
-  const appRoot = typeof options.appRoot === "string" && options.appRoot.trim() !== "" ? options.appRoot.trim() : DEFAULT_APP_ROOT[os6];
+  const appRoot = normalizeInstallRoot(options.appRoot) || DEFAULT_APP_ROOT[os6];
   const services = normalizeServices(options.services, os6);
   const scope = options.scope === "dsh" ? "dsh" : "all";
   const gatePort = String(options.gatePort ?? "80");
@@ -1766,6 +1822,9 @@ async function buildDeployPlan(options) {
   const serviceUser = typeof options.serviceUser === "string" && /^[A-Za-z_][A-Za-z0-9_-]{0,31}$/u.test(options.serviceUser.trim()) ? options.serviceUser.trim() : void 0;
   return {
     host: options.host.trim(),
+    // The local host runs the same phases without SSH: the gateway upgrading
+    // itself must not depend on its own sshd being reachable.
+    local: options.local === true,
     // Copied from the deployer so every member shares one gateway password;
     // empty means "generate on the target".
     gatePassword: typeof options.gatePassword === "string" ? options.gatePassword : "",
@@ -1838,7 +1897,7 @@ async function probeTarget(options) {
       `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
     ]);
     const [root2 = ""] = stdout2.split(/\r?\n/u);
-    const appRoot = root2.trim() !== "" ? root2.trim() : `C:\\Users\\${user ?? "Public"}\\.dsh\\dsh-mesh`;
+    const appRoot = normalizeInstallRoot(root2) !== "" ? normalizeInstallRoot(root2) : `C:\\Users\\${user ?? "Public"}\\.dsh\\dsh-mesh`;
     return { appRoot, serviceUser: void 0 };
   }
   const script = `#!/usr/bin/env bash
@@ -2629,6 +2688,93 @@ var SshRunner = class {
     }
   }
 };
+function runLocalProcess(command, args, input, onLine) {
+  return new Promise((resolve, reject) => {
+    const child = spawn2(command, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const buffers = { out: "", err: "" };
+    const emit = (key, chunk) => {
+      const text = buffers[key] + String(chunk);
+      const lines = text.split(/\r?\n/u);
+      buffers[key] = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed !== "") onLine?.(trimmed);
+      }
+    };
+    const flush = () => {
+      for (const key of ["out", "err"]) {
+        const trimmed = buffers[key].trim();
+        if (trimmed !== "") onLine?.(trimmed);
+        buffers[key] = "";
+      }
+    };
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+      emit("out", chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+      emit("err", chunk);
+    });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      flush();
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(`${command} exited with ${String(code)}: ${stderr.trim() || stdout.trim()}`));
+    });
+    child.stdin.end(input ?? "");
+  });
+}
+var LocalRunner = class {
+  /**
+   * @param {object} plan deployment plan.
+   * @param {{log?: (line: string) => void}} [options] options.
+   */
+  constructor(plan, options = {}) {
+    this.plan = plan;
+    this.log = options.log ?? (() => {
+    });
+  }
+  /**
+   * Copy one file into place, reporting the copy as one finished upload.
+   * @param {string} local source path.
+   * @param {string} remote destination path.
+   * @param {(progress: object) => void} [onProgress] progress callback.
+   * @returns {Promise<void>} completion.
+   */
+  async upload(local, remote, onProgress) {
+    const info = await stat3(local);
+    await mkdir3(path5.dirname(remote), { recursive: true });
+    await copyFile(local, remote);
+    onProgress?.({ bytes: info.size, totalBytes: info.size, percent: 100, speed: 0 });
+  }
+  /**
+   * Size of a local file, or null.
+   * @param {string} remote path.
+   * @returns {Promise<number|null>} bytes.
+   */
+  async remoteSize(remote) {
+    try {
+      const info = await stat3(remote);
+      return info.isFile() ? info.size : null;
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * Run a bash script in place.
+   * @param {string} script script text.
+   * @param {'linux'|'windows'} os target OS.
+   * @param {(line: string) => void} [onLine] line callback.
+   * @returns {Promise<void>} completion.
+   */
+  async script(script, os6, onLine) {
+    if (os6 !== "linux") throw new Error("\u672C\u5730\u90E8\u7F72\u53EA\u652F\u6301 Linux\uFF1A\u672C\u673A\u6CA1\u6709\u53EF\u7528\u7684 Windows \u8FD0\u884C\u65F6");
+    await runLocalProcess("bash", ["-s"], script, onLine);
+  }
+};
 var DeployManager = class {
   /**
    * @param {{repositoryRoot: string, dataDir: string, log?: (line:string)=>void, runnerFactory?: Function}} options options.
@@ -2638,7 +2784,7 @@ var DeployManager = class {
     this.dataDir = options.dataDir;
     this.logLine = options.log ?? (() => {
     });
-    this.runnerFactory = options.runnerFactory ?? ((plan) => new SshRunner(plan, { log: (line) => this.logLine(line) }));
+    this.runnerFactory = options.runnerFactory ?? ((plan) => plan.local === true ? new LocalRunner(plan, { log: (line) => this.logLine(line) }) : new SshRunner(plan, { log: (line) => this.logLine(line) }));
     this.running = /* @__PURE__ */ new Map();
     this.states = /* @__PURE__ */ new Map();
     this.saves = /* @__PURE__ */ new Map();
@@ -2689,22 +2835,30 @@ var DeployManager = class {
   }
   /**
    * Start a deployment or rollback job.
+   *
+   * `request.plan` skips the planning step when the caller already built it
+   * (the panel does: it needs the release name to write the job that the
+   * detached runner then adopts). `request.id` adopts an existing job id the
+   * same way, so a spawned runner continues the job the panel created.
    * @param {object} request deploy options.
    * @returns {Promise<object>} job state.
    */
   async start(request) {
-    const plan = await buildDeployPlan({
+    const plan = request.plan !== null && typeof request.plan === "object" ? request.plan : await buildDeployPlan({
       ...request,
       gatePassword: typeof request.gatePassword === "string" ? request.gatePassword : process.env.DSH_GATE_PASSWORD,
       repositoryRoot: this.repositoryRoot
     });
-    const id = `deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const id = typeof request.id === "string" && /^deploy-[A-Za-z0-9-]+$/u.test(request.id) ? request.id : newJobId();
     const dir = path5.join(this.dataDir, id);
     await mkdir3(dir, { recursive: true });
     const stateFile = path5.join(dir, "job.json");
     const logFile = path5.join(dir, "deploy.log");
     const state = {
       id,
+      // `install` and `upgrade` run the same phases; the panel only changes the
+      // wording, and a job started by the panel keeps the label it was queued with.
+      mode: request.mode === "upgrade" ? "upgrade" : "install",
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
       updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
       member: typeof request.member === "string" && request.member !== "" ? request.member : null,
@@ -2723,8 +2877,7 @@ var DeployManager = class {
       if (!oldest.done) this.states.delete(oldest.value);
     }
     this.states.set(id, state);
-    await writeFile3(stateFile, `${JSON.stringify(state, null, 2)}
-`, "utf8");
+    await writeDeployState(dir, state);
     const log = async (line) => {
       const stamp = (/* @__PURE__ */ new Date()).toISOString();
       await writeFile3(logFile, `[${stamp}] ${line}
@@ -2911,22 +3064,40 @@ var DeployManager = class {
   async #save(stateFile, state) {
     const text = `${JSON.stringify(state, null, 2)}
 `;
+    const tmp = `${stateFile}.${process.pid}.tmp`;
     const previous = this.writes.get(stateFile) ?? Promise.resolve();
     const next = previous.catch(() => {
-    }).then(() => writeFile3(stateFile, text, "utf8"));
+    }).then(async () => {
+      await writeFile3(tmp, text, "utf8");
+      await rename3(tmp, stateFile);
+    });
     this.writes.set(stateFile, next.catch(() => {
     }));
     await next;
   }
   /**
    * Finalize a job whose runner is gone: the process restarted, or a stale
-   * snapshot survived a crash. A job is only live while its promise is tracked.
+   * snapshot survived a crash.
+   *
+   * A job is live while its promise is tracked *in this process*, and also
+   * while the runner that owns it is still alive: jobs started by the panel run
+   * in a detached process on purpose, so this process (the panel) usually does
+   * not hold their promise. Only when both are gone is the job reported as
+   * interrupted instead of a failure.
    * @param {object} state job state read from disk.
    * @returns {Promise<object>} settled state.
    */
   async #settle(state) {
     if (state === null || typeof state !== "object") return state;
-    if (state.status !== "running" || this.running.has(state.id)) return state;
+    if (state.status !== "running" && state.status !== "queued") return state;
+    if (this.running.has(state.id)) return state;
+    const dir = path5.join(this.dataDir, state.id);
+    const runner = await runnerStatus(dir);
+    if (runner.alive) return state;
+    if (state.status === "queued") {
+      const created = Date.parse(String(state.createdAt ?? ""));
+      if (Number.isFinite(created) && Date.now() - created < RUNNER_START_GRACE_MS) return state;
+    }
     const log = await this.logs(state.id, 400).catch(() => "");
     const tail = log.split("\n").filter((line) => line.trim() !== "").slice(-5).join("\n");
     if (/deployment succeeded/u.test(tail)) {
@@ -2946,7 +3117,7 @@ var DeployManager = class {
       state.error = state.error ?? "deployment was interrupted before it finished";
     }
     state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    await this.#save(path5.join(this.dataDir, state.id, "job.json"), state).catch(() => {
+    await this.#save(path5.join(dir, "job.json"), state).catch(() => {
     });
     return state;
   }
@@ -3231,7 +3402,7 @@ ${errors.trim()}`));
 
 // src/lib/remote-build.mjs
 import { createHash as createHash3 } from "node:crypto";
-import { open as open2, rename as rename3, rm as rm4, stat as stat5, writeFile as writeFile4 } from "node:fs/promises";
+import { open as open2, rename as rename4, rm as rm4, stat as stat5, writeFile as writeFile4 } from "node:fs/promises";
 import path7 from "node:path";
 var DEFAULT_MESH_REPO = "https://github.com/Cangjier/dsh-mesh.git";
 var REMOTE_SRC = "$HOME/.dsh/mesh/build-src";
@@ -3489,7 +3660,7 @@ var RemoteBuilder = class {
     args.push(`${runner.target()}:${windows ? remote.replace(/\\/gu, "/") : remote}`, temporary);
     await runner.runProcess("scp", args);
     await rm4(local, { force: true });
-    await rename3(temporary, local);
+    await rename4(temporary, local);
     return local;
   }
   /**
@@ -3779,7 +3950,7 @@ function packageVersion() {
 }
 var MeshService = class {
   /**
-   * @param {{dataDir: string, config?: object, log?: (line: string) => void}} options service input.
+   * @param {{dataDir: string, config?: object, log?: (line: string) => void, spawnRunner?: Function}} options service input.
    */
   constructor(options) {
     this.dataDir = options.dataDir;
@@ -3801,6 +3972,7 @@ var MeshService = class {
       dataDir: this.deployRoot,
       log: (line) => this.logLine(`deploy: ${line}`)
     });
+    this.spawnRunner = options.spawnRunner ?? ((dir, id) => this.#spawnRunner(dir, id));
     this.running = /* @__PURE__ */ new Map();
     this.egress = new EgressProxy({ log: (line) => this.logLine(line) });
     this.remoteBuilder = new RemoteBuilder({ packagesDir: this.packagesDir, log: (line) => this.logLine(line) });
@@ -4490,15 +4662,17 @@ var MeshService = class {
     throw new Error(`package not found: ${raw}`);
   }
   /**
-   * Resolve a target and start a deployment job.
+   * Resolve a target and start a deployment or upgrade job.
    *
-   * This is the single entry point used by both the panel API and the model
-   * tool. The caller decides whether to wait by calling `deployPackage()`;
-   * the panel keeps the historical non-blocking `deployMember()` wrapper.
-   * @param {{host?: string, member?: string, package?: string}} request target and package.
-   * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string}>} started job.
+   * The job itself runs in a detached process (`code/deploy/runner.mjs`) so a
+   * member — including this gateway — can restart dsh-web and the gateway while
+   * its own upgrade keeps going. This method only writes the job directory and
+   * returns; `waitDeploy()` is what the model tool uses to block.
+   * @param {{host?: string, member?: string, package?: string, mode?: 'install'|'upgrade'}} request target and package.
+   * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string, layout: string}>} queued job.
    */
   async startDeploy(request) {
+    const mode = request.mode === "upgrade" ? "upgrade" : "install";
     const host = typeof request.host === "string" ? request.host.trim() : "";
     const memberId = typeof request.member === "string" ? request.member.trim() : "";
     const packagePath = await this.resolvePackage(request.package);
@@ -4506,35 +4680,61 @@ var MeshService = class {
     const all = [snapshot.local, ...snapshot.members].filter(Boolean);
     const member = memberId !== "" ? all.find((candidate) => candidate.id === memberId) : all.find((candidate) => candidate.id === host || candidate.name === host || candidate.ip === host);
     if (memberId !== "" && member === void 0) throw new Error(`member not found: ${memberId}`);
+    const busy = await this.#activeDeployFor(member?.id ?? null, member?.ip ?? host);
+    if (busy !== null) {
+      throw Object.assign(
+        new Error(`\u8BE5\u76EE\u6807\u5DF2\u6709\u6B63\u5728\u8FDB\u884C\u7684${busy.mode === "upgrade" ? "\u5347\u7EA7" : "\u90E8\u7F72"}\u4EFB\u52A1\uFF1A${busy.id}`),
+        { status: 409 }
+      );
+    }
     if (member !== void 0) {
       const os7 = /win(?:dows)?/iu.test(path9.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+      const identity = { id: member.id, name: member.name, ip: member.ip };
+      if (member.kind === "self" || member.id === "local") {
+        return this.#startLocalJob({ member, packagePath, os: os7, mode, identity });
+      }
       const deployRequest = await this.#memberDeployRequest(member, packagePath, os7);
-      const started2 = await this.deploy.start({ ...deployRequest, member: member.id });
-      return {
-        ok: true,
-        job: started2.job,
-        member: { id: member.id, name: member.name, ip: member.ip },
-        packagePath
-      };
+      const job2 = await this.#startEngineJob({ request: { ...deployRequest, member: member.id }, member: member.id, mode });
+      return { ok: true, job: job2, member: identity, packagePath, layout: "bluegreen" };
     }
     if (host === "") throw new Error("host is required");
     const os6 = /win(?:dows)?/iu.test(path9.basename(packagePath)) ? "windows" : "linux";
     const appRoot = os6 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
-    const started = await this.deploy.start({ host, package: packagePath, os: os6, appRoot });
-    return { ok: true, job: started.job, member: null, packagePath };
+    const job = await this.#startEngineJob({ request: { host, package: packagePath, os: os6, appRoot }, member: null, mode });
+    return { ok: true, job, member: null, packagePath, layout: "bluegreen" };
   }
   /**
    * Deploy one local package to a discovered member, without waiting.
    * Kept for the panel API, which returns a job id immediately.
-   * @param {{member?: string, package?: string}} request member id/ip and package filename.
+   * @param {{member?: string, package?: string, mode?: 'install'|'upgrade'}} request member id/ip and package filename.
    * @returns {Promise<object>} started deploy job.
    */
   async deployMember(request) {
-    const result = await this.startDeploy({ member: request.member, package: request.package });
+    const result = await this.startDeploy({ member: request.member, package: request.package, mode: request.mode });
     return {
       ok: true,
       job: result.job,
       member: result.member,
+      layout: result.layout,
+      packagesDir: this.packagesDir
+    };
+  }
+  /**
+   * Upgrade one member (or this machine) from a chosen deployment package.
+   *
+   * Same flow as a first deploy; the difference is that an installed member is
+   * upgraded by the package instead of being installed from scratch, and the
+   * panel labels the job as an upgrade.
+   * @param {{member?: string, package?: string}} request member id/ip and package filename.
+   * @returns {Promise<object>} queued job.
+   */
+  async upgradeMember(request) {
+    const result = await this.startDeploy({ member: request.member, package: request.package, mode: "upgrade" });
+    return {
+      ok: true,
+      job: result.job,
+      member: result.member,
+      layout: result.layout,
       packagesDir: this.packagesDir
     };
   }
@@ -4544,18 +4744,256 @@ var MeshService = class {
    * The host may be a discovered member id/name/IP, in which case the member's
    * OS, install root and WireGuard SSH metadata are used; otherwise the host is
    * treated as a plain SSH target and the package platform decides the OS.
-   * @param {{host?: string, package?: string}} request target host and package.
+   * @param {{host?: string, package?: string, mode?: 'install'|'upgrade'}} request target host and package.
    * @returns {Promise<{job: object|null, logFile: string, log: string, member?: object}>} final result.
    */
   async deployPackage(request) {
-    const started = await this.startDeploy({ host: request.host, package: request.package });
-    const job = await this.deploy.wait(started.job.id);
+    const started = await this.startDeploy({ host: request.host, package: request.package, mode: request.mode });
+    const job = await this.waitDeploy(started.job.id);
     return {
       job,
       member: started.member,
       logFile: path9.join(this.deployRoot, started.job.id, "deploy.log"),
       log: await this.deployLogs(started.job.id, 80)
     };
+  }
+  /**
+   * The job currently using one target, if any.
+   * @param {string|null} memberId member id.
+   * @param {string} host VPN address or SSH host.
+   * @returns {Promise<object|null>} active job.
+   */
+  async #activeDeployFor(memberId, host) {
+    for (const job of await this.deploy.list(20)) {
+      if (job.status !== "running" && job.status !== "queued") continue;
+      if (memberId !== null && memberId !== "" && job.member === memberId) return job;
+      if (typeof host === "string" && host !== "" && job.target?.host === host) return job;
+    }
+    return null;
+  }
+  /**
+   * Wait for one detached deploy job to settle.
+   * @param {string} id job id.
+   * @param {{timeoutMs?: number}} [options] budget; 30 minutes by default.
+   * @returns {Promise<object|null>} final job state.
+   */
+  async waitDeploy(id, options = {}) {
+    const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 30 * 60 * 1e3;
+    const deadline = Date.now() + timeoutMs;
+    for (; ; ) {
+      const job = await this.deployStatus(id);
+      if (job !== null && job.status !== "running" && job.status !== "queued") return job;
+      if (Date.now() >= deadline) return job;
+      await new Promise((resolve) => setTimeout(resolve, 1e3));
+    }
+  }
+  /**
+   * Start one job for a blue-green target (blue-green members and plain hosts).
+   *
+   * The plan is built here, once: the queued job needs its release name and
+   * size, and the runner must not hash a 300 MB package a second time.
+   * @param {{request: object, member: string|null, mode: 'install'|'upgrade'}} input job input.
+   * @returns {Promise<object>} queued job state.
+   */
+  async #startEngineJob(input) {
+    const plan = await buildDeployPlan({
+      ...input.request,
+      gatePassword: typeof input.request.gatePassword === "string" ? input.request.gatePassword : process.env.DSH_GATE_PASSWORD,
+      repositoryRoot: this.repositoryRoot
+    });
+    return this.#queueJob({
+      mode: input.mode,
+      member: input.member,
+      plan,
+      request: { kind: "engine", plan, options: { ...input.request, plan, mode: input.mode } }
+    });
+  }
+  /**
+   * Start the local upgrade, or a local blue-green deploy, whichever the
+   * install layout supports.
+   *
+   * A flat install (gateway) has no release symlink to switch: the package's
+   * own `upgrade-local.sh` copies the new tree over it. A blue-green install
+   * upgrades exactly like a member, using a local runner instead of SSH.
+   * @param {{member: object, packagePath: string, os: string, mode: 'install'|'upgrade', identity: object}} input target.
+   * @returns {Promise<object>} queued job and its layout.
+   */
+  async #startLocalJob(input) {
+    const install = this.#localAppRoot();
+    if (install === null) {
+      throw new Error("\u672C\u673A\u6CA1\u6709\u53EF\u8BC6\u522B\u7684 dsh-mesh \u5B89\u88C5\u76EE\u5F55\uFF08\u627E\u4E0D\u5230 config/gate.env\uFF09\uFF0C\u65E0\u6CD5\u5347\u7EA7\u672C\u673A");
+    }
+    if (input.os === "windows" && install.layout === "flat") {
+      throw new Error("\u672C\u673A\u662F Linux \u7F51\u5173\uFF0C\u4E0D\u80FD\u5B89\u88C5 Windows \u90E8\u7F72\u5305");
+    }
+    if (install.layout === "flat") {
+      const job2 = await this.#queueJob({
+        mode: input.mode,
+        member: "local",
+        plan: null,
+        request: { kind: "inplace", inplace: { package: input.packagePath, appRoot: install.appRoot } },
+        target: { host: "127.0.0.1", user: os5.userInfo().username, port: null, os: "linux", appRoot: install.appRoot },
+        services: ["dsh-web-app.service", "dsh-web-gate.service", "dsh-wireguard-control.service", "dsh-interop.service"],
+        packagePath: input.packagePath,
+        release: path9.basename(input.packagePath)
+      });
+      return { ok: true, job: job2, member: input.identity, packagePath: input.packagePath, layout: "flat" };
+    }
+    const job = await this.#startEngineJob({
+      request: { host: "127.0.0.1", local: true, package: input.packagePath, os: input.os, appRoot: install.appRoot, member: input.member.id },
+      member: input.member.id,
+      mode: input.mode
+    });
+    return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: "bluegreen" };
+  }
+  /**
+   * Write one queued job directory and spawn its detached runner.
+   * @param {{mode: string, member: string|null, plan: object|null, request: object, target?: object, services?: string[], packagePath?: string, release?: string}} job job input.
+   * @returns {Promise<object>} queued job state.
+   */
+  async #queueJob(job) {
+    const id = newJobId();
+    const dir = path9.join(this.deployRoot, id);
+    await mkdir5(dir, { recursive: true });
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const bytes = job.plan?.package?.bytes ?? (await stat7(job.packagePath).catch(() => null))?.size ?? 0;
+    const state = {
+      id,
+      mode: job.mode,
+      createdAt: now,
+      updatedAt: now,
+      member: job.member,
+      target: job.plan === null ? job.target : { host: job.plan.host, user: job.plan.user ?? null, port: job.plan.port, os: job.plan.os, appRoot: job.plan.appRoot },
+      release: job.plan?.release ?? job.release ?? "local",
+      package: job.plan?.package?.path ?? job.packagePath ?? null,
+      services: job.plan === null ? job.services ?? [] : job.plan.services.map((service) => service.name),
+      status: "queued",
+      phase: "starting",
+      error: null,
+      steps: initialDeploySteps(),
+      progress: { label: "\u542F\u52A8\u72EC\u7ACB\u5347\u7EA7\u8FDB\u7A0B", percent: 0, bytes: 0, totalBytes: bytes, speed: 0, indeterminate: false }
+    };
+    await writeDeployState(dir, state);
+    const requestFile = jobPaths(dir).request;
+    await writeFile6(requestFile, `${JSON.stringify({ ...job.request, id, member: job.member }, null, 2)}
+`, { encoding: "utf8", mode: 384 });
+    const spawned = await this.spawnRunner(dir, id);
+    await appendDeployLog(dir, `job queued; runner ${spawned.mode}${spawned.unit === null ? "" : ` (${spawned.unit})`}`);
+    this.logLine(`mesh ${job.mode} job ${id} queued for ${state.target.host} via ${spawned.mode}`);
+    return state;
+  }
+  /**
+   * Start the detached runner for one job.
+   *
+   * `systemd-run` is preferred: a service restart kills its whole cgroup, so a
+   * plain detached child of dsh-web would not survive the very restart it is
+   * deploying. The transient unit puts the runner in its own cgroup; when
+   * systemd is unavailable the plain detached spawn still survives the parent.
+   * @param {string} dir job directory.
+   * @param {string} id job id.
+   * @returns {Promise<{mode: string, unit: string|null}>} how it was started.
+   */
+  async #spawnRunner(dir, id) {
+    const script = path9.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
+    if (!existsSync8(script)) throw new Error(`deploy runner is missing: ${script}`);
+    const node = process.execPath;
+    const unit = `dsh-mesh-job-${id.replace(/^deploy-/u, "")}`;
+    const systemdRun = ["/usr/bin/systemd-run", "/bin/systemd-run"].find((file) => existsSync8(file));
+    if (systemdRun !== void 0 && process.platform === "linux" && process.getuid?.() === 0) {
+      const result = await new Promise((resolve) => {
+        const child2 = spawn4(systemdRun, [
+          "--unit",
+          unit,
+          "--collect",
+          "--description",
+          `dsh-mesh ${id}`,
+          "--setenv",
+          `DSH_MESH_JOB_UNIT=${unit}`,
+          node,
+          script,
+          "--job",
+          dir
+        ], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+        let stderr = "";
+        child2.stderr.on("data", (chunk) => {
+          stderr += String(chunk);
+        });
+        child2.once("error", (error) => resolve({ ok: false, detail: error.message }));
+        child2.once("exit", (code) => resolve({ ok: code === 0, detail: stderr.trim() }));
+      });
+      if (result.ok) return { mode: "systemd-run", unit };
+      await appendDeployLog(dir, `systemd-run failed, falling back to a detached process: ${result.detail}`);
+    }
+    const child = spawn4(node, [script, "--job", dir], {
+      cwd: this.repositoryRoot,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env: { ...process.env, DSH_MESH_JOB_UNIT: "" }
+    });
+    child.unref();
+    return { mode: "detached", unit: null };
+  }
+  /**
+   * Locate the install that owns this plugin.
+   * @returns {{appRoot: string, layout: 'flat'|'bluegreen'}|null} install, or null in a source checkout.
+   */
+  #localAppRoot() {
+    let candidate = path9.resolve(this.repositoryRoot, "..");
+    for (let depth = 0; depth < 5; depth += 1) {
+      const parent = path9.dirname(candidate);
+      const current = path9.join(parent, "current");
+      if (existsSync8(current)) {
+        try {
+          if (realpathSync(candidate) === realpathSync(current)) return { appRoot: parent, layout: "bluegreen" };
+        } catch {
+        }
+      }
+      if (existsSync8(path9.join(candidate, "current")) && existsSync8(path9.join(candidate, "releases"))) {
+        return { appRoot: candidate, layout: "bluegreen" };
+      }
+      if (existsSync8(path9.join(candidate, "config", "gate.env")) && existsSync8(path9.join(candidate, "plugins", "dsh-mesh"))) {
+        return { appRoot: candidate, layout: "flat" };
+      }
+      if (parent === candidate) break;
+      candidate = parent;
+    }
+    return null;
+  }
+  /**
+   * Empty one finished build job's log.
+   * @param {string} id job id.
+   * @returns {Promise<{ok: boolean, id: string}>} result.
+   */
+  async clearBuildLog(id) {
+    const dir = this._jobDir(id);
+    const state = await readState(dir).catch(() => null);
+    if (state === null) throw new Error(`build job not found: ${id}`);
+    if (this.running.has(state.id) || state.status === "running") {
+      throw new Error("\u7F16\u8BD1\u8FD8\u5728\u8FD0\u884C\uFF0C\u7ED3\u675F\u540E\u518D\u6E05\u7A7A\u65E5\u5FD7");
+    }
+    await writeFile6(path9.join(dir, "build.log"), "", "utf8");
+    return { ok: true, id: state.id };
+  }
+  /**
+   * Empty every finished build job's log.
+   * @returns {Promise<{ok: boolean, cleared: string[]}>} cleared job ids.
+   */
+  async clearFinishedBuildLogs() {
+    const cleared = [];
+    const entries = await readdir5(this.jobRoot, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const dir = path9.join(this.jobRoot, entry.name);
+      const state = await readState(dir).catch(() => null);
+      if (state === null || this.running.has(state.id) || state.status === "running") continue;
+      const file = path9.join(dir, "build.log");
+      const info = await stat7(file).catch(() => null);
+      if (info === null || info.size === 0) continue;
+      await writeFile6(file, "", "utf8");
+      cleared.push(state.id);
+    }
+    return { ok: true, cleared };
   }
   /**
    * Build the deployment request for a discovered member.
@@ -4579,7 +5017,7 @@ var MeshService = class {
       }
     }
     const system = member.system;
-    let appRoot = typeof system?.appRoot === "string" && system.appRoot.trim() !== "" ? system.appRoot.trim() : void 0;
+    let appRoot = normalizeInstallRoot(system?.appRoot) || void 0;
     let serviceUser = typeof system?.user === "string" && system.user.trim() !== "" ? system.user.trim() : void 0;
     if (appRoot === void 0) {
       try {
@@ -5119,6 +5557,23 @@ function registerApi(ctx, service) {
           ));
           return;
         }
+        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path14);
+        if (clearLog !== null) {
+          writeJson(response, 200, await service.clearBuildLog(clearLog[1]));
+          return;
+        }
+        if (path14 === "/build/logs/clear") {
+          writeJson(response, 200, await service.clearFinishedBuildLogs());
+          return;
+        }
+        if (path14 === "/upgrade") {
+          const body = await readJson(request);
+          writeJson(response, 202, await service.upgradeMember({
+            member: typeof body.member === "string" ? body.member : void 0,
+            package: typeof body.package === "string" ? body.package : void 0
+          }));
+          return;
+        }
         if (path14 === "/build") {
           const body = await readJson(request);
           const job = await service.startBuild({
@@ -5206,7 +5661,7 @@ function registerWireGuardApi(ctx) {
 
 // src/lib/member-tasks.mjs
 import { randomUUID } from "node:crypto";
-import { mkdir as mkdir6, readFile as readFile9, readdir as readdir6, rename as rename4, writeFile as writeFile7 } from "node:fs/promises";
+import { mkdir as mkdir6, readFile as readFile9, readdir as readdir6, rename as rename5, writeFile as writeFile7 } from "node:fs/promises";
 import { existsSync as existsSync9, readFileSync as readFileSync4 } from "node:fs";
 import path12 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
@@ -5302,7 +5757,7 @@ var MemberTaskService = class {
     await mkdir6(this.taskRoot, { recursive: true });
     await writeFile7(temporary, `${JSON.stringify(task, null, 2)}
 `, "utf8");
-    await rename4(temporary, file);
+    await rename5(temporary, file);
   }
   async #log(task, line) {
     const text = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}

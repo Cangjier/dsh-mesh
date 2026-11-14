@@ -189,6 +189,8 @@ export interface DeployProgress {
 
 export interface DeployJob {
   id: string
+  /** `upgrade` jobs are labelled differently in the panel, nothing else. */
+  mode?: 'install' | 'upgrade' | string
   createdAt: string
   updatedAt?: string
   member?: string | null
@@ -196,7 +198,8 @@ export interface DeployJob {
   package?: string
   services?: string[]
   target: { host: string; user?: string | null; port: number; os: string; appRoot: string }
-  status: 'running' | 'succeeded' | 'failed' | string
+  /** `queued` is the moment between the panel writing the job and its runner reporting in. */
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | string
   phase: string
   error: string | null
   steps?: DeployStep[]
@@ -206,7 +209,8 @@ export interface DeployJob {
 export interface DeployResponse {
   ok: boolean
   job: DeployJob
-  member: { id: string; name: string; ip: string }
+  member: { id: string; name: string; ip: string } | null
+  layout?: 'flat' | 'bluegreen' | string
   packagesDir: string
 }
 
@@ -351,6 +355,30 @@ export const api = {
       method: 'POST',
       headers: { 'x-dsh-mesh': '1' },
       body: JSON.stringify({ member, package: packageName }),
+    })
+  },
+
+  upgrade(member: string, packageName: string): Promise<DeployResponse> {
+    return request<DeployResponse>('/api/dsh-mesh/upgrade', {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: JSON.stringify({ member, package: packageName }),
+    })
+  },
+
+  clearBuildLog(id: string): Promise<{ ok: boolean; id: string }> {
+    return request<{ ok: boolean; id: string }>(`/api/dsh-mesh/build/${encodeURIComponent(id)}/log/clear`, {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: '{}',
+    })
+  },
+
+  clearBuildLogs(): Promise<{ ok: boolean; cleared: string[] }> {
+    return request<{ ok: boolean; cleared: string[] }>('/api/dsh-mesh/build/logs/clear', {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: '{}',
     })
   },
 

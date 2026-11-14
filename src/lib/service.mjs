@@ -9,7 +9,8 @@
  */
 
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { readFileSync, existsSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
@@ -30,7 +31,17 @@ import {
   updateState,
 } from '../../code/build/job.mjs'
 import { DEFAULT_REF, DEFAULT_SOURCE } from '../../code/build/engine.mjs'
-import { DeployManager } from '../../code/deploy/engine.mjs'
+import {
+  appendDeployLog,
+  buildDeployPlan,
+  DeployManager,
+  normalizeInstallRoot,
+  initialDeploySteps,
+  jobPaths,
+  newJobId,
+  readDeployState,
+  writeDeployState,
+} from '../../code/deploy/engine.mjs'
 import { EgressProxy } from './egress.mjs'
 import { RemoteBuilder } from './remote-build.mjs'
 import { CLUSTER_HEADER, deriveClusterSecret, signClusterRequest } from '../../code/shared/cluster.mjs'
@@ -83,7 +94,7 @@ function packageVersion() {
  */
 export class MeshService {
   /**
-   * @param {{dataDir: string, config?: object, log?: (line: string) => void}} options service input.
+   * @param {{dataDir: string, config?: object, log?: (line: string) => void, spawnRunner?: Function}} options service input.
    */
   constructor(options) {
     this.dataDir = options.dataDir
@@ -104,6 +115,13 @@ export class MeshService {
       dataDir: this.deployRoot,
       log: line => this.logLine(`deploy: ${line}`),
     })
+    /**
+     * How one detached job is started. Production spawns a systemd transient
+     * unit (see `#spawnRunner`); tests replace it so no process is ever
+     * started by the suite.
+     * @type {(dir: string, id: string) => Promise<{mode: string, unit: string|null}>}
+     */
+    this.spawnRunner = options.spawnRunner ?? ((dir, id) => this.#spawnRunner(dir, id))
     /** @type {Map<string, Promise<object>>} */
     this.running = new Map()
     /** Egress proxies live exactly as long as the build that started them. */
@@ -851,15 +869,17 @@ export class MeshService {
   }
 
   /**
-   * Resolve a target and start a deployment job.
+   * Resolve a target and start a deployment or upgrade job.
    *
-   * This is the single entry point used by both the panel API and the model
-   * tool. The caller decides whether to wait by calling `deployPackage()`;
-   * the panel keeps the historical non-blocking `deployMember()` wrapper.
-   * @param {{host?: string, member?: string, package?: string}} request target and package.
-   * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string}>} started job.
+   * The job itself runs in a detached process (`code/deploy/runner.mjs`) so a
+   * member — including this gateway — can restart dsh-web and the gateway while
+   * its own upgrade keeps going. This method only writes the job directory and
+   * returns; `waitDeploy()` is what the model tool uses to block.
+   * @param {{host?: string, member?: string, package?: string, mode?: 'install'|'upgrade'}} request target and package.
+   * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string, layout: string}>} queued job.
    */
   async startDeploy(request) {
+    const mode = request.mode === 'upgrade' ? 'upgrade' : 'install'
     const host = typeof request.host === 'string' ? request.host.trim() : ''
     const memberId = typeof request.member === 'string' ? request.member.trim() : ''
     const packagePath = await this.resolvePackage(request.package)
@@ -869,38 +889,68 @@ export class MeshService {
       ? all.find(candidate => candidate.id === memberId)
       : all.find(candidate => candidate.id === host || candidate.name === host || candidate.ip === host)
     if (memberId !== '' && member === undefined) throw new Error(`member not found: ${memberId}`)
+    // One job per target: a second upgrade of the same member would fight the
+    // first one over the same release directory, and the panel can be a second
+    // behind an already running job.
+    const busy = await this.#activeDeployFor(member?.id ?? null, member?.ip ?? host)
+    if (busy !== null) {
+      throw Object.assign(
+        new Error(`该目标已有正在进行的${busy.mode === 'upgrade' ? '升级' : '部署'}任务：${busy.id}`),
+        { status: 409 },
+      )
+    }
     if (member !== undefined) {
       const os = /win(?:dows)?/iu.test(path.basename(packagePath))
         ? 'windows'
         : member.system?.platform?.toLowerCase().startsWith('win') ? 'windows' : 'linux'
-      const deployRequest = await this.#memberDeployRequest(member, packagePath, os)
-      const started = await this.deploy.start({ ...deployRequest, member: member.id })
-      return {
-        ok: true,
-        job: started.job,
-        member: { id: member.id, name: member.name, ip: member.ip },
-        packagePath,
+      const identity = { id: member.id, name: member.name, ip: member.ip }
+      if (member.kind === 'self' || member.id === 'local') {
+        return this.#startLocalJob({ member, packagePath, os, mode, identity })
       }
+      const deployRequest = await this.#memberDeployRequest(member, packagePath, os)
+      const job = await this.#startEngineJob({ request: { ...deployRequest, member: member.id }, member: member.id, mode })
+      return { ok: true, job, member: identity, packagePath, layout: 'bluegreen' }
     }
     if (host === '') throw new Error('host is required')
     const os = /win(?:dows)?/iu.test(path.basename(packagePath)) ? 'windows' : 'linux'
     const appRoot = os === 'windows' ? 'C:\\dsh-mesh' : '/opt/dsh-mesh'
-    const started = await this.deploy.start({ host, package: packagePath, os, appRoot })
-    return { ok: true, job: started.job, member: null, packagePath }
+    const job = await this.#startEngineJob({ request: { host, package: packagePath, os, appRoot }, member: null, mode })
+    return { ok: true, job, member: null, packagePath, layout: 'bluegreen' }
   }
 
   /**
    * Deploy one local package to a discovered member, without waiting.
    * Kept for the panel API, which returns a job id immediately.
-   * @param {{member?: string, package?: string}} request member id/ip and package filename.
+   * @param {{member?: string, package?: string, mode?: 'install'|'upgrade'}} request member id/ip and package filename.
    * @returns {Promise<object>} started deploy job.
    */
   async deployMember(request) {
-    const result = await this.startDeploy({ member: request.member, package: request.package })
+    const result = await this.startDeploy({ member: request.member, package: request.package, mode: request.mode })
     return {
       ok: true,
       job: result.job,
       member: result.member,
+      layout: result.layout,
+      packagesDir: this.packagesDir,
+    }
+  }
+
+  /**
+   * Upgrade one member (or this machine) from a chosen deployment package.
+   *
+   * Same flow as a first deploy; the difference is that an installed member is
+   * upgraded by the package instead of being installed from scratch, and the
+   * panel labels the job as an upgrade.
+   * @param {{member?: string, package?: string}} request member id/ip and package filename.
+   * @returns {Promise<object>} queued job.
+   */
+  async upgradeMember(request) {
+    const result = await this.startDeploy({ member: request.member, package: request.package, mode: 'upgrade' })
+    return {
+      ok: true,
+      job: result.job,
+      member: result.member,
+      layout: result.layout,
       packagesDir: this.packagesDir,
     }
   }
@@ -911,18 +961,259 @@ export class MeshService {
    * The host may be a discovered member id/name/IP, in which case the member's
    * OS, install root and WireGuard SSH metadata are used; otherwise the host is
    * treated as a plain SSH target and the package platform decides the OS.
-   * @param {{host?: string, package?: string}} request target host and package.
+   * @param {{host?: string, package?: string, mode?: 'install'|'upgrade'}} request target host and package.
    * @returns {Promise<{job: object|null, logFile: string, log: string, member?: object}>} final result.
    */
   async deployPackage(request) {
-    const started = await this.startDeploy({ host: request.host, package: request.package })
-    const job = await this.deploy.wait(started.job.id)
+    const started = await this.startDeploy({ host: request.host, package: request.package, mode: request.mode })
+    const job = await this.waitDeploy(started.job.id)
     return {
       job,
       member: started.member,
       logFile: path.join(this.deployRoot, started.job.id, 'deploy.log'),
       log: await this.deployLogs(started.job.id, 80),
     }
+  }
+
+  /**
+   * The job currently using one target, if any.
+   * @param {string|null} memberId member id.
+   * @param {string} host VPN address or SSH host.
+   * @returns {Promise<object|null>} active job.
+   */
+  async #activeDeployFor(memberId, host) {
+    for (const job of await this.deploy.list(20)) {
+      if (job.status !== 'running' && job.status !== 'queued') continue
+      if (memberId !== null && memberId !== '' && job.member === memberId) return job
+      if (typeof host === 'string' && host !== '' && job.target?.host === host) return job
+    }
+    return null
+  }
+
+  /**
+   * Wait for one detached deploy job to settle.
+   * @param {string} id job id.
+   * @param {{timeoutMs?: number}} [options] budget; 30 minutes by default.
+   * @returns {Promise<object|null>} final job state.
+   */
+  async waitDeploy(id, options = {}) {
+    const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 30 * 60 * 1000
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      const job = await this.deployStatus(id)
+      if (job !== null && job.status !== 'running' && job.status !== 'queued') return job
+      if (Date.now() >= deadline) return job
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    }
+  }
+
+  /**
+   * Start one job for a blue-green target (blue-green members and plain hosts).
+   *
+   * The plan is built here, once: the queued job needs its release name and
+   * size, and the runner must not hash a 300 MB package a second time.
+   * @param {{request: object, member: string|null, mode: 'install'|'upgrade'}} input job input.
+   * @returns {Promise<object>} queued job state.
+   */
+  async #startEngineJob(input) {
+    const plan = await buildDeployPlan({
+      ...input.request,
+      gatePassword: typeof input.request.gatePassword === 'string' ? input.request.gatePassword : process.env.DSH_GATE_PASSWORD,
+      repositoryRoot: this.repositoryRoot,
+    })
+    return this.#queueJob({
+      mode: input.mode,
+      member: input.member,
+      plan,
+      request: { kind: 'engine', plan, options: { ...input.request, plan, mode: input.mode } },
+    })
+  }
+
+  /**
+   * Start the local upgrade, or a local blue-green deploy, whichever the
+   * install layout supports.
+   *
+   * A flat install (gateway) has no release symlink to switch: the package's
+   * own `upgrade-local.sh` copies the new tree over it. A blue-green install
+   * upgrades exactly like a member, using a local runner instead of SSH.
+   * @param {{member: object, packagePath: string, os: string, mode: 'install'|'upgrade', identity: object}} input target.
+   * @returns {Promise<object>} queued job and its layout.
+   */
+  async #startLocalJob(input) {
+    const install = this.#localAppRoot()
+    if (install === null) {
+      throw new Error('本机没有可识别的 dsh-mesh 安装目录（找不到 config/gate.env），无法升级本机')
+    }
+    if (input.os === 'windows' && install.layout === 'flat') {
+      throw new Error('本机是 Linux 网关，不能安装 Windows 部署包')
+    }
+    if (install.layout === 'flat') {
+      const job = await this.#queueJob({
+        mode: input.mode,
+        member: 'local',
+        plan: null,
+        request: { kind: 'inplace', inplace: { package: input.packagePath, appRoot: install.appRoot } },
+        target: { host: '127.0.0.1', user: os.userInfo().username, port: null, os: 'linux', appRoot: install.appRoot },
+        services: ['dsh-web-app.service', 'dsh-web-gate.service', 'dsh-wireguard-control.service', 'dsh-interop.service'],
+        packagePath: input.packagePath,
+        release: path.basename(input.packagePath),
+      })
+      return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: 'flat' }
+    }
+    const job = await this.#startEngineJob({
+      request: { host: '127.0.0.1', local: true, package: input.packagePath, os: input.os, appRoot: install.appRoot, member: input.member.id },
+      member: input.member.id,
+      mode: input.mode,
+    })
+    return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: 'bluegreen' }
+  }
+
+  /**
+   * Write one queued job directory and spawn its detached runner.
+   * @param {{mode: string, member: string|null, plan: object|null, request: object, target?: object, services?: string[], packagePath?: string, release?: string}} job job input.
+   * @returns {Promise<object>} queued job state.
+   */
+  async #queueJob(job) {
+    const id = newJobId()
+    const dir = path.join(this.deployRoot, id)
+    await mkdir(dir, { recursive: true })
+    const now = new Date().toISOString()
+    const bytes = job.plan?.package?.bytes ?? (await stat(job.packagePath).catch(() => null))?.size ?? 0
+    const state = {
+      id,
+      mode: job.mode,
+      createdAt: now,
+      updatedAt: now,
+      member: job.member,
+      target: job.plan === null
+        ? job.target
+        : { host: job.plan.host, user: job.plan.user ?? null, port: job.plan.port, os: job.plan.os, appRoot: job.plan.appRoot },
+      release: job.plan?.release ?? job.release ?? 'local',
+      package: job.plan?.package?.path ?? job.packagePath ?? null,
+      services: job.plan === null ? (job.services ?? []) : job.plan.services.map(service => service.name),
+      status: 'queued',
+      phase: 'starting',
+      error: null,
+      steps: initialDeploySteps(),
+      progress: { label: '启动独立升级进程', percent: 0, bytes: 0, totalBytes: bytes, speed: 0, indeterminate: false },
+    }
+    await writeDeployState(dir, state)
+    const requestFile = jobPaths(dir).request
+    await writeFile(requestFile, `${JSON.stringify({ ...job.request, id, member: job.member }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+    const spawned = await this.spawnRunner(dir, id)
+    await appendDeployLog(dir, `job queued; runner ${spawned.mode}${spawned.unit === null ? '' : ` (${spawned.unit})`}`)
+    this.logLine(`mesh ${job.mode} job ${id} queued for ${state.target.host} via ${spawned.mode}`)
+    return state
+  }
+
+  /**
+   * Start the detached runner for one job.
+   *
+   * `systemd-run` is preferred: a service restart kills its whole cgroup, so a
+   * plain detached child of dsh-web would not survive the very restart it is
+   * deploying. The transient unit puts the runner in its own cgroup; when
+   * systemd is unavailable the plain detached spawn still survives the parent.
+   * @param {string} dir job directory.
+   * @param {string} id job id.
+   * @returns {Promise<{mode: string, unit: string|null}>} how it was started.
+   */
+  async #spawnRunner(dir, id) {
+    const script = path.join(this.repositoryRoot, 'code', 'deploy', 'runner.mjs')
+    if (!existsSync(script)) throw new Error(`deploy runner is missing: ${script}`)
+    const node = process.execPath
+    const unit = `dsh-mesh-job-${id.replace(/^deploy-/u, '')}`
+    const systemdRun = ['/usr/bin/systemd-run', '/bin/systemd-run'].find(file => existsSync(file))
+    if (systemdRun !== undefined && process.platform === 'linux' && process.getuid?.() === 0) {
+      const result = await new Promise(resolve => {
+        const child = spawn(systemdRun, [
+          '--unit', unit,
+          '--collect',
+          '--description', `dsh-mesh ${id}`,
+          '--setenv', `DSH_MESH_JOB_UNIT=${unit}`,
+          node, script, '--job', dir,
+        ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+        let stderr = ''
+        child.stderr.on('data', chunk => { stderr += String(chunk) })
+        child.once('error', error => resolve({ ok: false, detail: error.message }))
+        child.once('exit', code => resolve({ ok: code === 0, detail: stderr.trim() }))
+      })
+      if (result.ok) return { mode: 'systemd-run', unit }
+      await appendDeployLog(dir, `systemd-run failed, falling back to a detached process: ${result.detail}`)
+    }
+    const child = spawn(node, [script, '--job', dir], {
+      cwd: this.repositoryRoot,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: { ...process.env, DSH_MESH_JOB_UNIT: '' },
+    })
+    child.unref()
+    return { mode: 'detached', unit: null }
+  }
+
+  /**
+   * Locate the install that owns this plugin.
+   * @returns {{appRoot: string, layout: 'flat'|'bluegreen'}|null} install, or null in a source checkout.
+   */
+  #localAppRoot() {
+    let candidate = path.resolve(this.repositoryRoot, '..')
+    for (let depth = 0; depth < 5; depth += 1) {
+      const parent = path.dirname(candidate)
+      const current = path.join(parent, 'current')
+      if (existsSync(current)) {
+        try {
+          if (realpathSync(candidate) === realpathSync(current)) return { appRoot: parent, layout: 'bluegreen' }
+        } catch {
+          // Fall through to the flat-install checks.
+        }
+      }
+      if (existsSync(path.join(candidate, 'current')) && existsSync(path.join(candidate, 'releases'))) {
+        return { appRoot: candidate, layout: 'bluegreen' }
+      }
+      if (existsSync(path.join(candidate, 'config', 'gate.env')) && existsSync(path.join(candidate, 'plugins', 'dsh-mesh'))) {
+        return { appRoot: candidate, layout: 'flat' }
+      }
+      if (parent === candidate) break
+      candidate = parent
+    }
+    return null
+  }
+
+  /**
+   * Empty one finished build job's log.
+   * @param {string} id job id.
+   * @returns {Promise<{ok: boolean, id: string}>} result.
+   */
+  async clearBuildLog(id) {
+    const dir = this._jobDir(id)
+    const state = await readState(dir).catch(() => null)
+    if (state === null) throw new Error(`build job not found: ${id}`)
+    if (this.running.has(state.id) || state.status === 'running') {
+      throw new Error('编译还在运行，结束后再清空日志')
+    }
+    await writeFile(path.join(dir, 'build.log'), '', 'utf8')
+    return { ok: true, id: state.id }
+  }
+
+  /**
+   * Empty every finished build job's log.
+   * @returns {Promise<{ok: boolean, cleared: string[]}>} cleared job ids.
+   */
+  async clearFinishedBuildLogs() {
+    const cleared = []
+    const entries = await readdir(this.jobRoot, { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const dir = path.join(this.jobRoot, entry.name)
+      const state = await readState(dir).catch(() => null)
+      if (state === null || this.running.has(state.id) || state.status === 'running') continue
+      const file = path.join(dir, 'build.log')
+      const info = await stat(file).catch(() => null)
+      if (info === null || info.size === 0) continue
+      await writeFile(file, '', 'utf8')
+      cleared.push(state.id)
+    }
+    return { ok: true, cleared }
   }
 
   /**
@@ -949,9 +1240,8 @@ export class MeshService {
     // The gate reports its own install root, home and run user, so a healthy
     // member needs no SSH round-trip just to learn where it lives.
     const system = member.system
-    let appRoot = typeof system?.appRoot === 'string' && system.appRoot.trim() !== ''
-      ? system.appRoot.trim()
-      : undefined
+    // A member reports the release it runs from; the deploy needs the root.
+    let appRoot = normalizeInstallRoot(system?.appRoot) || undefined
     let serviceUser = typeof system?.user === 'string' && system.user.trim() !== ''
       ? system.user.trim()
       : undefined

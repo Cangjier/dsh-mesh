@@ -186,6 +186,23 @@ export function registerApi(ctx, service) {
           ))
           return
         }
+        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path)
+        if (clearLog !== null) {
+          writeJson(response, 200, await service.clearBuildLog(clearLog[1]))
+          return
+        }
+        if (path === '/build/logs/clear') {
+          writeJson(response, 200, await service.clearFinishedBuildLogs())
+          return
+        }
+        if (path === '/upgrade') {
+          const body = await readJson(request)
+          writeJson(response, 202, await service.upgradeMember({
+            member: typeof body.member === 'string' ? body.member : undefined,
+            package: typeof body.package === 'string' ? body.package : undefined,
+          }))
+          return
+        }
         if (path === '/build') {
           const body = await readJson(request)
           const job = await service.startBuild({

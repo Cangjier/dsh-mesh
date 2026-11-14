@@ -21,9 +21,9 @@ import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { copyFile, link, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { isIP } from 'node:net'
-import { homedir, tmpdir } from 'node:os'
+import { homedir, hostname, tmpdir } from 'node:os'
 import path from 'node:path'
 
 /** tar emits one progress marker per this many extracted entries. */
@@ -288,6 +288,114 @@ export function initialDeploySteps() {
   ]
 }
 
+/** A job whose runner has not written its heartbeat yet still counts as alive. */
+export const RUNNER_START_GRACE_MS = 45_000
+/** A runner that stops heartbeating for this long is gone. */
+export const RUNNER_STALE_MS = 120_000
+/** How often the detached runner rewrites `runner.json`. */
+export const RUNNER_HEARTBEAT_MS = 5_000
+
+/** @returns {string} fresh deployment job id. */
+export function newJobId() {
+  return `deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+}
+
+/**
+ * Paths owned by one job directory.
+ *
+ * A job is a directory with four files; every process that touches it (the
+ * panel, the detached runner, the CLI) reads the same ones.
+ * @param {string} dir job directory.
+ * @returns {{dir: string, state: string, log: string, runner: string, request: string}} paths.
+ */
+export function jobPaths(dir) {
+  return {
+    dir,
+    state: path.join(dir, 'job.json'),
+    log: path.join(dir, 'deploy.log'),
+    runner: path.join(dir, 'runner.json'),
+    request: path.join(dir, 'request.json'),
+  }
+}
+
+/**
+ * Write one job state atomically.
+ *
+ * The panel and the runner are separate processes: a reader must never see a
+ * half-written `job.json`, so the text lands in a sibling temp file and is
+ * renamed over the target.
+ * @param {string} dir job directory.
+ * @param {object} state job state.
+ * @returns {Promise<void>} completion.
+ */
+export async function writeDeployState(dir, state) {
+  const file = path.join(dir, 'job.json')
+  const tmp = `${file}.${process.pid}.tmp`
+  await mkdir(dir, { recursive: true })
+  await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+  await rename(tmp, file)
+}
+
+/**
+ * Read one job state, or null when it is missing or unreadable.
+ * @param {string} dir job directory.
+ * @returns {Promise<object|null>} state.
+ */
+export async function readDeployState(dir) {
+  try {
+    const parsed = JSON.parse(await readFile(path.join(dir, 'job.json'), 'utf8'))
+    return parsed !== null && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Append one line to a job log.
+ * @param {string} dir job directory.
+ * @param {string} line text.
+ * @returns {Promise<void>} completion.
+ */
+export async function appendDeployLog(dir, line) {
+  await mkdir(dir, { recursive: true })
+  await writeFile(path.join(dir, 'deploy.log'), `[${new Date().toISOString()}] ${line}\n`, { encoding: 'utf8', flag: 'a' })
+}
+
+/**
+ * Is the detached runner that owns this job still working?
+ *
+ * A job started by another process (the runner is spawned detached so it
+ * survives a dsh-web/gate restart) is only "running" while that process lives.
+ * Same-host jobs are checked by pid; a job directory copied from another host
+ * falls back to the heartbeat timestamp.
+ * @param {string} dir job directory.
+ * @returns {Promise<{alive: boolean, runner: object|null}>} verdict.
+ */
+export async function runnerStatus(dir) {
+  let runner = null
+  try {
+    runner = JSON.parse(await readFile(path.join(dir, 'runner.json'), 'utf8'))
+  } catch {
+    runner = null
+  }
+  if (runner === null || typeof runner !== 'object') return { alive: false, runner: null }
+  const pid = Number(runner.pid)
+  if (runner.host === hostname() && Number.isInteger(pid) && pid > 0) {
+    // Same host: the pid is the best evidence, and it is immediate. A pid that
+    // is gone means the job is gone, even if its last heartbeat is seconds old.
+    try {
+      process.kill(pid, 0)
+      return { alive: true, runner }
+    } catch (error) {
+      return { alive: error?.code === 'EPERM', runner }
+    }
+  }
+  // Another host (a copied job directory): only the heartbeat can tell.
+  const beat = Date.parse(String(runner.heartbeatAt ?? runner.startedAt ?? ''))
+  if (Number.isFinite(beat) && Date.now() - beat < RUNNER_STALE_MS) return { alive: true, runner }
+  return { alive: false, runner }
+}
+
 /** Encode a PowerShell script that copies stdin to one file (Windows upload). */
 function windowsStdinWriter(remote) {
   const script = `$ErrorActionPreference = 'Stop'
@@ -323,6 +431,22 @@ export function normalizeOs(value) {
     return text.startsWith('win') ? 'windows' : 'linux'
   }
   throw new Error('os must be "linux" or "windows"')
+}
+
+/**
+ * Strip a release symlink from an install root.
+ *
+ * A healthy member reports the release it is running from (`<root>/current`),
+ * and the unit's WorkingDirectory is that symlink too. Every deployment path
+ * needs the stable root instead: it is the directory that owns `releases/` and
+ * `shared/`, and pointing a deploy at `current` would nest a second install.
+ * @param {string} value reported root.
+ * @returns {string} stable install root ('' when empty).
+ */
+export function normalizeInstallRoot(value) {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (text === '') return ''
+  return text.replace(/[\\/]+current$/iu, '').replace(/[\\/]+$/u, '')
 }
 
 /**
@@ -444,9 +568,7 @@ export async function buildDeployPlan(options) {
   if (!/^[A-Za-z0-9._-]{3,80}$/.test(release)) {
     throw new Error('release must be 3-80 chars of letters, digits, dot, underscore or dash')
   }
-  const appRoot = typeof options.appRoot === 'string' && options.appRoot.trim() !== ''
-    ? options.appRoot.trim()
-    : DEFAULT_APP_ROOT[os]
+  const appRoot = normalizeInstallRoot(options.appRoot) || DEFAULT_APP_ROOT[os]
   const services = normalizeServices(options.services, os)
   const scope = options.scope === 'dsh' ? 'dsh' : 'all'
   const gatePort = String(options.gatePort ?? '80')
@@ -468,6 +590,9 @@ export async function buildDeployPlan(options) {
     : undefined
   return {
     host: options.host.trim(),
+    // The local host runs the same phases without SSH: the gateway upgrading
+    // itself must not depend on its own sshd being reachable.
+    local: options.local === true,
     // Copied from the deployer so every member shares one gateway password;
     // empty means "generate on the target".
     gatePassword: typeof options.gatePassword === 'string' ? options.gatePassword : '',
@@ -560,8 +685,8 @@ export async function probeTarget(options) {
       `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`,
     ])
     const [root = ''] = stdout.split(/\r?\n/u)
-    const appRoot = root.trim() !== ''
-      ? root.trim()
+    const appRoot = normalizeInstallRoot(root) !== ''
+      ? normalizeInstallRoot(root)
       : `C:\\Users\\${user ?? 'Public'}\\.dsh\\dsh-mesh`
     return { appRoot, serviceUser: undefined }
   }
@@ -1453,6 +1578,112 @@ export class SshRunner {
 }
 
 /**
+ * Run one local process and stream its output line by line.
+ * @param {string} command executable.
+ * @param {string[]} args arguments.
+ * @param {string|undefined} input stdin text.
+ * @param {(line: string) => void} [onLine] line callback.
+ * @returns {Promise<{stdout: string, stderr: string}>} captured output.
+ */
+function runLocalProcess(command, args, input, onLine) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    const buffers = { out: '', err: '' }
+    const emit = (key, chunk) => {
+      const text = buffers[key] + String(chunk)
+      const lines = text.split(/\r?\n/u)
+      buffers[key] = lines.pop() ?? ''
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (trimmed !== '') onLine?.(trimmed)
+      }
+    }
+    const flush = () => {
+      for (const key of ['out', 'err']) {
+        const trimmed = buffers[key].trim()
+        if (trimmed !== '') onLine?.(trimmed)
+        buffers[key] = ''
+      }
+    }
+    child.stdout.on('data', chunk => {
+      stdout += String(chunk)
+      emit('out', chunk)
+    })
+    child.stderr.on('data', chunk => {
+      stderr += String(chunk)
+      emit('err', chunk)
+    })
+    child.once('error', reject)
+    child.once('exit', code => {
+      flush()
+      if (code === 0) resolve({ stdout, stderr })
+      else reject(new Error(`${command} exited with ${String(code)}: ${stderr.trim() || stdout.trim()}`))
+    })
+    child.stdin.end(input ?? '')
+  })
+}
+
+/**
+ * Runner for the machine the panel runs on.
+ *
+ * The gateway deploying itself is the one case SSH cannot cover: the target
+ * address may not be reachable from inside, and the deploy must keep working
+ * while its own sshd is restarting. Same phases, same scripts, no network.
+ */
+export class LocalRunner {
+  /**
+   * @param {object} plan deployment plan.
+   * @param {{log?: (line: string) => void}} [options] options.
+   */
+  constructor(plan, options = {}) {
+    this.plan = plan
+    this.log = options.log ?? (() => {})
+  }
+
+  /**
+   * Copy one file into place, reporting the copy as one finished upload.
+   * @param {string} local source path.
+   * @param {string} remote destination path.
+   * @param {(progress: object) => void} [onProgress] progress callback.
+   * @returns {Promise<void>} completion.
+   */
+  async upload(local, remote, onProgress) {
+    const info = await stat(local)
+    await mkdir(path.dirname(remote), { recursive: true })
+    await copyFile(local, remote)
+    onProgress?.({ bytes: info.size, totalBytes: info.size, percent: 100, speed: 0 })
+  }
+
+  /**
+   * Size of a local file, or null.
+   * @param {string} remote path.
+   * @returns {Promise<number|null>} bytes.
+   */
+  async remoteSize(remote) {
+    try {
+      const info = await stat(remote)
+      return info.isFile() ? info.size : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Run a bash script in place.
+   * @param {string} script script text.
+   * @param {'linux'|'windows'} os target OS.
+   * @param {(line: string) => void} [onLine] line callback.
+   * @returns {Promise<void>} completion.
+   */
+  async script(script, os, onLine) {
+    if (os !== 'linux') throw new Error('本地部署只支持 Linux：本机没有可用的 Windows 运行时')
+    await runLocalProcess('bash', ['-s'], script, onLine)
+  }
+}
+
+/**
  * One deployment job store and runner.
  */
 export class DeployManager {
@@ -1463,7 +1694,9 @@ export class DeployManager {
     this.repositoryRoot = options.repositoryRoot
     this.dataDir = options.dataDir
     this.logLine = options.log ?? (() => {})
-    this.runnerFactory = options.runnerFactory ?? (plan => new SshRunner(plan, { log: line => this.logLine(line) }))
+    this.runnerFactory = options.runnerFactory ?? (plan => (plan.local === true
+      ? new LocalRunner(plan, { log: line => this.logLine(line) })
+      : new SshRunner(plan, { log: line => this.logLine(line) })))
     /** @type {Map<string, Promise<object>>} */
     this.running = new Map()
     /** @type {Map<string, object>} live job state, so progress reads skip the disk */
@@ -1522,22 +1755,32 @@ export class DeployManager {
 
   /**
    * Start a deployment or rollback job.
+   *
+   * `request.plan` skips the planning step when the caller already built it
+   * (the panel does: it needs the release name to write the job that the
+   * detached runner then adopts). `request.id` adopts an existing job id the
+   * same way, so a spawned runner continues the job the panel created.
    * @param {object} request deploy options.
    * @returns {Promise<object>} job state.
    */
   async start(request) {
-    const plan = await buildDeployPlan({
-      ...request,
-      gatePassword: typeof request.gatePassword === 'string' ? request.gatePassword : process.env.DSH_GATE_PASSWORD,
-      repositoryRoot: this.repositoryRoot,
-    })
-    const id = `deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+    const plan = request.plan !== null && typeof request.plan === 'object'
+      ? request.plan
+      : await buildDeployPlan({
+        ...request,
+        gatePassword: typeof request.gatePassword === 'string' ? request.gatePassword : process.env.DSH_GATE_PASSWORD,
+        repositoryRoot: this.repositoryRoot,
+      })
+    const id = typeof request.id === 'string' && /^deploy-[A-Za-z0-9-]+$/u.test(request.id) ? request.id : newJobId()
     const dir = path.join(this.dataDir, id)
     await mkdir(dir, { recursive: true })
     const stateFile = path.join(dir, 'job.json')
     const logFile = path.join(dir, 'deploy.log')
     const state = {
       id,
+      // `install` and `upgrade` run the same phases; the panel only changes the
+      // wording, and a job started by the panel keeps the label it was queued with.
+      mode: request.mode === 'upgrade' ? 'upgrade' : 'install',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       member: typeof request.member === 'string' && request.member !== '' ? request.member : null,
@@ -1556,7 +1799,7 @@ export class DeployManager {
       if (!oldest.done) this.states.delete(oldest.value)
     }
     this.states.set(id, state)
-    await writeFile(stateFile, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+    await writeDeployState(dir, state)
     const log = async line => {
       const stamp = new Date().toISOString()
       await writeFile(logFile, `[${stamp}] ${line}\n`, { encoding: 'utf8', flag: 'a' })
@@ -1760,24 +2003,46 @@ export class DeployManager {
 
   async #save(stateFile, state) {
     const text = `${JSON.stringify(state, null, 2)}\n`
+    const tmp = `${stateFile}.${process.pid}.tmp`
     // Writes are chained per file: progress flushes are fire-and-forget, and
     // without ordering a slow one can land after the final snapshot and turn a
-    // finished job back into "running".
+    // finished job back into "running". The rename makes the swap atomic, so a
+    // reader in another process (the panel watching a detached runner) never
+    // parses half a state file.
     const previous = this.writes.get(stateFile) ?? Promise.resolve()
-    const next = previous.catch(() => {}).then(() => writeFile(stateFile, text, 'utf8'))
+    const next = previous.catch(() => {}).then(async () => {
+      await writeFile(tmp, text, 'utf8')
+      await rename(tmp, stateFile)
+    })
     this.writes.set(stateFile, next.catch(() => {}))
     await next
   }
 
   /**
    * Finalize a job whose runner is gone: the process restarted, or a stale
-   * snapshot survived a crash. A job is only live while its promise is tracked.
+   * snapshot survived a crash.
+   *
+   * A job is live while its promise is tracked *in this process*, and also
+   * while the runner that owns it is still alive: jobs started by the panel run
+   * in a detached process on purpose, so this process (the panel) usually does
+   * not hold their promise. Only when both are gone is the job reported as
+   * interrupted instead of a failure.
    * @param {object} state job state read from disk.
    * @returns {Promise<object>} settled state.
    */
   async #settle(state) {
     if (state === null || typeof state !== 'object') return state
-    if (state.status !== 'running' || this.running.has(state.id)) return state
+    if (state.status !== 'running' && state.status !== 'queued') return state
+    if (this.running.has(state.id)) return state
+    const dir = path.join(this.dataDir, state.id)
+    const runner = await runnerStatus(dir)
+    if (runner.alive) return state
+    if (state.status === 'queued') {
+      // The spawn happens right after the job directory is written; the runner
+      // needs a moment to report in, and that must not read as "unknown job".
+      const created = Date.parse(String(state.createdAt ?? ''))
+      if (Number.isFinite(created) && Date.now() - created < RUNNER_START_GRACE_MS) return state
+    }
     const log = await this.logs(state.id, 400).catch(() => '')
     const tail = log.split('\n').filter(line => line.trim() !== '').slice(-5).join('\n')
     if (/deployment succeeded/u.test(tail)) {
@@ -1797,7 +2062,7 @@ export class DeployManager {
       state.error = state.error ?? 'deployment was interrupted before it finished'
     }
     state.updatedAt = new Date().toISOString()
-    await this.#save(path.join(this.dataDir, state.id, 'job.json'), state).catch(() => {})
+    await this.#save(path.join(dir, 'job.json'), state).catch(() => {})
     return state
   }
 

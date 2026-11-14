@@ -23,41 +23,65 @@ async function waitForJob(service, id) {
   throw new Error('job did not finish in time')
 }
 
-test('deployPackage resolves a package and uses discovered member metadata', async () => {
+test('deployPackage resolves a package and queues a detached job for a member', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-deploy-package-'))
   const pkg = path.join(dir, 'dsh-mesh-0.2.2-linux-x64.tar.gz')
+  const readJob = async job => {
+    const file = path.join(dir, 'mesh', 'deploy', job.id, 'job.json')
+    return JSON.parse(await readFile(file, 'utf8'))
+  }
+  const readRequest = async job => {
+    const file = path.join(dir, 'mesh', 'deploy', job.id, 'request.json')
+    return JSON.parse(await readFile(file, 'utf8'))
+  }
   try {
     await writeFile(pkg, 'not-a-real-archive', 'utf8')
+    const spawned = []
     const service = new MeshService({
       dataDir: path.join(dir, 'mesh'),
       config: {},
       log: () => {},
+      // No process is started by the suite: the job directory is the contract.
+      spawnRunner: async (jobDir, id) => {
+        spawned.push(id)
+        assert.ok(existsSync(path.join(jobDir, 'request.json')))
+        return { mode: 'test', unit: null }
+      },
     })
     service.members = async () => ({
-      local: { id: 'local', name: 'a', ip: '10.66.66.1', system: { appRoot: '/opt/a', user: 'root', platform: 'linux' } },
+      local: { id: 'local', name: 'a', ip: '10.66.66.1', kind: 'self', system: { appRoot: '/opt/a', user: 'root', platform: 'linux' } },
       members: [{ id: 'b', name: 'B', ip: '10.66.66.2', system: { appRoot: '/opt/b', user: 'deploy', platform: 'linux' } }],
     })
-    const calls = []
-    service.deploy = {
-      start: async request => {
-        calls.push(request)
-        return { job: { id: `deploy-${String(calls.length)}`, status: 'running' } }
-      },
-      wait: async id => ({ id, status: 'succeeded' }),
-      logs: async () => '',
-    }
+    service.waitDeploy = async id => ({ id, status: 'succeeded' })
+    // These jobs are not really running: nothing should look "busy".
+    service.deploy.list = async () => []
 
     const result = await service.deployPackage({ host: 'B', package: pkg })
-    assert.equal(calls.length, 1)
-    assert.equal(calls[0].host, '10.66.66.2')
-    assert.equal(calls[0].appRoot, '/opt/b')
-    assert.equal(calls[0].os, 'linux')
+    assert.equal(spawned.length, 1)
     assert.equal(result.member.name, 'B')
+    const state = await readJob(result.job)
+    assert.equal(state.status, 'queued')
+    assert.equal(state.mode, 'install')
+    assert.equal(state.target.host, '10.66.66.2')
+    assert.equal(state.target.appRoot, '/opt/b')
+    assert.equal(state.services[0], 'dsh-web-gate.service')
+    // The plan travels with the job so the runner does not hash the package
+    // twice, and the queued row already shows the right release.
+    const request = await readRequest(result.job)
+    assert.equal(request.kind, 'engine')
+    assert.equal(request.options.os, 'linux')
+    assert.equal(request.plan.appRoot, '/opt/b')
+    assert.equal(request.plan.release, state.release)
 
-    await service.deployPackage({ host: 'raw.example', package: pkg })
-    assert.equal(calls[1].host, 'raw.example')
-    assert.equal(calls[1].appRoot, '/opt/dsh-mesh')
-    assert.equal(calls[1].os, 'linux')
+    const upgrade = await service.upgradeMember({ member: 'b', package: pkg })
+    const upgradeState = await readJob(upgrade.job)
+    assert.equal(upgradeState.mode, 'upgrade')
+    assert.equal(upgrade.layout, 'bluegreen')
+
+    const raw = await service.deployPackage({ host: 'raw.example', package: pkg })
+    const rawState = await readJob(raw.job)
+    assert.equal(rawState.target.host, 'raw.example')
+    assert.equal(rawState.target.appRoot, '/opt/dsh-mesh')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -155,6 +179,36 @@ test('service exposes status, recipes, members, and a plan job', async () => {
     assert.ok(jobs.some(entry => entry.id === started.id))
     const log = await service.log(started.id, 20)
     assert.ok(Array.isArray(log))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a second job for the same target is refused while one is running', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-deploy-busy-'))
+  const pkg = path.join(dir, 'dsh-mesh-0.2.2-linux-x64.tar.gz')
+  try {
+    await writeFile(pkg, 'not-a-real-archive', 'utf8')
+    const service = new MeshService({
+      dataDir: path.join(dir, 'mesh'),
+      config: {},
+      log: () => {},
+      spawnRunner: async () => ({ mode: 'test', unit: null }),
+    })
+    service.members = async () => ({
+      local: { id: 'local', name: 'a', ip: '10.66.66.1', kind: 'self', system: { appRoot: '/opt/a', user: 'root', platform: 'linux' } },
+      members: [{ id: 'b', name: 'B', ip: '10.66.66.2', system: { appRoot: '/opt/b', user: 'root', platform: 'linux' } }],
+    })
+    service.deploy = {
+      list: async () => [{ id: 'deploy-live', status: 'running', mode: 'upgrade', member: 'b', target: { host: '10.66.66.2' } }],
+      status: async () => ({ id: 'deploy-live', status: 'running' }),
+    }
+    await assert.rejects(service.upgradeMember({ member: 'b', package: pkg }), /已有正在进行的升级任务/u)
+    // Another target is unaffected.
+    service.deploy.list = async () => [{ id: 'deploy-live', status: 'running', mode: 'upgrade', member: 'b', target: { host: '10.66.66.2' } }]
+    const other = await service.deployMember({ member: '10.66.66.3', package: pkg }).catch(error => error)
+    assert.ok(other instanceof Error)
+    assert.match(other.message, /member not found/u)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

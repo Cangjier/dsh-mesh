@@ -27,6 +27,7 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
+  ClearOutlined,
   CloudDownloadOutlined,
   DeleteOutlined,
   ReloadOutlined,
@@ -149,6 +150,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
   const [error, setError] = useState('')
   const [logJob, setLogJob] = useState<BuildJob | null>(null)
   const [logLines, setLogLines] = useState<string[]>([])
+  const [logCleared, setLogCleared] = useState(false)
   const [logLoading, setLogLoading] = useState(false)
   const logRef = useRef<HTMLPreElement | null>(null)
 
@@ -232,6 +234,8 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
   }, [logLines])
 
   const activeJob = logJob === null ? null : jobs.find(job => job.id === logJob.id) ?? logJob
+  // A log file can be one empty line after a clear; that is not content.
+  const visibleLines = logLines.filter(line => line.trim() !== '')
 
   const start = useCallback(async () => {
     setError('')
@@ -265,6 +269,39 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
       setStarting(false)
     }
   }, [buildMember, messageApi, proxyMember, proxyMode, proxyUrl, ref, targets, loadJobs])
+
+  /**
+   * Truncate one finished job's log.
+   *
+   * The log is where a failed build explains itself, so a running job keeps
+   * its log; the button is disabled until it settles.
+   */
+  const clearLog = useCallback(async () => {
+    if (logJob === null) return
+    try {
+      await api.clearBuildLog(logJob.id)
+      setLogLines([])
+      setLogCleared(true)
+      messageApi.success('日志已清空')
+    } catch (failure) {
+      messageApi.error(errorText(failure))
+    }
+  }, [logJob, messageApi])
+
+  /** Empty every finished job's log in one go (the card's toolbar button). */
+  const clearAllLogs = useCallback(async () => {
+    try {
+      const result = await api.clearBuildLogs()
+      if (logJob !== null && result.cleared.includes(logJob.id)) {
+        setLogLines([])
+        setLogCleared(true)
+      }
+      messageApi.success(result.cleared.length === 0 ? '没有需要清空的日志' : `已清空 ${String(result.cleared.length)} 个任务的日志`)
+      await loadJobs()
+    } catch (failure) {
+      messageApi.error(errorText(failure))
+    }
+  }, [loadJobs, logJob, messageApi])
 
   const remove = useCallback(async (name: string) => {
     try {
@@ -339,6 +376,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
           size="small"
           onClick={() => {
             setLogLines([])
+            setLogCleared(false)
             setLogJob(job)
           }}
         >
@@ -513,7 +551,25 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
           </Space>
         </Card>
 
-        <Card size="small" title="编译任务" extra={<Typography.Text type="secondary" style={{ fontSize: 12 }}>保留最近的任务与日志</Typography.Text>}>
+        <Card
+          size="small"
+          title="编译任务"
+          extra={(
+            <Space size={10}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>保留最近的任务与日志</Typography.Text>
+              <Popconfirm
+                title="清空所有已结束任务的日志？"
+                description="只截断日志文件；任务记录与编译产物保留。"
+                okText="清空"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => { void clearAllLogs() }}
+              >
+                <Button size="small" type="text" danger icon={<ClearOutlined />}>清空日志</Button>
+              </Popconfirm>
+            </Space>
+          )}
+        >
           <Table<BuildJob>
             rowKey="id"
             size="small"
@@ -551,7 +607,22 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
         open={logJob !== null}
         title={`编译日志 · ${logJob?.id.slice(0, 24) ?? ''}`}
         width={820}
-        footer={<Button onClick={() => setLogJob(null)}>关闭</Button>}
+        footer={(
+          <Space>
+            <Popconfirm
+              title="清空这个任务的日志？"
+              description={activeJob?.status === 'running' ? '编译还在运行，结束后才能清空。' : '日志文件会被截断为空。'}
+              okText="清空"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              disabled={activeJob === null || activeJob.status === 'running' || visibleLines.length === 0}
+              onConfirm={() => { void clearLog() }}
+            >
+              <Button danger disabled={activeJob === null || activeJob.status === 'running' || visibleLines.length === 0}>清空日志</Button>
+            </Popconfirm>
+            <Button onClick={() => setLogJob(null)}>关闭</Button>
+          </Space>
+        )}
         onCancel={() => setLogJob(null)}
         destroyOnHidden
       >
@@ -573,7 +644,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
               status={activeJob.status === 'failed' ? 'exception' : activeJob.status === 'done' ? 'success' : 'active'}
             />
             <pre className="dsh-pw-deploy-log" ref={logRef}>
-              {logLines.length > 0 ? logLines.join('\n') : (logLoading ? '读取日志…' : '等待日志…')}
+              {visibleLines.length > 0 ? visibleLines.join('\n') : logCleared ? '日志已清空' : logLoading ? '读取日志…' : '等待日志…'}
             </pre>
           </Space>
         )}

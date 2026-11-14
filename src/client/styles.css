@@ -672,3 +672,95 @@
   background: var(--chat-pane-bg, #f6f6f6);
   font-weight: 600;
 }
+
+/* 发起任务: toolbar, object tables and the markdown preview. */
+.dsh-task-root {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.dsh-task-error {
+  margin: 0 0 12px;
+}
+
+/* The tab itself already sits inside .dsh-pw-tabbody, which owns the width and
+   the inset padding; this only adds the vertical rhythm. */
+.dsh-task-tabbody {
+  width: 100%;
+  padding: 4px 0 24px;
+  box-sizing: border-box;
+}
+
+.dsh-task-toolbar {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--ant-color-border-secondary, rgba(5, 5, 5, 0.06));
+}
+
+.dsh-task-count {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.dsh-task-source {
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.dsh-task-source:hover {
+  text-decoration: underline;
+}
+
+.dsh-task-muted {
+  color: var(--ant-color-text-tertiary, rgba(0, 0, 0, 0.45));
+  font-size: 12px;
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+.dsh-task-cards {
+  margin-top: 4px;
+}
+
+.dsh-task-cards .dsh-task-card {
+  margin-bottom: 10px;
+}
+
+.dsh-task-md {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--ant-color-fill-quaternary, rgba(0, 0, 0, 0.04));
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dsh-task-result {
+  max-height: 260px;
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.06));
+}
+
+@media (max-width: 767px) {
+  .dsh-task-tabbody,
+  .dsh-task-error {
+    padding-left: 0;
+    padding-right: 0;
+    margin-left: 0;
+    margin-right: 0;
+  }
+
+  .dsh-task-toolbar {
+    gap: 6px;
+  }
+}
+
+.dsh-task-clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

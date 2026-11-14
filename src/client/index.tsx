@@ -59,6 +59,7 @@ import {
 } from './api'
 import { WireGuardPanel } from './wireguard'
 import { PackagesPanel } from './packages'
+import { TasksPanel } from './tasks'
 import { EN as WIREGUARD_EN, dictionary as wireguardDictionary } from './wireguard/i18n'
 
 const NS = 'dsh-mesh'
@@ -936,7 +937,7 @@ function Panel({ ctx }: { ctx: any }) {
   const [progressJob, setProgressJob] = useState<DeployJob | null>(null)
   const [progressLog, setProgressLog] = useState<string[]>([])
   const deployStatusRef = useRef<Record<string, string>>({})
-  const [panelTab, setPanelTab] = useState<'members' | 'network' | 'conversations' | 'packages'>('members')
+  const [panelTab, setPanelTab] = useState<'members' | 'network' | 'conversations' | 'packages' | 'tasks'>('members')
   const [networkRefresh, setNetworkRefresh] = useState(0)
   // Bumped by the toolbar buttons; the conversation tab reloads when it changes.
   const [conversationRefresh, setConversationRefresh] = useState(0)
@@ -1385,7 +1386,7 @@ function Panel({ ctx }: { ctx: any }) {
         <Tabs
           className="dsh-pw-tabs"
           activeKey={panelTab}
-          onChange={key => setPanelTab(key as 'members' | 'network' | 'conversations' | 'packages')}
+          onChange={key => setPanelTab(key as 'members' | 'network' | 'conversations' | 'packages' | 'tasks')}
           tabBarExtraContent={panelTab === 'conversations' ? (
             <Space size={4}>
               <Tooltip title="清空已完成对话">
@@ -1467,6 +1468,17 @@ function Panel({ ctx }: { ctx: any }) {
                   members={memberRows}
                   refreshToken={conversationRefresh}
                 />
+              ),
+            },
+            {
+              key: 'tasks',
+              label: '发起任务',
+              children: (
+                <div className="dsh-pw-tabbody">
+                  <TasksPanel
+                    members={memberRows.map(member => ({ id: member.id, name: member.name, ip: member.ip }))}
+                  />
+                </div>
               ),
             },
             {

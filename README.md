@@ -133,6 +133,15 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - B 完成后，A 的插件用 `agent.followup()` 把结果写回 **A 的同一个会话**；A 正忙就排到下一轮，空闲就唤醒一个 turn，类似子代理完成通知。
 - 不需要 B 主动访问 A；A 长轮询（阻塞式等待）B 的 `/wait`，避免回调端口/NAT 问题。
 
+### 8. 发起任务：对象树 → markdown → SDK 对话
+
+- 面板顶层 Tab「发起任务」：把一件事拆成对象树，每个对象有 `source`（文件 / git 仓库 / 类名）、`define`（要做的事）和 `children`（只存 `{ id, remark }` 引用）。
+- 平铺视图铺开全部对象并标出谁挂在谁下面；树形视图只列根对象逐层展开。根对象按「没有被任何对象引用」算出来，因此同一对象可以挂多处。
+- 编辑走抽屉；表格只给入口。窄屏自动换成卡片列表。
+- 发起时整棵树渲染成 markdown，`POST` 到目标成员 8765 交互服务的 `/v1/conversations`，开一个真实 SDK 对话；历史保存发起那一刻的定义、对话 id、状态与结果。
+- 任务、模板、历史都存在网关的 control-service（`$DSH_HOME/wireguard/tasks/tasks.json`），成员带着入网时的 agent token 读写同一份。
+- 详见 [Step 017](docs/Step%20017%20发起任务.md)。
+
 ## 快速开始
 
 ### 安装插件（本机 DSH）
@@ -284,6 +293,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 014 成员任务插件与主对话回调](docs/Step%20014%20成员任务插件与主对话回调.md) | `call_member`、成员发现、后台等待、agent.followup 通知 |
 | [Step 015 面板事件推送](docs/Step%20015%20面板事件推送.md) | SSE 通道、`fs.watch` 任务目录、面板零轮询 |
 | [Step 016 入网即双向 SSH](docs/Step%20016%20入网即双向SSH.md) | 成员自带密钥、`from=` 限制、`/ssh/authorize`、托管 config 块、撤销 |
+| [Step 017 发起任务](docs/Step%20017%20发起任务.md) | 对象树（source/define/children）、平铺与树形视图、模板、经 SDK 发起对话、历史快照 |
 
 ## 代码位置
 
@@ -298,6 +308,10 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
 | `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` 工具 |
+| `src/wireguard/lib/task-model.ts` | 对象树模型：归一化、根对象、增删改排序、树布局、markdown 渲染 |
+| `src/wireguard/lib/task-store.ts` | 任务文件：原子写、模板与历史归一化、历史上限 |
+| `src/wireguard/lib/task-service.ts` | 草稿/模板/历史、经成员 interop 发起、状态追踪、成员→网关转发 |
+| `src/client/tasks/index.tsx` | 「发起任务」Tab：任务/模板/历史、平铺与树形、抽屉编辑、发起预览 |
 | `src/client/index.tsx` | 侧边栏「DSH 成员」面板 |
 | `code/gate/server.mjs` | 网关：密码门、目标路由、反向代理、WebSocket |
 | `code/gate/members.mjs` | 成员发现、`/__gate/select`、cluster 代理、cookie 隔离 |

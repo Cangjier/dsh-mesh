@@ -48,9 +48,20 @@
     ],
     [
       "pnpm",
-      "run",
-      "build:lib:client"
+      "exec",
+      "tsx",
+      "scripts/compile-referenced-projects.ts",
+      "client"
+    ],
+    [
+      "pnpm",
+      "exec",
+      "tsdown",
+      "--config-loader",
+      "native",
+      "--env.DSH_BUILD_FACE",
+      "client"
     ]
   ],
-  "prepareNotes": "A clean upstream tree has apps/web importing workspace build output (dsh-client-web, the ui-theme CSS, the webworker runtime), and upstream's build:web does not build it. The host library pass produces the Host declarations the client tsc needs; build:lib:client then emits the client bundles. Desktop/native steps are skipped: they are unrelated to the web payload and the desktop bundle needs git metadata a tarball does not carry."
+  "prepareNotes": "A clean upstream tree has apps/web importing workspace build output (dsh-client-web, the ui-theme CSS, the webworker runtime), and upstream's build:web does not build it. Host declarations come from host-libraries; the client tsc must compile only the project references (mode `client`) because the aggregate tsconfig.client.json program needs more than a 2 GB heap and OOMs on a 3 GB member; then the client tsdown pass emits the lib/ bundles. Desktop and native steps are skipped: they are unrelated to the web payload and the desktop bundle needs git metadata a source archive does not carry."
 }

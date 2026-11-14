@@ -60,6 +60,8 @@ export class MemberTaskService {
     this.monitors = new Map()
     /** @type {Map<string, AbortController>} per-task cancellation for the in-flight wait */
     this.controllers = new Map()
+    /** @type {Map<string, Set<() => void>>} `wait_member` calls parked on a task */
+    this.waiters = new Map()
     /** Cached `{ id, name, ip }` of this machine, filled by the first member lookup. */
     this.identity = null
     this.loaded = false
@@ -77,6 +79,7 @@ export class MemberTaskService {
         task.error = 'the plugin stopped before the member conversation completed'
         await this.#save(task).catch(() => {})
       }
+      this.#notifyWaiters(task)
     }
   }
 
@@ -96,6 +99,11 @@ export class MemberTaskService {
           task.error = 'the plugin restarted before the member conversation completed'
           await this.#save(task)
         }
+        // Older records predate per-turn replies; start them at zero so a
+        // resumed task cannot replay an answer it never had.
+        task.replies = Array.isArray(task.replies) ? task.replies : []
+        task.replySeq = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0
+        task.deliveredSeq = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0
         this.tasks.set(task.id, task)
       } catch { }
     }
@@ -274,6 +282,12 @@ export class MemberTaskService {
       interrupted: false,
       attempts: 0,
       turns: 0,
+      /** Replies already accepted from the member, oldest first. */
+      replies: [],
+      /** Newest reply sequence number seen on the member. */
+      replySeq: 0,
+      /** Newest reply seq a `wait_member` call already returned to the model. */
+      deliveredSeq: 0,
       notify,
       notified: false,
       notifiedAt: null,
@@ -292,12 +306,15 @@ export class MemberTaskService {
   }
 
   /**
-   * Wait for one task up to a bounded timeout. The task monitor keeps running
-   * in the background, so a timeout only ends this caller's wait; the caller
-   * can call wait again with the same id.
+   * Wait for the next news about one task, up to a bounded timeout.
+   *
+   * "News" is either a finished-turn reply the model has not seen yet, or the
+   * task reaching a terminal state. The monitor keeps running in the background,
+   * so a timeout only ends this caller's wait; the same taskId can be waited
+   * again, and replies that arrived meanwhile are not lost.
    * @param {string} taskId task id returned by call_member.
    * @param {{timeoutMs?: number, signal?: AbortSignal}} [options] wait options.
-   * @returns {Promise<{done: boolean, timedOut: boolean, task: object}>} outcome.
+   * @returns {Promise<{done: boolean, timedOut: boolean, task: object, replies: object[], state: string}>} outcome.
    */
   async wait(taskId, options = {}) {
     await this.#ensureLoaded()
@@ -310,12 +327,72 @@ export class MemberTaskService {
       if (signal?.aborted) throw new Error('tool call aborted')
       const task = this.tasks.get(id)
       if (task === undefined) throw new Error(`member task not found: ${id}`)
-      if (task.status === 'completed' || task.status === 'failed' || task.status === 'interrupted') {
-        return { done: true, timedOut: false, task }
+      const replies = this.#pendingReplies(task)
+      const terminal = task.status === 'completed' || task.status === 'failed' || task.status === 'interrupted'
+      if (replies.length > 0) {
+        task.deliveredSeq = replies[replies.length - 1].seq
+        await this.#save(task).catch(() => {})
+        return {
+          done: terminal,
+          timedOut: false,
+          task,
+          replies,
+          state: terminal ? (task.status === 'completed' ? 'done' : 'failed') : 'progress',
+        }
+      }
+      if (terminal) {
+        return { done: true, timedOut: false, task, replies: [], state: task.status === 'completed' ? 'done' : 'failed' }
       }
       const left = deadline - Date.now()
-      if (left <= 0) return { done: false, timedOut: true, task }
-      await new Promise(resolve => setTimeout(resolve, Math.min(500, left)))
+      if (left <= 0) return { done: false, timedOut: true, task, replies: [], state: 'running' }
+      await this.#waitForWake(task, left)
+    }
+  }
+
+  /** Replies this task received but no `wait` call has returned yet. */
+  #pendingReplies(task) {
+    const delivered = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0
+    const replies = Array.isArray(task.replies) ? task.replies : []
+    return replies.filter(reply => Number.isSafeInteger(reply?.seq) && reply.seq > delivered)
+  }
+
+  /**
+   * Park until this task changes or the budget runs out.
+   *
+   * A promise per waiter (rather than a poll loop) is what makes a finished
+   * turn reach the model immediately, without a half-second of latency.
+   * @param {object} task member task.
+   * @param {number} ms maximum wait.
+   * @returns {Promise<void>} resolves on a wake or on the deadline.
+   */
+  #waitForWake(task, ms) {
+    return new Promise((resolve) => {
+      let timer
+      const waiter = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+      timer = setTimeout(() => {
+        this.waiters.get(task.id)?.delete(waiter)
+        resolve()
+      }, Math.max(0, ms))
+      timer.unref?.()
+      let parked = this.waiters.get(task.id)
+      if (parked === undefined) {
+        parked = new Set()
+        this.waiters.set(task.id, parked)
+      }
+      parked.add(waiter)
+    })
+  }
+
+  /** Wake every `wait_member` call parked on this task. */
+  #notifyWaiters(task) {
+    const parked = this.waiters.get(task.id)
+    if (parked === undefined) return
+    this.waiters.delete(task.id)
+    for (const waiter of [...parked]) {
+      try { waiter() } catch { }
     }
   }
 
@@ -443,10 +520,13 @@ export class MemberTaskService {
           task.baseUrl,
           'POST',
           `/v1/conversations/${encodeURIComponent(task.conversationId)}/wait`,
-          { timeoutMs: WAIT_TIMEOUT_MS },
+          { timeoutMs: WAIT_TIMEOUT_MS, since: Number.isSafeInteger(task.replySeq) ? task.replySeq : 0 },
           WAIT_TIMEOUT_MS + 10_000,
           signal,
         )
+        // A completed round trip proves the member is healthy: start the retry
+        // budget over, so a long multi-turn task is not failed by one late blip.
+        task.attempts = 0
         if (result.timedOut === true) {
           task.status = 'running'
           await this.#save(task)
@@ -454,7 +534,6 @@ export class MemberTaskService {
         }
         if (this.disposed) break
         const conversation = result.conversation ?? {}
-        task.lastText = typeof conversation.lastText === 'string' ? conversation.lastText : ''
         if (conversation.error) task.error = String(conversation.error)
         const status = String(conversation.status ?? '')
         if (status === 'interrupted' || status === 'unavailable') {
@@ -465,6 +544,40 @@ export class MemberTaskService {
           task.error = String(conversation.error ?? EMPTY_TURN)
           break
         }
+        const state = typeof result.state === 'string' ? result.state : ''
+        if (state === 'progress' || state === 'done') {
+          // A member with per-turn replies: every finished turn carries its own
+          // text, and `done` means the runtime is idle with no subagent left.
+          // The `done` path updates the status before waking anyone, so a parked
+          // `wait_member` never sees a reply that already ended the task and
+          // calls it "progress" by mistake.
+          await this.#acceptReplies(task, result, { notify: state === 'progress' })
+          if (Number.isSafeInteger(result.turn)) task.turns = result.turn
+          if (state === 'progress') {
+            task.emptyWaits = 0
+            task.status = 'running'
+            await this.#save(task)
+            continue
+          }
+          if (task.turns === 0 && String(task.lastText ?? '') === '') {
+            // Idle before the prompt ever produced a turn: the same guard as the
+            // legacy path, so a runtime that starts late is not called finished.
+            task.emptyWaits = (task.emptyWaits ?? 0) + 1
+            if (task.emptyWaits < EMPTY_WAIT_RETRIES) {
+              await new Promise(resolve => setTimeout(resolve, 1_000))
+              continue
+            }
+            task.status = 'failed'
+            task.interrupted = true
+            task.error = EMPTY_TURN
+            break
+          }
+          task.emptyWaits = 0
+          task.status = conversation.error ? 'failed' : 'completed'
+          break
+        }
+        // Older members answer with the conversation only: wait for idle.
+        task.lastText = typeof conversation.lastText === 'string' ? conversation.lastText : ''
         if (status === 'idle' && !this.#turnAdvanced(task, conversation) && String(task.lastText ?? '') === '') {
           // An idle answer without a finished turn is not a finished turn: the
           // target answered while its runtime was shutting down, or the prompt
@@ -511,7 +624,52 @@ export class MemberTaskService {
       await this.#log(task, `${task.status}: ${truncate(task.lastText || task.error || '', 500)}`)
       if (task.notify) await this.#notify(task)
     }
+    // A parked `wait_member` must hear about a terminal state (or an
+    // interruption) without waiting for its own timeout.
+    this.#notifyWaiters(task)
     return task
+  }
+
+  /**
+   * Store the replies a wait response brought and wake parked `wait_member` calls.
+   *
+   * Replies are idempotent on their `seq`, so a response that repeats the last
+   * reply (a `done` that follows a `progress` for the same turn) cannot make the
+   * model read the same answer twice.
+   * @param {object} task the tracked task.
+   * @param {object} result wait response from the member.
+   * @param {{notify?: boolean}} [options] `notify: false` when the caller will
+   *   wake waiters itself after updating the task status.
+   * @returns {Promise<boolean>} whether anything new arrived.
+   */
+  async #acceptReplies(task, result, options = {}) {
+    const incoming = Array.isArray(result.replies) && result.replies.length > 0
+      ? result.replies
+      : (typeof result.text === 'string' && result.text !== '' && Number.isSafeInteger(result.seq)
+          ? [{ seq: result.seq, turn: result.turn, text: result.text }]
+          : [])
+    const seen = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0
+    let added = false
+    for (const reply of incoming) {
+      if (!Number.isSafeInteger(reply?.seq) || reply.seq <= seen) continue
+      if (typeof reply.text !== 'string' || reply.text.trim() === '') continue
+      task.replies = Array.isArray(task.replies) ? task.replies : []
+      task.replies.push({
+        seq: reply.seq,
+        turn: Number.isSafeInteger(reply.turn) ? reply.turn : null,
+        text: truncate(reply.text, 20_000),
+        at: typeof reply.at === 'string' ? reply.at : new Date().toISOString(),
+      })
+      if (task.replies.length > 30) task.replies.splice(0, task.replies.length - 30)
+      task.replySeq = reply.seq
+      task.lastText = truncate(reply.text, 20_000)
+      added = true
+    }
+    if (!added) return false
+    await this.#save(task)
+    await this.#log(task, `reply ${String(task.replySeq)}: ${truncate(task.lastText, 300)}`)
+    if (options.notify !== false) this.#notifyWaiters(task)
+    return true
   }
 
   /**

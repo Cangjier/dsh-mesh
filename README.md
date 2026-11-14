@@ -119,14 +119,14 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 
 - `code/interop-service/server.mjs`：独立进程，默认 `127.0.0.1:8765`。
 - 内部拉起 `dsh --profile sdk`，通过原生 stdio JSON-RPC 创建/驱动/等待对话。
-- 提供 `POST /v1/conversations`、`/messages`、`/notify`、`/wait`、`GET /events`、`/result`、`/healthz`。
+- 提供 `POST /v1/conversations`、`/messages`、`/notify`、`/wait`、`GET /events`、`/result`、`/healthz`；`/wait` 带 `since` 时按轮返回（`state: progress` / `done`）。
 - 提供 `GET /v1/system`（CPU/内存/磁盘/网络/进程）以及 `/v1/system/cpu|memory|disk|network|process` 分区接口。
 - Bearer token；Windows 服务 `DSH-Interop` / Linux `dsh-interop.service`，和网关、DSH、51821 控制面板互不依赖。
 - 详见 [Step 013](docs/Step%20013%20独立DSH交互HTTP服务.md)。
 
 ### 7. 成员任务：A 操作 B 的对话并回调主对话
 
-- 新工具 `call_member`：`delegate` / `send`（只发起，立即返回 taskId）；`wait_member` 有界等待。
+- 新工具 `call_member`：`delegate` / `send`（只发起，立即返回 taskId）；`wait_member` 有界等待，**成员每结束一轮回答就返回**，`state` 区分进行中（还会继续/有子代理在跑）与完成。
 - A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话并等待；`run` 可直接同步等待最终结果。
 - B 完成后，A 的插件用 `agent.followup()` 把结果写回 **A 的同一个会话**；A 正忙就排到下一轮，空闲就唤醒一个 turn，类似子代理完成通知。
 - 不需要 B 主动访问 A；A 轮询 B，避免回调端口/NAT 问题。
@@ -317,7 +317,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `repack` | 用当前仓库刷新已有离线包：只替换 `gate/`、`shared/`、`config/`、`code/*`、根脚本和 `plugins/dsh-mesh/`，DSH 主体（`app/`、`web/`、`runtime/`）复用，最后更新 `.sha256` |
 | `members` | WireGuard 成员发现 |
 | `call_member` | 在成员上发起/继续对话，返回 taskId |
-| `wait_member` | 有界等待成员任务，超时返回继续等待提示 |
+| `wait_member` | 有界等待成员任务：有新回复立刻返回（`state=progress`），完成返回 `done`；超时返回继续等待提示 |
 
 ## 约定与限制
 

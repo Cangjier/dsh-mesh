@@ -34,6 +34,7 @@ async function sharedModule(name) {
 }
 const { collectSystemInfo } = await sharedModule('system-info.mjs')
 const { conversationRecord, normalizeInitiator, normalizeTitle, restoredConversation, titleFromPrompt } = await sharedModule('conversation-meta.mjs')
+const { applySessionEvent, repliesSince, summarizeReplies } = await sharedModule('conversation-replies.mjs')
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..', '..')
@@ -76,6 +77,18 @@ const REQUEST_TIMEOUT_MS = Number.parseInt(setting('DSH_INTEROP_REQUEST_TIMEOUT_
 const RESUME_TIMEOUT_MS = 120_000
 const MAX_EVENTS = Number.parseInt(setting('DSH_INTEROP_MAX_EVENTS', '5000'), 10)
 const MAX_BODY = 1024 * 1024
+/**
+ * How long a wait looks for "the conversation is now fully idle" before it
+ * reports the finished turn as still in progress.
+ *
+ * The probe races the conversation's one shared `session/wait`, so a task that
+ * really ended answers `done` within milliseconds while a task that continues
+ * pays at most this much extra latency per turn. Setting it to 0 reports every
+ * finished turn as progress immediately.
+ */
+const SETTLE_MS = Math.max(0, Number.parseInt(setting('DSH_INTEROP_SETTLE_MS', '300'), 10) || 0)
+/** A shared `session/wait` older than this is considered lost and restarted. */
+const SESSION_WAIT_TIMEOUT_MS = Number.parseInt(setting('DSH_INTEROP_SESSION_WAIT_TIMEOUT_MS', '3600000'), 10)
 
 mkdirSync(WORKDIR, { recursive: true })
 mkdirSync(DSH_HOME, { recursive: true })
@@ -177,13 +190,6 @@ function contentBlocks(value) {
   return blocks
 }
 
-function assistantText(event) {
-  if (event?.type !== 'assistant/message') return ''
-  const blocks = event?.data?.message?.content
-  if (!Array.isArray(blocks)) return ''
-  return blocks.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join('')
-}
-
 const conversations = new Map()
 const bySession = new Map()
 let child = null
@@ -218,6 +224,7 @@ function publicConversation(conversation) {
     title: conversation.title ?? '',
     initiator: conversation.initiator ?? null,
     turns: Number.isSafeInteger(conversation.turns) ? conversation.turns : 0,
+    replySeq: Number.isSafeInteger(conversation.replySeq) ? conversation.replySeq : 0,
   }
 }
 
@@ -282,6 +289,15 @@ function loadState() {
         notifiedAt: null,
         // No session exists in the new child yet; the next request resumes one.
         generation: -1,
+        // Runtime-only reply bookkeeping: a restored conversation has no live
+        // turns, and the first message starts a fresh one.
+        replySeq: 0,
+        replies: [],
+        turnText: '',
+        idle: false,
+        settledAt: null,
+        waiters: new Set(),
+        pendingWait: null,
       }
       conversations.set(conversation.id, conversation)
       bySession.set(conversation.sessionId, conversation)
@@ -295,15 +311,13 @@ function loadState() {
 function appendEvent(conversation, event) {
   conversation.events.push(event)
   if (conversation.events.length > MAX_EVENTS) conversation.events.splice(0, conversation.events.length - MAX_EVENTS)
-  const text = assistantText(event)
-  if (text !== '') conversation.lastText = text
-  if (event?.type === 'turn/end') {
-    conversation.turns += 1
-    if (event?.data?.reason?.kind === 'error') {
-      conversation.error = event.data.reason.error?.message ?? 'turn ended with an error'
-    }
-  }
+  // Fold the turn into a reply first: a waiter must be able to see the text the
+  // moment it is woken, and a text-less turn must not wake anyone.
+  const reply = applySessionEvent(conversation, event)
+  // A turn just started: whatever "settled" meant before no longer holds.
+  if (event?.type === 'turn/start') conversation.idle = false
   broadcast(conversation, { type: 'session.event', sessionId: conversation.sessionId, event })
+  if (reply !== null) wake(conversation)
 }
 
 function findConversation(id) {
@@ -348,7 +362,12 @@ async function ensureSessionOpen(conversation) {
     await sdkRequest('session/resume', { sessionId: conversation.sessionId }, RESUME_TIMEOUT_MS)
     conversation.generation = generation
     // The turn that was cut short cannot come back, but the conversation can.
-    if (conversation.status === 'interrupted') updateConversation(conversation, { status: 'idle', error: null })
+    // An `unavailable` status is kept on purpose: it is what tells the waiting
+    // member that this turn was interrupted, and `send` clears it.
+    if (conversation.status === 'interrupted') {
+      conversation.idle = true
+      updateConversation(conversation, { status: 'idle', error: null })
+    }
     log(`resumed session ${conversation.sessionId}`)
     return true
   } catch (error) {
@@ -384,6 +403,12 @@ function handleNotification(method, params) {
     const conversation = bySession.get(String(params?.sessionId ?? ''))
     if (conversation === undefined) return
     const status = params?.status === 'running' ? 'running' : 'idle'
+    // A new turn makes the conversation active again; only the shared
+    // `session/wait` may declare it finished (it also accounts for subagents).
+    if (status === 'running') {
+      conversation.idle = false
+      conversation.settledAt = null
+    }
     updateConversation(conversation, { status })
     broadcast(conversation, { type: 'session.status', sessionId: conversation.sessionId, status })
     if (status === 'idle') notifyCallback(conversation)
@@ -472,7 +497,10 @@ function startChild() {
     child = null
     log(`SDK exited (${signal ?? String(code)})`)
     for (const conversation of conversations.values()) {
+      conversation.pendingWait = null
       if (conversation.status === 'running') updateConversation(conversation, { status: 'unavailable', error: 'SDK runtime exited' })
+      // A waiter parked on this conversation must not sit until its timeout.
+      wake(conversation)
     }
     scheduleRestart()
   })
@@ -508,6 +536,13 @@ async function createConversation(request) {
     callbackUrl: typeof request.callbackUrl === 'string' ? request.callbackUrl : '',
     notifiedAt: null,
     turns: 0,
+    replySeq: 0,
+    replies: [],
+    turnText: '',
+    idle: false,
+    settledAt: null,
+    waiters: new Set(),
+    pendingWait: null,
   }
   conversations.set(id, conversation)
   bySession.set(sessionId, conversation)
@@ -519,6 +554,8 @@ async function createConversation(request) {
       const blocks = contentBlocks(request.prompt)
       const result = await sdkRequest('session/query', { sessionId, contentBlocks: blocks })
       updateConversation(conversation, { status: 'running' })
+      conversation.idle = false
+      conversation.settledAt = null
       conversation.lastReceipt = result
     }
     return conversation
@@ -536,29 +573,273 @@ async function sendMessage(conversation, request) {
   await ensureSessionOpen(conversation)
   const result = await sdkRequest('session/query', { sessionId: conversation.sessionId, contentBlocks: blocks })
   updateConversation(conversation, { status: 'running', error: null })
+  conversation.idle = false
+  conversation.settledAt = null
   conversation.notifiedAt = null
   if (request.callbackUrl !== undefined) conversation.callbackUrl = String(request.callbackUrl)
   broadcast(conversation, { type: 'message.accepted', sessionId: conversation.sessionId, result })
   return result
 }
 
-async function waitConversation(conversation, timeoutMs) {
+/**
+ * Wake every request parked on this conversation.
+ *
+ * Waiters are plain resolvers: the loop in {@link waitForReply} re-reads the
+ * conversation after each wake, so a wake never has to carry the news itself.
+ * @param {object} conversation runtime conversation record.
+ * @returns {void}
+ */
+function wake(conversation) {
+  const waiters = conversation.waiters
+  if (!(waiters instanceof Set) || waiters.size === 0) return
+  const parked = [...waiters]
+  waiters.clear()
+  for (const resolve of parked) {
+    try { resolve() } catch { }
+  }
+}
+
+/**
+ * Park until someone wakes us or the budget runs out.
+ * @param {object} conversation runtime conversation record.
+ * @param {number} ms maximum wait.
+ * @returns {Promise<void>} resolves on a wake or on the deadline.
+ */
+function nextSignal(conversation, ms) {
+  if (!(conversation.waiters instanceof Set)) conversation.waiters = new Set()
+  return new Promise((resolve) => {
+    let timer
+    const waiter = () => {
+      clearTimeout(timer)
+      resolve()
+    }
+    timer = setTimeout(() => {
+      conversation.waiters.delete(waiter)
+      resolve()
+    }, Math.max(0, ms))
+    timer.unref?.()
+    conversation.waiters.add(waiter)
+  })
+}
+
+/**
+ * Race a promise against a deadline without cancelling it.
+ * @param {Promise<any>} promise work to race.
+ * @param {number} ms budget.
+ * @returns {Promise<{timedOut: boolean, value?: any}>} outcome.
+ */
+function raceDeadline(promise, ms) {
+  return new Promise((resolve) => {
+    let settled = false
+    let timer
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    timer = setTimeout(() => finish({ timedOut: true }), Math.max(0, ms))
+    timer.unref?.()
+    promise.then(
+      value => finish({ timedOut: false, value }),
+      error => finish({ timedOut: false, value: { ok: false, error } }),
+    )
+  })
+}
+
+/**
+ * The conversation's single in-flight SDK wait.
+ *
+ * `session/wait` already answers the only question a waiter really has — "is the
+ * root agent idle and are all of its subagents finished?" — so the service keeps
+ * exactly one of them running per conversation and races it instead of issuing
+ * new ones. A probe that loses the race does not cancel it: the answer stays
+ * useful for the next waiter (that is how a parent turn that ended while its
+ * subagents were still running turns into a `done` later).
+ * @param {object} conversation runtime conversation record.
+ * @returns {Promise<{ok: boolean, error?: Error}>} settled outcome.
+ */
+function sessionWait(conversation) {
+  if (conversation.idle === true) return Promise.resolve({ ok: true })
+  if (conversation.pendingWait !== null && conversation.pendingWait !== undefined) {
+    return conversation.pendingWait.promise
+  }
+  if (transport === null || !sdkReady) {
+    return Promise.resolve({ ok: false, error: Object.assign(new Error('SDK runtime is not ready'), { status: 503, code: 'sdk_unavailable' }) })
+  }
+  const controller = new AbortController()
+  const entry = { controller, promise: null }
+  const timer = setTimeout(() => controller.abort(new Error('session wait timed out')), SESSION_WAIT_TIMEOUT_MS)
+  timer.unref?.()
+  const settle = (value) => {
+    clearTimeout(timer)
+    if (conversation.pendingWait === entry) conversation.pendingWait = null
+    return value
+  }
+  entry.promise = transport.request('session/wait', { sessionId: conversation.sessionId }, controller.signal).then(
+    () => {
+      const value = settle({ ok: true })
+      markSettled(conversation)
+      return value
+    },
+    error => settle({ ok: false, error }),
+  )
+  conversation.pendingWait = entry
+  return entry.promise
+}
+
+/**
+ * Record that the conversation reached full idle.
+ * @param {object} conversation runtime conversation record.
+ * @returns {void}
+ */
+function markSettled(conversation) {
+  conversation.idle = true
+  conversation.settledAt = new Date().toISOString()
+  updateConversation(conversation, { status: 'idle' })
+  broadcast(conversation, { type: 'session.settled', sessionId: conversation.sessionId })
+  notifyCallback(conversation)
+  wake(conversation)
+}
+
+/** Turns finished so far. */
+function turnsOf(conversation) {
+  return Number.isSafeInteger(conversation.turns) ? conversation.turns : 0
+}
+
+/** Newest reply sequence number. */
+function seqOf(conversation) {
+  return Number.isSafeInteger(conversation.replySeq) ? conversation.replySeq : 0
+}
+
+/**
+ * Old wait: block until root agent and all subagents are finished.
+ * @param {object} conversation runtime conversation record.
+ * @param {number} timeoutMs budget.
+ * @returns {Promise<object>} wait result.
+ */
+async function waitUntilSettled(conversation, timeoutMs) {
+  await ensureSessionOpen(conversation)
+  const outcome = await raceDeadline(sessionWait(conversation), timeoutMs)
+  if (outcome.timedOut === true) return { timedOut: true, state: 'running', settled: false }
+  if (outcome.value?.ok !== true) throw outcome.value?.error ?? new Error('session wait failed')
+  updateConversation(conversation, { status: 'idle' })
+  return {
+    timedOut: false,
+    state: 'done',
+    settled: true,
+    text: conversation.lastText ?? '',
+    turn: turnsOf(conversation),
+    seq: seqOf(conversation),
+    replies: [],
+  }
+}
+
+/**
+ * Whether the conversation looks finished right now.
+ *
+ * "Finished" is the shared `session/wait` resolving: root idle and every
+ * subagent settled. A finished turn that is followed by another turn keeps that
+ * wait pending, so this returns false and the caller reports progress.
+ * @param {object} conversation runtime conversation record.
+ * @param {number} budgetMs how long the probe may take.
+ * @returns {Promise<boolean>} true when the task really ended.
+ */
+async function settledWithin(conversation, budgetMs) {
+  if (conversation.idle === true) return true
+  const outcome = await raceDeadline(sessionWait(conversation), budgetMs)
+  if (outcome.timedOut === true) return false
+  return outcome.value?.ok === true
+}
+
+/**
+ * New wait: return as soon as a turn produced text, and say whether the
+ * conversation will continue.
+ *
+ * The reply is read from the same event stream the panel sees, so a finished
+ * turn wakes the caller immediately. Before answering `progress`, the service
+ * gives the shared `session/wait` a short chance to resolve, which folds "this
+ * was also the last turn" into the same response instead of making the caller
+ * wait a second time.
+ * @param {object} conversation runtime conversation record.
+ * @param {number} timeoutMs budget for this call.
+ * @param {number} since last reply seq the caller already received.
+ * @returns {Promise<object>} wait result with `state` of `progress`, `done`, or `running`.
+ */
+async function waitForReply(conversation, timeoutMs, since) {
+  const deadline = Date.now() + timeoutMs
+  // Keep one wait running from the start: it is how "the whole task ended"
+  // reaches this loop even when the last turn produced no new text.
+  if (conversation.idle !== true) void sessionWait(conversation)
+  for (;;) {
+    const replies = repliesSince(conversation, since)
+    if (replies.length > 0) {
+      const settled = conversation.idle === true
+        ? true
+        : await settledWithin(conversation, Math.min(SETTLE_MS, Math.max(0, deadline - Date.now())))
+      const summary = summarizeReplies(replies)
+      return {
+        timedOut: false,
+        state: settled ? 'done' : 'progress',
+        settled,
+        text: summary.text,
+        turn: summary.turn ?? turnsOf(conversation),
+        seq: summary.seq ?? seqOf(conversation),
+        replies,
+      }
+    }
+    if (conversation.idle === true) {
+      // The last reply was already delivered as progress; this call only has to
+      // report that the whole task is over.
+      return {
+        timedOut: false,
+        state: 'done',
+        settled: true,
+        text: '',
+        turn: turnsOf(conversation),
+        seq: seqOf(conversation),
+        replies: [],
+      }
+    }
+    if (conversation.status === 'unavailable') {
+      // The turn died with the runtime. Report it as a terminal result; the
+      // caller reads `conversation.status` and fails the task with that reason.
+      return {
+        timedOut: false,
+        state: 'done',
+        settled: true,
+        text: '',
+        turn: turnsOf(conversation),
+        seq: seqOf(conversation),
+        replies: [],
+      }
+    }
+    const left = deadline - Date.now()
+    if (left <= 0) {
+      return {
+        timedOut: true,
+        state: 'running',
+        settled: false,
+        text: '',
+        turn: turnsOf(conversation),
+        seq: seqOf(conversation),
+        replies: [],
+      }
+    }
+    await nextSignal(conversation, left)
+  }
+}
+
+async function waitConversation(conversation, timeoutMs, since) {
   if (conversation.status === 'interrupted' && conversation.error !== null) {
     // The restart ended this turn before it could finish; there is no live
     // session to wait for, and the caller must hear about it right away.
-    return { timedOut: false }
+    return { timedOut: false, state: 'done', settled: true }
   }
-  await ensureSessionOpen(conversation)
-  try {
-    await sdkRequest('session/wait', { sessionId: conversation.sessionId }, timeoutMs)
-    updateConversation(conversation, { status: 'idle' })
-    return { timedOut: false }
-  } catch (error) {
-    if (error?.name === 'AbortError' || /timeout|aborted/i.test(String(error?.message ?? ''))) {
-      return { timedOut: true }
-    }
-    throw error
-  }
+  // A caller that sends no cursor gets the old, all-or-nothing behaviour.
+  if (!Number.isSafeInteger(since) || since < 0) return waitUntilSettled(conversation, timeoutMs)
+  if (conversation.idle !== true) await ensureSessionOpen(conversation)
+  return waitForReply(conversation, timeoutMs, since)
 }
 
 const server = http.createServer(async (request, response) => {
@@ -666,8 +947,19 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && suffix === 'wait') {
       const body = await readJson(request).catch(() => ({}))
       const timeoutMs = Number.isSafeInteger(body.timeoutMs) ? Math.max(1000, Math.min(body.timeoutMs, 600_000)) : 30_000
-      const result = await waitConversation(conversation, timeoutMs)
-      json(response, 200, { ok: true, timedOut: result.timedOut, conversation: publicConversation(conversation) })
+      const since = Number.isSafeInteger(body.since) ? body.since : undefined
+      const result = await waitConversation(conversation, timeoutMs, since)
+      json(response, 200, {
+        ok: true,
+        timedOut: result.timedOut === true,
+        state: result.state ?? 'done',
+        settled: result.settled === true,
+        text: typeof result.text === 'string' ? result.text : '',
+        turn: Number.isSafeInteger(result.turn) ? result.turn : turnsOf(conversation),
+        seq: Number.isSafeInteger(result.seq) ? result.seq : seqOf(conversation),
+        replies: Array.isArray(result.replies) ? result.replies : [],
+        conversation: publicConversation(conversation),
+      })
       return
     }
     fail(response, 405, 'method_not_allowed', 'Unsupported method for this endpoint.')

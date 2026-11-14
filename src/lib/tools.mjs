@@ -245,8 +245,10 @@ export function registerTools(ctx, toolsCtx, service) {
     description: [
       '等待一个由 call_member 发起的成员任务，最多 timeoutMs 毫秒。',
       '',
-      '完成：返回成员对话的最终文本。',
-      '超时：返回 done=false 和“可以继续调用 wait_member”的提示；用同一个 taskId 再调一次即可。',
+      '成员对话一有新回复（一轮结束）就立刻返回，不等到整段任务结束；返回值带 state：',
+      'progress：本轮回复已返回，但成员还会继续（可能还有未完成的子代理）；用同一个 taskId 再等下一轮。',
+      'done：整段任务完成，返回最终文本。',
+      '超时：done=false、state=running，用同一个 taskId 继续等即可，期间产生的回复不会丢。',
       '失败/中断：返回错误；目标 DSH 重启时可以用 call_member send 继续该对话。',
       '每次调用有上限（默认 30000，最大 300000 毫秒），不会无限阻塞；用户停止当前对话会中止本次等待。',
     ].join('\n'),
@@ -271,7 +273,42 @@ export function registerTools(ctx, toolsCtx, service) {
       const timeoutMs = Number.isSafeInteger(args.timeoutMs) ? args.timeoutMs : 30_000
       const result = await memberTasks.wait(args.taskId, { timeoutMs, signal: exec.signal })
       const task = result.task
-      const data = { ...task, done: result.done, timedOut: result.timedOut, logFile: memberTasks.logPath(task.id) }
+      const replies = Array.isArray(result.replies) ? result.replies : []
+      const replyText = replies.map(reply => reply.text).join('\n\n').trim()
+      const data = {
+        ...task,
+        done: result.done,
+        timedOut: result.timedOut,
+        state: result.state,
+        text: replyText,
+        replies,
+        logFile: memberTasks.logPath(task.id),
+      }
+      if (!result.done && result.state === 'progress') {
+        return {
+          ok: true,
+          text: [
+            `成员任务 ${task.id} 进行中：${task.member}（${task.memberIp}），对话 ${task.conversationId}。`,
+            replyText !== '' ? `本轮回复：\n${replyText}` : '',
+            `成员还会继续（可能还有未完成的子代理）。继续等待下一轮：taskId="${task.id}"，timeoutMs=30000。`,
+            `日志：${data.logFile}`,
+          ].filter(line => line !== '').join('\n'),
+          data,
+        }
+      }
+      if (result.done && task.status === 'completed') {
+        const finalText = replyText !== '' ? replyText : (typeof task.lastText === 'string' ? task.lastText : '')
+        return {
+          ok: true,
+          text: [
+            `成员任务 ${task.id} 已完成：${task.member}（${task.memberIp}）。`,
+            '结果：',
+            finalText !== '' ? finalText : '(成员没有返回文本结果)',
+            `日志：${data.logFile}`,
+          ].join('\n'),
+          data,
+        }
+      }
       if (!result.done) {
         const effective = Math.min(300_000, Math.max(1000, timeoutMs))
         return {
@@ -285,22 +322,11 @@ export function registerTools(ctx, toolsCtx, service) {
           data,
         }
       }
-      if (task.status === 'completed') {
-        return {
-          ok: true,
-          text: [
-            `成员任务 ${task.id} 已完成：${task.member}（${task.memberIp}）。`,
-            '结果：',
-            typeof task.lastText === 'string' && task.lastText !== '' ? task.lastText : '(成员没有返回文本结果)',
-            `日志：${data.logFile}`,
-          ].join('\n'),
-          data,
-        }
-      }
       return {
         ok: false,
         text: [
           `成员任务 ${task.id} ${task.status}：${task.error ?? 'unknown'}`,
+          replyText !== '' ? `中断前的回复：\n${replyText}` : '',
           task.interrupted === true ? '目标成员的 DSH 重启或运行时退出打断了这一轮；可以用 call_member send 同一个 taskId 继续。' : '',
           `日志：${data.logFile}`,
         ].filter(line => line !== '').join('\n'),

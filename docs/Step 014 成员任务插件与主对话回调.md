@@ -59,6 +59,28 @@ dsh_member_task action="send" taskId="member-..." content="把结果写到 /tmp/
 
 发送后重新进入等待；B 下一轮完成后继续通知 A。
 
+### wait_member：分轮等待
+
+```text
+wait_member taskId="member-..." timeoutMs=30000
+```
+
+B 的对话**每结束一轮回答就立刻返回**，不等整段任务结束；返回值里的 `state` 说明后续：
+
+| `state` | 含义 | 下一步 |
+|---|---|---|
+| `progress` | 这一轮的回答已返回，但对话还会继续（还有排队的下一轮，或名下还有子代理在跑） | 用同一个 taskId 再 wait，拿下一轮 |
+| `done` | 整段任务结束，`text` 是最终回答 | 结束 |
+| `running` | 这段时间没有新回复（`done=false, timedOut=true`） | 继续 wait，回复不会丢 |
+
+实现要点：
+
+- 成员侧的交互服务从 `session.event` 里按轮累积回答，`POST /wait` 带上 `since`（本任务已收到的最后一个 `seq`），一有整轮回答就返回。
+- A 侧的 `MemberTaskService` 把回复存进 `task.replies`，并**直接唤醒**正在等 `wait_member` 的调用（不是每 500ms 轮询），响应只多一次本地唤醒的延迟。
+- 返回前的“完成探测”由成员侧完成：服务端复用一个常驻的 `session/wait`，300ms 内能结束就直接返回 `done`，所以单轮任务只返回一次。
+- 每条回复按 `seq` 去重，`progress` 之后跟一条 `done`（同一轮）不会让模型把同一段答案读两遍。
+- 老成员（没有 `since` 支持）仍走原来的“等到 idle”语义，A 侧自动兼容。
+
 ### status / list / logs
 
 ```text

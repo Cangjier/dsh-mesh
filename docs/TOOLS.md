@@ -385,7 +385,27 @@ call_member { "action": "send", "taskId": "member-...", "content": "把结果写
   → B 下一轮完成后继续通知 A
 ```
 
-### 6.6 任务文件
+### 6.6 wait_member：按轮返回
+
+```text
+wait_member { "taskId": "member-...", "timeoutMs": 30000 }
+```
+
+成员对话每结束一轮回答就返回，不等整段任务结束：
+
+```text
+state=progress  → 本轮回复已返回；对话还会继续，或名下还有子代理在跑
+state=done      → 整段任务完成，text 为最终回答
+state=running   → 这段时间没有新回复（done=false, timedOut=true），继续 wait
+```
+
+`data` 里带 `replies`（本轮及之前未返回的回复，按 `seq` 去重）、`text`、`seq`、`turn`。
+
+实现上 A 侧不再轮询：`MemberTaskService.wait()` 被 `#notifyWaiters()` 直接唤醒；
+成员侧 `POST /wait` 带 `since`，由交互服务从 `session.event` 按轮累积回答并即时返回
+（详见 Step 013「等待对话」）。
+
+### 6.7 任务文件
 
 ```text
 $DSH_HOME/mesh/member-tasks/<taskId>.json

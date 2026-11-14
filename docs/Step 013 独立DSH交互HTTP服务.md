@@ -29,6 +29,8 @@ DSH_INTEROP_PROVIDER=deepseek-official
 DSH_INTEROP_MODEL=deepseek-flash
 DSH_INTEROP_APPROVE=0
 DSH_INTEROP_USE_GATE_PASSWORD=0
+# 可选：分轮等待返回前的“是否已完成”探测窗口，默认 300ms
+DSH_INTEROP_SETTLE_MS=300
 ```
 
 - `DSH_INTEROP_BIND=0.0.0.0` 或 VPN IP 才能让成员 A 访问；必须同时配置防火墙。
@@ -36,6 +38,7 @@ DSH_INTEROP_USE_GATE_PASSWORD=0
 - 模型必须是 B 的 DSH 凭据支持的模型；默认 `deepseek-flash`。
 - `DSH_INTEROP_USE_GATE_PASSWORD=1` 时 token 直接使用 `config/gate.env` 的 `DSH_GATE_PASSWORD`，不读 `DSH_INTEROP_TOKEN`。**这等于把网关登录密码同时变成可执行 DSH 工具的服务凭据**：任何知道网关密码的人都能调用 8765；只应在 loopback/VPN、且接受这个风险时使用。单独随机 token 更安全。
 - 修改网关密码后需要重启 `DSH-Interop`，token 才会跟着变。
+- `DSH_INTEROP_SETTLE_MS` 只影响带 `since` 的 `wait`：越大越容易把“最后一轮”和“进行中”合并成一次 `done`，代价是进行中最多晚这么久返回。
 
 Token 也可以通过 `data/interop-token` 自动生成；HTTP 请求必须带：
 
@@ -161,10 +164,36 @@ POST /v1/conversations/<id>/notify
 POST /v1/conversations/<id>/wait
 Authorization: Bearer <token>
 
-{"timeoutMs":60000}
+{"timeoutMs":60000,"since":3}
 ```
 
-调用 SDK `session/wait`，在根 Agent 空闲且受管子任务结束后返回。超时返回 `timedOut:true`，对话继续在后台运行。
+**不带 `since`（老调用方）**：调用 SDK `session/wait`，在根 Agent 空闲且受管子任务结束后返回。超时返回 `timedOut:true`，对话继续在后台运行。
+
+**带 `since`（分轮等待）**：一有新的整轮回答就返回，不等到整段任务结束。
+
+`since` 是调用方已经收到的最后一个回复序号（首次传 `0`）。返回值：
+
+```json
+{
+  "timedOut": false,
+  "state": "progress",
+  "settled": false,
+  "text": "这一轮的完整回答",
+  "turn": 3,
+  "seq": 5,
+  "replies": [{"seq": 5, "turn": 3, "text": "...", "at": "..."}]
+}
+```
+
+- `state: "progress"` —— 这一轮结束了，但对话还会继续（还有排队的下一轮），或名下还有子代理在跑；用新的 `seq` 再等下一轮。
+- `state: "done"` —— 整段任务结束（根 Agent 空闲，子代理全部收尾），`text` 是最后一轮的回答。
+- `timedOut: true` —— 这段时间没有新回复，`state: "running"`，对话继续在后台运行；用同一个 `since` 再等。
+
+实现上：
+
+- 每轮的回答由服务端**从已有的 `session.event` 流里累积**（`turn/start` … `assistant/message` … `turn/end`），不需要插件，也不会漏；没有文本的轮次不产生回复，但轮数照常前进。
+- 服务端每个对话只保留**一个在飞的 `session/wait`**。要返回 `progress` 前，先用它做一次 `DSH_INTEROP_SETTLE_MS`（默认 300ms）的探测：能立刻完成就说明这一轮同时也是最后一轮，直接返回 `done`，不会出现“先进行中、紧接着又完成”的两次返回；探测没命中也**不取消**它，下一个等待继续用（父轮结束时子代理还在跑的情况，就是靠它最后返回 `done`）。
+- `DSH_INTEROP_SETTLE_MS=0` 可以关掉这段探测延迟，代价是每个完成的轮次都会先报一次 `progress`。
 
 ### 状态 / 结果
 

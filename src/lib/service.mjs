@@ -461,8 +461,8 @@ export class MeshService {
       if (found.id !== 'local') {
         if (found.online === false) throw new Error(`member ${found.name} is offline`)
         const platform = String(found.system?.platform ?? '').toLowerCase()
-        if (platform !== '' && !platform.startsWith('linux')) {
-          throw new Error(`member build needs a Linux member; ${found.name} runs ${String(found.system?.platform)}`)
+        if (platform !== '' && !platform.startsWith('linux') && !platform.startsWith('win')) {
+          throw new Error(`member build needs Linux or Windows; ${found.name} runs ${String(found.system?.platform)}`)
         }
         member = found
       }
@@ -474,6 +474,10 @@ export class MeshService {
     if (proxyMemberId !== '' && proxyMember === null) throw new Error(`proxy member not found: ${proxyMemberId}`)
     if (proxyMember !== null && proxyMember.id === 'local') {
       throw new Error('the local host cannot proxy its own build; pick a member')
+    }
+    if (proxyMember !== null && String(proxyMember.system?.platform ?? '').toLowerCase().startsWith('win')) {
+      // The egress proxy is one small Node script started with `bash -s`.
+      throw new Error(`proxy member must be Linux; ${proxyMember.name} runs ${String(proxyMember.system?.platform)}`)
     }
     const job = await createJob({
       root: this.jobRoot,
@@ -572,13 +576,14 @@ export class MeshService {
         if (existsSync(candidate)) identityFile = candidate
       }
     }
+    const platform = String(member.system?.platform ?? '').toLowerCase()
     return {
       host: member.ip,
       user,
       port,
       identityFile,
       appRoot: typeof member.system?.appRoot === 'string' ? member.system.appRoot : undefined,
-      os: 'linux',
+      os: platform.startsWith('win') ? 'windows' : 'linux',
     }
   }
 

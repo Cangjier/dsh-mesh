@@ -107,6 +107,100 @@ function quote(value) {
 }
 
 /**
+ * Build the PowerShell script that runs one job on a Windows member.
+ *
+ * Windows members have no git and no bash; what they do have is the DSH
+ * runtime (`runtime\node\node.exe` + corepack), the system `tar.exe`, and
+ * PowerShell. So the checkout is a codeload tarball extracted with tar, and the
+ * engine runs exactly as it does on Linux — it is cross-platform and can emit a
+ * linux-x64 archive from a Windows host.
+ * @param {{jobId: string, ref: string, targets: string[], proxyUrl?: string|null, repoUrl?: string, heapMb?: number, appRoot?: string}} options script input.
+ * @returns {string} PowerShell script.
+ */
+export function windowsBuildScript(options) {
+  const repo = options.repoUrl ?? DEFAULT_MESH_REPO
+  const codeload = repo
+    .replace(/^git\+/u, '')
+    .replace(/\.git$/u, '')
+    .replace(/^https:\/\/github\.com\//u, 'https://codeload.github.com/')
+    .replace(/\/+$/u, '')
+  const zipUrl = `${codeload}/zip/refs/heads/main`
+  const heap = Number.isSafeInteger(options.heapMb) && options.heapMb > 0 ? options.heapMb : 4096
+  const proxy = typeof options.proxyUrl === 'string' ? options.proxyUrl.trim() : ''
+  const proxyArgument = proxy === '' ? '' : ` -Proxy ${quotePs(proxy)}`
+  const appRoot = String(options.appRoot ?? '').replace(/[\\/]+$/u, '')
+  const candidates = [
+    ...(appRoot === '' ? [] : [quotePs(`${appRoot}\\runtime\\node`)]),
+    '"$env:USERPROFILE\\.dsh\\dsh-mesh\\current\\runtime\\node"',
+    '"$env:USERPROFILE\\.dsh\\dsh-person-web\\runtime\\node"',
+    '"$env:ProgramFiles\\nodejs"',
+  ]
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "$root = Join-Path $env:USERPROFILE '.dsh\\mesh'",
+    "$src = Join-Path $root 'build-src'",
+    "$bin = Join-Path $root 'bin'",
+    `$out = Join-Path $root 'build\\${options.jobId}'`,
+    'New-Item -ItemType Directory -Force -Path $out, $bin | Out-Null',
+    '$nodeDir = $null',
+    `foreach ($candidate in @(${candidates.join(', ')})) { if (Test-Path (Join-Path $candidate 'node.exe')) { $nodeDir = $candidate; break } }`,
+    "if ($null -eq $nodeDir) { throw 'no node runtime on this member' }",
+    '$env:PATH = "$bin;$nodeDir;$env:PATH"',
+    "$env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'",
+    "$env:CI = '1'",
+    `$env:NODE_OPTIONS = '--max-old-space-size=${String(heap)}'`,
+    proxy === '' ? '' : `$env:HTTP_PROXY = ${quotePs(proxy)}; $env:HTTPS_PROXY = $env:HTTP_PROXY`,
+    "Write-Output 'downloading the dsh-mesh checkout'",
+    // A zip + Expand-Archive instead of the tar.gz: Windows' bsdtar fails on
+    // the repository's Chinese doc names ("Invalid empty pathname"), while
+    // .NET's zip reader keeps UTF-8 names intact.
+    '$archive = Join-Path $root "dsh-mesh.zip"',
+    `$curl = Join-Path $env:SystemRoot 'System32\\curl.exe'`,
+    `if (Test-Path $curl) { & $curl -fsSL${proxy === '' ? '' : ` --proxy ${quotePs(proxy)}`} -o $archive '${zipUrl}' } else { Invoke-WebRequest -Uri '${zipUrl}' -OutFile $archive -UseBasicParsing${proxyArgument} }`,
+    'if ($LASTEXITCODE -ne 0 -or -not (Test-Path $archive)) { throw "mesh download failed ($LASTEXITCODE)" }',
+    '$extract = Join-Path $root "extract"',
+    'Remove-Item -Recurse -Force $src, $extract -ErrorAction SilentlyContinue',
+    'New-Item -ItemType Directory -Force -Path $extract | Out-Null',
+    'Expand-Archive -LiteralPath $archive -DestinationPath $extract -Force',
+    '$inner = Get-ChildItem -Directory $extract | Select-Object -First 1',
+    'if ($null -eq $inner) { throw "mesh archive had no top-level directory" }',
+    'New-Item -ItemType Directory -Force -Path $src | Out-Null',
+    'Move-Item -Path (Join-Path $inner.FullName "*") -Destination $src -Force',
+    'Remove-Item -Recurse -Force $extract, $archive -ErrorAction SilentlyContinue',
+    'if (-not (Test-Path (Join-Path $src "code\\build\\cli.mjs"))) { throw "mesh checkout is incomplete" }',
+    `& (Join-Path $nodeDir 'corepack.cmd') enable --install-directory $bin | Out-Null`,
+    'Set-Location $src',
+    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(','))}${proxy === '' ? '' : ` --proxy ${quotePs(proxy)}`}`,
+    '$code = $LASTEXITCODE',
+    'Get-ChildItem -Directory $out -ErrorAction SilentlyContinue | Select-Object -First 5 -ExpandProperty FullName',
+    'exit $code',
+    '',
+  ].filter(line => line !== '').join('\r\n')
+}
+
+/**
+ * Escape one value for a PowerShell single-quoted string.
+ * @param {string} value text.
+ * @returns {string} escaped text.
+ */
+function quotePs(value) {
+  return `'${String(value).replace(/'/gu, "''")}'`
+}
+
+/**
+ * Run one PowerShell snippet on a Windows member.
+ *
+ * `-EncodedCommand` is UTF-16LE base64 and avoids the `cmd.exe` quoting layer
+ * that SSH inserts between the caller and PowerShell.
+ * @param {string} script PowerShell source.
+ * @returns {string} remote command line.
+ */
+export function powershellCommand(script) {
+  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  return `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
+}
+
+/**
  * SHA-256 of a file.
  * @param {string} file path.
  * @returns {Promise<string>} hex digest.
@@ -149,21 +243,32 @@ export class RemoteBuilder {
   /**
    * Run one job on a member and settle the local job state.
    * @param {string} jobDir local job directory.
-   * @param {{plan: object, memberName: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number}} options run options.
+   * @param {{plan: {os?: string, appRoot?: string}, memberName: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number}} options run options.
    * @returns {Promise<object>} final local state.
    */
   async run(jobDir, options) {
     const state = await readState(jobDir)
     await this.#update(jobDir, { status: 'running', phase: 'prepare', percent: 1, error: null })
     const runner = new SshRunner({ port: 22, ...options.plan }, { log: line => this.log(`remote ${state.member ?? ''}: ${line}`) })
-    const script = remoteBuildScript({
-      jobId: state.id,
-      ref: state.ref,
-      targets: state.targets,
-      proxyUrl: options.proxyUrl,
-      repoUrl: options.repoUrl,
-      heapMb: options.heapMb,
-    })
+    const windows = options.plan.os === 'windows'
+    const script = windows
+      ? windowsBuildScript({
+        jobId: state.id,
+        ref: state.ref,
+        targets: state.targets,
+        proxyUrl: options.proxyUrl,
+        repoUrl: options.repoUrl,
+        heapMb: options.heapMb,
+        appRoot: options.plan.appRoot,
+      })
+      : remoteBuildScript({
+        jobId: state.id,
+        ref: state.ref,
+        targets: state.targets,
+        proxyUrl: options.proxyUrl,
+        repoUrl: options.repoUrl,
+        heapMb: options.heapMb,
+      })
     let percent = 1
     const onLine = (line) => {
       void appendLog(jobDir, line)
@@ -173,13 +278,13 @@ export class RemoteBuilder {
       void this.#update(jobDir, { phase: update.phase, percent })
     }
     try {
-      await runner.script(script, 'linux', onLine)
+      await runner.script(script, windows ? 'windows' : 'linux', onLine)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await appendLog(jobDir, `member build did not finish: ${message}`)
       return this.#update(jobDir, { status: 'failed', phase: 'failed', error: message, percent: 100 })
     }
-    const remote = await this.#readRemoteState(runner, state.id)
+    const remote = await this.#readRemoteState(runner, state.id, windows)
     if (remote === null) {
       const message = 'the member finished without writing a job state; see the log for its output'
       await appendLog(jobDir, message)
@@ -205,7 +310,7 @@ export class RemoteBuilder {
     for (const artifact of directories) {
       const archive = typeof artifact.archive === 'string' ? artifact.archive : ''
       if (archive === '') continue
-      const local = await this.#pull(runner, archive)
+      const local = await this.#pull(runner, archive, windows)
       const info = await stat(local)
       const digest = await sha256File(local)
       await writeSidecar(local, digest)
@@ -235,13 +340,16 @@ export class RemoteBuilder {
    * @param {string} remote remote path.
    * @returns {Promise<string>} local path.
    */
-  async #pull(runner, remote) {
-    const name = path.basename(remote)
+  async #pull(runner, remote, windows = false) {
+    const name = remote.split(/[\\/]/u).pop() ?? path.basename(remote)
     const local = path.join(this.packagesDir, name)
     const temporary = `${local}.part`
     const args = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-P', String(runner.plan.port ?? 22)]
     if (runner.plan.identityFile) args.push('-i', runner.plan.identityFile)
-    args.push(`${runner.target()}:${remote}`, temporary)
+    // scp runs the path through the remote shell; forward slashes work on both
+    // OpenSSH for Windows and POSIX, and a drive-letter path quoted with
+    // backslashes confuses the scp argument parser.
+    args.push(`${runner.target()}:${windows ? remote.replace(/\\/gu, '/') : remote}`, temporary)
     await runner.runProcess('scp', args)
     await rm(local, { force: true })
     await rename(temporary, local)
@@ -254,10 +362,16 @@ export class RemoteBuilder {
    * @param {string} jobId gateway job id (also the remote directory name).
    * @returns {Promise<object|null>} state.
    */
-  async #readRemoteState(runner, jobId) {
+  async #readRemoteState(runner, jobId, windows = false) {
     try {
-      const { stdout } = await runner.runProcess('ssh', [...runner.sshOptions(), runner.target(),
-        `cat "${REMOTE_JOBS}/${jobId}"/*/state.json`])
+      const command = windows
+        ? powershellCommand([
+            `$out = Join-Path $env:USERPROFILE '.dsh\\mesh\\build\\${jobId}'`,
+            '$file = Get-ChildItem -Path $out -Filter state.json -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1',
+            'if ($file) { Get-Content -Raw -LiteralPath $file.FullName }',
+          ].join('; '))
+        : `cat "${REMOTE_JOBS}/${jobId}"/*/state.json`
+      const { stdout } = await runner.runProcess('ssh', [...runner.sshOptions(), runner.target(), command])
       const parsed = JSON.parse(stdout)
       if (parsed === null || typeof parsed !== 'object') return null
       return parsed

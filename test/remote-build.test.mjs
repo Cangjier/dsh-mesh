@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { phaseFromLine, remoteBuildScript } from '../src/lib/remote-build.mjs'
+import { phaseFromLine, powershellCommand, remoteBuildScript, windowsBuildScript } from '../src/lib/remote-build.mjs'
 
 test('phaseFromLine follows the engine markers', () => {
   assert.deepEqual(phaseFromLine('job created'), { phase: 'prepare', percent: 4 })
@@ -39,4 +39,37 @@ test('remoteBuildScript escapes quotes in values', () => {
   assert.match(script, /--ref 'ma'\\''in'/u)
   assert.doesNotMatch(script, /--proxy/u)
   assert.match(script, /corepack enable/u)
+})
+
+test('windowsBuildScript avoids git and uses the bundled node runtime', () => {
+  const script = windowsBuildScript({
+    jobId: 'job-3',
+    ref: 'abc1234',
+    targets: ['linux-x64', 'win-x64'],
+    proxyUrl: 'http://10.66.66.2:8888',
+    appRoot: 'C:\\Users\\Admin\\.dsh\\dsh-mesh\\current',
+  })
+  assert.match(script, /codeload\.github\.com\/Cangjier\/dsh-mesh\/zip\/refs\/heads\/main/u)
+  assert.match(script, /Expand-Archive/u)
+  assert.doesNotMatch(script, /tar\.exe -xzf/u)
+  assert.doesNotMatch(script, /git clone|git -C/u)
+  assert.match(script, /'C:\\Users\\Admin\\.dsh\\dsh-mesh\\current\\runtime\\node'/u)
+  assert.match(script, /corepack\.cmd' \) enable|corepack\.cmd/u)
+  assert.match(script, /--ref 'abc1234' --targets 'linux-x64,win-x64' --proxy 'http:\/\/10\.66\.66\.2:8888'/u)
+  assert.match(script, /HTTP_PROXY/u)
+  assert.match(script, /--max-old-space-size=4096/u)
+})
+
+test('windowsBuildScript escapes single quotes and omits an unset proxy', () => {
+  const script = windowsBuildScript({ jobId: 'job-4', ref: "ma'in", targets: ['win-x64'], proxyUrl: null })
+  assert.match(script, /--ref 'ma''in'/u)
+  assert.doesNotMatch(script, /HTTP_PROXY/u)
+  assert.doesNotMatch(script, / -Proxy /u)
+})
+
+test('powershellCommand encodes the snippet as UTF-16LE base64', () => {
+  const command = powershellCommand("Write-Output 'hi'")
+  const encoded = command.split(' ').pop() ?? ''
+  assert.equal(Buffer.from(encoded, 'base64').toString('utf16le'), "Write-Output 'hi'")
+  assert.match(command, /^powershell\.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand /u)
 })

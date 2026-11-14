@@ -872,6 +872,9 @@ async function learnOverlays(options) {
   }
   return { ok: true, learned, recipes: options.recipes };
 }
+function needsShell(command) {
+  return process.platform === "win32" && /^(pnpm|npm|npx|yarn|corepack)(\.cmd)?$/iu.test(command);
+}
 async function buildWebWorkerPackages(options) {
   const log = options.log ?? (() => {
   });
@@ -887,6 +890,7 @@ async function buildWebWorkerPackages(options) {
       cwd: options.dir,
       log,
       env: options.env,
+      shell: needsShell("pnpm"),
       timeoutMs: 10 * 6e4
     });
     if (!result.ok) {
@@ -900,7 +904,6 @@ ${result.tail.join("\n")}` };
 async function runWebBuild(options) {
   const log = options.log ?? (() => {
   });
-  const needsShell = (command) => process.platform === "win32" && /^(pnpm|npm|npx|yarn|corepack)(\.cmd)?$/iu.test(command);
   const install = options.install === void 0 ? ["pnpm", "install", "--frozen-lockfile"] : options.install;
   const build = options.build ?? ["pnpm", "run", "build:web"];
   if (install !== null && install.length > 0) {
@@ -928,6 +931,7 @@ ${installed.tail.join("\n")}` };
       cwd: options.dir,
       log,
       env: options.env,
+      shell: needsShell(command[0]),
       timeoutMs: 60 * 6e4
     });
     if (!prepared.ok) {
@@ -3267,6 +3271,69 @@ function remoteBuildScript(options) {
 function quote(value) {
   return `'${String(value).replace(/'/gu, `'\\''`)}'`;
 }
+function windowsBuildScript(options) {
+  const repo = options.repoUrl ?? DEFAULT_MESH_REPO;
+  const codeload = repo.replace(/^git\+/u, "").replace(/\.git$/u, "").replace(/^https:\/\/github\.com\//u, "https://codeload.github.com/").replace(/\/+$/u, "");
+  const zipUrl = `${codeload}/zip/refs/heads/main`;
+  const heap = Number.isSafeInteger(options.heapMb) && options.heapMb > 0 ? options.heapMb : 4096;
+  const proxy2 = typeof options.proxyUrl === "string" ? options.proxyUrl.trim() : "";
+  const proxyArgument = proxy2 === "" ? "" : ` -Proxy ${quotePs(proxy2)}`;
+  const appRoot = String(options.appRoot ?? "").replace(/[\\/]+$/u, "");
+  const candidates = [
+    ...appRoot === "" ? [] : [quotePs(`${appRoot}\\runtime\\node`)],
+    '"$env:USERPROFILE\\.dsh\\dsh-mesh\\current\\runtime\\node"',
+    '"$env:USERPROFILE\\.dsh\\dsh-person-web\\runtime\\node"',
+    '"$env:ProgramFiles\\nodejs"'
+  ];
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "$root = Join-Path $env:USERPROFILE '.dsh\\mesh'",
+    "$src = Join-Path $root 'build-src'",
+    "$bin = Join-Path $root 'bin'",
+    `$out = Join-Path $root 'build\\${options.jobId}'`,
+    "New-Item -ItemType Directory -Force -Path $out, $bin | Out-Null",
+    "$nodeDir = $null",
+    `foreach ($candidate in @(${candidates.join(", ")})) { if (Test-Path (Join-Path $candidate 'node.exe')) { $nodeDir = $candidate; break } }`,
+    "if ($null -eq $nodeDir) { throw 'no node runtime on this member' }",
+    '$env:PATH = "$bin;$nodeDir;$env:PATH"',
+    "$env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'",
+    "$env:CI = '1'",
+    `$env:NODE_OPTIONS = '--max-old-space-size=${String(heap)}'`,
+    proxy2 === "" ? "" : `$env:HTTP_PROXY = ${quotePs(proxy2)}; $env:HTTPS_PROXY = $env:HTTP_PROXY`,
+    "Write-Output 'downloading the dsh-mesh checkout'",
+    // A zip + Expand-Archive instead of the tar.gz: Windows' bsdtar fails on
+    // the repository's Chinese doc names ("Invalid empty pathname"), while
+    // .NET's zip reader keeps UTF-8 names intact.
+    '$archive = Join-Path $root "dsh-mesh.zip"',
+    `$curl = Join-Path $env:SystemRoot 'System32\\curl.exe'`,
+    `if (Test-Path $curl) { & $curl -fsSL${proxy2 === "" ? "" : ` --proxy ${quotePs(proxy2)}`} -o $archive '${zipUrl}' } else { Invoke-WebRequest -Uri '${zipUrl}' -OutFile $archive -UseBasicParsing${proxyArgument} }`,
+    'if ($LASTEXITCODE -ne 0 -or -not (Test-Path $archive)) { throw "mesh download failed ($LASTEXITCODE)" }',
+    '$extract = Join-Path $root "extract"',
+    "Remove-Item -Recurse -Force $src, $extract -ErrorAction SilentlyContinue",
+    "New-Item -ItemType Directory -Force -Path $extract | Out-Null",
+    "Expand-Archive -LiteralPath $archive -DestinationPath $extract -Force",
+    "$inner = Get-ChildItem -Directory $extract | Select-Object -First 1",
+    'if ($null -eq $inner) { throw "mesh archive had no top-level directory" }',
+    "New-Item -ItemType Directory -Force -Path $src | Out-Null",
+    'Move-Item -Path (Join-Path $inner.FullName "*") -Destination $src -Force',
+    "Remove-Item -Recurse -Force $extract, $archive -ErrorAction SilentlyContinue",
+    'if (-not (Test-Path (Join-Path $src "code\\build\\cli.mjs"))) { throw "mesh checkout is incomplete" }',
+    `& (Join-Path $nodeDir 'corepack.cmd') enable --install-directory $bin | Out-Null`,
+    "Set-Location $src",
+    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(","))}${proxy2 === "" ? "" : ` --proxy ${quotePs(proxy2)}`}`,
+    "$code = $LASTEXITCODE",
+    "Get-ChildItem -Directory $out -ErrorAction SilentlyContinue | Select-Object -First 5 -ExpandProperty FullName",
+    "exit $code",
+    ""
+  ].filter((line) => line !== "").join("\r\n");
+}
+function quotePs(value) {
+  return `'${String(value).replace(/'/gu, "''")}'`;
+}
+function powershellCommand(script) {
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  return `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
+}
 async function sha256File2(file) {
   const hash = createHash3("sha256");
   const handle = await open2(file, "r");
@@ -3295,14 +3362,23 @@ var RemoteBuilder = class {
   /**
    * Run one job on a member and settle the local job state.
    * @param {string} jobDir local job directory.
-   * @param {{plan: object, memberName: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number}} options run options.
+   * @param {{plan: {os?: string, appRoot?: string}, memberName: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number}} options run options.
    * @returns {Promise<object>} final local state.
    */
   async run(jobDir, options) {
     const state = await readState(jobDir);
     await this.#update(jobDir, { status: "running", phase: "prepare", percent: 1, error: null });
     const runner = new SshRunner({ port: 22, ...options.plan }, { log: (line) => this.log(`remote ${state.member ?? ""}: ${line}`) });
-    const script = remoteBuildScript({
+    const windows = options.plan.os === "windows";
+    const script = windows ? windowsBuildScript({
+      jobId: state.id,
+      ref: state.ref,
+      targets: state.targets,
+      proxyUrl: options.proxyUrl,
+      repoUrl: options.repoUrl,
+      heapMb: options.heapMb,
+      appRoot: options.plan.appRoot
+    }) : remoteBuildScript({
       jobId: state.id,
       ref: state.ref,
       targets: state.targets,
@@ -3319,13 +3395,13 @@ var RemoteBuilder = class {
       void this.#update(jobDir, { phase: update.phase, percent });
     };
     try {
-      await runner.script(script, "linux", onLine);
+      await runner.script(script, windows ? "windows" : "linux", onLine);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await appendLog(jobDir, `member build did not finish: ${message}`);
       return this.#update(jobDir, { status: "failed", phase: "failed", error: message, percent: 100 });
     }
-    const remote = await this.#readRemoteState(runner, state.id);
+    const remote = await this.#readRemoteState(runner, state.id, windows);
     if (remote === null) {
       const message = "the member finished without writing a job state; see the log for its output";
       await appendLog(jobDir, message);
@@ -3351,7 +3427,7 @@ var RemoteBuilder = class {
     for (const artifact of directories) {
       const archive = typeof artifact.archive === "string" ? artifact.archive : "";
       if (archive === "") continue;
-      const local = await this.#pull(runner, archive);
+      const local = await this.#pull(runner, archive, windows);
       const info = await stat5(local);
       const digest = await sha256File2(local);
       await writeSidecar(local, digest);
@@ -3380,13 +3456,13 @@ var RemoteBuilder = class {
    * @param {string} remote remote path.
    * @returns {Promise<string>} local path.
    */
-  async #pull(runner, remote) {
-    const name = path7.basename(remote);
+  async #pull(runner, remote, windows = false) {
+    const name = remote.split(/[\\/]/u).pop() ?? path7.basename(remote);
     const local = path7.join(this.packagesDir, name);
     const temporary = `${local}.part`;
     const args = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-P", String(runner.plan.port ?? 22)];
     if (runner.plan.identityFile) args.push("-i", runner.plan.identityFile);
-    args.push(`${runner.target()}:${remote}`, temporary);
+    args.push(`${runner.target()}:${windows ? remote.replace(/\\/gu, "/") : remote}`, temporary);
     await runner.runProcess("scp", args);
     await rm4(local, { force: true });
     await rename3(temporary, local);
@@ -3398,13 +3474,14 @@ var RemoteBuilder = class {
    * @param {string} jobId gateway job id (also the remote directory name).
    * @returns {Promise<object|null>} state.
    */
-  async #readRemoteState(runner, jobId) {
+  async #readRemoteState(runner, jobId, windows = false) {
     try {
-      const { stdout } = await runner.runProcess("ssh", [
-        ...runner.sshOptions(),
-        runner.target(),
-        `cat "${REMOTE_JOBS}/${jobId}"/*/state.json`
-      ]);
+      const command = windows ? powershellCommand([
+        `$out = Join-Path $env:USERPROFILE '.dsh\\mesh\\build\\${jobId}'`,
+        "$file = Get-ChildItem -Path $out -Filter state.json -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1",
+        "if ($file) { Get-Content -Raw -LiteralPath $file.FullName }"
+      ].join("; ")) : `cat "${REMOTE_JOBS}/${jobId}"/*/state.json`;
+      const { stdout } = await runner.runProcess("ssh", [...runner.sshOptions(), runner.target(), command]);
       const parsed = JSON.parse(stdout);
       if (parsed === null || typeof parsed !== "object") return null;
       return parsed;
@@ -4018,8 +4095,8 @@ var MeshService = class {
       if (found.id !== "local") {
         if (found.online === false) throw new Error(`member ${found.name} is offline`);
         const platform = String(found.system?.platform ?? "").toLowerCase();
-        if (platform !== "" && !platform.startsWith("linux")) {
-          throw new Error(`member build needs a Linux member; ${found.name} runs ${String(found.system?.platform)}`);
+        if (platform !== "" && !platform.startsWith("linux") && !platform.startsWith("win")) {
+          throw new Error(`member build needs Linux or Windows; ${found.name} runs ${String(found.system?.platform)}`);
         }
         member = found;
       }
@@ -4029,6 +4106,9 @@ var MeshService = class {
     if (proxyMemberId !== "" && proxyMember === null) throw new Error(`proxy member not found: ${proxyMemberId}`);
     if (proxyMember !== null && proxyMember.id === "local") {
       throw new Error("the local host cannot proxy its own build; pick a member");
+    }
+    if (proxyMember !== null && String(proxyMember.system?.platform ?? "").toLowerCase().startsWith("win")) {
+      throw new Error(`proxy member must be Linux; ${proxyMember.name} runs ${String(proxyMember.system?.platform)}`);
     }
     const job = await createJob({
       root: this.jobRoot,
@@ -4125,13 +4205,14 @@ var MeshService = class {
         if (existsSync7(candidate)) identityFile = candidate;
       }
     }
+    const platform = String(member.system?.platform ?? "").toLowerCase();
     return {
       host: member.ip,
       user,
       port,
       identityFile,
       appRoot: typeof member.system?.appRoot === "string" ? member.system.appRoot : void 0,
-      os: "linux"
+      os: platform.startsWith("win") ? "windows" : "linux"
     };
   }
   /**

@@ -452,6 +452,19 @@ export async function learnOverlays(options) {
 }
 
 /**
+ * Whether a command must go through the shell.
+ *
+ * Windows package managers are `.cmd` shims, and Node can only run those
+ * through the shell. A plain executable such as `node` must not, or a path
+ * containing spaces loses its quoting.
+ * @param {string} command executable name.
+ * @returns {boolean} true when spawn should use a shell.
+ */
+function needsShell(command) {
+  return process.platform === 'win32' && /^(pnpm|npm|npx|yarn|corepack)(\.cmd)?$/iu.test(command)
+}
+
+/**
  * Build the workspace packages the web frontend imports as build output.
  *
  * `apps/web` now imports `@deepseek-ai/dsh-experimental-webworker-runtime/worker`,
@@ -478,6 +491,7 @@ export async function buildWebWorkerPackages(options) {
       cwd: options.dir,
       log,
       env: options.env,
+      shell: needsShell('pnpm'),
       timeoutMs: 10 * 60_000,
     })
     if (!result.ok) {
@@ -495,10 +509,6 @@ export async function buildWebWorkerPackages(options) {
  */
 export async function runWebBuild(options) {
   const log = options.log ?? (() => {})
-  // Windows package managers are `.cmd` shims; `shell: true` is how Node runs
-  // them. A plain executable such as `node` must not go through the shell, or
-  // a path containing spaces loses its quoting.
-  const needsShell = command => process.platform === 'win32' && /^(pnpm|npm|npx|yarn|corepack)(\.cmd)?$/iu.test(command)
   const install = options.install === undefined ? ['pnpm', 'install', '--frozen-lockfile'] : options.install
   const build = options.build ?? ['pnpm', 'run', 'build:web']
   if (install !== null && install.length > 0) {
@@ -527,6 +537,7 @@ export async function runWebBuild(options) {
       cwd: options.dir,
       log,
       env: options.env,
+      shell: needsShell(command[0]),
       timeoutMs: 60 * 60_000,
     })
     if (!prepared.ok) {

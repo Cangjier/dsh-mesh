@@ -86,19 +86,27 @@ function jobPercent(job: BuildJob): number {
   return 0
 }
 
-/** Member picker options: Linux members can build, everyone can proxy. */
+/**
+ * Member picker options.
+ *
+ * Any online Linux or Windows member can build; the proxy member must be Linux
+ * because the egress proxy is started with `bash -s`.
+ */
 function memberOptions(members: Member[], forBuild: boolean): Array<{ value: string, label: string, disabled?: boolean }> {
   const options = forBuild
     ? [{ value: 'local', label: '本机（网关）' }]
     : []
   for (const member of members) {
     const platform = String(member.system?.platform ?? '').toLowerCase()
+    const supported = platform === '' || platform.startsWith('linux') || platform.startsWith('win')
     const linux = platform === '' || platform.startsWith('linux')
-    const disabled = member.online === false || (forBuild && !linux)
+    const disabled = member.online === false || (forBuild && !supported) || (!forBuild && !linux)
     const bits = [member.name]
     if (member.ip !== '') bits.push(member.ip)
+    if (platform.startsWith('win')) bits.push('Windows')
     if (member.online === false) bits.push('离线')
-    else if (forBuild && !linux) bits.push(String(member.system?.platform ?? '非 Linux'))
+    else if (forBuild && !supported) bits.push(String(member.system?.platform ?? '不支持'))
+    else if (!forBuild && !linux) bits.push('仅 Linux 可做代理')
     options.push({ value: member.id, label: bits.join(' · '), ...(disabled ? { disabled: true } : {}) })
   }
   return options
@@ -474,7 +482,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
               />
             ) : (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                成员会用 GitHub main 的 dsh-mesh 检出运行同一套 code/build 引擎；产物拉回后出现在下方部署包列表。
+                成员运行同一套 code/build 引擎：Linux 成员用 git 检出 main 并 bash 执行，Windows 成员下载 main 的 tar 包、用自带 node + PowerShell 执行；产物拉回后出现在下方部署包列表。目标平台与编译成员无关，Linux 成员同样能打 win-x64 包。
               </Typography.Text>
             )}
             {proxyMode === 'member' ? (

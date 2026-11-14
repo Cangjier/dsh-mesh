@@ -15,13 +15,36 @@
  */
 
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { SshRunner } from '../../code/deploy/engine.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const SCRIPT_PATH = path.resolve(HERE, '..', '..', 'code', 'shared', 'egress-proxy.mjs')
+
+/**
+ * Locate the proxy script both from `src/lib` and from the bundled `index.js`.
+ *
+ * The plugin ships as one bundle, so `import.meta.url` points at
+ * `plugins/dsh-mesh/index.js`; the repository layout would make a fixed
+ * `../../code/...` path miss and the proxy would never start.
+ * @param {string} start directory to start from.
+ * @returns {string} absolute path to the script.
+ */
+export function resolveEgressScript(start) {
+  let current = start
+  for (let depth = 0; depth < 6; depth += 1) {
+    const candidate = path.join(current, 'code', 'shared', 'egress-proxy.mjs')
+    if (existsSync(candidate)) return candidate
+    const parent = path.dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  return path.resolve(start, '..', '..', 'code', 'shared', 'egress-proxy.mjs')
+}
+
+const SCRIPT_PATH = resolveEgressScript(HERE)
 const REMOTE_SCRIPT = '$HOME/.dsh/mesh/egress-proxy.mjs'
 const LISTEN_TIMEOUT_MS = 20_000
 

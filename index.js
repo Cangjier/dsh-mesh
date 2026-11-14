@@ -4,7 +4,7 @@ import path11 from "node:path";
 
 // src/lib/service.mjs
 import { mkdir as mkdir5, readFile as readFile8, readdir as readdir5, rm as rm6, stat as stat7, writeFile as writeFile6 } from "node:fs/promises";
-import { readFileSync as readFileSync3, existsSync as existsSync7 } from "node:fs";
+import { readFileSync as readFileSync3, existsSync as existsSync8 } from "node:fs";
 import { createHash as createHash6 } from "node:crypto";
 import os5 from "node:os";
 import path9 from "node:path";
@@ -3069,11 +3069,23 @@ var DeployManager = class {
 
 // src/lib/egress.mjs
 import { spawn as spawn3 } from "node:child_process";
+import { existsSync as existsSync5 } from "node:fs";
 import { readFile as readFile6, stat as stat4 } from "node:fs/promises";
 import path6 from "node:path";
 import { fileURLToPath } from "node:url";
 var HERE = path6.dirname(fileURLToPath(import.meta.url));
-var SCRIPT_PATH = path6.resolve(HERE, "..", "..", "code", "shared", "egress-proxy.mjs");
+function resolveEgressScript(start) {
+  let current = start;
+  for (let depth = 0; depth < 6; depth += 1) {
+    const candidate = path6.join(current, "code", "shared", "egress-proxy.mjs");
+    if (existsSync5(candidate)) return candidate;
+    const parent = path6.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return path6.resolve(start, "..", "..", "code", "shared", "egress-proxy.mjs");
+}
+var SCRIPT_PATH = resolveEgressScript(HERE);
 var REMOTE_SCRIPT = "$HOME/.dsh/mesh/egress-proxy.mjs";
 var LISTEN_TIMEOUT_MS = 2e4;
 function nodeCandidates(appRoot) {
@@ -3533,7 +3545,7 @@ function payloadOf(method, path12, timestamp, nonce) {
 import { execFile } from "node:child_process";
 import { createHash as createHash5 } from "node:crypto";
 import { cp as cp2, mkdir as mkdir4, mkdtemp as mkdtemp2, readFile as readFile7, readdir as readdir4, rm as rm5, stat as stat6, writeFile as writeFile5 } from "node:fs/promises";
-import { createReadStream as createReadStream2, existsSync as existsSync5 } from "node:fs";
+import { createReadStream as createReadStream2, existsSync as existsSync6 } from "node:fs";
 import path8 from "node:path";
 import { promisify } from "node:util";
 var run = promisify(execFile);
@@ -3546,12 +3558,12 @@ async function clear(target) {
   await rm5(target, { recursive: true, force: true });
 }
 async function replaceDirectory(from, to) {
-  if (!existsSync5(from)) return;
+  if (!existsSync6(from)) return;
   await clear(to);
   await cp2(from, to, { recursive: true });
 }
 async function replaceFile(from, to) {
-  if (!existsSync5(from)) return;
+  if (!existsSync6(from)) return;
   await clear(to);
   await cp2(from, to);
 }
@@ -3565,7 +3577,7 @@ async function countFiles(dir) {
 }
 async function repackDirectory(packageDir, repositoryRoot) {
   const manifestFile = path8.join(packageDir, "manifest.json");
-  if (!existsSync5(manifestFile)) throw new Error(`${packageDir} is not an extracted package (no manifest.json)`);
+  if (!existsSync6(manifestFile)) throw new Error(`${packageDir} is not an extracted package (no manifest.json)`);
   await replaceDirectory(path8.join(repositoryRoot, "code", "gate"), path8.join(packageDir, "gate"));
   await replaceDirectory(path8.join(repositoryRoot, "code", "shared"), path8.join(packageDir, "shared"));
   await replaceDirectory(path8.join(repositoryRoot, "code", "config"), path8.join(packageDir, "config"));
@@ -3621,7 +3633,7 @@ async function extractArchive(file, directory) {
     await run("tar", ["-xzf", file, "-C", directory]);
   }
   const root = path8.join(directory, archiveRootName(file));
-  if (!existsSync5(path8.join(root, "manifest.json"))) {
+  if (!existsSync6(path8.join(root, "manifest.json"))) {
     throw new Error(`archive ${path8.basename(file)} has no ${archiveRootName(file)}/manifest.json`);
   }
   return root;
@@ -3663,7 +3675,7 @@ async function repackArchive(file, { repositoryRoot, log = () => {
 
 // code/shared/system-info.mjs
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync6, readFileSync as readFileSync2, statfsSync } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync2, statfsSync } from "node:fs";
 import os4 from "node:os";
 import { promisify as promisify2 } from "node:util";
 var execFileAsync = promisify2(execFile2);
@@ -3732,7 +3744,7 @@ var PROBE_RETRY_MS = 3e3;
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync7(path9.join(current, "build", "recipes.json")) && existsSync7(path9.join(current, "code", "build"))) {
+    if (existsSync8(path9.join(current, "build", "recipes.json")) && existsSync8(path9.join(current, "code", "build"))) {
       return current;
     }
     const parent = path9.dirname(current);
@@ -4043,7 +4055,7 @@ var MeshService = class {
    * @returns {Promise<string[]>} ids whose outputs were removed.
    */
   async cleanupBuilds(options = {}) {
-    if (!existsSync7(this.jobRoot)) return [];
+    if (!existsSync8(this.jobRoot)) return [];
     const entries = await readdir5(this.jobRoot, { withFileTypes: true });
     const removed = [];
     for (const entry of entries) {
@@ -4153,13 +4165,13 @@ var MeshService = class {
   async #runBuild(job, options) {
     let egress = null;
     let proxyUrl = options.proxyUrl !== "" ? options.proxyUrl : null;
-    if (options.proxyMember !== null && (options.member === null || options.member.id !== options.proxyMember.id)) {
-      egress = await this.egress.start({ plan: await this.#memberSshPlan(options.proxyMember), member: options.proxyMember.name });
-      proxyUrl = egress.url;
-      await appendLog(job.dir, `outbound proxy ${proxyUrl} (${options.proxyMember.name})`);
-      await updateState(job.dir, { proxy: proxyUrl, proxyMember: options.proxyMember.id });
-    }
     try {
+      if (options.proxyMember !== null && (options.member === null || options.member.id !== options.proxyMember.id)) {
+        egress = await this.egress.start({ plan: await this.#memberSshPlan(options.proxyMember), member: options.proxyMember.name });
+        proxyUrl = egress.url;
+        await appendLog(job.dir, `outbound proxy ${proxyUrl} (${options.proxyMember.name})`);
+        await updateState(job.dir, { proxy: proxyUrl, proxyMember: options.proxyMember.id });
+      }
       if (options.member === null) {
         await runJob(job.dir, {
           repositoryRoot: this.repositoryRoot,
@@ -4180,6 +4192,13 @@ var MeshService = class {
         proxyUrl,
         heapMb: typeof this.config.build?.memberHeapMb === "number" ? this.config.build.memberHeapMb : void 0
       });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await appendLog(job.dir, `build failed to start: ${message}`).catch(() => {
+      });
+      await updateState(job.dir, { status: "failed", phase: "failed", error: message, percent: 100 }).catch(() => {
+      });
+      throw error;
     } finally {
       egress?.close();
     }
@@ -4202,7 +4221,7 @@ var MeshService = class {
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
         const digest = createHash6("sha256").update(peer.publicKey).digest("hex");
         const candidate = path9.join(this.home, "wireguard", "ssh", `${digest}.key`);
-        if (existsSync7(candidate)) identityFile = candidate;
+        if (existsSync8(candidate)) identityFile = candidate;
       }
     }
     const platform = String(member.system?.platform ?? "").toLowerCase();
@@ -4296,7 +4315,7 @@ var MeshService = class {
    * @returns {Promise<object[]>} jobs.
    */
   async jobs() {
-    if (!existsSync7(this.jobRoot)) return [];
+    if (!existsSync8(this.jobRoot)) return [];
     const entries = await readdir5(this.jobRoot, { withFileTypes: true });
     const jobs = [];
     for (const entry of entries) {
@@ -4407,7 +4426,7 @@ var MeshService = class {
     await rm6(file, { force: true });
     removed.push(file);
     const sidecar = `${file}.sha256`;
-    if (existsSync7(sidecar)) {
+    if (existsSync8(sidecar)) {
       await rm6(sidecar, { force: true });
       removed.push(sidecar);
     }
@@ -4516,7 +4535,7 @@ var MeshService = class {
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
         const digest = createHash6("sha256").update(peer.publicKey).digest("hex");
         const candidate = path9.join(this.home, "wireguard", "ssh", `${digest}.key`);
-        if (existsSync7(candidate)) identityFile = candidate;
+        if (existsSync8(candidate)) identityFile = candidate;
       }
     }
     const system = member.system;
@@ -4859,7 +4878,7 @@ function registerWireGuardApi(ctx) {
 // src/lib/member-tasks.mjs
 import { randomUUID } from "node:crypto";
 import { mkdir as mkdir6, readFile as readFile9, readdir as readdir6, rename as rename4, writeFile as writeFile7 } from "node:fs/promises";
-import { existsSync as existsSync8, readFileSync as readFileSync4 } from "node:fs";
+import { existsSync as existsSync9, readFileSync as readFileSync4 } from "node:fs";
 import path10 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
@@ -4869,7 +4888,7 @@ var EMPTY_TURN = "\u76EE\u6807\u7684 DSH \u5728\u4EFB\u52A1\u6267\u884C\u671F\u9
 var EMPTY_WAIT_RETRIES = 3;
 function envFile(file) {
   const values = {};
-  if (!existsSync8(file)) return values;
+  if (!existsSync9(file)) return values;
   for (const raw of readFileSync4(file, "utf8").split(/\r?\n/)) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;

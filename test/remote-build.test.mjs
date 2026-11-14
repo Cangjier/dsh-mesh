@@ -73,3 +73,23 @@ test('powershellCommand encodes the snippet as UTF-16LE base64', () => {
   assert.equal(Buffer.from(encoded, 'base64').toString('utf16le'), "Write-Output 'hi'")
   assert.match(command, /^powershell\.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand /u)
 })
+
+test('resolveEgressScript finds the script in source and bundled layouts', async () => {
+  const { mkdir, writeFile, rm } = await import('node:fs/promises')
+  const os = await import('node:os')
+  const nodePath = await import('node:path')
+  const { resolveEgressScript } = await import('../src/lib/egress.mjs')
+  const root = await mkdir(nodePath.join(os.tmpdir(), `dsh-egress-${String(Date.now())}`), { recursive: true })
+  const sourceLayout = nodePath.join(root, 'src', 'lib')
+  const bundledLayout = nodePath.join(root, 'plugins', 'dsh-mesh')
+  for (const dir of [nodePath.join(root, 'code', 'shared'), nodePath.join(bundledLayout, 'code', 'shared')]) {
+    await mkdir(dir, { recursive: true })
+    await writeFile(nodePath.join(dir, 'egress-proxy.mjs'), '// proxy\n', 'utf8')
+  }
+  try {
+    assert.equal(resolveEgressScript(sourceLayout), nodePath.join(root, 'code', 'shared', 'egress-proxy.mjs'))
+    assert.equal(resolveEgressScript(bundledLayout), nodePath.join(bundledLayout, 'code', 'shared', 'egress-proxy.mjs'))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

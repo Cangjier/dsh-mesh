@@ -523,13 +523,13 @@ export class MeshService {
   async #runBuild(job, options) {
     let egress = null
     let proxyUrl = options.proxyUrl !== '' ? options.proxyUrl : null
-    if (options.proxyMember !== null && (options.member === null || options.member.id !== options.proxyMember.id)) {
-      egress = await this.egress.start({ plan: await this.#memberSshPlan(options.proxyMember), member: options.proxyMember.name })
-      proxyUrl = egress.url
-      await appendLog(job.dir, `outbound proxy ${proxyUrl} (${options.proxyMember.name})`)
-      await updateState(job.dir, { proxy: proxyUrl, proxyMember: options.proxyMember.id })
-    }
     try {
+      if (options.proxyMember !== null && (options.member === null || options.member.id !== options.proxyMember.id)) {
+        egress = await this.egress.start({ plan: await this.#memberSshPlan(options.proxyMember), member: options.proxyMember.name })
+        proxyUrl = egress.url
+        await appendLog(job.dir, `outbound proxy ${proxyUrl} (${options.proxyMember.name})`)
+        await updateState(job.dir, { proxy: proxyUrl, proxyMember: options.proxyMember.id })
+      }
       if (options.member === null) {
         await runJob(job.dir, {
           repositoryRoot: this.repositoryRoot,
@@ -550,6 +550,14 @@ export class MeshService {
         proxyUrl,
         heapMb: typeof this.config.build?.memberHeapMb === 'number' ? this.config.build.memberHeapMb : undefined,
       })
+    } catch (error) {
+      // A failure before the engine starts (an unreachable proxy member, a
+      // missing runtime) must settle the job, or the panel shows a job that
+      // never starts and never ends.
+      const message = error instanceof Error ? error.message : String(error)
+      await appendLog(job.dir, `build failed to start: ${message}`).catch(() => {})
+      await updateState(job.dir, { status: 'failed', phase: 'failed', error: message, percent: 100 }).catch(() => {})
+      throw error
     } finally {
       egress?.close()
     }

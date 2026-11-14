@@ -6134,7 +6134,8 @@ function registerTools(ctx, toolsCtx, service) {
       "",
       "`delegate`\uFF1A\u5728\u6210\u5458 B \u4E0A\u521B\u5EFA\u5BF9\u8BDD\u5E76\u7ACB\u5373\u8FD4\u56DE taskId\uFF1B\u4E0D\u4F1A\u540C\u6B65\u7B49\u5F85\u3002",
       "`send`\uFF1A\u5411\u5DF2\u7ECF\u521B\u5EFA\u7684\u6210\u5458\u4EFB\u52A1\u5BF9\u8BDD\u7EE7\u7EED\u53D1\u6D88\u606F\uFF0C\u7ACB\u5373\u8FD4\u56DE\uFF1B\u4E0D\u4F1A\u81EA\u52A8\u7B49\u5F85\u6216\u901A\u77E5\u3002",
-      "\u7528 wait_member \u7B49\u5F85\u7ED3\u679C\uFF1A\u6BCF\u6B21\u6709\u8D85\u65F6\u4E0A\u9650\uFF0C\u8D85\u65F6\u4F1A\u8FD4\u56DE\u63D0\u793A\uFF0C\u53EF\u4EE5\u7EE7\u7EED\u7528\u540C\u4E00\u4E2A taskId \u7B49\u5F85\u3002",
+      "\u7528 wait_member \u7B49\u7ED3\u679C\uFF1A\u6210\u5458\u6BCF\u7ED3\u675F\u4E00\u8F6E\u56DE\u7B54\u5C31\u8FD4\u56DE\u4E00\u6B21\uFF08state=progress \u8868\u793A\u8FD8\u4F1A\u7EE7\u7EED\uFF09\uFF0C",
+      "\u53EA\u6709 state=done \u624D\u662F\u6574\u6BB5\u4EFB\u52A1\u7684\u6700\u7EC8\u7ED3\u679C\uFF1B\u8D85\u65F6\uFF08state=running\uFF09\u7528\u540C\u4E00\u4E2A taskId \u63A5\u7740\u7B49\u3002",
       "\u8FD4\u56DE\u503C\u5E26 data.logFile\uFF0C\u6307\u5411\u8BE5\u4EFB\u52A1\u7684\u65E5\u5FD7\u6587\u4EF6\u3002",
       "",
       "\u6210\u5458\u901A\u8FC7 WireGuard \u6210\u5458\u53D1\u73B0\u89E3\u6790\uFF08id/name/IP \u5747\u53EF\uFF09\uFF1B\u76EE\u6807 B \u7684 8765 interop \u670D\u52A1\u5FC5\u987B\u53EF\u8FBE\uFF0Ctoken \u9ED8\u8BA4\u590D\u7528\u7F51\u5173\u5BC6\u7801\u3002"
@@ -6182,6 +6183,7 @@ function registerTools(ctx, toolsCtx, service) {
           text: [
             `\u5DF2\u53D1\u8D77\u6210\u5458\u4EFB\u52A1 ${task.id}\uFF1A${task.member}\uFF08${task.memberIp}\uFF09\uFF0C\u5BF9\u8BDD ${task.conversationId}\u3002`,
             `\u7528 wait_member \u7B49\u5F85\u7ED3\u679C\uFF1AtaskId="${task.id}"\uFF0CtimeoutMs=30000\uFF08\u53EF\u6309\u9700\u8C03\u5927\uFF0C\u6700\u5927 300000\uFF09\u3002`,
+            "\u6210\u5458\u6BCF\u7ED3\u675F\u4E00\u8F6E\u56DE\u7B54\u5C31\u8FD4\u56DE\u4E00\u6B21\uFF08state=progress\uFF09\uFF0C\u62FF\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002",
             task.status === "failed" ? `\u5F53\u524D\u72B6\u6001\uFF1Afailed\uFF0C${task.error ?? ""}` : "",
             `\u65E5\u5FD7\uFF1A${data.logFile}`
           ].filter((line) => line !== "").join("\n"),
@@ -6197,7 +6199,7 @@ function registerTools(ctx, toolsCtx, service) {
           ok: true,
           text: [
             `\u5DF2\u53D1\u9001\u5230 ${task.member} \u7684\u5BF9\u8BDD ${task.conversationId}\u3002`,
-            `\u7528 wait_member \u7B49\u5F85\u56DE\u590D\uFF1AtaskId="${task.id}"\uFF0CtimeoutMs=30000\u3002`,
+            `\u7528 wait_member \u7B49\u5F85\u56DE\u590D\uFF1AtaskId="${task.id}"\uFF0CtimeoutMs=30000\uFF1B\u540C\u6837\u6BCF\u8F6E\u8FD4\u56DE\u4E00\u6B21\uFF0Cstate=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
             `\u65E5\u5FD7\uFF1A${data.logFile}`
           ].join("\n"),
           data
@@ -6250,14 +6252,17 @@ function registerTools(ctx, toolsCtx, service) {
         replies,
         logFile: memberTasks.logPath(task.id)
       };
+      const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `\u7B2C ${String(task.turns)} \u8F6E` : "";
+      const where = `${task.member}\uFF08${task.memberIp}\uFF09\uFF0C\u5BF9\u8BDD ${task.conversationId}`;
       if (!result.done && result.state === "progress") {
         return {
           ok: true,
           text: [
-            `\u6210\u5458\u4EFB\u52A1 ${task.id} \u8FDB\u884C\u4E2D\uFF1A${task.member}\uFF08${task.memberIp}\uFF09\uFF0C\u5BF9\u8BDD ${task.conversationId}\u3002`,
+            `\u6210\u5458\u4EFB\u52A1 ${task.id} \u8FDB\u884C\u4E2D${turn === "" ? "" : `\uFF08${turn}\uFF0C\u5C1A\u672A\u7ED3\u675F\uFF09`}\uFF1A${where}\u3002`,
             replyText !== "" ? `\u672C\u8F6E\u56DE\u590D\uFF1A
 ${replyText}` : "",
-            `\u6210\u5458\u8FD8\u4F1A\u7EE7\u7EED\uFF08\u53EF\u80FD\u8FD8\u6709\u672A\u5B8C\u6210\u7684\u5B50\u4EE3\u7406\uFF09\u3002\u7EE7\u7EED\u7B49\u5F85\u4E0B\u4E00\u8F6E\uFF1AtaskId="${task.id}"\uFF0CtimeoutMs=30000\u3002`,
+            "\u6210\u5458\u8FD8\u4F1A\u7EE7\u7EED\uFF08\u53EF\u80FD\u8FD8\u6709\u5B50\u4EE3\u7406\u5728\u8DD1\uFF09\uFF0C\u8FD9\u4E0D\u662F\u6700\u7EC8\u7ED3\u679C\u3002",
+            `\u8BF7\u7EE7\u7EED\u8C03\u7528 wait_member \u7B49\u4E0B\u4E00\u8F6E\uFF1AtaskId="${task.id}"\uFF0CtimeoutMs=30000\uFF1B\u6536\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
             `\u65E5\u5FD7\uFF1A${data.logFile}`
           ].filter((line) => line !== "").join("\n"),
           data
@@ -6268,7 +6273,8 @@ ${replyText}` : "",
         return {
           ok: true,
           text: [
-            `\u6210\u5458\u4EFB\u52A1 ${task.id} \u5DF2\u5B8C\u6210\uFF1A${task.member}\uFF08${task.memberIp}\uFF09\u3002`,
+            `\u6210\u5458\u4EFB\u52A1 ${task.id} \u5DF2\u5B8C\u6210\uFF1A${where}\u3002`,
+            "\uFF08\u4EFB\u52A1\u5DF2\u7ED3\u675F\uFF0C\u4E0D\u9700\u8981\u518D\u8C03\u7528 wait_member\uFF1B\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\u7528 call_member send\u3002\uFF09",
             "\u7ED3\u679C\uFF1A",
             finalText !== "" ? finalText : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
             `\u65E5\u5FD7\uFF1A${data.logFile}`
@@ -6281,8 +6287,9 @@ ${replyText}` : "",
         return {
           ok: true,
           text: [
-            `\u6210\u5458\u4EFB\u52A1 ${task.id} \u4ECD\u5728\u8FD0\u884C\uFF1A${task.member}\uFF08${task.memberIp}\uFF09\uFF0C\u5BF9\u8BDD ${task.conversationId}\u3002`,
-            `\u53EF\u4EE5\u7EE7\u7EED\u8C03\u7528 wait_member \u7B49\u5F85\uFF1AtaskId="${task.id}"\uFF0CtimeoutMs=${String(effective)}\u3002`,
+            `\u6210\u5458\u4EFB\u52A1 ${task.id} \u4ECD\u5728\u8FD0\u884C${turn === "" ? "" : `\uFF08${turn}\uFF0C\u5C1A\u672A\u7ED3\u675F\uFF09`}\uFF1A${where}\u3002`,
+            "\u8FD9\u6BB5\u65F6\u95F4\u6CA1\u6709\u65B0\u56DE\u590D\uFF0C\u4F46\u4EFB\u52A1\u6CA1\u6709\u7ED3\u675F\u3001\u671F\u95F4\u7684\u56DE\u590D\u4E5F\u4E0D\u4F1A\u4E22\u3002",
+            `\u8BF7\u7EE7\u7EED\u8C03\u7528 wait_member\uFF1AtaskId="${task.id}"\uFF0CtimeoutMs=${String(effective)}\uFF1B\u6536\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
             typeof task.lastText === "string" && task.lastText !== "" ? `\u6700\u8FD1\u8F93\u51FA\uFF1A${task.lastText.slice(0, 500)}` : "",
             `\u65E5\u5FD7\uFF1A${data.logFile}`
           ].filter((line) => line !== "").join("\n"),
@@ -6292,7 +6299,8 @@ ${replyText}` : "",
       return {
         ok: false,
         text: [
-          `\u6210\u5458\u4EFB\u52A1 ${task.id} ${task.status}\uFF1A${task.error ?? "unknown"}`,
+          `\u6210\u5458\u4EFB\u52A1 ${task.id} ${task.status}\uFF08\u5DF2\u7ED3\u675F\uFF09\uFF1A${where}\u3002`,
+          `\u539F\u56E0\uFF1A${task.error ?? "unknown"}`,
           replyText !== "" ? `\u4E2D\u65AD\u524D\u7684\u56DE\u590D\uFF1A
 ${replyText}` : "",
           task.interrupted === true ? "\u76EE\u6807\u6210\u5458\u7684 DSH \u91CD\u542F\u6216\u8FD0\u884C\u65F6\u9000\u51FA\u6253\u65AD\u4E86\u8FD9\u4E00\u8F6E\uFF1B\u53EF\u4EE5\u7528 call_member send \u540C\u4E00\u4E2A taskId \u7EE7\u7EED\u3002" : "",

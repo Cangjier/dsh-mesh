@@ -167,7 +167,8 @@ export function registerTools(ctx, toolsCtx, service) {
       '',
       '`delegate`：在成员 B 上创建对话并立即返回 taskId；不会同步等待。',
       '`send`：向已经创建的成员任务对话继续发消息，立即返回；不会自动等待或通知。',
-      '用 wait_member 等待结果：每次有超时上限，超时会返回提示，可以继续用同一个 taskId 等待。',
+      '用 wait_member 等结果：成员每结束一轮回答就返回一次（state=progress 表示还会继续），',
+      '只有 state=done 才是整段任务的最终结果；超时（state=running）用同一个 taskId 接着等。',
       '返回值带 data.logFile，指向该任务的日志文件。',
       '',
       '成员通过 WireGuard 成员发现解析（id/name/IP 均可）；目标 B 的 8765 interop 服务必须可达，token 默认复用网关密码。',
@@ -215,6 +216,7 @@ export function registerTools(ctx, toolsCtx, service) {
           text: [
             `已发起成员任务 ${task.id}：${task.member}（${task.memberIp}），对话 ${task.conversationId}。`,
             `用 wait_member 等待结果：taskId="${task.id}"，timeoutMs=30000（可按需调大，最大 300000）。`,
+            '成员每结束一轮回答就返回一次（state=progress），拿到 state=done 才是最终结果。',
             task.status === 'failed' ? `当前状态：failed，${task.error ?? ''}` : '',
             `日志：${data.logFile}`,
           ].filter(line => line !== '').join('\n'),
@@ -230,7 +232,7 @@ export function registerTools(ctx, toolsCtx, service) {
           ok: true,
           text: [
             `已发送到 ${task.member} 的对话 ${task.conversationId}。`,
-            `用 wait_member 等待回复：taskId="${task.id}"，timeoutMs=30000。`,
+            `用 wait_member 等待回复：taskId="${task.id}"，timeoutMs=30000；同样每轮返回一次，state=done 才是最终结果。`,
             `日志：${data.logFile}`,
           ].join('\n'),
           data,
@@ -284,13 +286,16 @@ export function registerTools(ctx, toolsCtx, service) {
         replies,
         logFile: memberTasks.logPath(task.id),
       }
+      const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `第 ${String(task.turns)} 轮` : ''
+      const where = `${task.member}（${task.memberIp}），对话 ${task.conversationId}`
       if (!result.done && result.state === 'progress') {
         return {
           ok: true,
           text: [
-            `成员任务 ${task.id} 进行中：${task.member}（${task.memberIp}），对话 ${task.conversationId}。`,
+            `成员任务 ${task.id} 进行中${turn === '' ? '' : `（${turn}，尚未结束）`}：${where}。`,
             replyText !== '' ? `本轮回复：\n${replyText}` : '',
-            `成员还会继续（可能还有未完成的子代理）。继续等待下一轮：taskId="${task.id}"，timeoutMs=30000。`,
+            '成员还会继续（可能还有子代理在跑），这不是最终结果。',
+            `请继续调用 wait_member 等下一轮：taskId="${task.id}"，timeoutMs=30000；收到 state=done 才是最终结果。`,
             `日志：${data.logFile}`,
           ].filter(line => line !== '').join('\n'),
           data,
@@ -301,7 +306,8 @@ export function registerTools(ctx, toolsCtx, service) {
         return {
           ok: true,
           text: [
-            `成员任务 ${task.id} 已完成：${task.member}（${task.memberIp}）。`,
+            `成员任务 ${task.id} 已完成：${where}。`,
+            '（任务已结束，不需要再调用 wait_member；要继续这个对话用 call_member send。）',
             '结果：',
             finalText !== '' ? finalText : '(成员没有返回文本结果)',
             `日志：${data.logFile}`,
@@ -314,8 +320,9 @@ export function registerTools(ctx, toolsCtx, service) {
         return {
           ok: true,
           text: [
-            `成员任务 ${task.id} 仍在运行：${task.member}（${task.memberIp}），对话 ${task.conversationId}。`,
-            `可以继续调用 wait_member 等待：taskId="${task.id}"，timeoutMs=${String(effective)}。`,
+            `成员任务 ${task.id} 仍在运行${turn === '' ? '' : `（${turn}，尚未结束）`}：${where}。`,
+            '这段时间没有新回复，但任务没有结束、期间的回复也不会丢。',
+            `请继续调用 wait_member：taskId="${task.id}"，timeoutMs=${String(effective)}；收到 state=done 才是最终结果。`,
             typeof task.lastText === 'string' && task.lastText !== '' ? `最近输出：${task.lastText.slice(0, 500)}` : '',
             `日志：${data.logFile}`,
           ].filter(line => line !== '').join('\n'),
@@ -325,7 +332,8 @@ export function registerTools(ctx, toolsCtx, service) {
       return {
         ok: false,
         text: [
-          `成员任务 ${task.id} ${task.status}：${task.error ?? 'unknown'}`,
+          `成员任务 ${task.id} ${task.status}（已结束）：${where}。`,
+          `原因：${task.error ?? 'unknown'}`,
           replyText !== '' ? `中断前的回复：\n${replyText}` : '',
           task.interrupted === true ? '目标成员的 DSH 重启或运行时退出打断了这一轮；可以用 call_member send 同一个 taskId 继续。' : '',
           `日志：${data.logFile}`,

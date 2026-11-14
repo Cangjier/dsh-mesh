@@ -1294,6 +1294,7 @@ async function runJob(dir, options) {
   let state = await readState(dir);
   const log = (line) => {
     void appendLog(dir, line);
+    options.onLog?.(line);
   };
   try {
     state = await updateState(dir, { status: "running", phase: "prepare", error: null });
@@ -3272,7 +3273,7 @@ function remoteBuildScript(options) {
     'corepack enable --install-directory "$HOME/.dsh/mesh/bin" >/dev/null 2>&1 || true',
     `cd "${REMOTE_SRC}" || { echo "mesh checkout is missing" >&2; exit 3; }`,
     'echo "mesh head $(git rev-parse --short HEAD)"',
-    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ""}`,
+    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --stream --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ""}`,
     "code=$?",
     `ls -1d "${out}"/* 2>/dev/null | head -n 5`,
     "exit $code",
@@ -3334,7 +3335,7 @@ function windowsBuildScript(options) {
     'if (-not (Test-Path (Join-Path $src "code\\build\\cli.mjs"))) { throw "mesh checkout is incomplete" }',
     `& (Join-Path $nodeDir 'corepack.cmd') enable --install-directory $bin | Out-Null`,
     "Set-Location $src",
-    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(","))}${proxy2 === "" ? "" : ` --proxy ${quotePs(proxy2)}`}`,
+    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --stream --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(","))}${proxy2 === "" ? "" : ` --proxy ${quotePs(proxy2)}`}`,
     "$code = $LASTEXITCODE",
     "Get-ChildItem -Directory $out -ErrorAction SilentlyContinue | Select-Object -First 5 -ExpandProperty FullName",
     "exit $code",

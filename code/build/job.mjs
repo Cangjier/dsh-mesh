@@ -142,7 +142,7 @@ export async function updateState(dir, patch) {
 /**
  * Run the deterministic build pipeline.
  * @param {string} dir job directory.
- * @param {{repositoryRoot: string, recipesPath?: string, overlayRoot?: string, cacheDir?: string, source?: string, ref?: string, targets?: string[], planOnly?: boolean, reuseWorktree?: boolean, install?: string[]|null, build?: string[], prepare?: string[][]|null, prebuild?: boolean, version?: string, full?: boolean, nodeVersion?: string, proxy?: string|null, env?: NodeJS.ProcessEnv}} options build input.
+ * @param {{repositoryRoot: string, recipesPath?: string, overlayRoot?: string, cacheDir?: string, source?: string, ref?: string, targets?: string[], planOnly?: boolean, reuseWorktree?: boolean, install?: string[]|null, build?: string[], prepare?: string[][]|null, prebuild?: boolean, version?: string, full?: boolean, nodeVersion?: string, proxy?: string|null, env?: NodeJS.ProcessEnv, onLog?: (line: string) => void}} options build input.
  * @returns {Promise<object>} final state.
  */
 export async function runJob(dir, options) {
@@ -153,6 +153,9 @@ export async function runJob(dir, options) {
   let state = await readState(dir)
   const log = (line) => {
     void appendLog(dir, line)
+    // `onLog` lets the CLI (and therefore a remote build) mirror the log to
+    // stdout, which is how the panel sees phases while a build runs.
+    options.onLog?.(line)
   }
   try {
     state = await updateState(dir, { status: 'running', phase: 'prepare', error: null })

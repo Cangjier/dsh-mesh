@@ -920,11 +920,12 @@ async function runWebBuild(options) {
 ${installed.tail.join("\n")}` };
     }
   }
-  if (options.prebuild !== false) {
+  const prepareCommands = options.prepare ?? [];
+  if (options.prebuild !== false && prepareCommands.length === 0) {
     const prepared = await buildWebWorkerPackages({ dir: options.dir, log, env: options.env });
     if (!prepared.ok) return { ok: false, dist: null, error: prepared.error ?? "webworker prebuild failed" };
   }
-  for (const command of options.prepare ?? []) {
+  for (const command of prepareCommands) {
     if (command.length === 0) continue;
     log(`$ ${command.join(" ")}`);
     const prepared = await runCommand(command[0], command.slice(1), {

@@ -686,29 +686,56 @@ export class MeshService {
       if (!entry.isDirectory()) continue
       try {
         const state = await readState(path.join(this.jobRoot, entry.name))
-        jobs.push({
-          id: state.id,
-          status: state.status,
-          phase: state.phase,
-          source: state.source,
-          ref: state.ref,
-          targets: state.targets,
-          updatedAt: state.updatedAt,
-          createdAt: state.createdAt,
-          member: state.member ?? null,
-          memberName: state.memberName ?? null,
-          mode: state.mode ?? 'local',
-          proxy: state.proxy ?? null,
-          proxyMember: state.proxyMember ?? null,
-          percent: typeof state.percent === 'number' ? state.percent : null,
-          version: state.version ?? null,
-          error: state.error ?? null,
-        })
+        jobs.push(this.#summary(state))
       } catch {
         // A half-created directory is not a job.
       }
     }
     return jobs.sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))
+  }
+
+  /**
+   * The list projection of one job, or null when it does not exist.
+   *
+   * The panel's event stream pushes this shape, so it is the same object
+   * `jobs()` returns and the client can merge it into its table.
+   * @param {string} id job id.
+   * @returns {Promise<object|null>} summary.
+   */
+  async buildSummary(id) {
+    let dir
+    try {
+      dir = this._jobDir(id)
+    } catch {
+      return null
+    }
+    try {
+      return this.#summary(await readState(dir))
+    } catch {
+      return null
+    }
+  }
+
+  /** Project a job state onto the fields the panel lists. */
+  #summary(state) {
+    return {
+      id: state.id,
+      status: state.status,
+      phase: state.phase,
+      source: state.source,
+      ref: state.ref,
+      targets: state.targets,
+      updatedAt: state.updatedAt,
+      createdAt: state.createdAt,
+      member: state.member ?? null,
+      memberName: state.memberName ?? null,
+      mode: state.mode ?? 'local',
+      proxy: state.proxy ?? null,
+      proxyMember: state.proxyMember ?? null,
+      percent: typeof state.percent === 'number' ? state.percent : null,
+      version: state.version ?? null,
+      error: state.error ?? null,
+    }
   }
 
   /**

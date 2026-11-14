@@ -34,14 +34,33 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import { api, ApiError, type BuildJob, type Member, type PackageInfo } from './api'
+import { useEventStream } from './events'
 
 const TARGET_OPTIONS = [
   { value: 'linux-x64', label: 'Linux x64' },
   { value: 'win-x64', label: 'Windows x64' },
 ]
 
-/** Jobs older than this are still listed, but the panel stops polling them. */
+/** Statuses that still own the single build slot. */
 const ACTIVE_STATUSES = new Set(['running', 'created'])
+
+/**
+ * Merge pushed job snapshots into the table.
+ *
+ * Events can arrive out of order after a reconnect; the newer `updatedAt` wins
+ * so a stale frame can never roll the table back.
+ * @param previous current rows.
+ * @param incoming pushed rows.
+ * @returns rows newest first.
+ */
+function mergeJobs(previous: BuildJob[], incoming: BuildJob[]): BuildJob[] {
+  const byId = new Map(previous.map(job => [job.id, job] as const))
+  for (const job of incoming) {
+    const existing = byId.get(job.id)
+    if (existing === undefined || String(job.updatedAt ?? '') >= String(existing.updatedAt ?? '')) byId.set(job.id, job)
+  }
+  return [...byId.values()].sort((left, right) => String(right.updatedAt ?? '').localeCompare(String(left.updatedAt ?? '')))
+}
 
 function formatBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '0'
@@ -168,43 +187,43 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
 
   const running = useMemo(() => jobs.some(job => ACTIVE_STATUSES.has(job.status)), [jobs])
 
-  // A build takes minutes and the panel is the only progress display, so poll
-  // while something runs and stop as soon as everything is settled.
-  useEffect(() => {
-    if (!active || !running) return
-    const timer = setInterval(() => { void loadJobs() }, 3000)
-    return () => clearInterval(timer)
-  }, [active, running, loadJobs])
+  // One SSE connection carries every build change and log tail; there is no
+  // timer and no request while nothing happens. `ready` fires on connect and
+  // after every reconnect, which is where the panel resyncs.
+  useEventStream(active ? '/api/dsh-mesh/events' : null, event => {
+    const type = event.type ?? ''
+    if (type === 'ready') {
+      // Connect/reconnect: resync the table and the open log once.
+      void loadJobs()
+      if (logJob !== null) {
+        void api.log(logJob.id, 300).then(result => setLogLines(result.lines)).catch(() => {})
+      }
+      return
+    }
+    if (type === 'build' && event.job !== undefined) {
+      const job = event.job as unknown as BuildJob
+      setJobs(previous => mergeJobs(previous, [job]))
+      setLogJob(current => (current !== null && current.id === job.id ? job : current))
+      return
+    }
+    if (type === 'build-log' && logJob !== null && event.id === logJob.id) {
+      setLogLines(Array.isArray(event.lines) ? event.lines : [])
+    }
+  })
 
-  // The log modal follows the same rule: live while the job runs, then stop.
+  // The log modal reads one tail when it opens; later lines arrive above.
   useEffect(() => {
     if (logJob === null) return
     let cancelled = false
-    const load = async () => {
-      setLogLoading(true)
-      try {
-        const result = await api.log(logJob.id, 300)
-        if (!cancelled) setLogLines(result.lines)
-      } catch {
-        // A job that is still starting has no log yet.
-      } finally {
-        if (!cancelled) setLogLoading(false)
-      }
-    }
-    void load()
-    const timer = setInterval(() => {
-      void load()
-      void api.job(logJob.id).then(result => {
-        if (!cancelled) {
-          setLogJob(current => (current !== null && current.id === result.job.id ? result.job : current))
-          setJobs(current => current.map(job => (job.id === result.job.id ? { ...job, ...result.job } : job)))
-        }
-      }).catch(() => {})
-    }, 2500)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
+    setLogLoading(true)
+    void api.log(logJob.id, 300).then(result => {
+      if (!cancelled) setLogLines(result.lines)
+    }).catch(() => {
+      // A job that is still starting has no log yet.
+    }).finally(() => {
+      if (!cancelled) setLogLoading(false)
+    })
+    return () => { cancelled = true }
   }, [logJob?.id])
 
   useEffect(() => {

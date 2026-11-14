@@ -13,7 +13,7 @@
  * @module @local/dsh-mesh/deploy-cli
  */
 
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, statSync, watch } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -138,15 +138,40 @@ async function main() {
     return 0
   }
   let last = ''
+  const paint = (job) => {
+    const line = meterLine(job)
+    if (line === last) return
+    last = line
+    process.stderr.write(`\r${line.padEnd(60)}`)
+  }
   let settled = await manager.status(id)
-  while (settled !== null && settled.status === 'running') {
-    const line = meterLine(settled)
-    if (line !== last) {
-      last = line
-      process.stderr.write(`\r${line.padEnd(60)}`)
+  if (settled !== null) paint(settled)
+  if (settled !== null && settled.status === 'running') {
+    // The state file is rewritten on every progress tick, so watching the job
+    // directory is the change feed here. `manager.wait()` is the completion
+    // promise the engine already owns; no polling interval is needed.
+    const finished = manager.wait(id)
+    let watcher = null
+    let timer = null
+    const repaint = () => {
+      if (timer !== null) return
+      timer = setTimeout(() => {
+        timer = null
+        void manager.status(id).then(job => { if (job !== null) paint(job) }).catch(() => {})
+      }, 100)
+      timer.unref?.()
     }
-    await new Promise(resolve => setTimeout(resolve, 1500))
+    try {
+      watcher = watch(path.join(dataDir, id), { persistent: false }, repaint)
+      watcher.on('error', () => {})
+    } catch {
+      watcher = null
+    }
+    await finished
+    if (timer !== null) clearTimeout(timer)
+    watcher?.close()
     settled = await manager.status(id)
+    if (settled !== null) paint(settled)
   }
   if (last !== '') process.stderr.write('\n')
   const job = settled ?? started.job

@@ -27,6 +27,7 @@ import {
   type HysteriaLink,
   type Member,
 } from './api'
+import { useEventStream } from './events'
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -202,32 +203,44 @@ export function DirectLinksModal({
   useEffect(() => {
     if (!open || !gateAvailable) return
     void load()
-    const timer = window.setInterval(() => { void load(true) }, 4000)
-    return () => { window.clearInterval(timer) }
   }, [open, gateAvailable, load, peerIp])
 
+  // The gateway pushes link and job changes; the dialog holds no timer.
+  useEventStream(open && gateAvailable ? '/__gate/hysteria/events' : null, event => {
+    if (event.type === 'ready') {
+      void load(true)
+      return
+    }
+    if (event.type !== 'hysteria') return
+    const kind = typeof event.kind === 'string' ? event.kind : ''
+    if (kind === 'links' && Array.isArray(event.links)) {
+      setLinks(event.links as HysteriaLink[])
+      return
+    }
+    if (kind === 'job' && event.job !== undefined) {
+      const job = event.job as unknown as HysteriaJob
+      setProgressJob(current => (current !== null && current.id === job.id ? job : current))
+      return
+    }
+    if (kind === 'log' && progressJob !== null && event.id === progressJob.id && Array.isArray(event.lines)) {
+      setProgressLines(event.lines)
+    }
+  })
+
   const progressId = progressJob?.id ?? ''
+  // One read when the dialog opens; later lines are pushed above.
   useEffect(() => {
     if (!open || progressId === '') return
     let alive = true
-    const tick = async () => {
-      try {
-        const result = await api.hysteriaJob(progressId, 300)
-        if (!alive) return
-        setProgressJob(result.job)
-        setProgressLines(result.lines)
-        if (result.job.status === 'succeeded') void load(true)
-      } catch {
-        // Keep the last snapshot; the next tick retries.
-      }
-    }
-    void tick()
-    const timer = window.setInterval(() => { void tick() }, 1000)
-    return () => {
-      alive = false
-      window.clearInterval(timer)
-    }
-  }, [open, progressId, load])
+    void api.hysteriaJob(progressId, 300).then(result => {
+      if (!alive) return
+      setProgressJob(result.job)
+      setProgressLines(result.lines)
+    }).catch(() => {
+      // A job that is still starting has no log yet.
+    })
+    return () => { alive = false }
+  }, [open, progressId])
 
   const related = useMemo(
     () => (member === undefined

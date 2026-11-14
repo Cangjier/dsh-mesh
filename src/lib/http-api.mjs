@@ -8,6 +8,9 @@
  * @module @local/dsh-mesh/http-api
  */
 
+import { EventHub } from '../../code/shared/event-stream.mjs'
+import { startJobEvents } from './job-events.mjs'
+
 const API_PREFIX = '/api/dsh-mesh'
 const AGENT_HEADER = 'x-dsh-mesh'
 const MAX_BODY_BYTES = 64 * 1024
@@ -57,6 +60,13 @@ async function readJson(request) {
  * @returns {void}
  */
 export function registerApi(ctx, service) {
+  const hub = new EventHub({ log: line => ctx.logger?.info?.(`mesh events: ${line}`) })
+  const jobEvents = startJobEvents({ service, hub, log: line => ctx.logger?.warn?.(`mesh events: ${line}`) })
+  ctx.effect(() => () => {
+    jobEvents.close()
+    hub.close()
+  }, 'mesh events')
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
@@ -96,6 +106,10 @@ export function registerApi(ctx, service) {
         }
         if (method === 'GET' && path === '/conversations') {
           writeJson(response, 200, await service.conversations())
+          return
+        }
+        if (method === 'GET' && path === '/events') {
+          hub.subscribe(request, response)
           return
         }
         if (method === 'GET' && path === '/jobs') {

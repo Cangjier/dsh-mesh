@@ -27,6 +27,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isIP } from 'node:net'
 import { readWireGuardState } from '../shared/wireguard.mjs'
+import { EventHub, JobDirectoryWatcher } from '../shared/event-stream.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ASSETS_DIR = path.join(HERE, 'assets', 'hysteria2')
@@ -276,6 +277,16 @@ export class HysteriaService {
     this.states = new Map()
     /** @type {Map<string, Promise<object>>} */
     this.running = new Map()
+    // Push job/link changes instead of letting the panel poll for them.
+    this.hub = new EventHub({ log: line => this.log(`hysteria events: ${line}`) })
+    /** @type {Map<string, ReturnType<typeof setTimeout>>} */
+    this.logTimers = new Map()
+    this.watcher = new JobDirectoryWatcher({
+      root: this.dataDir,
+      log: line => this.log(`hysteria events: ${line}`),
+      onChange: (dir, file) => this.#onChange(dir, file),
+    })
+    this.watcher.start()
   }
 
   /** Read the bundled asset manifest. */
@@ -315,6 +326,72 @@ export class HysteriaService {
     }
     jobs.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
     return jobs.slice(0, Math.max(1, Math.min(limit, JOB_LIMIT)))
+  }
+
+  /**
+   * Map one filesystem change under `home/hysteria` onto a push.
+   *
+   * `job.json` is the job summary, `job.log` its tail, and `links.json` at the
+   * root the direct-link list. Everything else (config renders, temp files) is
+   * ignored on purpose: the panel only shows those three things.
+   * @param {string} dir job directory name, or '' for a change in the root.
+   * @param {string} file changed file name.
+   * @returns {void}
+   */
+  #onChange(dir, file) {
+    if (dir === '') {
+      if (file === 'links.json') {
+        void this.links().then((result) => {
+          this.hub.send('hysteria', { type: 'hysteria', kind: 'links', links: result.links })
+        }).catch(() => {})
+        return
+      }
+      if (!String(file).startsWith('hy-')) return
+      void this.#pushJob(file)
+      return
+    }
+    if (file === '' || file === 'job.json') {
+      void this.#pushJob(dir)
+      return
+    }
+    if (file === 'job.log') this.#scheduleLog(dir)
+  }
+
+  /**
+   * Push one job state.
+   * @param {string} id job id.
+   * @returns {Promise<void>} completion.
+   */
+  async #pushJob(id) {
+    const job = await this.status(id).catch(() => null)
+    if (job === null || job === undefined) return
+    this.hub.send('hysteria', { type: 'hysteria', kind: 'job', id, job })
+  }
+
+  /**
+   * Push one job's log tail, at most once per throttle window.
+   * @param {string} id job id.
+   * @returns {void}
+   */
+  #scheduleLog(id) {
+    if (this.logTimers.has(id)) return
+    const timer = setTimeout(() => {
+      this.logTimers.delete(id)
+      void this.logs(id, 200).then((text) => {
+        const lines = text.trim() === '' ? [] : text.trimEnd().split(/\r?\n/u)
+        this.hub.send('hysteria', { type: 'hysteria', kind: 'log', id, lines })
+      }).catch(() => {})
+    }, 400)
+    timer.unref?.()
+    this.logTimers.set(id, timer)
+  }
+
+  /** Stop every watcher and close the streams. */
+  close() {
+    for (const timer of this.logTimers.values()) clearTimeout(timer)
+    this.logTimers.clear()
+    this.watcher.stop()
+    this.hub.close()
   }
 
   /** One job state. */
@@ -934,6 +1011,10 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
     const pathname = url.pathname
     if (!this.isAdmitted(req)) {
       sendJson(res, 401, { ok: false, error: 'login required' })
+      return true
+    }
+    if (req.method === 'GET' && pathname === '/__gate/hysteria/events') {
+      this.hub.subscribe(req, res)
       return true
     }
     if (req.method === 'GET' && pathname === '/__gate/hysteria/jobs') {

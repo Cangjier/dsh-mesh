@@ -41,6 +41,7 @@ import zhCN from 'antd/locale/zh_CN'
 import enUS from 'antd/locale/en_US'
 import styles from './styles.css'
 import { renderMarkdown } from './markdown'
+import { useEventStream } from './events'
 import {
   api,
   ApiError,
@@ -225,6 +226,24 @@ function deployPercent(job: DeployJob): number {
   if (share === undefined) return Math.round(inner)
   const own = active.progress === undefined || active.progress === null ? inner : active.progress.percent
   return Math.round(share[0] + ((share[1] - share[0]) * Math.max(0, Math.min(100, own))) / 100)
+}
+
+/**
+ * Merge pushed deploy snapshots into the table.
+ *
+ * A reconnect can replay an older frame; `updatedAt` makes the newer one win so
+ * the progress column never moves backwards.
+ * @param previous current rows.
+ * @param incoming pushed rows.
+ * @returns rows newest first.
+ */
+function mergeDeployJobs(previous: DeployJob[], incoming: DeployJob[]): DeployJob[] {
+  const byId = new Map(previous.map(job => [job.id, job] as const))
+  for (const job of incoming) {
+    const existing = byId.get(job.id)
+    if (existing === undefined || String(job.updatedAt ?? job.createdAt) >= String(existing.updatedAt ?? existing.createdAt)) byId.set(job.id, job)
+  }
+  return [...byId.values()].sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
 }
 
 function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] }) {
@@ -1004,9 +1023,33 @@ function Panel({ ctx }: { ctx: any }) {
 
   useEffect(() => {
     void refreshDeployJobs()
-    const timer = window.setInterval(() => { void refreshDeployJobs() }, 2000)
-    return () => { window.clearInterval(timer) }
   }, [refreshDeployJobs])
+
+  // Deploy changes arrive on the same push stream as builds; the only fetch is
+  // the resync after a (re)connect.
+  useEventStream('/api/dsh-mesh/events', event => {
+    const type = event.type ?? ''
+    if (type === 'ready') {
+      // Connect/reconnect: resync the table and the open dialog once.
+      void refreshDeployJobs()
+      if (progressJob !== null) {
+        void api.deployJob(progressJob.id, 300).then(result => {
+          setProgressJob(result.job)
+          setProgressLog(result.lines)
+        }).catch(() => {})
+      }
+      return
+    }
+    if (type === 'deploy' && event.job !== undefined) {
+      const job = event.job as unknown as DeployJob
+      setDeployJobs(previous => mergeDeployJobs(previous, [job]))
+      setProgressJob(current => (current !== null && current.id === job.id ? job : current))
+      return
+    }
+    if (type === 'deploy-log' && event.id !== undefined && event.id === progressJob?.id) {
+      setProgressLog(Array.isArray(event.lines) ? event.lines : [])
+    }
+  })
 
   useEffect(() => {
     let finished = false
@@ -1035,25 +1078,18 @@ function Panel({ ctx }: { ctx: any }) {
   }, [deployJobs])
 
   const progressId = progressJob?.id ?? ''
+  // One read when the dialog opens; every later change is pushed.
   useEffect(() => {
     if (progressId === '') return
     let alive = true
-    const tick = async () => {
-      try {
-        const result = await api.deployJob(progressId, 300)
-        if (!alive) return
-        setProgressJob(result.job)
-        setProgressLog(result.lines)
-      } catch {
-        // Keep the last snapshot; the next tick retries.
-      }
-    }
-    void tick()
-    const timer = window.setInterval(() => { void tick() }, 1000)
-    return () => {
-      alive = false
-      window.clearInterval(timer)
-    }
+    void api.deployJob(progressId, 300).then(result => {
+      if (!alive) return
+      setProgressJob(result.job)
+      setProgressLog(result.lines)
+    }).catch(() => {
+      // The job may have been pruned; the pushed events still cover a live one.
+    })
+    return () => { alive = false }
   }, [progressId])
 
   const memberRows = useMemo(() => {

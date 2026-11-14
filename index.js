@@ -1,6 +1,6 @@
 // src/index.ts
 import { homedir as homedir2 } from "node:os";
-import path11 from "node:path";
+import path13 from "node:path";
 
 // src/lib/service.mjs
 import { mkdir as mkdir5, readFile as readFile8, readdir as readdir5, rm as rm6, stat as stat7, writeFile as writeFile6 } from "node:fs/promises";
@@ -3552,8 +3552,8 @@ function signClusterRequest(secret, request) {
   const signature = createHmac("sha256", secret).update(payload).digest("base64url");
   return `${VERSION}.${String(timestamp)}.${nonce}.${signature}`;
 }
-function payloadOf(method, path12, timestamp, nonce) {
-  return [VERSION, String(method).toUpperCase(), path12, String(timestamp), nonce].join("\n");
+function payloadOf(method, path14, timestamp, nonce) {
+  return [VERSION, String(method).toUpperCase(), path14, String(timestamp), nonce].join("\n");
 }
 
 // code/build/repack.mjs
@@ -3886,10 +3886,10 @@ var MeshService = class {
     let host = String(member.ip ?? "");
     if (host === "") throw new Error(`member ${member.id} has no VPN address`);
     if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
-    const path12 = "/__gate/cluster/__gate/session/promote";
-    const response = await fetch(`http://${host}${path12}`, {
+    const path14 = "/__gate/cluster/__gate/session/promote";
+    const response = await fetch(`http://${host}${path14}`, {
       method: "POST",
-      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path12 }) }
+      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path14 }) }
     });
     const text = await response.text();
     if (!response.ok) throw new Error(`member ${member.name} refused the request: HTTP ${String(response.status)} ${text.slice(0, 120)}`);
@@ -4337,28 +4337,53 @@ var MeshService = class {
       if (!entry.isDirectory()) continue;
       try {
         const state = await readState(path9.join(this.jobRoot, entry.name));
-        jobs.push({
-          id: state.id,
-          status: state.status,
-          phase: state.phase,
-          source: state.source,
-          ref: state.ref,
-          targets: state.targets,
-          updatedAt: state.updatedAt,
-          createdAt: state.createdAt,
-          member: state.member ?? null,
-          memberName: state.memberName ?? null,
-          mode: state.mode ?? "local",
-          proxy: state.proxy ?? null,
-          proxyMember: state.proxyMember ?? null,
-          percent: typeof state.percent === "number" ? state.percent : null,
-          version: state.version ?? null,
-          error: state.error ?? null
-        });
+        jobs.push(this.#summary(state));
       } catch {
       }
     }
     return jobs.sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
+  }
+  /**
+   * The list projection of one job, or null when it does not exist.
+   *
+   * The panel's event stream pushes this shape, so it is the same object
+   * `jobs()` returns and the client can merge it into its table.
+   * @param {string} id job id.
+   * @returns {Promise<object|null>} summary.
+   */
+  async buildSummary(id) {
+    let dir;
+    try {
+      dir = this._jobDir(id);
+    } catch {
+      return null;
+    }
+    try {
+      return this.#summary(await readState(dir));
+    } catch {
+      return null;
+    }
+  }
+  /** Project a job state onto the fields the panel lists. */
+  #summary(state) {
+    return {
+      id: state.id,
+      status: state.status,
+      phase: state.phase,
+      source: state.source,
+      ref: state.ref,
+      targets: state.targets,
+      updatedAt: state.updatedAt,
+      createdAt: state.createdAt,
+      member: state.member ?? null,
+      memberName: state.memberName ?? null,
+      mode: state.mode ?? "local",
+      proxy: state.proxy ?? null,
+      proxyMember: state.proxyMember ?? null,
+      percent: typeof state.percent === "number" ? state.percent : null,
+      version: state.version ?? null,
+      error: state.error ?? null
+    };
   }
   /**
    * Read one job's log tail.
@@ -4661,6 +4686,285 @@ var MeshService = class {
   }
 };
 
+// code/shared/event-stream.mjs
+import { mkdirSync, readdirSync, watch } from "node:fs";
+import path10 from "node:path";
+var HEARTBEAT_MS = 15e3;
+var DEBOUNCE_MS = 120;
+var EventHub = class {
+  /**
+   * @param {{log?: (line: string) => void, heartbeatMs?: number}} [options] options.
+   */
+  constructor(options = {}) {
+    this.log = options.log ?? (() => {
+    });
+    this.heartbeatMs = Number.isSafeInteger(options.heartbeatMs) ? options.heartbeatMs : HEARTBEAT_MS;
+    this.clients = /* @__PURE__ */ new Set();
+  }
+  /** How many panels are currently subscribed. */
+  get size() {
+    return this.clients.size;
+  }
+  /**
+   * Turn one HTTP response into a long-lived event stream.
+   *
+   * The caller must not write to the response afterwards. The returned
+   * unsubscribe function is idempotent, so both request and response `close`
+   * handlers can call it.
+   * @param {import('node:http').IncomingMessage} request request.
+   * @param {import('node:http').ServerResponse} response response.
+   * @returns {() => void} unsubscribe.
+   */
+  subscribe(request, response) {
+    response.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no"
+    });
+    try {
+      response.write("retry: 3000\n\n");
+      response.write(`event: ready
+data: ${JSON.stringify({ type: "ready" })}
+
+`);
+    } catch {
+      try {
+        response.end();
+      } catch {
+      }
+      return () => {
+      };
+    }
+    this.clients.add(response);
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      this.clients.delete(response);
+    };
+    const heartbeat = setInterval(() => {
+      try {
+        response.write(": ping\n\n");
+      } catch {
+        close();
+      }
+    }, this.heartbeatMs);
+    heartbeat.unref?.();
+    request.once("close", close);
+    response.once("close", close);
+    return close;
+  }
+  /**
+   * Send one named event to every subscriber.
+   * @param {string} type event name.
+   * @param {object} payload JSON payload.
+   * @returns {void}
+   */
+  send(type, payload) {
+    if (this.clients.size === 0) return;
+    const frame = `event: ${type}
+data: ${JSON.stringify(payload)}
+
+`;
+    for (const client of [...this.clients]) {
+      try {
+        client.write(frame);
+      } catch {
+        this.clients.delete(client);
+      }
+    }
+  }
+  /** Close every stream, e.g. when the plugin is unloaded. */
+  close() {
+    for (const client of [...this.clients]) {
+      try {
+        client.end();
+      } catch {
+      }
+    }
+    this.clients.clear();
+  }
+};
+var JobDirectoryWatcher = class {
+  /**
+   * @param {{root: string, onChange: (dir: string, file: string) => void, log?: (line: string) => void}} options options.
+   */
+  constructor(options) {
+    this.root = options.root;
+    this.onChange = options.onChange;
+    this.log = options.log ?? (() => {
+    });
+    this.watchers = /* @__PURE__ */ new Map();
+    this.pending = /* @__PURE__ */ new Map();
+    this.rootWatcher = null;
+    this.timer = null;
+    this.started = false;
+  }
+  /** Start watching. Safe to call twice. */
+  start() {
+    if (this.started) return;
+    this.started = true;
+    try {
+      mkdirSync(this.root, { recursive: true });
+      this.rootWatcher = watch(this.root, { persistent: false }, (_event, file) => {
+        this.#scan();
+        this.#queue("", String(file ?? ""));
+      });
+      this.rootWatcher.on("error", (error) => this.#fail(error));
+    } catch (error) {
+      this.#fail(error);
+      return;
+    }
+    this.#scan();
+  }
+  /** Stop every watcher and drop pending callbacks. */
+  stop() {
+    this.started = false;
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.pending.clear();
+    this.rootWatcher?.close();
+    this.rootWatcher = null;
+    for (const watcher of this.watchers.values()) watcher.close();
+    this.watchers.clear();
+  }
+  /** Add a watcher for every immediate subdirectory not seen yet. */
+  #scan() {
+    let entries = [];
+    try {
+      entries = readdirSync(this.root, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || this.watchers.has(entry.name)) continue;
+      try {
+        const watcher = watch(path10.join(this.root, entry.name), { persistent: false }, (_event, file) => {
+          this.#queue(entry.name, String(file ?? ""));
+        });
+        watcher.on("error", () => {
+          this.watchers.delete(entry.name);
+        });
+        this.watchers.set(entry.name, watcher);
+      } catch {
+      }
+    }
+  }
+  /** Batch one change and deliver it after a short debounce. */
+  #queue(dir, file) {
+    this.pending.set(`${dir}\0${file}`, { dir, file });
+    if (this.timer !== null) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      const changes = [...this.pending.values()];
+      this.pending.clear();
+      for (const change of changes) {
+        try {
+          this.onChange(change.dir, change.file);
+        } catch (error) {
+          this.log(`event watcher callback failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }, DEBOUNCE_MS);
+    this.timer.unref?.();
+  }
+  /** Report a watcher that could not even be created. */
+  #fail(error) {
+    this.log(`cannot watch ${this.root}: ${error instanceof Error ? error.message : String(error)}`);
+    this.rootWatcher?.close();
+    this.rootWatcher = null;
+  }
+};
+
+// src/lib/job-events.mjs
+import path11 from "node:path";
+var LOG_THROTTLE_MS = 400;
+var LOG_LINES = 200;
+var JOB_ID = /^[A-Za-z0-9._-]+$/u;
+function startJobEvents(options) {
+  const { service, hub } = options;
+  const log = options.log ?? (() => {
+  });
+  const logTimers = /* @__PURE__ */ new Map();
+  const reading = /* @__PURE__ */ new Map();
+  if (typeof service.dataDir !== "string" || service.dataDir === "") {
+    log("job events disabled: the service has no dataDir");
+    return { close() {
+    } };
+  }
+  const watchers = [
+    new JobDirectoryWatcher({
+      root: path11.join(service.dataDir, "build"),
+      log,
+      onChange: (dir, file) => handle("build", dir, file)
+    }),
+    new JobDirectoryWatcher({
+      root: path11.join(service.dataDir, "deploy"),
+      log,
+      onChange: (dir, file) => handle("deploy", dir, file)
+    })
+  ];
+  for (const watcher of watchers) watcher.start();
+  function handle(kind, dir, file) {
+    const id = dir !== "" ? dir : file;
+    if (typeof id !== "string" || id === "" || !JOB_ID.test(id)) return;
+    if (dir === "") {
+      void emit(kind, id);
+      return;
+    }
+    if (file === "" || file === "state.json" || file === "job.json") {
+      void emit(kind, id);
+      return;
+    }
+    if (file.endsWith(".log")) scheduleLog(kind, id);
+  }
+  async function emit(kind, id) {
+    const key = `${kind}:${id}`;
+    if (reading.get(key) === true) return;
+    reading.set(key, true);
+    try {
+      const job = kind === "build" ? await service.buildSummary(id) : await service.deployStatus(id);
+      if (job === null || job === void 0) return;
+      hub.send(kind, { type: kind, id, job });
+    } catch (error) {
+      log(`job event for ${key} failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      reading.delete(key);
+    }
+  }
+  function scheduleLog(kind, id) {
+    const key = `${kind}:${id}`;
+    if (logTimers.has(key)) return;
+    const timer = setTimeout(() => {
+      logTimers.delete(key);
+      void sendLog(kind, id);
+    }, LOG_THROTTLE_MS);
+    timer.unref?.();
+    logTimers.set(key, timer);
+  }
+  async function sendLog(kind, id) {
+    try {
+      const text = kind === "build" ? await service.log(id, LOG_LINES) : await service.deployLogs(id, LOG_LINES);
+      const lines = typeof text === "string" && text.trim() !== "" ? text.trimEnd().split(/\r?\n/u) : [];
+      hub.send(`${kind}-log`, { type: `${kind}-log`, id, lines });
+    } catch (error) {
+      log(`job log for ${kind}:${id} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return {
+    close() {
+      for (const watcher of watchers) watcher.stop();
+      for (const timer of logTimers.values()) clearTimeout(timer);
+      logTimers.clear();
+      reading.clear();
+    }
+  };
+}
+
 // src/lib/http-api.mjs
 var API_PREFIX = "/api/dsh-mesh";
 var AGENT_HEADER = "x-dsh-mesh";
@@ -4690,6 +4994,12 @@ async function readJson(request) {
   return parsed;
 }
 function registerApi(ctx, service) {
+  const hub = new EventHub({ log: (line) => ctx.logger?.info?.(`mesh events: ${line}`) });
+  const jobEvents = startJobEvents({ service, hub, log: (line) => ctx.logger?.warn?.(`mesh events: ${line}`) });
+  ctx.effect(() => () => {
+    jobEvents.close();
+    hub.close();
+  }, "mesh events");
   ctx.effect(() => ctx.webServer.register({
     kind: "prefix",
     path: API_PREFIX,
@@ -4697,25 +5007,25 @@ function registerApi(ctx, service) {
       try {
         const method = request.method ?? "GET";
         const url = new URL(request.url ?? "/", "http://local.invalid");
-        const path12 = url.pathname.slice(API_PREFIX.length) || "/";
-        if (method === "GET" && path12 === "/status") {
+        const path14 = url.pathname.slice(API_PREFIX.length) || "/";
+        if (method === "GET" && path14 === "/status") {
           writeJson(response, 200, await service.status());
           return;
         }
-        if (method === "GET" && path12 === "/members") {
+        if (method === "GET" && path14 === "/members") {
           writeJson(response, 200, await service.members());
           return;
         }
-        if (method === "GET" && path12 === "/member-tags") {
+        if (method === "GET" && path14 === "/member-tags") {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() });
           return;
         }
-        if (method === "POST" && path12 === "/packages/delete") {
+        if (method === "POST" && path14 === "/packages/delete") {
           const body = await readJson(request);
           writeJson(response, 200, await service.removePackage({ name: typeof body.name === "string" ? body.name : "" }));
           return;
         }
-        if (method === "POST" && path12 === "/conversations/send") {
+        if (method === "POST" && path14 === "/conversations/send") {
           const body = await readJson(request);
           writeJson(response, 200, await service.sendConversation({
             text: typeof body.text === "string" ? body.text : "",
@@ -4723,28 +5033,32 @@ function registerApi(ctx, service) {
           }));
           return;
         }
-        if (method === "POST" && path12 === "/conversations/clear") {
+        if (method === "POST" && path14 === "/conversations/clear") {
           writeJson(response, 200, await service.clearConversations());
           return;
         }
-        if (method === "GET" && path12 === "/conversations") {
+        if (method === "GET" && path14 === "/conversations") {
           writeJson(response, 200, await service.conversations());
           return;
         }
-        if (method === "GET" && path12 === "/jobs") {
+        if (method === "GET" && path14 === "/events") {
+          hub.subscribe(request, response);
+          return;
+        }
+        if (method === "GET" && path14 === "/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() });
           return;
         }
-        if (method === "GET" && path12 === "/packages") {
+        if (method === "GET" && path14 === "/packages") {
           writeJson(response, 200, await service.packages());
           return;
         }
-        if (method === "GET" && path12 === "/deploy/jobs") {
+        if (method === "GET" && path14 === "/deploy/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) });
           return;
         }
         if (method === "GET") {
-          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path12);
+          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path14);
           if (deployRead !== null) {
             const lines = Number.parseInt(url.searchParams.get("lines") ?? "200", 10);
             const job = await service.deployStatus(deployRead[1]);
@@ -4761,7 +5075,7 @@ function registerApi(ctx, service) {
             });
             return;
           }
-          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path12);
+          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path14);
           if (read !== null) {
             if (read[2] === "/log") {
               const lines = Number.parseInt(url.searchParams.get("lines") ?? "80", 10);
@@ -4783,7 +5097,7 @@ function registerApi(ctx, service) {
           writeJson(response, 403, { ok: false, error: { code: "forbidden", message: `Missing the ${AGENT_HEADER} header.` } });
           return;
         }
-        if (path12 === "/deploy") {
+        if (path14 === "/deploy") {
           const body = await readJson(request);
           const result = await service.deployMember({
             member: typeof body.member === "string" ? body.member : void 0,
@@ -4792,12 +5106,12 @@ function registerApi(ctx, service) {
           writeJson(response, 202, result);
           return;
         }
-        if (path12 === "/session/promote") {
+        if (path14 === "/session/promote") {
           const body = await readJson(request);
           writeJson(response, 200, await service.promoteSession(String(body.member ?? "")));
           return;
         }
-        if (path12 === "/member-tags") {
+        if (path14 === "/member-tags") {
           const body = await readJson(request);
           writeJson(response, 200, await service.setMemberTag(
             typeof body.id === "string" ? body.id : "",
@@ -4805,7 +5119,7 @@ function registerApi(ctx, service) {
           ));
           return;
         }
-        if (path12 === "/build") {
+        if (path14 === "/build") {
           const body = await readJson(request);
           const job = await service.startBuild({
             source: typeof body.source === "string" ? body.source : void 0,
@@ -4820,12 +5134,12 @@ function registerApi(ctx, service) {
           writeJson(response, 202, { ok: true, job });
           return;
         }
-        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path12);
+        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path14);
         if (resume !== null) {
           writeJson(response, 202, { ok: true, job: await service.resumeBuild(resume[1]) });
           return;
         }
-        const match = /^\/build\/([^/]+)\/learn$/u.exec(path12);
+        const match = /^\/build\/([^/]+)\/learn$/u.exec(path14);
         if (match !== null) {
           writeJson(response, 200, { ok: true, job: await service.learn(match[1]) });
           return;
@@ -4894,7 +5208,7 @@ function registerWireGuardApi(ctx) {
 import { randomUUID } from "node:crypto";
 import { mkdir as mkdir6, readFile as readFile9, readdir as readdir6, rename as rename4, writeFile as writeFile7 } from "node:fs/promises";
 import { existsSync as existsSync9, readFileSync as readFileSync4 } from "node:fs";
-import path10 from "node:path";
+import path12 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
@@ -4927,10 +5241,11 @@ var MemberTaskService = class {
     this.dataDir = options.dataDir;
     this.logLine = options.log ?? (() => {
     });
-    this.taskRoot = path10.join(this.dataDir, "member-tasks");
+    this.taskRoot = path12.join(this.dataDir, "member-tasks");
     this.tasks = /* @__PURE__ */ new Map();
     this.monitors = /* @__PURE__ */ new Map();
     this.controllers = /* @__PURE__ */ new Map();
+    this.waiters = /* @__PURE__ */ new Map();
     this.identity = null;
     this.loaded = false;
     this.disposed = false;
@@ -4950,6 +5265,7 @@ var MemberTaskService = class {
         await this.#save(task).catch(() => {
         });
       }
+      this.#notifyWaiters(task);
     }
   }
   async #ensureLoaded() {
@@ -4964,13 +5280,16 @@ var MemberTaskService = class {
     for (const file of files) {
       if (!file.endsWith(".json")) continue;
       try {
-        const task = JSON.parse(await readFile9(path10.join(this.taskRoot, file), "utf8"));
+        const task = JSON.parse(await readFile9(path12.join(this.taskRoot, file), "utf8"));
         if (task?.id === void 0) continue;
         if (task.status === "running" || task.status === "starting") {
           task.status = "interrupted";
           task.error = "the plugin restarted before the member conversation completed";
           await this.#save(task);
         }
+        task.replies = Array.isArray(task.replies) ? task.replies : [];
+        task.replySeq = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0;
+        task.deliveredSeq = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0;
         this.tasks.set(task.id, task);
       } catch {
       }
@@ -4978,7 +5297,7 @@ var MemberTaskService = class {
   }
   async #save(task) {
     task.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const file = path10.join(this.taskRoot, `${task.id}.json`);
+    const file = path12.join(this.taskRoot, `${task.id}.json`);
     const temporary = `${file}.${process.pid}.tmp`;
     await mkdir6(this.taskRoot, { recursive: true });
     await writeFile7(temporary, `${JSON.stringify(task, null, 2)}
@@ -4989,7 +5308,7 @@ var MemberTaskService = class {
     const text = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
 `;
     try {
-      await writeFile7(path10.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
+      await writeFile7(path12.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
     } catch {
     }
     try {
@@ -5009,9 +5328,9 @@ var MemberTaskService = class {
     if (this.service.config?.interopUseGatePassword !== false) {
       if (process.env.DSH_GATE_PASSWORD) return process.env.DSH_GATE_PASSWORD;
       const candidates = [
-        path10.join(this.service.repositoryRoot, "..", "config", "gate.env"),
-        path10.join(this.service.repositoryRoot, "config", "gate.env"),
-        path10.join(this.service.dataDir, "..", "..", "config", "gate.env")
+        path12.join(this.service.repositoryRoot, "..", "config", "gate.env"),
+        path12.join(this.service.repositoryRoot, "config", "gate.env"),
+        path12.join(this.service.dataDir, "..", "..", "config", "gate.env")
       ];
       for (const file of candidates) {
         const password = envFile(file).DSH_GATE_PASSWORD;
@@ -5152,6 +5471,12 @@ var MemberTaskService = class {
       interrupted: false,
       attempts: 0,
       turns: 0,
+      /** Replies already accepted from the member, oldest first. */
+      replies: [],
+      /** Newest reply sequence number seen on the member. */
+      replySeq: 0,
+      /** Newest reply seq a `wait_member` call already returned to the model. */
+      deliveredSeq: 0,
       notify,
       notified: false,
       notifiedAt: null,
@@ -5170,12 +5495,15 @@ var MemberTaskService = class {
     return task;
   }
   /**
-   * Wait for one task up to a bounded timeout. The task monitor keeps running
-   * in the background, so a timeout only ends this caller's wait; the caller
-   * can call wait again with the same id.
+   * Wait for the next news about one task, up to a bounded timeout.
+   *
+   * "News" is either a finished-turn reply the model has not seen yet, or the
+   * task reaching a terminal state. The monitor keeps running in the background,
+   * so a timeout only ends this caller's wait; the same taskId can be waited
+   * again, and replies that arrived meanwhile are not lost.
    * @param {string} taskId task id returned by call_member.
    * @param {{timeoutMs?: number, signal?: AbortSignal}} [options] wait options.
-   * @returns {Promise<{done: boolean, timedOut: boolean, task: object}>} outcome.
+   * @returns {Promise<{done: boolean, timedOut: boolean, task: object, replies: object[], state: string}>} outcome.
    */
   async wait(taskId, options = {}) {
     await this.#ensureLoaded();
@@ -5188,12 +5516,73 @@ var MemberTaskService = class {
       if (signal?.aborted) throw new Error("tool call aborted");
       const task = this.tasks.get(id);
       if (task === void 0) throw new Error(`member task not found: ${id}`);
-      if (task.status === "completed" || task.status === "failed" || task.status === "interrupted") {
-        return { done: true, timedOut: false, task };
+      const replies = this.#pendingReplies(task);
+      const terminal = task.status === "completed" || task.status === "failed" || task.status === "interrupted";
+      if (replies.length > 0) {
+        task.deliveredSeq = replies[replies.length - 1].seq;
+        await this.#save(task).catch(() => {
+        });
+        return {
+          done: terminal,
+          timedOut: false,
+          task,
+          replies,
+          state: terminal ? task.status === "completed" ? "done" : "failed" : "progress"
+        };
+      }
+      if (terminal) {
+        return { done: true, timedOut: false, task, replies: [], state: task.status === "completed" ? "done" : "failed" };
       }
       const left = deadline - Date.now();
-      if (left <= 0) return { done: false, timedOut: true, task };
-      await new Promise((resolve) => setTimeout(resolve, Math.min(500, left)));
+      if (left <= 0) return { done: false, timedOut: true, task, replies: [], state: "running" };
+      await this.#waitForWake(task, left);
+    }
+  }
+  /** Replies this task received but no `wait` call has returned yet. */
+  #pendingReplies(task) {
+    const delivered = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0;
+    const replies = Array.isArray(task.replies) ? task.replies : [];
+    return replies.filter((reply) => Number.isSafeInteger(reply?.seq) && reply.seq > delivered);
+  }
+  /**
+   * Park until this task changes or the budget runs out.
+   *
+   * A promise per waiter (rather than a poll loop) is what makes a finished
+   * turn reach the model immediately, without a half-second of latency.
+   * @param {object} task member task.
+   * @param {number} ms maximum wait.
+   * @returns {Promise<void>} resolves on a wake or on the deadline.
+   */
+  #waitForWake(task, ms) {
+    return new Promise((resolve) => {
+      let timer;
+      const waiter = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      timer = setTimeout(() => {
+        this.waiters.get(task.id)?.delete(waiter);
+        resolve();
+      }, Math.max(0, ms));
+      timer.unref?.();
+      let parked = this.waiters.get(task.id);
+      if (parked === void 0) {
+        parked = /* @__PURE__ */ new Set();
+        this.waiters.set(task.id, parked);
+      }
+      parked.add(waiter);
+    });
+  }
+  /** Wake every `wait_member` call parked on this task. */
+  #notifyWaiters(task) {
+    const parked = this.waiters.get(task.id);
+    if (parked === void 0) return;
+    this.waiters.delete(task.id);
+    for (const waiter of [...parked]) {
+      try {
+        waiter();
+      } catch {
+      }
     }
   }
   async send(taskId, content, signal) {
@@ -5312,10 +5701,11 @@ var MemberTaskService = class {
           task.baseUrl,
           "POST",
           `/v1/conversations/${encodeURIComponent(task.conversationId)}/wait`,
-          { timeoutMs: WAIT_TIMEOUT_MS },
+          { timeoutMs: WAIT_TIMEOUT_MS, since: Number.isSafeInteger(task.replySeq) ? task.replySeq : 0 },
           WAIT_TIMEOUT_MS + 1e4,
           signal
         );
+        task.attempts = 0;
         if (result.timedOut === true) {
           task.status = "running";
           await this.#save(task);
@@ -5323,7 +5713,6 @@ var MemberTaskService = class {
         }
         if (this.disposed) break;
         const conversation = result.conversation ?? {};
-        task.lastText = typeof conversation.lastText === "string" ? conversation.lastText : "";
         if (conversation.error) task.error = String(conversation.error);
         const status = String(conversation.status ?? "");
         if (status === "interrupted" || status === "unavailable") {
@@ -5332,6 +5721,32 @@ var MemberTaskService = class {
           task.error = String(conversation.error ?? EMPTY_TURN);
           break;
         }
+        const state = typeof result.state === "string" ? result.state : "";
+        if (state === "progress" || state === "done") {
+          await this.#acceptReplies(task, result, { notify: state === "progress" });
+          if (Number.isSafeInteger(result.turn)) task.turns = result.turn;
+          if (state === "progress") {
+            task.emptyWaits = 0;
+            task.status = "running";
+            await this.#save(task);
+            continue;
+          }
+          if (task.turns === 0 && String(task.lastText ?? "") === "") {
+            task.emptyWaits = (task.emptyWaits ?? 0) + 1;
+            if (task.emptyWaits < EMPTY_WAIT_RETRIES) {
+              await new Promise((resolve) => setTimeout(resolve, 1e3));
+              continue;
+            }
+            task.status = "failed";
+            task.interrupted = true;
+            task.error = EMPTY_TURN;
+            break;
+          }
+          task.emptyWaits = 0;
+          task.status = conversation.error ? "failed" : "completed";
+          break;
+        }
+        task.lastText = typeof conversation.lastText === "string" ? conversation.lastText : "";
         if (status === "idle" && !this.#turnAdvanced(task, conversation) && String(task.lastText ?? "") === "") {
           task.emptyWaits = (task.emptyWaits ?? 0) + 1;
           if (task.emptyWaits < EMPTY_WAIT_RETRIES) {
@@ -5373,7 +5788,45 @@ var MemberTaskService = class {
       await this.#log(task, `${task.status}: ${truncate(task.lastText || task.error || "", 500)}`);
       if (task.notify) await this.#notify(task);
     }
+    this.#notifyWaiters(task);
     return task;
+  }
+  /**
+   * Store the replies a wait response brought and wake parked `wait_member` calls.
+   *
+   * Replies are idempotent on their `seq`, so a response that repeats the last
+   * reply (a `done` that follows a `progress` for the same turn) cannot make the
+   * model read the same answer twice.
+   * @param {object} task the tracked task.
+   * @param {object} result wait response from the member.
+   * @param {{notify?: boolean}} [options] `notify: false` when the caller will
+   *   wake waiters itself after updating the task status.
+   * @returns {Promise<boolean>} whether anything new arrived.
+   */
+  async #acceptReplies(task, result, options = {}) {
+    const incoming = Array.isArray(result.replies) && result.replies.length > 0 ? result.replies : typeof result.text === "string" && result.text !== "" && Number.isSafeInteger(result.seq) ? [{ seq: result.seq, turn: result.turn, text: result.text }] : [];
+    const seen = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0;
+    let added = false;
+    for (const reply of incoming) {
+      if (!Number.isSafeInteger(reply?.seq) || reply.seq <= seen) continue;
+      if (typeof reply.text !== "string" || reply.text.trim() === "") continue;
+      task.replies = Array.isArray(task.replies) ? task.replies : [];
+      task.replies.push({
+        seq: reply.seq,
+        turn: Number.isSafeInteger(reply.turn) ? reply.turn : null,
+        text: truncate(reply.text, 2e4),
+        at: typeof reply.at === "string" ? reply.at : (/* @__PURE__ */ new Date()).toISOString()
+      });
+      if (task.replies.length > 30) task.replies.splice(0, task.replies.length - 30);
+      task.replySeq = reply.seq;
+      task.lastText = truncate(reply.text, 2e4);
+      added = true;
+    }
+    if (!added) return false;
+    await this.#save(task);
+    await this.#log(task, `reply ${String(task.replySeq)}: ${truncate(task.lastText, 300)}`);
+    if (options.notify !== false) this.#notifyWaiters(task);
+    return true;
   }
   /**
    * True when a wait result proves a turn finished on the member.
@@ -5458,7 +5911,7 @@ var MemberTaskService = class {
     const task = this.tasks.get(String(taskId));
     if (task === void 0) return "";
     try {
-      const text = await readFile9(path10.join(this.taskRoot, `${task.id}.log`), "utf8");
+      const text = await readFile9(path12.join(this.taskRoot, `${task.id}.log`), "utf8");
       return text.split("\n").slice(-Math.max(1, Math.min(lines, 500))).join("\n");
     } catch {
       return "";
@@ -5533,7 +5986,7 @@ var MemberTaskService = class {
    * @returns {string} log path.
    */
   logPath(taskId) {
-    return path10.join(this.taskRoot, `${String(taskId)}.log`);
+    return path12.join(this.taskRoot, `${String(taskId)}.log`);
   }
 };
 
@@ -5758,8 +6211,10 @@ function registerTools(ctx, toolsCtx, service) {
     description: [
       "\u7B49\u5F85\u4E00\u4E2A\u7531 call_member \u53D1\u8D77\u7684\u6210\u5458\u4EFB\u52A1\uFF0C\u6700\u591A timeoutMs \u6BEB\u79D2\u3002",
       "",
-      "\u5B8C\u6210\uFF1A\u8FD4\u56DE\u6210\u5458\u5BF9\u8BDD\u7684\u6700\u7EC8\u6587\u672C\u3002",
-      "\u8D85\u65F6\uFF1A\u8FD4\u56DE done=false \u548C\u201C\u53EF\u4EE5\u7EE7\u7EED\u8C03\u7528 wait_member\u201D\u7684\u63D0\u793A\uFF1B\u7528\u540C\u4E00\u4E2A taskId \u518D\u8C03\u4E00\u6B21\u5373\u53EF\u3002",
+      "\u6210\u5458\u5BF9\u8BDD\u4E00\u6709\u65B0\u56DE\u590D\uFF08\u4E00\u8F6E\u7ED3\u675F\uFF09\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF0C\u4E0D\u7B49\u5230\u6574\u6BB5\u4EFB\u52A1\u7ED3\u675F\uFF1B\u8FD4\u56DE\u503C\u5E26 state\uFF1A",
+      "progress\uFF1A\u672C\u8F6E\u56DE\u590D\u5DF2\u8FD4\u56DE\uFF0C\u4F46\u6210\u5458\u8FD8\u4F1A\u7EE7\u7EED\uFF08\u53EF\u80FD\u8FD8\u6709\u672A\u5B8C\u6210\u7684\u5B50\u4EE3\u7406\uFF09\uFF1B\u7528\u540C\u4E00\u4E2A taskId \u518D\u7B49\u4E0B\u4E00\u8F6E\u3002",
+      "done\uFF1A\u6574\u6BB5\u4EFB\u52A1\u5B8C\u6210\uFF0C\u8FD4\u56DE\u6700\u7EC8\u6587\u672C\u3002",
+      "\u8D85\u65F6\uFF1Adone=false\u3001state=running\uFF0C\u7528\u540C\u4E00\u4E2A taskId \u7EE7\u7EED\u7B49\u5373\u53EF\uFF0C\u671F\u95F4\u4EA7\u751F\u7684\u56DE\u590D\u4E0D\u4F1A\u4E22\u3002",
       "\u5931\u8D25/\u4E2D\u65AD\uFF1A\u8FD4\u56DE\u9519\u8BEF\uFF1B\u76EE\u6807 DSH \u91CD\u542F\u65F6\u53EF\u4EE5\u7528 call_member send \u7EE7\u7EED\u8BE5\u5BF9\u8BDD\u3002",
       "\u6BCF\u6B21\u8C03\u7528\u6709\u4E0A\u9650\uFF08\u9ED8\u8BA4 30000\uFF0C\u6700\u5927 300000 \u6BEB\u79D2\uFF09\uFF0C\u4E0D\u4F1A\u65E0\u9650\u963B\u585E\uFF1B\u7528\u6237\u505C\u6B62\u5F53\u524D\u5BF9\u8BDD\u4F1A\u4E2D\u6B62\u672C\u6B21\u7B49\u5F85\u3002"
     ].join("\n"),
@@ -5784,7 +6239,43 @@ function registerTools(ctx, toolsCtx, service) {
       const timeoutMs = Number.isSafeInteger(args.timeoutMs) ? args.timeoutMs : 3e4;
       const result = await memberTasks.wait(args.taskId, { timeoutMs, signal: exec.signal });
       const task = result.task;
-      const data = { ...task, done: result.done, timedOut: result.timedOut, logFile: memberTasks.logPath(task.id) };
+      const replies = Array.isArray(result.replies) ? result.replies : [];
+      const replyText = replies.map((reply) => reply.text).join("\n\n").trim();
+      const data = {
+        ...task,
+        done: result.done,
+        timedOut: result.timedOut,
+        state: result.state,
+        text: replyText,
+        replies,
+        logFile: memberTasks.logPath(task.id)
+      };
+      if (!result.done && result.state === "progress") {
+        return {
+          ok: true,
+          text: [
+            `\u6210\u5458\u4EFB\u52A1 ${task.id} \u8FDB\u884C\u4E2D\uFF1A${task.member}\uFF08${task.memberIp}\uFF09\uFF0C\u5BF9\u8BDD ${task.conversationId}\u3002`,
+            replyText !== "" ? `\u672C\u8F6E\u56DE\u590D\uFF1A
+${replyText}` : "",
+            `\u6210\u5458\u8FD8\u4F1A\u7EE7\u7EED\uFF08\u53EF\u80FD\u8FD8\u6709\u672A\u5B8C\u6210\u7684\u5B50\u4EE3\u7406\uFF09\u3002\u7EE7\u7EED\u7B49\u5F85\u4E0B\u4E00\u8F6E\uFF1AtaskId="${task.id}"\uFF0CtimeoutMs=30000\u3002`,
+            `\u65E5\u5FD7\uFF1A${data.logFile}`
+          ].filter((line) => line !== "").join("\n"),
+          data
+        };
+      }
+      if (result.done && task.status === "completed") {
+        const finalText = replyText !== "" ? replyText : typeof task.lastText === "string" ? task.lastText : "";
+        return {
+          ok: true,
+          text: [
+            `\u6210\u5458\u4EFB\u52A1 ${task.id} \u5DF2\u5B8C\u6210\uFF1A${task.member}\uFF08${task.memberIp}\uFF09\u3002`,
+            "\u7ED3\u679C\uFF1A",
+            finalText !== "" ? finalText : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
+            `\u65E5\u5FD7\uFF1A${data.logFile}`
+          ].join("\n"),
+          data
+        };
+      }
       if (!result.done) {
         const effective = Math.min(3e5, Math.max(1e3, timeoutMs));
         return {
@@ -5798,22 +6289,12 @@ function registerTools(ctx, toolsCtx, service) {
           data
         };
       }
-      if (task.status === "completed") {
-        return {
-          ok: true,
-          text: [
-            `\u6210\u5458\u4EFB\u52A1 ${task.id} \u5DF2\u5B8C\u6210\uFF1A${task.member}\uFF08${task.memberIp}\uFF09\u3002`,
-            "\u7ED3\u679C\uFF1A",
-            typeof task.lastText === "string" && task.lastText !== "" ? task.lastText : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
-            `\u65E5\u5FD7\uFF1A${data.logFile}`
-          ].join("\n"),
-          data
-        };
-      }
       return {
         ok: false,
         text: [
           `\u6210\u5458\u4EFB\u52A1 ${task.id} ${task.status}\uFF1A${task.error ?? "unknown"}`,
+          replyText !== "" ? `\u4E2D\u65AD\u524D\u7684\u56DE\u590D\uFF1A
+${replyText}` : "",
           task.interrupted === true ? "\u76EE\u6807\u6210\u5458\u7684 DSH \u91CD\u542F\u6216\u8FD0\u884C\u65F6\u9000\u51FA\u6253\u65AD\u4E86\u8FD9\u4E00\u8F6E\uFF1B\u53EF\u4EE5\u7528 call_member send \u540C\u4E00\u4E2A taskId \u7EE7\u7EED\u3002" : "",
           `\u65E5\u5FD7\uFF1A${data.logFile}`
         ].filter((line) => line !== "").join("\n"),
@@ -5961,8 +6442,8 @@ function formatBytes2(value) {
 // src/index.ts
 var inject = ["webServer"];
 function dataDirectory() {
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path11.join(homedir2(), ".dsh");
-  return path11.join(home, "mesh");
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path13.join(homedir2(), ".dsh");
+  return path13.join(home, "mesh");
 }
 async function apply(ctx, config = {}) {
   const service = new MeshService({

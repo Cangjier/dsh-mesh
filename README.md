@@ -5,13 +5,13 @@
 这个仓库现在同时是：
 
 - **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` 工具。
-- **可观察的部署**：点「部署」后按钮变为「正在部署」，随时点开查看上传进度（字节、速度、剩余时间）、上传/解压准备/切换重启三步状态与远端脚本日志尾部，结束后直接给出成功或失败原因。
+- **可观察的部署**：点「部署」后按钮变为「正在部署」，随时点开查看上传进度（字节、速度、剩余时间）、上传/解压准备/切换重启三步状态与远端脚本日志尾部，结束后直接给出成功或失败原因。进度与日志走 **SSE 推送**（`/api/dsh-mesh/events`、`/__gate/hysteria/events`），面板里没有定时轮询。
 - **网关**：`code/gate/`，负责密码门、反向代理、成员 cluster 认证、目标 cookie。
 - **构建引擎**：`code/build/`，从 DSH GitHub 源码确定性地应用覆盖层、构建 Web 前端、按目标系统和架构打包。
 - **WireGuard 控制服务源码**：`src/wireguard/`（引擎 + 51821 面板），`pnpm build` 会把 `code/wireguard/control-service.js` 从源码重建；引擎测试在 `test/wireguard/`，用 `pnpm test:wireguard` 跑。
 - **成员 SSH 自注册**：成员上的 WireGuard 控制服务会定期检查本机 OpenSSH，把真实的 Windows/Linux 登录用户、sshd 状态和版本回报给服务端；Windows 没装 sshd 时从网关统一静态资源 `gate/assets/openssh/` 下载并安装，随后自动写入服务端公钥。服务端不再需要人工猜 `Administrator`/`root`。
 - **统一静态资源**：hysteria2、OpenSSH、WireGuard 安装包都放在 `gate/assets/<name>/`，由同一个 `StaticAssets` 服务通过 `/__gate/assets/*` 暴露；Windows 成员首次引导时如果没装 WireGuard，会从 `gate/assets/wireguard/` 取 MSI 静默安装，再自动加入隧道。
-- **文档集**：Step 001–010，记录每个坑和对应检查。
+- **文档集**：Step 001–015，记录每个坑和对应检查。
 
 ## 统一静态资源
 
@@ -129,7 +129,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - 新工具 `call_member`：`delegate` / `send`（只发起，立即返回 taskId）；`wait_member` 有界等待，**成员每结束一轮回答就返回**，`state` 区分进行中（还会继续/有子代理在跑）与完成。
 - A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话并等待；`run` 可直接同步等待最终结果。
 - B 完成后，A 的插件用 `agent.followup()` 把结果写回 **A 的同一个会话**；A 正忙就排到下一轮，空闲就唤醒一个 turn，类似子代理完成通知。
-- 不需要 B 主动访问 A；A 轮询 B，避免回调端口/NAT 问题。
+- 不需要 B 主动访问 A；A 长轮询（阻塞式等待）B 的 `/wait`，避免回调端口/NAT 问题。
 
 ## 快速开始
 
@@ -280,6 +280,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 012 独立服务与WireGuard控制面板](docs/Step%20012%20独立服务与WireGuard控制面板.md) | 网关/DSH/51821 三个独立服务、token 文件、内置面板代理 |
 | [Step 013 独立DSH交互HTTP服务](docs/Step%20013%20独立DSH交互HTTP服务.md) | 独立 8765、SDK stdio、创建/等待/通知/事件/回调 |
 | [Step 014 成员任务插件与主对话回调](docs/Step%20014%20成员任务插件与主对话回调.md) | `call_member`、成员发现、后台等待、agent.followup 通知 |
+| [Step 015 面板事件推送](docs/Step%20015%20面板事件推送.md) | SSE 通道、`fs.watch` 任务目录、面板零轮询 |
 
 ## 代码位置
 

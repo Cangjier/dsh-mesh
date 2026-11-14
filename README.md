@@ -136,7 +136,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 ### 8. 发起任务：对象树 → markdown → SDK 对话
 
 - 面板顶层 Tab「发起任务」：把一件事拆成对象树，每个对象有 `source`（文件 / git 仓库 / 类名）、`define`（要做的事）和 `children`（只存 `{ id, remark }` 引用）。
-- 平铺视图铺开全部对象并标出谁挂在谁下面；树形视图只列根对象逐层展开。根对象按「没有被任何对象引用」算出来，因此同一对象可以挂多处。
+- 平铺视图把全部对象各列一行，直接子对象作为表格子行挂在下面（只一层，带该条引用的备注）；树形视图只列根对象逐层展开。根对象按「没有被任何对象引用」算出来，因此同一对象可以挂多处。
 - 编辑走抽屉；表格只给入口。窄屏自动换成卡片列表。
 - 发起时整棵树渲染成 markdown，`POST` 到目标成员 8765 交互服务的 `/v1/conversations`，开一个真实 SDK 对话；历史保存发起那一刻的定义、对话 id、状态与结果。
 - 任务、模板、历史都存在网关的 control-service（`$DSH_HOME/wireguard/tasks/tasks.json`），成员带着入网时的 agent token 读写同一份。

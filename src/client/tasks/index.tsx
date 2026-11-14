@@ -119,28 +119,75 @@ function labelOf(doc: TaskDoc, id: number): string {
   return node.source === '' ? `#${String(id)}（未命名）` : node.source
 }
 
-/** A flattened row: the object plus everyone that references it. */
-interface FlatRow {
+/**
+ * One row of the 平铺 view.
+ *
+ * Every object is a top-level row, and its direct children hang below it as
+ * Antd Table child rows — one level only. An object therefore appears both as
+ * its own row and under each parent, which is what "flat list of references"
+ * means once edges are shown in place.
+ */
+interface FlatDisplayRow {
   key: string
   node: TaskDoc['nodes'][number]
-  parents: Array<{ parentId: number; remark: string }>
+  /** The remark of the edge that reached this row; empty for top-level rows. */
+  remark: string
+  parentId: number | null
+  edgeIndex: number | null
+  /** Undefined (not empty) on leaf rows so Antd draws no expander for them. */
+  children?: FlatDisplayRow[]
 }
 
 /**
- * Build the 平铺 view rows: every object once, with its parents listed.
+ * Build the 平铺 view rows: all objects, each with its direct children nested.
  * @param doc document.
  * @returns rows.
  */
-function flatRows(doc: TaskDoc): FlatRow[] {
-  const parents = new Map<number, Array<{ parentId: number; remark: string }>>()
-  for (const node of doc.nodes) {
-    for (const child of node.children) {
-      const list = parents.get(child.id) ?? []
-      list.push({ parentId: node.id, remark: child.remark })
-      parents.set(child.id, list)
+function flatDisplayRows(doc: TaskDoc): FlatDisplayRow[] {
+  const byId = new Map(doc.nodes.map((node) => [node.id, node]))
+  return doc.nodes.map((node) => {
+    const kids: FlatDisplayRow[] = node.children.flatMap((edge, index) => {
+      const child = byId.get(edge.id)
+      if (child === undefined) return []
+      return [{
+        key: `flat-${String(node.id)}-${String(index)}-${String(edge.id)}`,
+        node: child,
+        remark: edge.remark,
+        parentId: node.id,
+        edgeIndex: index,
+        // Deliberately absent: the 平铺 view stops at one level, so a shared
+        // subtree is not repeated under every row that reaches it.
+      }]
+    })
+    return {
+      key: `flat-${String(node.id)}`,
+      node,
+      remark: '',
+      parentId: null,
+      edgeIndex: null,
+      // An empty array would still make Antd draw an expander.
+      ...(kids.length > 0 ? { children: kids } : {}),
     }
-  }
-  return doc.nodes.map((node) => ({ key: `flat-${String(node.id)}`, node, parents: parents.get(node.id) ?? [] }))
+  })
+}
+
+/**
+ * The direct children of one object, one level only.
+ *
+ * The 平铺 view shows what hangs below an object without walking further:
+ * anything deeper belongs to the 树形 view, and a recursive list would repeat
+ * the same subtree under every row that reaches it.
+ * @param node object.
+ * @param doc whole document, for the child labels.
+ * @returns rows ready to render.
+ */
+function childLines(node: TaskDoc['nodes'][number], doc: TaskDoc): ChildLine[] {
+  return node.children.map((child, index) => ({
+    key: `${String(node.id)}-${String(index)}-${String(child.id)}`,
+    id: child.id,
+    label: labelOf(doc, child.id),
+    remark: child.remark,
+  }))
 }
 
 /** One row of the 树形 view, ready for an Antd table. */
@@ -167,20 +214,47 @@ function treeRows(rows: TaskTreeRow[], prefix = 't'): TreeDisplayRow[] {
 }
 
 /**
- * Every row key in a tree, for "expand everything".
+ * Every row key in a table that has nested rows, for "expand everything".
  * @param rows display rows.
  * @returns keys.
  */
-function expandableKeys(rows: TreeDisplayRow[]): string[] {
+function expandableKeys<T extends { key: string; children?: T[] }>(rows: T[]): string[] {
   const keys: string[] = []
-  const walk = (items: TreeDisplayRow[]) => {
+  const walk = (items: T[]) => {
     for (const item of items) {
       keys.push(item.key)
-      walk(item.children)
+      if (item.children !== undefined) walk(item.children)
     }
   }
   walk(rows)
   return keys
+}
+
+/** One line of a child edge: id, the child's source, and this edge's remark. */
+interface ChildLine {
+  key: string
+  id: number
+  label: string
+  remark: string
+}
+
+/**
+ * Render one object's direct children as a compact list.
+ * @param props lines from `childLines`.
+ */
+function ChildLines({ lines }: { lines: ChildLine[] }) {
+  if (lines.length === 0) return <Text type="secondary">—</Text>
+  return (
+    <div className="dsh-task-childlines">
+      {lines.map((line) => (
+        <div className="dsh-task-childline" key={line.key}>
+          <Text code className="dsh-task-childid">#{line.id}</Text>
+          <span className="dsh-task-childlabel" title={line.label}>{line.label}</span>
+          {line.remark === '' ? null : <span className="dsh-task-childremark" title={line.remark}>{line.remark}</span>}
+        </div>
+      ))}
+    </div>
+  )
 }
 
 /** The status tag of one launch. */
@@ -212,7 +286,8 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
   const [updateTemplateOpen, setUpdateTemplateOpen] = useState(false)
   const [detail, setDetail] = useState<TaskRun | null>(null)
   // null means "everything expanded"; a list is the user's own choice.
-  const [expandedKeys, setExpandedKeys] = useState<string[] | null>(null)
+  const [flatExpanded, setFlatExpanded] = useState<string[] | null>(null)
+  const [treeExpanded, setTreeExpanded] = useState<string[] | null>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const applySnapshot = useCallback((snapshot: TaskSnapshot, keepDoc: boolean) => {
@@ -270,7 +345,7 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
   }, [persist])
 
   const stats = useMemo(() => summarize(doc), [doc])
-  const flat = useMemo(() => flatRows(doc), [doc])
+  const flat = useMemo(() => flatDisplayRows(doc), [doc])
   const tree = useMemo(() => treeRows(taskTree(doc)), [doc])
   const roots = useMemo(() => rootIds(doc), [doc])
 
@@ -345,17 +420,16 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
     </Flex>
   )
 
-  const actions = (row: { id: number; parentId: number | null; edgeIndex: number | null; nodeIndex: number }, isTree: boolean) => {
-    const canUp = isTree
-      ? row.parentId === null ? row.nodeIndex > 0 : (row.edgeIndex ?? 0) > 0
-      : row.nodeIndex > 0
-    const canDown = isTree
-      ? row.parentId === null ? row.nodeIndex < doc.nodes.length - 1 : (row.edgeIndex ?? 0) < (findNode(doc, row.parentId)?.children.length ?? 1) - 1
-      : row.nodeIndex < doc.nodes.length - 1
+  const actions = (row: { id: number; parentId: number | null; edgeIndex: number | null; nodeIndex: number }, showAddChild: boolean) => {
+    const edge = row.parentId === null ? null : { parentId: row.parentId, index: row.edgeIndex ?? 0 }
+    const siblings = edge === null ? doc.nodes.length : (findNode(doc, edge.parentId)?.children.length ?? 1)
+    const position = edge === null ? row.nodeIndex : edge.index
+    const canUp = position > 0
+    const canDown = position < siblings - 1
     return (
       <Space size={2} wrap>
         <Tooltip title="编辑"><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(row.id)} /></Tooltip>
-        {isTree ? (
+        {showAddChild ? (
           <Tooltip title="新建子对象"><Button size="small" type="text" icon={<PlusOutlined />} onClick={() => addChild(row.id)} /></Tooltip>
         ) : null}
         <Tooltip title="上移">
@@ -365,7 +439,7 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
             icon={<ArrowUpOutlined />}
             disabled={!canUp}
             onClick={() => {
-              if (isTree && row.parentId !== null) moveEdge(row.parentId, row.edgeIndex ?? 0, -1)
+              if (edge !== null) moveEdge(edge.parentId, edge.index, -1)
               else move(row.id, -1)
             }}
           />
@@ -377,7 +451,7 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
             icon={<ArrowDownOutlined />}
             disabled={!canDown}
             onClick={() => {
-              if (isTree && row.parentId !== null) moveEdge(row.parentId, row.edgeIndex ?? 0, 1)
+              if (edge !== null) moveEdge(edge.parentId, edge.index, 1)
               else move(row.id, 1)
             }}
           />
@@ -397,12 +471,13 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
   }
 
   const flatColumns = [
-    { title: 'id', dataIndex: ['node', 'id'], width: 64, render: (id: number) => <Text code>#{id}</Text> },
+    { title: 'id', dataIndex: ['node', 'id'], width: 84, render: (id: number) => <Text code className="dsh-task-id">#{id}</Text> },
     {
       title: 'source',
       dataIndex: ['node', 'source'],
+      width: 240,
       ellipsis: true,
-      render: (source: string, row: FlatRow) => (
+      render: (source: string, row: FlatDisplayRow) => (
         <span className="dsh-task-source" onClick={() => setEditing(row.node.id)} role="button" tabIndex={0} onKeyDown={() => {}}>
           {source === '' ? <Text type="secondary">（未填）</Text> : source}
         </span>
@@ -415,33 +490,20 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
       render: (define: string) => <Text type="secondary" ellipsis>{define === '' ? '—' : define.replace(/\n/gu, ' ')}</Text>,
     },
     {
-      title: '挂在',
-      width: 170,
-      render: (_: unknown, row: FlatRow) => (row.parents.length === 0
-        ? <Tag color="blue">根</Tag>
-        : row.parents.map((parent, index) => (
-          <Tag key={`${String(parent.parentId)}-${String(index)}`}>
-            #{parent.parentId}{parent.remark === '' ? '' : ` · ${parent.remark}`}
-          </Tag>
-        ))),
-    },
-    {
-      title: '子对象',
-      width: 80,
-      render: (_: unknown, row: FlatRow) => {
-        const count = row.node.children.length
-        return count === 0 ? <Text type="secondary">0</Text> : <Text>{count}</Text>
-      },
+      title: '备注',
+      width: 200,
+      ellipsis: true,
+      render: (_: unknown, row: FlatDisplayRow) => (row.remark === '' ? <Text type="secondary">—</Text> : row.remark),
     },
     {
       title: '操作',
       width: 170,
-      render: (_: unknown, row: FlatRow) => actions({
+      render: (_: unknown, row: FlatDisplayRow) => actions({
         id: row.node.id,
-        parentId: null,
-        edgeIndex: null,
+        parentId: row.parentId,
+        edgeIndex: row.edgeIndex,
         nodeIndex: doc.nodes.findIndex((node) => node.id === row.node.id),
-      }, false),
+      }, true),
     },
   ]
 
@@ -466,11 +528,6 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
       render: (remark: string) => (remark === '' ? <Text type="secondary">—</Text> : remark),
     },
     {
-      title: '子对象',
-      width: 80,
-      render: (_: unknown, row: TreeDisplayRow) => <Text type="secondary">{row.row.node.children.length}</Text>,
-    },
-    {
       title: '操作',
       width: 170,
       render: (_: unknown, row: TreeDisplayRow) => actions({
@@ -483,7 +540,7 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
   ]
 
   const cards = (isTree: boolean) => {
-    const rows: Array<{ id: number; source: string; define: string; remark: string; depth: number; parentId: number | null; edgeIndex: number | null; children: number }> = []
+    const rows: Array<{ id: number; source: string; define: string; remark: string; depth: number; parentId: number | null; edgeIndex: number | null; childRows: ChildLine[] }> = []
     if (isTree) {
       const walk = (items: TreeDisplayRow[]) => {
         for (const item of items) {
@@ -495,7 +552,9 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
             depth: item.row.depth,
             parentId: item.row.parentId,
             edgeIndex: item.row.edgeIndex,
-            children: item.row.node.children.length,
+            // The tree already nests the children; repeating them would
+            // read as duplicates.
+            childRows: [],
           })
           walk(item.children)
         }
@@ -507,11 +566,11 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
           id: row.node.id,
           source: row.node.source,
           define: row.node.define,
-          remark: row.parents.length === 0 ? '' : row.parents.map((parent) => `#${String(parent.parentId)}${parent.remark === '' ? '' : ` · ${parent.remark}`}`).join('，'),
+          remark: '',
           depth: 0,
           parentId: null,
           edgeIndex: null,
-          children: row.node.children.length,
+          childRows: childLines(row.node, doc),
         })
       }
     }
@@ -530,7 +589,11 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
                 </Space>
                 {row.remark === '' ? null : <div className="dsh-task-muted">{row.remark}</div>}
                 {row.define === '' ? null : <div className="dsh-task-muted dsh-task-clamp">{row.define}</div>}
-                <div className="dsh-task-muted">子对象 {row.children} 个</div>
+                {row.childRows.length === 0 ? null : (
+                  <div className="dsh-task-muted">
+                    <ChildLines lines={row.childRows} />
+                  </div>
+                )}
               </div>
             </Flex>
             <div style={{ marginTop: 8 }}>
@@ -556,12 +619,18 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
         ) : narrow ? (
           cards(view === 'tree')
         ) : view === 'flat' ? (
-          <Table<FlatRow>
+          <Table<FlatDisplayRow>
+            className="dsh-task-flat"
             size="middle"
             rowKey="key"
             dataSource={flat}
             columns={flatColumns as never}
             pagination={false}
+            expandable={{
+              expandedRowKeys: flatExpanded ?? expandableKeys(flat),
+              onExpandedRowsChange: (keys) => setFlatExpanded([...keys] as string[]),
+              indentSize: 22,
+            }}
             locale={{ emptyText: <Empty description="还没有对象，点「新建对象」开始" /> }}
           />
         ) : (
@@ -572,8 +641,8 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
             columns={treeColumns as never}
             pagination={false}
             expandable={{
-              expandedRowKeys: expandedKeys ?? expandableKeys(tree),
-              onExpandedRowsChange: (keys) => setExpandedKeys([...keys] as string[]),
+              expandedRowKeys: treeExpanded ?? expandableKeys(tree),
+              onExpandedRowsChange: (keys) => setTreeExpanded([...keys] as string[]),
               indentSize: 18,
             }}
             locale={{ emptyText: <Empty description="没有根对象（每个对象都被别人引用了）" /> }}

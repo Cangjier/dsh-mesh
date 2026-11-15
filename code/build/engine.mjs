@@ -711,6 +711,9 @@ export async function assembleWebPackage(options) {
   await copyIfExists(path.join(options.repositoryRoot, 'build'), path.join(packageDir, 'plugins', 'dsh-mesh', 'build'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'build'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'build'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'shared'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'shared'))
+  // The deploy runner/engine travel with the plugin too: a member that runs
+  // its own panel starts `code/deploy/runner.mjs` from its plugin directory.
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'deploy'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'deploy'))
   // Plugins that travel with dsh-mesh (currently xl): fetched from main at build
   // time, so a package built today carries today's plugin code.
   const extraPlugins = await copyExtraPlugins({

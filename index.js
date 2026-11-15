@@ -1059,6 +1059,7 @@ async function assembleWebPackage(options) {
   await copyIfExists(path3.join(options.repositoryRoot, "build"), path3.join(packageDir, "plugins", "dsh-mesh", "build"));
   await copyIfExists(path3.join(options.repositoryRoot, "code", "build"), path3.join(packageDir, "plugins", "dsh-mesh", "code", "build"));
   await copyIfExists(path3.join(options.repositoryRoot, "code", "shared"), path3.join(packageDir, "plugins", "dsh-mesh", "code", "shared"));
+  await copyIfExists(path3.join(options.repositoryRoot, "code", "deploy"), path3.join(packageDir, "plugins", "dsh-mesh", "code", "deploy"));
   const extraPlugins = await copyExtraPlugins({
     packageDir,
     repositoryRoot: options.repositoryRoot,
@@ -5355,8 +5356,8 @@ var MeshService = class {
     }
     const os6 = String(found.system?.platform ?? "").toLowerCase().startsWith("win") ? "windows" : "linux";
     const request = await this.#memberDeployRequest(found, "", os6);
-    const job = await this.deploy.rollback({ ...request, os: os6, skipPackage: true });
-    return { ok: true, job, member: found };
+    const rolled = await this.deploy.rollback({ ...request, os: os6, skipPackage: true });
+    return { ok: true, job: rolled.job ?? rolled, member: found };
   }
   /**
    * Resolve and validate one job directory.

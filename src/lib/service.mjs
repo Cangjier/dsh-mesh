@@ -1443,8 +1443,10 @@ export class MeshService {
     }
     const os = String(found.system?.platform ?? '').toLowerCase().startsWith('win') ? 'windows' : 'linux'
     const request = await this.#memberDeployRequest(found, '', os)
-    const job = await this.deploy.rollback({ ...request, os, skipPackage: true })
-    return { ok: true, job, member: found }
+    const rolled = await this.deploy.rollback({ ...request, os, skipPackage: true })
+    // `DeployManager.rollback` answers `{ ok, job }`; the route hands the client
+    // the same `{ ok, job, member }` shape the upgrade route uses.
+    return { ok: true, job: rolled.job ?? rolled, member: found }
   }
 
   /**

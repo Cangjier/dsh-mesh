@@ -1230,8 +1230,8 @@ function Panel({ ctx }: { ctx: any }) {
       title: '操作',
       key: 'action',
       // Wide enough for the running pill (spinner + "正在升级 62%") and for
-      // 切换 + 升级 next to each other; a narrower column wraps the label.
-      width: screens.lg === true ? 186 : 150,
+      // 切换 + 升级 + 测试升级 on one line; a narrower column wraps the label.
+      width: screens.lg === true ? 264 : 200,
       align: 'right',
       render: (_value, member) => {
         // `queued` is the second between the panel writing the job and its
@@ -1249,10 +1249,10 @@ function Panel({ ctx }: { ctx: any }) {
             </Button>
           )
         }
-        // Only this machine can be upgraded from here: an upgrade restarts the
-        // services of the member it targets, and that is a decision the member's
-        // own panel should own. Remote members that are not installed yet can
-        // still be deployed to (首次安装), and installed ones keep 切换.
+        // Every installed member can be upgraded from here, including other
+        // members: the job runs in its own process, so restarting the target's
+        // dsh / gate does not take this panel with it. A member that is not
+        // installed yet still gets 首次安装 instead.
         const isSelf = member.kind === 'self'
         const installed = member.dsh || isSelf
         const canSwitch = member.dsh && gateAvailable && member.port !== null && member.id !== currentTarget
@@ -1269,8 +1269,10 @@ function Panel({ ctx }: { ctx: any }) {
                 切换
               </Button>
             ) : null}
-            {isSelf ? (
-              <Tooltip title="选择部署包，把本机升级到该版本">
+            {installed ? (
+              <Tooltip title={isSelf
+                ? '选择部署包，把本机升级到该版本'
+                : '选择部署包，把这个成员升级到该版本（会重启它的 dsh / gate）'}>
                 <Button
                   size="small"
                   icon={<CloudUploadOutlined />}
@@ -1279,7 +1281,8 @@ function Panel({ ctx }: { ctx: any }) {
                   升级
                 </Button>
               </Tooltip>
-            ) : installed ? (
+            ) : null}
+            {installed && !isSelf ? (
               // A member upgrade only proves the blue-green path. On a Linux
               // member 测试升级 first rehearses the flat path (what 升级 does on
               // this machine) in a sandbox there. A Windows member has no flat
@@ -1295,7 +1298,8 @@ function Panel({ ctx }: { ctx: any }) {
                   测试升级
                 </Button>
               </Tooltip>
-            ) : (
+            ) : null}
+            {!installed ? (
               <Button
                 size="small"
                 icon={<CloudDownloadOutlined />}
@@ -1303,7 +1307,7 @@ function Panel({ ctx }: { ctx: any }) {
               >
                 部署
               </Button>
-            )}
+            ) : null}
           </span>
         )
       },
@@ -1346,7 +1350,7 @@ function Panel({ ctx }: { ctx: any }) {
       {
         title: '标签',
         key: 'tag',
-        width: screens.lg === true ? '9%' : 120,
+        width: screens.lg === true ? '8%' : 120,
         responsive: ['md'],
         render: (_value, member) => (
           <Space size={4} wrap>
@@ -1364,7 +1368,7 @@ function Panel({ ctx }: { ctx: any }) {
       {
         title: '状态',
         key: 'status',
-        width: screens.lg === true ? '16%' : 190,
+        width: screens.lg === true ? '15%' : 190,
         responsive: ['sm'],
         render: (_value, member) => (
           <Space size={6} wrap>
@@ -1388,9 +1392,9 @@ function Panel({ ctx }: { ctx: any }) {
         title: '系统',
         key: 'system',
         // Percentages plus the fixed action width must fit the card, or the
-        // browser steals the difference from the action column and the two
-        // buttons wrap onto a second line.
-        width: screens.lg === true ? '28%' : 240,
+        // extra width becomes a horizontal scrollbar and the row actions stop
+        // lining up with their header.
+        width: screens.lg === true ? '23%' : 240,
         responsive: ['lg'],
         render: (_value, member) => (
           <Tooltip title={<pre style={{ margin: 0, fontFamily: 'inherit', whiteSpace: 'pre-wrap' }}>{systemDetails(member)}</pre>}>
@@ -1530,6 +1534,12 @@ function Panel({ ctx }: { ctx: any }) {
                   x: screens.lg === true ? 820 : undefined,
                   ...(memberRows.length > 8 ? { y: 'max(240px, calc(100vh - 320px))' } : {}),
                 }}
+                // Automatic layout sizes the action column by whatever the long
+                // 系统 strings leave over, which wrapped 测试升级 onto a second
+                // line. Fixed layout honours the percentages and the action
+                // width instead; below lg the table keeps auto layout so it can
+                // still shrink to a phone.
+                tableLayout={screens.lg === true ? 'fixed' : undefined}
                 pagination={{
                   pageSize: 10,
                   showSizeChanger: true,
@@ -1730,7 +1740,7 @@ function Panel({ ctx }: { ctx: any }) {
             type="info"
             showIcon
             message={deployIntent === 'upgrade'
-              ? '本机升级会重启当前面板所在的服务'
+              ? (deployTarget?.kind === 'self' ? '本机升级会重启当前面板所在的服务' : '升级会重启这个成员的 dsh / gate')
               : deployIntent === 'test'
                 ? '测试升级只影响这个成员，不会动本机'
                 : '部署包会安装到成员上并启动服务'}
@@ -1739,7 +1749,9 @@ function Panel({ ctx }: { ctx: any }) {
                 ? '这个成员是 Windows：它没有平铺安装可以演练，所以直接执行真实升级（prepare → activate → 健康检查），会重启它的服务。平铺演练只适用于 Linux 平铺安装（本机就是那种布局）。'
                 : '两步：① 在沙箱里用该成员当前版本的插件和它真实的 gate.env／profile 清单搭一份平铺安装，跑与本机「升级」同源的平铺升级脚本（备份、覆盖、接线，再注入一次失败验证 restore），不碰成员的任何服务；② 演练通过后才按该成员自己的布局真实升级，并重启它的服务。演练失败会把任务停在失败上，成员保持原样。注意：单元重装与健康检查只在第②步跑，沙箱里跑不了。')
               : deployIntent === 'upgrade'
-                ? '升级进程用 systemd 临时单元单独运行，dsh-web / gate 重启不会打断它；本页面会断开约 30–60 秒，之后自动恢复并显示升级结果。'
+                ? (deployTarget?.kind === 'self'
+                  ? '升级进程用 systemd 临时单元单独运行，dsh-web / gate 重启不会打断它；本页面会断开约 30–60 秒，之后自动恢复并显示升级结果。'
+                  : '升级进程独立运行，本页面不受影响；成员切到新版本后会重启自己的 dsh / gate，健康检查失败时自动切回上一版。')
               : '部署包从本机上传到成员，安装完成后成员上的 dsh / gate / 控制服务会重启一次；进度在任务对话框里查看。'}
           />
           {deployTarget !== null ? (() => {

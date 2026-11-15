@@ -556,6 +556,9 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
                 代理在所选成员上临时启动，只绑定它的组网地址，编译结束即关闭；经 WireGuard 转发通常比成员直连慢。
               </Typography.Text>
             ) : null}
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              产物会自动携带 dsh-mesh 与 xl 两个插件：xl 每次编译从 Cangjier/xl 的 main 拉取，来源和归档哈希记在包的 manifest.json 里。
+            </Typography.Text>
             {error !== '' ? <Alert type="error" showIcon message={error} closable onClose={() => setError('')} /> : null}
           </Space>
         </Card>

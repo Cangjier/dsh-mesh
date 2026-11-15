@@ -695,11 +695,19 @@ export async function assembleWebPackage(options) {
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'windows-service'), path.join(packageDir, 'code', 'windows-service'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'interop-service'), path.join(packageDir, 'code', 'interop-service'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'wireguard'), path.join(packageDir, 'code', 'wireguard'))
+  // The split-service supervisor and its installer: install.sh only wires the
+  // dsh-web-app / dsh-web-gate units when this directory is present, and a flat
+  // upgrade rebuilds the units from it. Leaving it out silently produced a
+  // package that installed as one monolithic service.
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'dsh-service'), path.join(packageDir, 'code', 'dsh-service'))
+  // A flat install upgrades itself by running code/deploy/upgrade-local.sh from
+  // the package and then re-wiring the profile with code/deploy/wire-profile.mjs.
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'deploy'), path.join(packageDir, 'code', 'deploy'))
   await copyIfExists(path.join(options.repositoryRoot, 'docs'), path.join(packageDir, 'docs'))
   for (const file of ['install.sh', 'start.sh', 'stop.sh', 'status.sh', 'doctor.sh', 'install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'start-stack.ps1', 'VERSION']) {
     await copyIfExists(path.join(options.repositoryRoot, 'code', file), path.join(packageDir, file))
   }
-  for (const file of ['start-interop.sh', 'install-interop-service.sh', 'uninstall-interop-service.sh']) {
+  for (const file of ['start-dsh.sh', 'start-interop.sh', 'install-interop-service.sh', 'uninstall-interop-service.sh']) {
     await copyIfExists(path.join(options.repositoryRoot, file), path.join(packageDir, file))
   }
   for (const file of ['index.js', 'client.js', 'cordis.patch.yml', 'package.json']) {

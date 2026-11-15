@@ -18,6 +18,7 @@ set -euo pipefail
 
 APP_ROOT=""
 JOB_DIR=""
+STAGE_OVERRIDE=""
 DSH_HOME_OVERRIDE=""
 PORT_OVERRIDE=""
 INTEROP_TOKEN_OVERRIDE=""
@@ -27,6 +28,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --app-root) APP_ROOT=$2; shift 2 ;;
     --job-dir) JOB_DIR=$2; shift 2 ;;
+    --stage) STAGE_OVERRIDE=$2; shift 2 ;;
     --dsh-home) DSH_HOME_OVERRIDE=$2; shift 2 ;;
     --port) PORT_OVERRIDE=$2; shift 2 ;;
     --interop-token) INTEROP_TOKEN_OVERRIDE=$2; shift 2 ;;
@@ -41,7 +43,14 @@ die() { printf '[error] %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" = 0 ] || die '升级需要 root（要重写 systemd 单元）'
 [ -n "$APP_ROOT" ] || die '--app-root is required'
-STAGE=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# 默认把脚本所在目录的上一级当作部署包（脚本位于 <包>/code/deploy/）。
+# --stage 用于从插件目录里的脚本升级：脚本与 runner 同版本，包内容另行指定。
+if [ -n "$STAGE_OVERRIDE" ]; then
+  STAGE=$(CDPATH= cd -- "$STAGE_OVERRIDE" && pwd) || die "无效的 --stage：$STAGE_OVERRIDE"
+else
+  STAGE=$(CDPATH= cd -- "$SELF_DIR/../.." && pwd)
+fi
 ENV_FILE="$APP_ROOT/config/gate.env"
 [ -f "$ENV_FILE" ] || die "不是已安装的平铺目录：缺少 $ENV_FILE"
 [ -d "$APP_ROOT/plugins/dsh-mesh" ] || die "缺少 $APP_ROOT/plugins/dsh-mesh"
@@ -169,7 +178,12 @@ chmod +x "$APP_ROOT/code/wireguard/"*.sh "$APP_ROOT/code/dsh-service/"*.sh 2>/de
 
 # ── 3. 接线：gate.env 与 profile ───────────────────────────────────────────
 say '重写 gate.env 与 profile 接线'
-"$NODE" "$APP_ROOT/code/deploy/wire-profile.mjs" \
+WIRE_PROFILE="$SELF_DIR/wire-profile.mjs"
+[ -f "$WIRE_PROFILE" ] || WIRE_PROFILE="$STAGE/code/deploy/wire-profile.mjs"
+[ -f "$WIRE_PROFILE" ] || WIRE_PROFILE="$APP_ROOT/code/deploy/wire-profile.mjs"
+[ -f "$WIRE_PROFILE" ] || { restore; die '找不到 wire-profile.mjs（脚本目录/新包/安装目录都没有）'; }
+say "profile 接线脚本 $WIRE_PROFILE"
+"$NODE" "$WIRE_PROFILE" \
   --root "$APP_ROOT" \
   --profile "$PROFILE" \
   --env "$ENV_FILE" \
@@ -186,6 +200,7 @@ fi
 
 # ── 4. 重装 systemd 单元并重启 ─────────────────────────────────────────────
 say '重装 DSH app + gateway 服务（会重启 dsh-web-app / dsh-web-gate）'
+[ -f "$APP_ROOT/code/dsh-service/install-split.sh" ] || { restore; die '安装目录缺少 code/dsh-service/install-split.sh：包不完整，未重启任何服务'; }
 if ! bash "$APP_ROOT/code/dsh-service/install-split.sh"; then
   restore
   die 'install-split.sh 失败'

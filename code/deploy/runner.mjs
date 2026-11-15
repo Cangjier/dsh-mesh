@@ -18,7 +18,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -196,13 +196,34 @@ async function runInplace(context) {
   meter('解压安装包', { done: entries, total: entries, percent: 100 })
   await mark('prepare', 'succeeded', entries > 0 ? `${String(entries)} 项` : '已解压')
 
-  const script = path.join(stage, 'code', 'deploy', 'upgrade-local.sh')
-  await stat(script).catch(() => {
-    throw new Error(`upgrade script is missing in the package: code/deploy/upgrade-local.sh`)
-  })
+  // Run the script that sits next to this runner, not the one inside the
+  // package: the runner is the upgraded (or hot-fixed) copy, so this keeps the
+  // two in lockstep and lets an operator fix the script without rebuilding and
+  // re-uploading a 300 MiB package. `--stage` still points the script at the
+  // extracted package it must copy from. Packages built before this fix only
+  // carry the script under code/deploy; fall back to it.
+  const source = await stat(path.join(HERE, 'upgrade-local.sh'))
+    .then(() => path.join(HERE, 'upgrade-local.sh'))
+    .catch(async () => {
+      const packed = path.join(stage, 'code', 'deploy', 'upgrade-local.sh')
+      const found = await stat(packed).then(() => true).catch(() => false)
+      if (!found) throw new Error(`upgrade script is missing: neither ${path.join(HERE, 'upgrade-local.sh')} nor ${packed}`)
+      return packed
+    })
+  // Copy the script (and its profile-wiring helper) out of the install before
+  // running it: the copy step below replaces plugins/dsh-mesh, and bash reads
+  // its script lazily, so running the in-place file would edit it under the
+  // interpreter's feet.
+  const tools = path.join(jobDir, 'tools')
+  await rm(tools, { recursive: true, force: true })
+  await mkdir(tools, { recursive: true })
+  const script = path.join(tools, 'upgrade-local.sh')
+  await cp(source, script)
+  await chmod(script, 0o755)
+  await cp(path.join(path.dirname(source), 'wire-profile.mjs'), path.join(tools, 'wire-profile.mjs')).catch(() => {})
   await mark('activate', 'running')
   meter('重启服务并检查', { percent: 99, indeterminate: true })
-  const args = ['--app-root', String(settings.appRoot ?? ''), '--job-dir', jobDir]
+  const args = ['--app-root', String(settings.appRoot ?? ''), '--job-dir', jobDir, '--stage', stage]
   // Escape hatch for validating the script against a sandbox root: copy and
   // rewire only, no service is touched.
   if (process.env.DSH_MESH_UPGRADE_NO_RESTART === '1') args.push('--no-restart')

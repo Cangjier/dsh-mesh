@@ -222,6 +222,10 @@ test('assembleWebPackage copies the web payload, gate, and plugin', async () => 
     await write(path.join(repo, 'code', 'config', 'patch.yml'), '[]')
     await write(path.join(repo, 'docs', 'Step.md'), '# step')
     await write(path.join(repo, 'code', 'install.sh'), '#!/bin/sh')
+    await write(path.join(repo, 'code', 'dsh-service', 'install-split.sh'), '#!/bin/sh')
+    await write(path.join(repo, 'code', 'deploy', 'upgrade-local.sh'), '#!/usr/bin/env bash')
+    await write(path.join(repo, 'code', 'deploy', 'wire-profile.mjs'), '// wire')
+    await write(path.join(repo, 'start-dsh.sh'), '#!/bin/sh')
     await write(path.join(repo, 'index.js'), '// host')
     await write(path.join(repo, 'client.js'), '// client')
     await write(path.join(repo, 'cordis.patch.yml'), '[]')
@@ -241,6 +245,15 @@ test('assembleWebPackage copies the web payload, gate, and plugin', async () => 
     assert.match(await readFile(path.join(result.packageDir, 'web', 'index.html'), 'utf8'), /doctype/u)
     assert.match(await readFile(path.join(result.packageDir, 'gate', 'server.mjs'), 'utf8'), /gate/u)
     assert.match(await readFile(path.join(result.packageDir, 'plugins', 'dsh-mesh', 'client.js'), 'utf8'), /client/u)
+    // A flat install rebuilds its units and rewires its profile from the
+    // package, so the supervisor, the upgrade script, and start-dsh.sh must
+    // travel with it.
+    assert.match(await readFile(path.join(result.packageDir, 'code', 'dsh-service', 'install-split.sh'), 'utf8'), /sh/u)
+    assert.match(await readFile(path.join(result.packageDir, 'code', 'deploy', 'upgrade-local.sh'), 'utf8'), /bash/u)
+    assert.match(await readFile(path.join(result.packageDir, 'code', 'deploy', 'wire-profile.mjs'), 'utf8'), /wire/u)
+    assert.match(await readFile(path.join(result.packageDir, 'start-dsh.sh'), 'utf8'), /sh/u)
+    // ...and the plugin keeps its own copy for a member that upgrades itself.
+    assert.match(await readFile(path.join(result.packageDir, 'plugins', 'dsh-mesh', 'code', 'deploy', 'upgrade-local.sh'), 'utf8'), /bash/u)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

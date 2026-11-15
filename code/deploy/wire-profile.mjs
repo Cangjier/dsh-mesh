@@ -133,8 +133,14 @@ function wireProfile(profileDir, root, token) {
   // the profile and add its bundle, otherwise the files sit in plugins/ without
   // DSH ever loading them.
   const pluginsRoot = path.join(root, 'plugins')
-  for (const entry of fs.existsSync(pluginsRoot) ? fs.readdirSync(pluginsRoot) : []) {
+  const wired = new Set()
+  for (const entry of (fs.existsSync(pluginsRoot) ? fs.readdirSync(pluginsRoot) : []).sort()) {
     if (entry === 'dsh-mesh') continue
+    // A leftover copy of the plugin directory (`dsh-mesh.bak-20261111-1541`)
+    // still carries the original package name. Wiring it would point the
+    // profile at stale code, so only a directory whose own name matches the
+    // package name counts as a plugin.
+    if (entry.startsWith('.') || /[.~_]/u.test(entry)) continue
     const dir = path.join(pluginsRoot, entry)
     const pkgFile = path.join(dir, 'package.json')
     if (!fs.existsSync(pkgFile)) continue
@@ -145,6 +151,8 @@ function wireProfile(profileDir, root, token) {
       continue
     }
     const name = typeof pkg.name === 'string' && pkg.name !== '' ? pkg.name : entry
+    if (path.basename(name) !== entry || wired.has(name)) continue
+    wired.add(name)
     const linkTarget = path.join(profileDir, 'node_modules', ...name.split('/'))
     fs.mkdirSync(path.dirname(linkTarget), { recursive: true })
     fs.rmSync(linkTarget, { recursive: true, force: true })

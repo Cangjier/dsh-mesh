@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -224,6 +224,9 @@ test('wire-profile rewrites gate.env and links the profile to the install', asyn
     await mkdir(path.join(root, 'plugins', 'dsh-mesh'), { recursive: true })
     await mkdir(path.join(root, 'plugins', 'xl'), { recursive: true })
     await writeFile(path.join(root, 'plugins', 'xl', 'package.json'), JSON.stringify({ name: 'xl', dsh: { bundle: { patch: './cordis.patch.yml' } } }), 'utf8')
+    // A leftover backup of the plugin directory must not steal the link.
+    await mkdir(path.join(root, 'plugins', 'dsh-mesh.bak-20261111-1541'), { recursive: true })
+    await writeFile(path.join(root, 'plugins', 'dsh-mesh.bak-20261111-1541', 'package.json'), JSON.stringify({ name: '@local/dsh-mesh', dsh: { bundle: {} } }), 'utf8')
     await mkdir(profile, { recursive: true })
     const envFile = path.join(root, 'config', 'gate.env')
     await mkdir(path.dirname(envFile), { recursive: true })
@@ -260,6 +263,8 @@ test('wire-profile rewrites gate.env and links the profile to the install', asyn
     // The sibling plugin in the install is linked and enabled too.
     assert.equal(manifest.dependencies.xl, `link:${path.join(root, 'plugins', 'xl')}`)
     assert.equal(existsSync(path.join(profile, 'node_modules', 'xl')), true)
+    // ...but the backup directory next to it is ignored.
+    assert.equal(await readlink(path.join(profile, 'node_modules', '@local', 'dsh-mesh')), path.join(root, 'plugins', 'dsh-mesh'))
 
     const patch = await readFile(path.join(profile, 'cordis.patch.yml'), 'utf8')
     assert.match(patch, /# BEGIN dsh-mesh deploy/u)
@@ -340,14 +345,14 @@ test('the detached runner drives an in-place upgrade and settles the job', async
   const repository = path.join(here, '..')
   try {
     // The package that the runner extracts and hands to upgrade-local.sh.
-    await mkdir(path.join(packageDir, 'code', 'deploy'), { recursive: true })
+    // Deliberately built the way rc.3 was: no code/deploy inside the package.
+    // The runner that is already installed must still be able to upgrade, using
+    // the script next to itself and --stage for the package payload.
     await mkdir(path.join(packageDir, 'plugins', 'dsh-mesh'), { recursive: true })
     await writeFile(path.join(packageDir, 'manifest.json'), JSON.stringify({ version: '9.9.9' }), 'utf8')
     await writeFile(path.join(packageDir, 'start.sh'), '#!/usr/bin/env bash\n', 'utf8')
     await chmod(path.join(packageDir, 'start.sh'), 0o755)
     await writeFile(path.join(packageDir, 'plugins', 'dsh-mesh', 'package.json'), JSON.stringify({ version: '9.9.9' }), 'utf8')
-    await cp(path.join(repository, 'code', 'deploy', 'upgrade-local.sh'), path.join(packageDir, 'code', 'deploy', 'upgrade-local.sh'))
-    await cp(path.join(repository, 'code', 'deploy', 'wire-profile.mjs'), path.join(packageDir, 'code', 'deploy', 'wire-profile.mjs'))
     const archive = path.join(dir, 'dsh-mesh-9.9.9-linux-x64.tar.gz')
     await run('tar', ['-czf', archive, '-C', packageDir, '.'])
 
@@ -399,6 +404,47 @@ test('the detached runner drives an in-place upgrade and settles the job', async
     assert.match(await readFile(path.join(jobDir, 'deploy.log'), 'utf8'), /deployment succeeded/u)
     // The extracted staging tree is removed once the job is done.
     assert.equal(existsSync(path.join(jobDir, 'stage')), false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('upgrade-local.sh takes --stage so the script can live outside the package', async () => {
+  if (process.platform !== 'linux') return
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-upgrade-stage-'))
+  const root = path.join(dir, 'app')
+  const stage = path.join(dir, 'package')
+  const scriptDir = path.join(dir, 'plugin', 'code', 'deploy')
+  const repository = path.join(here, '..')
+  try {
+    await mkdir(path.join(root, 'config'), { recursive: true })
+    await mkdir(path.join(root, 'plugins', 'dsh-mesh'), { recursive: true })
+    await mkdir(path.join(root, 'code', 'dsh-service'), { recursive: true })
+    await writeFile(path.join(root, 'config', 'gate.env'), `DSH_GATE_PORT=8080\nDSH_HOME=${path.join(dir, 'home')}\n`, 'utf8')
+    await writeFile(path.join(root, 'plugins', 'dsh-mesh', 'package.json'), JSON.stringify({ version: '0.0.1' }), 'utf8')
+
+    await mkdir(path.join(stage, 'plugins', 'dsh-mesh'), { recursive: true })
+    await writeFile(path.join(stage, 'manifest.json'), JSON.stringify({ version: '0.0.3' }), 'utf8')
+    await writeFile(path.join(stage, 'start.sh'), '#!/usr/bin/env bash\n', 'utf8')
+    await writeFile(path.join(stage, 'plugins', 'dsh-mesh', 'package.json'), JSON.stringify({ version: '0.0.3' }), 'utf8')
+
+    // The script sits in an installed plugin, two levels below a directory that
+    // is NOT the package; --stage is what tells it where the payload is.
+    await mkdir(scriptDir, { recursive: true })
+    await cp(path.join(repository, 'code', 'deploy', 'upgrade-local.sh'), path.join(scriptDir, 'upgrade-local.sh'))
+    await cp(path.join(repository, 'code', 'deploy', 'wire-profile.mjs'), path.join(scriptDir, 'wire-profile.mjs'))
+
+    const stub = await stubSystemBin(dir)
+    const result = await run('bash', [
+      path.join(scriptDir, 'upgrade-local.sh'),
+      '--app-root', root,
+      '--stage', stage,
+      '--dsh-home', path.join(dir, 'home'),
+      '--no-restart',
+    ], { env: { ...process.env, PATH: `${stub}:${process.env.PATH ?? ''}` } })
+    assert.match(result.stdout, /新包 /u)
+    assert.equal(JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8')).version, '0.0.3')
+    assert.equal(JSON.parse(await readFile(path.join(root, 'plugins', 'dsh-mesh', 'package.json'), 'utf8')).version, '0.0.3')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

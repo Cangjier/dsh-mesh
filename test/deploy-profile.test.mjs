@@ -98,11 +98,16 @@ test('the profile wire script also wires the plugins shipped next to dsh-mesh', 
     const plugins = path.join(dir, 'release', 'plugins')
     const mesh = path.join(plugins, 'dsh-mesh')
     mkdirSync(mesh, { recursive: true })
-    writeFileSync(path.join(mesh, 'package.json'), '{"name":"@local/dsh-mesh","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}')
+    writeFileSync(path.join(mesh, 'package.json'), '{"name":"@local/dsh-mesh","dsh":{"bundle":{"patch":"./cordis.patch.yml"}},"dsh-mesh.plugin":true}')
     const xl = path.join(plugins, 'xl')
     mkdirSync(xl, { recursive: true })
     writeFileSync(path.join(xl, 'package.json'), '{"name":"xl","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}')
     writeFileSync(path.join(xl, 'cordis.patch.yml'), '[]\n')
+    // A backup copy of the plugin directory keeps the original package name;
+    // it must not shadow the real one.
+    const backup = path.join(plugins, 'dsh-mesh.bak-20261111-1541')
+    mkdirSync(backup, { recursive: true })
+    writeFileSync(path.join(backup, 'package.json'), '{"name":"@local/dsh-mesh","dsh":{"bundle":{}}}')
     const profile = path.join(dir, 'home', 'profiles', 'web')
     mkdirSync(profile, { recursive: true })
     writeFileSync(path.join(profile, 'package.json'), JSON.stringify({
@@ -122,6 +127,10 @@ test('the profile wire script also wires the plugins shipped next to dsh-mesh', 
       'xl',
     ])
     assert.equal(manifest.dependencies.xl, 'link:./node_modules/xl')
+    assert.equal(manifest.dependencies['@local/dsh-mesh'], 'link:./node_modules/@local/dsh-mesh')
+    // The copy step copies the plugin in; the backup would carry a different package.json.
+    assert.match(readFileSync(path.join(profile, 'node_modules', '@local', 'dsh-mesh', 'package.json'), 'utf8'), /dsh-mesh\.plugin/u)
+    assert.equal(manifest.dsh.profile.bundles.filter(name => name === '@local/dsh-mesh').length, 1)
     assert.equal(readFileSync(path.join(profile, 'node_modules', 'xl', 'package.json'), 'utf8'), '{"name":"xl","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}')
   } finally {
     rmSync(dir, { recursive: true, force: true })

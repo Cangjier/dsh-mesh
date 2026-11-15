@@ -134,8 +134,12 @@ console.log('profile-wire: dsh loads @local/dsh-mesh from ' + target)
 // the package declares one. Skipping this would leave the files in the release
 // without DSH ever loading them.
 const pluginsRoot = path.dirname(pluginDir)
-for (const entry of fs.readdirSync(pluginsRoot)) {
+const wired = new Set()
+for (const entry of fs.readdirSync(pluginsRoot).sort()) {
   if (entry === path.basename(pluginDir)) continue
+  // Backup copies (dsh-mesh.bak-20261111-1541) keep the original package
+  // name; wiring one would load stale code instead of the release.
+  if (entry.startsWith('.') || /[.~_]/u.test(entry)) continue
   const dir = path.join(pluginsRoot, entry)
   const manifestPath = path.join(dir, 'package.json')
   if (!fs.existsSync(manifestPath)) continue
@@ -147,6 +151,8 @@ for (const entry of fs.readdirSync(pluginsRoot)) {
     continue
   }
   const name = typeof pkg.name === 'string' && pkg.name !== '' ? pkg.name : entry
+  if (path.basename(name) !== entry || wired.has(name)) continue
+  wired.add(name)
   const parts = name.split('/')
   const linkTarget = path.join(profileDir, 'node_modules', ...parts)
   fs.mkdirSync(path.dirname(linkTarget), { recursive: true })

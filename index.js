@@ -1,14 +1,14 @@
 // src/index.ts
 import { homedir as homedir2 } from "node:os";
-import path15 from "node:path";
+import path16 from "node:path";
 
 // src/lib/service.mjs
-import { mkdir as mkdir6, readFile as readFile10, readdir as readdir5, rm as rm8, stat as stat7, writeFile as writeFile7 } from "node:fs/promises";
+import { mkdir as mkdir7, readFile as readFile11, readdir as readdir6, rm as rm8, stat as stat7, writeFile as writeFile8 } from "node:fs/promises";
 import { existsSync as existsSync10, readFileSync as readFileSync3, realpathSync } from "node:fs";
 import { spawn as spawn6 } from "node:child_process";
 import { createHash as createHash6 } from "node:crypto";
-import os6 from "node:os";
-import path11 from "node:path";
+import os7 from "node:os";
+import path12 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // code/shared/wireguard.mjs
@@ -287,11 +287,11 @@ async function discoverMembers(options) {
 }
 
 // code/build/job.mjs
-import { appendFile as appendFile2, mkdir as mkdir3, readFile as readFile6, rename as rename2, rm as rm4, stat as stat2, writeFile as writeFile3 } from "node:fs/promises";
+import { appendFile as appendFile2, mkdir as mkdir4, readFile as readFile7, rename as rename3, rm as rm4, stat as stat2, writeFile as writeFile4 } from "node:fs/promises";
 import { existsSync as existsSync5 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import os4 from "node:os";
-import path6 from "node:path";
+import os5 from "node:os";
+import path7 from "node:path";
 
 // code/build/engine.mjs
 import { spawn } from "node:child_process";
@@ -583,10 +583,10 @@ function sha256Text(text) {
   return createHash("sha256").update(text).digest("hex");
 }
 function parseTarget(target) {
-  const [os7, arch] = String(target).split("-");
-  if (!["linux", "win", "darwin"].includes(os7)) throw new Error(`unsupported target OS: ${target}`);
+  const [os8, arch] = String(target).split("-");
+  if (!["linux", "win", "darwin"].includes(os8)) throw new Error(`unsupported target OS: ${target}`);
   if (!["x64", "arm64"].includes(arch)) throw new Error(`unsupported target architecture: ${target}`);
-  return { os: os7, arch, libc: os7 === "linux" ? "glibc" : "" };
+  return { os: os8, arch, libc: os8 === "linux" ? "glibc" : "" };
 }
 function classifySource(source) {
   const value = String(source).trim().replace(/^git\+/u, "").replace(/\.git$/u, "").replace(/\/+$/u, "");
@@ -1035,7 +1035,9 @@ async function copyExtraPlugins(options) {
 }
 async function assembleWebPackage(options) {
   const { os: targetOs2, arch, libc } = parseTarget(options.target);
-  const packageDir = path3.join(options.outputDir, `dsh-mesh-${options.version}-${targetOs2}-${arch}`);
+  const buildStamp = typeof options.buildStamp === "string" && options.buildStamp !== "" ? options.buildStamp : null;
+  const identity = buildStamp === null ? options.version : `${options.version}-${buildStamp}`;
+  const packageDir = path3.join(options.outputDir, `dsh-mesh-${identity}-${targetOs2}-${arch}`);
   await rm(packageDir, { recursive: true, force: true });
   await mkdir(path3.join(packageDir, "web"), { recursive: true });
   await cp(options.dist, path3.join(packageDir, "web"), { recursive: true });
@@ -1073,7 +1075,10 @@ async function assembleWebPackage(options) {
   const manifest = {
     format: 1,
     name: "dsh-mesh",
+    // `version` is the DSH version, unchanged. `buildStamp` is the daily
+    // build revision that appears after it in the archive name.
     version: options.version,
+    buildStamp,
     target: { os: targetOs2, arch, libc },
     builtAt: (/* @__PURE__ */ new Date()).toISOString(),
     source: options.source ?? null,
@@ -1598,8 +1603,8 @@ function findChrome(env = process.env) {
   return null;
 }
 function parseSmokeTarget(target) {
-  const [os7, arch] = String(target ?? "").split("-");
-  return { os: os7 ?? "", arch: arch ?? "" };
+  const [os8, arch] = String(target ?? "").split("-");
+  return { os: os8 ?? "", arch: arch ?? "" };
 }
 function targetOs(platform = process.platform) {
   if (platform === "win32") return "win";
@@ -2193,18 +2198,87 @@ async function runPackageSmoke(options) {
   }
 }
 
+// code/build/stamp.mjs
+import { mkdir as mkdir3, readFile as readFile6, readdir as readdir3, rename as rename2, writeFile as writeFile3 } from "node:fs/promises";
+import os4 from "node:os";
+import path6 from "node:path";
+function defaultStampFile() {
+  return path6.join(os4.homedir(), ".dsh", "mesh", "build-stamp.json");
+}
+function buildStampDate(date = /* @__PURE__ */ new Date()) {
+  const year = String(date.getFullYear()).padStart(4, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}${month}${day}`;
+}
+function letterFor(index) {
+  if (!Number.isSafeInteger(index) || index < 1) throw new Error(`invalid build sequence: ${String(index)}`);
+  let value = index;
+  let letters = "";
+  while (value > 0) {
+    value -= 1;
+    letters = String.fromCharCode(65 + value % 26) + letters;
+    value = Math.floor(value / 26);
+  }
+  return letters;
+}
+function letterIndex(letters) {
+  let value = 0;
+  for (const char of String(letters)) value = value * 26 + (char.charCodeAt(0) - 64);
+  return value;
+}
+function isValidBuildStamp(value) {
+  return typeof value === "string" && /^\d{8}[A-Z]+$/u.test(value);
+}
+function highestFromNames(names, date) {
+  let highest = 0;
+  for (const name of names) {
+    const match = new RegExp(`-${date}([A-Z]+)-(?:linux|win|darwin)-`, "u").exec(name);
+    if (match !== null) highest = Math.max(highest, letterIndex(match[1]));
+  }
+  return highest;
+}
+async function nextBuildStamp(options = {}) {
+  const now = options.now ?? /* @__PURE__ */ new Date();
+  const date = buildStampDate(now);
+  const stateFile = options.stateFile ?? defaultStampFile();
+  const packagesDir = options.packagesDir ?? path6.join(os4.homedir(), ".dsh", "packages");
+  let state = {};
+  try {
+    state = JSON.parse(await readFile6(stateFile, "utf8"));
+  } catch {
+    state = {};
+  }
+  let next = state?.date === date && Number.isSafeInteger(state.next) && state.next > 0 ? state.next : 1;
+  const names = await readdir3(packagesDir).catch(() => []);
+  next = Math.max(next, highestFromNames(names, date) + 1);
+  const stamp = `${date}${letterFor(next)}`;
+  await mkdir3(path6.dirname(stateFile), { recursive: true });
+  const temporary = `${stateFile}.${String(process.pid)}.tmp`;
+  await writeFile3(temporary, `${JSON.stringify({
+    format: 1,
+    date,
+    next: next + 1,
+    last: stamp,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  }, null, 2)}
+`, "utf8");
+  await rename2(temporary, stateFile);
+  return stamp;
+}
+
 // code/build/job.mjs
 function defaultJobRoot() {
-  return path6.join(os4.homedir(), ".dsh", "mesh", "build");
+  return path7.join(os5.homedir(), ".dsh", "mesh", "build");
 }
 function defaultCacheDir2() {
-  return path6.join(os4.homedir(), ".dsh", "mesh", "cache");
+  return path7.join(os5.homedir(), ".dsh", "mesh", "cache");
 }
 async function createJob(options = {}) {
   const root = options.root ?? defaultJobRoot();
   const id = `${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/gu, "-")}-${randomBytes(3).toString("hex")}`;
-  const dir = path6.join(root, id);
-  await mkdir3(dir, { recursive: true });
+  const dir = path7.join(root, id);
+  await mkdir4(dir, { recursive: true });
   const state = {
     id,
     dir,
@@ -2213,6 +2287,9 @@ async function createJob(options = {}) {
     source: options.source ?? DEFAULT_SOURCE,
     ref: options.ref ?? DEFAULT_REF,
     targets: options.targets ?? [...DEFAULT_TARGETS],
+    // Immutable DSH version lives in `version`; this is the daily build
+    // revision used in the package filename.
+    buildStamp: options.buildStamp ?? null,
     createdAt: (/* @__PURE__ */ new Date()).toISOString(),
     updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
     // `member` is the build host (null = this machine); `proxy` is the outbound
@@ -2231,21 +2308,21 @@ async function createJob(options = {}) {
   return { id, dir, state };
 }
 async function readState(dir) {
-  return JSON.parse(await readFile6(path6.join(dir, "state.json"), "utf8"));
+  return JSON.parse(await readFile7(path7.join(dir, "state.json"), "utf8"));
 }
 async function writeState(dir, state) {
-  const file = path6.join(dir, "state.json");
+  const file = path7.join(dir, "state.json");
   const temporary = `${file}.tmp`;
-  await writeFile3(temporary, JSON.stringify({ ...state, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }, null, 2), "utf8");
-  await rename2(temporary, file);
+  await writeFile4(temporary, JSON.stringify({ ...state, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }, null, 2), "utf8");
+  await rename3(temporary, file);
 }
 async function appendLog(dir, line) {
-  await appendFile2(path6.join(dir, "build.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
+  await appendFile2(path7.join(dir, "build.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `, "utf8");
 }
 async function readLogTail(dir, lines = 80) {
   try {
-    const text = await readFile6(path6.join(dir, "build.log"), "utf8");
+    const text = await readFile7(path7.join(dir, "build.log"), "utf8");
     const trimmed = text.trimEnd();
     if (trimmed === "") return [];
     return trimmed.split(/\r?\n/u).slice(-lines);
@@ -2260,17 +2337,20 @@ async function updateState(dir, patch) {
 }
 async function runJob(dir, options) {
   const repositoryRoot = options.repositoryRoot;
-  const recipesPath = options.recipesPath ?? path6.join(repositoryRoot, "build", "recipes.json");
-  const overlayRoot = options.overlayRoot ?? path6.join(repositoryRoot, "build", "overlays");
+  const recipesPath = options.recipesPath ?? path7.join(repositoryRoot, "build", "recipes.json");
+  const overlayRoot = options.overlayRoot ?? path7.join(repositoryRoot, "build", "overlays");
   const outbound = proxyFor({ proxy: options.proxy, env: options.env, fetchImpl: options.fetchImpl });
   let state = await readState(dir);
+  const buildStamp = options.buildStamp ?? state.buildStamp ?? `${buildStampDate()}A`;
+  if (!isValidBuildStamp(buildStamp)) throw new Error(`invalid build stamp: ${String(buildStamp)}`);
+  if (state.buildStamp !== buildStamp) state = await updateState(dir, { buildStamp });
   const log = (line) => {
     void appendLog(dir, line);
     options.onLog?.(line);
   };
   try {
     state = await updateState(dir, { status: "running", phase: "prepare", error: null });
-    const prepared = options.reuseWorktree === true && existsSync5(path6.join(dir, "src")) ? { dir: path6.join(dir, "src"), source: state.source, ref: state.ref, local: false, archiveSha256: state.archiveSha256 ?? null } : await prepareSource({
+    const prepared = options.reuseWorktree === true && existsSync5(path7.join(dir, "src")) ? { dir: path7.join(dir, "src"), source: state.source, ref: state.ref, local: false, archiveSha256: state.archiveSha256 ?? null } : await prepareSource({
       source: state.source,
       ref: state.ref,
       cacheDir: options.cacheDir ?? defaultCacheDir2(),
@@ -2290,7 +2370,7 @@ async function runJob(dir, options) {
     const result = await applyRecipes({ dir: prepared.dir, recipes, overlayRoot, log });
     if (!result.ok) {
       const order = await writeWorkOrder({
-        dir: path6.join(dir, "work-order"),
+        dir: path7.join(dir, "work-order"),
         jobDir: dir,
         source: state.source,
         ref: state.ref,
@@ -2343,8 +2423,9 @@ async function runJob(dir, options) {
       const shared = {
         dist: built.dist,
         target,
-        outputDir: path6.join(dir, "dist"),
+        outputDir: path7.join(dir, "dist"),
         version,
+        buildStamp,
         repositoryRoot,
         source: state.source,
         ref: state.ref,
@@ -2373,8 +2454,8 @@ async function runJob(dir, options) {
         smoke = await runPackageSmoke({
           packageRoot: assembled.packageDir,
           target,
-          workDir: path6.join(dir, "smoke", target),
-          screenshotDir: path6.join(dir, "smoke", target),
+          workDir: path7.join(dir, "smoke", target),
+          screenshotDir: path7.join(dir, "smoke", target),
           chrome: options.smokeChrome,
           required: options.smokeRequired === true,
           startTimeoutMs: options.smokeStartTimeoutMs,
@@ -2418,8 +2499,8 @@ async function runJob(dir, options) {
   }
 }
 async function learnJob(dir, options) {
-  const recipesPath = options.recipesPath ?? path6.join(options.repositoryRoot, "build", "recipes.json");
-  const overlayRoot = options.overlayRoot ?? path6.join(options.repositoryRoot, "build", "overlays");
+  const recipesPath = options.recipesPath ?? path7.join(options.repositoryRoot, "build", "recipes.json");
+  const overlayRoot = options.overlayRoot ?? path7.join(options.repositoryRoot, "build", "overlays");
   const state = await readState(dir);
   if (state.worktree === null) throw new Error("this job has no worktree yet");
   const recipes = await loadRecipes(recipesPath);
@@ -2429,17 +2510,17 @@ async function learnJob(dir, options) {
     overlayRoot,
     mismatches: Array.isArray(state.mismatches) ? state.mismatches : []
   });
-  await writeFile3(recipesPath, JSON.stringify(learned.recipes, null, 2), "utf8");
+  await writeFile4(recipesPath, JSON.stringify(learned.recipes, null, 2), "utf8");
   await appendLog(dir, `learned ${String(learned.learned.length)} overlay(s)`);
   return updateState(dir, { status: "learned", learnedAt: (/* @__PURE__ */ new Date()).toISOString(), learned: learned.learned });
 }
 async function readSourceVersion(worktree) {
   for (const candidate of [
-    path6.join(worktree, "apps", "cli", "package.json"),
-    path6.join(worktree, "package.json")
+    path7.join(worktree, "apps", "cli", "package.json"),
+    path7.join(worktree, "package.json")
   ]) {
     try {
-      const pkg = JSON.parse(await readFile6(candidate, "utf8"));
+      const pkg = JSON.parse(await readFile7(candidate, "utf8"));
       if (typeof pkg.version === "string" && pkg.version !== "") return pkg.version;
     } catch {
     }
@@ -2452,10 +2533,10 @@ import { createHash as createHash2 } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { spawn as spawn4 } from "node:child_process";
 import { existsSync as existsSync6, readFileSync } from "node:fs";
-import { copyFile as copyFile2, link, mkdir as mkdir4, mkdtemp as mkdtemp3, readFile as readFile7, readdir as readdir3, rename as rename3, rm as rm5, stat as stat3, writeFile as writeFile4 } from "node:fs/promises";
+import { copyFile as copyFile2, link, mkdir as mkdir5, mkdtemp as mkdtemp3, readFile as readFile8, readdir as readdir4, rename as rename4, rm as rm5, stat as stat3, writeFile as writeFile5 } from "node:fs/promises";
 import { isIP as isIP2 } from "node:net";
 import { homedir, hostname, tmpdir as tmpdir2 } from "node:os";
-import path7 from "node:path";
+import path8 from "node:path";
 var EXTRACT_CHECKPOINT = 1e3;
 var DEFAULT_APP_ROOT = {
   linux: "/opt/dsh-mesh",
@@ -2636,8 +2717,8 @@ function mergeModelRoute(text, pairs) {
 `;
 function deployerModelRoute() {
   if (process.env.DSH_DEPLOY_SYNC_MODEL === "0") return null;
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path7.join(homedir(), ".dsh");
-  const file = path7.join(home, "profiles", "web", "cordis.patch.yml");
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path8.join(homedir(), ".dsh");
+  const file = path8.join(home, "profiles", "web", "cordis.patch.yml");
   if (!existsSync6(file)) return null;
   let text;
   try {
@@ -2671,8 +2752,8 @@ function deployerModelRoute() {
 }
 function deployerCredentialsFile() {
   if (process.env.DSH_DEPLOY_SHARE_ACCOUNT === "0") return null;
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path7.join(homedir(), ".dsh");
-  const file = path7.join(home, ".credentials.yaml");
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path8.join(homedir(), ".dsh");
+  const file = path8.join(home, ".credentials.yaml");
   return existsSync6(file) ? file : null;
 }
 function formatBytes(value) {
@@ -2713,31 +2794,31 @@ function newJobId() {
 function jobPaths(dir) {
   return {
     dir,
-    state: path7.join(dir, "job.json"),
-    log: path7.join(dir, "deploy.log"),
-    runner: path7.join(dir, "runner.json"),
-    request: path7.join(dir, "request.json")
+    state: path8.join(dir, "job.json"),
+    log: path8.join(dir, "deploy.log"),
+    runner: path8.join(dir, "runner.json"),
+    request: path8.join(dir, "request.json")
   };
 }
 async function writeDeployState(dir, state) {
-  const file = path7.join(dir, "job.json");
+  const file = path8.join(dir, "job.json");
   const tmp = `${file}.${process.pid}.tmp`;
-  await mkdir4(dir, { recursive: true });
-  await writeFile4(tmp, `${JSON.stringify(state, null, 2)}
+  await mkdir5(dir, { recursive: true });
+  await writeFile5(tmp, `${JSON.stringify(state, null, 2)}
 `, "utf8");
-  await rename3(tmp, file);
+  await rename4(tmp, file);
 }
 async function appendDeployLog(dir, line) {
-  await mkdir4(dir, { recursive: true });
-  await writeFile4(path7.join(dir, "deploy.log"), `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
+  await mkdir5(dir, { recursive: true });
+  await writeFile5(path8.join(dir, "deploy.log"), `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
 `, { encoding: "utf8", flag: "a" });
 }
 async function runnerStatus(dir) {
-  const file = path7.join(dir, "runner.json");
+  const file = path8.join(dir, "runner.json");
   let runner = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      runner = JSON.parse(await readFile7(file, "utf8"));
+      runner = JSON.parse(await readFile8(file, "utf8"));
       break;
     } catch {
       runner = null;
@@ -2785,8 +2866,8 @@ function inferRole(name) {
   if (text.includes("gate")) return "gate";
   return "dsh";
 }
-function normalizeServices(input, os7) {
-  const source = input === void 0 ? DEFAULT_SERVICES[os7] : input;
+function normalizeServices(input, os8) {
+  const source = input === void 0 ? DEFAULT_SERVICES[os8] : input;
   if (!Array.isArray(source) || source.length === 0) {
     throw new Error("at least one service is required");
   }
@@ -2801,7 +2882,7 @@ function normalizeServices(input, os7) {
     seen.add(name);
     const role = raw.role ?? inferRole(name);
     if (!(role in ROLE_ORDER)) throw new Error(`service ${name} has unknown role ${String(role)}`);
-    const command = typeof raw.command === "string" && raw.command.trim() !== "" ? raw.command.trim() : os7 === "linux" ? "start.sh" : "dsh-mesh-service.exe";
+    const command = typeof raw.command === "string" && raw.command.trim() !== "" ? raw.command.trim() : os8 === "linux" ? "start.sh" : "dsh-mesh-service.exe";
     return { name, role, command };
   });
   if (!services.some((service) => service.role === "gate")) {
@@ -2816,34 +2897,34 @@ function normalizeServices(input, os7) {
   }
   return services;
 }
-async function findLatestPackage(repositoryRoot, os7) {
-  const dist = path7.join(repositoryRoot, "dist");
-  const suffix = os7 === "linux" ? ".tar.gz" : ".zip";
+async function findLatestPackage(repositoryRoot, os8) {
+  const dist = path8.join(repositoryRoot, "dist");
+  const suffix = os8 === "linux" ? ".tar.gz" : ".zip";
   const prefix = `dsh-mesh-`;
-  const marker = `-${os7 === "linux" ? "linux" : "win"}-x64`;
-  const entries = await readdir3(dist).catch(() => []);
+  const marker = `-${os8 === "linux" ? "linux" : "win"}-x64`;
+  const entries = await readdir4(dist).catch(() => []);
   const candidates = [];
   for (const entry of entries) {
     if (!entry.startsWith(prefix) || !entry.endsWith(suffix) || !entry.includes(marker)) continue;
-    const file = path7.join(dist, entry);
+    const file = path8.join(dist, entry);
     const info = await stat3(file).catch(() => null);
     if (info?.isFile()) candidates.push({ file, mtimeMs: info.mtimeMs });
   }
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   if (candidates.length === 0) {
-    throw new Error(`no ${os7} package found in ${dist}; build one or pass --package`);
+    throw new Error(`no ${os8} package found in ${dist}; build one or pass --package`);
   }
   return candidates[0].file;
 }
 async function buildDeployPlan(options) {
   if (typeof options.host !== "string" || options.host.trim() === "") throw new Error("host is required");
-  const os7 = normalizeOs(options.os ?? "linux");
+  const os8 = normalizeOs(options.os ?? "linux");
   const repositoryRoot = options.repositoryRoot ?? process.cwd();
   let packagePath = "";
   let packageInfo = null;
   let sha256 = "";
   if (options.skipPackage !== true) {
-    packagePath = options.package ? path7.resolve(options.package) : await findLatestPackage(repositoryRoot, os7);
+    packagePath = options.package ? path8.resolve(options.package) : await findLatestPackage(repositoryRoot, os8);
     packageInfo = await stat3(packagePath);
     if (!packageInfo.isFile()) throw new Error(`package is not a file: ${packagePath}`);
     sha256 = await hashFile(packagePath);
@@ -2852,8 +2933,8 @@ async function buildDeployPlan(options) {
   if (!/^[A-Za-z0-9._-]{3,80}$/.test(release)) {
     throw new Error("release must be 3-80 chars of letters, digits, dot, underscore or dash");
   }
-  const appRoot = normalizeInstallRoot(options.appRoot) || DEFAULT_APP_ROOT[os7];
-  const services = normalizeServices(options.services, os7);
+  const appRoot = normalizeInstallRoot(options.appRoot) || DEFAULT_APP_ROOT[os8];
+  const services = normalizeServices(options.services, os8);
   const scope = options.scope === "dsh" ? "dsh" : "all";
   const gatePort = String(options.gatePort ?? "80");
   if (!/^\d{1,5}$/.test(gatePort) || Number(gatePort) > 65535) throw new Error("gatePort is invalid");
@@ -2880,16 +2961,16 @@ async function buildDeployPlan(options) {
     gatePassword: typeof options.gatePassword === "string" ? options.gatePassword : "",
     user: typeof options.user === "string" && options.user.trim() !== "" ? options.user.trim() : void 0,
     port: Number.isSafeInteger(options.port) ? options.port : 22,
-    identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path7.resolve(options.identityFile) : void 0,
-    os: os7,
+    identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path8.resolve(options.identityFile) : void 0,
+    os: os8,
     package: { path: packagePath, bytes: packageInfo?.size ?? 0, sha256 },
     release,
     appRoot,
     serviceUser,
-    shared: `${appRoot}${os7 === "linux" ? "/shared" : "\\shared"}`,
-    current: `${appRoot}${os7 === "linux" ? "/current" : "\\current"}`,
-    previous: `${appRoot}${os7 === "linux" ? "/previous" : "\\previous"}`,
-    releases: `${appRoot}${os7 === "linux" ? "/releases" : "\\releases"}`,
+    shared: `${appRoot}${os8 === "linux" ? "/shared" : "\\shared"}`,
+    current: `${appRoot}${os8 === "linux" ? "/current" : "\\current"}`,
+    previous: `${appRoot}${os8 === "linux" ? "/previous" : "\\previous"}`,
+    releases: `${appRoot}${os8 === "linux" ? "/releases" : "\\releases"}`,
     services,
     scope,
     gatePort,
@@ -2908,7 +2989,7 @@ async function buildDeployPlan(options) {
     interop: options.interop === false || process.env.DSH_DEPLOY_INTEROP === "0" ? null : interop,
     // Named by content, not by release, so a retried deploy of the same package
     // reuses the upload instead of pushing hundreds of megabytes again.
-    remotePackage: os7 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path7.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path7.extname(packagePath)}`,
+    remotePackage: os8 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path8.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path8.extname(packagePath)}`,
     // A test upgrade rehearses the *flat* upgrade (the path the gateway uses
     // on itself) in a sandbox on the member before touching it, then runs the
     // normal blue-green upgrade. Without this a member test proves nothing
@@ -2916,22 +2997,22 @@ async function buildDeployPlan(options) {
     test: options.test === true,
     // The deployer's account grants travel with the deploy so a fresh member
     // needs no QR scan of its own.
-    remoteCredentials: os7 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}.account` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}.account`
+    remoteCredentials: os8 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}.account` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}.account`
   };
 }
 async function probeTarget(options) {
   if (typeof options.host !== "string" || options.host.trim() === "") throw new Error("host is required");
-  const os7 = normalizeOs(options.os ?? "linux");
+  const os8 = normalizeOs(options.os ?? "linux");
   const user = typeof options.user === "string" && options.user.trim() !== "" ? options.user.trim() : void 0;
   const plan = {
     host: options.host.trim(),
     user,
     port: Number.isSafeInteger(options.port) ? options.port : 22,
-    identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path7.resolve(options.identityFile) : void 0,
-    os: os7
+    identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path8.resolve(options.identityFile) : void 0,
+    os: os8
   };
   const runner = new SshRunner(plan);
-  if (os7 === "windows") {
+  if (os8 === "windows") {
     const script2 = [
       "$ErrorActionPreference = 'SilentlyContinue'",
       `$svc = Get-CimInstance Win32_Service -Filter "Name='DSH-Mesh'"`,
@@ -3709,7 +3790,7 @@ function describePlan(plan) {
     services: plan.services,
     scope: plan.scope,
     steps: [
-      `upload ${path7.basename(plan.package.path)} to ${plan.remotePackage}`,
+      `upload ${path8.basename(plan.package.path)} to ${plan.remotePackage}`,
       `extract and prepare ${plan.releases}/${plan.release} (no service switch)`,
       `update shared config and service definitions for ${plan.appRoot}/current`,
       `switch ${plan.current} to ${plan.release}`,
@@ -3819,14 +3900,14 @@ var SshRunner = class {
    */
   async #uploadStream(local, remote, totalBytes, onProgress) {
     const windows = this.plan.os === "windows";
-    const remoteCommand = windows ? `tar -xf - -C "${path7.win32.dirname(remote)}"` : `cat > ${sh(remote)}`;
+    const remoteCommand = windows ? `tar -xf - -C "${path8.win32.dirname(remote)}"` : `cat > ${sh(remote)}`;
     const args = [...this.sshOptions(), this.target(), remoteCommand];
     let tarDir = null;
     let tarName = null;
     if (windows) {
-      tarName = path7.win32.basename(remote);
-      tarDir = await mkdtemp3(path7.join(tmpdir2(), "dsh-mesh-upload-"));
-      const staged = path7.join(tarDir, tarName);
+      tarName = path8.win32.basename(remote);
+      tarDir = await mkdtemp3(path8.join(tmpdir2(), "dsh-mesh-upload-"));
+      const staged = path8.join(tarDir, tarName);
       try {
         try {
           await link(local, staged);
@@ -3965,17 +4046,17 @@ var SshRunner = class {
    * @param {'linux'|'windows'} os target OS.
    * @returns {Promise<void>}
    */
-  async script(script, os7, onLine) {
+  async script(script, os8, onLine) {
     const base = this.sshOptions();
-    if (os7 === "linux") {
+    if (os8 === "linux") {
       const remote = this.plan.sudo ? "sudo -n bash -s" : "bash -s";
       await this.runProcess("ssh", [...base, this.target(), remote], script, onLine);
       return;
     }
     const name = `dsh-deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.ps1`;
     const remotePath = `C:\\Windows\\Temp\\${name}`;
-    const localPath = path7.join(tmpdir2(), name);
-    await writeFile4(localPath, `\uFEFF${script}`, "utf8");
+    const localPath = path8.join(tmpdir2(), name);
+    await writeFile5(localPath, `\uFEFF${script}`, "utf8");
     try {
       await this.upload(localPath, remotePath);
       await this.runProcess(
@@ -4050,7 +4131,7 @@ var LocalRunner = class {
    */
   async upload(local, remote, onProgress) {
     const info = await stat3(local);
-    await mkdir4(path7.dirname(remote), { recursive: true });
+    await mkdir5(path8.dirname(remote), { recursive: true });
     await copyFile2(local, remote);
     onProgress?.({ bytes: info.size, totalBytes: info.size, percent: 100, speed: 0 });
   }
@@ -4074,8 +4155,8 @@ var LocalRunner = class {
    * @param {(line: string) => void} [onLine] line callback.
    * @returns {Promise<void>} completion.
    */
-  async script(script, os7, onLine) {
-    if (os7 !== "linux") throw new Error("\u672C\u5730\u90E8\u7F72\u53EA\u652F\u6301 Linux\uFF1A\u672C\u673A\u6CA1\u6709\u53EF\u7528\u7684 Windows \u8FD0\u884C\u65F6");
+  async script(script, os8, onLine) {
+    if (os8 !== "linux") throw new Error("\u672C\u5730\u90E8\u7F72\u53EA\u652F\u6301 Linux\uFF1A\u672C\u673A\u6CA1\u6709\u53EF\u7528\u7684 Windows \u8FD0\u884C\u65F6");
     await runLocalProcess("bash", ["-s"], script, onLine);
   }
 };
@@ -4155,10 +4236,10 @@ var DeployManager = class {
       repositoryRoot: this.repositoryRoot
     });
     const id = typeof request.id === "string" && /^deploy-[A-Za-z0-9-]+$/u.test(request.id) ? request.id : newJobId();
-    const dir = path7.join(this.dataDir, id);
-    await mkdir4(dir, { recursive: true });
-    const stateFile = path7.join(dir, "job.json");
-    const logFile = path7.join(dir, "deploy.log");
+    const dir = path8.join(this.dataDir, id);
+    await mkdir5(dir, { recursive: true });
+    const stateFile = path8.join(dir, "job.json");
+    const logFile = path8.join(dir, "deploy.log");
     const state = {
       id,
       // `install`, `upgrade` and `test` run the same phases; the panel only
@@ -4185,7 +4266,7 @@ var DeployManager = class {
     await writeDeployState(dir, state);
     const log = async (line) => {
       const stamp = (/* @__PURE__ */ new Date()).toISOString();
-      await writeFile4(logFile, `[${stamp}] ${line}
+      await writeFile5(logFile, `[${stamp}] ${line}
 `, { encoding: "utf8", flag: "a" });
       this.logLine(line);
     };
@@ -4267,7 +4348,7 @@ var DeployManager = class {
       if (credentialsFile !== null) {
         try {
           await runner.upload(credentialsFile, plan.remoteCredentials);
-          const helperFile = path7.join(this.repositoryRoot, "code", "shared", "credentials-merge.mjs");
+          const helperFile = path8.join(this.repositoryRoot, "code", "shared", "credentials-merge.mjs");
           if (existsSync6(helperFile)) await runner.upload(helperFile, `${plan.remoteCredentials}.mjs`);
           await log("shared the deployer's account sign-in");
         } catch (error) {
@@ -4382,8 +4463,8 @@ var DeployManager = class {
     const previous = this.writes.get(stateFile) ?? Promise.resolve();
     const next = previous.catch(() => {
     }).then(async () => {
-      await writeFile4(tmp, text, "utf8");
-      await rename3(tmp, stateFile);
+      await writeFile5(tmp, text, "utf8");
+      await rename4(tmp, stateFile);
     });
     this.writes.set(stateFile, next.catch(() => {
     }));
@@ -4405,7 +4486,7 @@ var DeployManager = class {
     if (state === null || typeof state !== "object") return state;
     if (state.status !== "running" && state.status !== "queued") return state;
     if (this.running.has(state.id)) return state;
-    const dir = path7.join(this.dataDir, state.id);
+    const dir = path8.join(this.dataDir, state.id);
     const runner = await runnerStatus(dir);
     if (runner.alive) return state;
     if (runner.runner === null) {
@@ -4438,7 +4519,7 @@ var DeployManager = class {
       });
     }
     state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    await this.#save(path7.join(dir, "job.json"), state).catch(() => {
+    await this.#save(path8.join(dir, "job.json"), state).catch(() => {
     });
     return state;
   }
@@ -4462,7 +4543,7 @@ var DeployManager = class {
     const live = this.states.get(id);
     if (live !== void 0) return live;
     try {
-      const stored = JSON.parse(await readFile7(path7.join(this.dataDir, id, "job.json"), "utf8"));
+      const stored = JSON.parse(await readFile8(path8.join(this.dataDir, id, "job.json"), "utf8"));
       return await this.#settle(stored);
     } catch {
       return null;
@@ -4477,14 +4558,14 @@ var DeployManager = class {
     const jobs = [];
     let entries = [];
     try {
-      entries = await readdir3(this.dataDir, { withFileTypes: true });
+      entries = await readdir4(this.dataDir, { withFileTypes: true });
     } catch {
       entries = [];
     }
     for (const entry of entries) {
       if (!entry.isDirectory() || !entry.name.startsWith("deploy-")) continue;
       try {
-        const stored = JSON.parse(await readFile7(path7.join(this.dataDir, entry.name, "job.json"), "utf8"));
+        const stored = JSON.parse(await readFile8(path8.join(this.dataDir, entry.name, "job.json"), "utf8"));
         jobs.push(await this.#settle(stored));
       } catch {
       }
@@ -4504,7 +4585,7 @@ var DeployManager = class {
   async logs(id, lines = 80) {
     if (typeof id !== "string" || !/^deploy-[A-Za-z0-9-]+$/.test(id)) return "";
     try {
-      const text = await readFile7(path7.join(this.dataDir, id, "deploy.log"), "utf8");
+      const text = await readFile8(path8.join(this.dataDir, id, "deploy.log"), "utf8");
       return text.split("\n").slice(-Math.max(1, Math.min(lines, 500))).join("\n");
     } catch {
       return "";
@@ -4518,10 +4599,10 @@ var DeployManager = class {
   async rollback(request) {
     const plan = await buildDeployPlan({ ...request, repositoryRoot: this.repositoryRoot, skipPackage: true });
     const id = `deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-    const dir = path7.join(this.dataDir, id);
-    await mkdir4(dir, { recursive: true });
-    const stateFile = path7.join(dir, "job.json");
-    const logFile = path7.join(dir, "deploy.log");
+    const dir = path8.join(this.dataDir, id);
+    await mkdir5(dir, { recursive: true });
+    const stateFile = path8.join(dir, "job.json");
+    const logFile = path8.join(dir, "deploy.log");
     const state = {
       id,
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -4531,11 +4612,11 @@ var DeployManager = class {
       phase: "rollback",
       error: null
     };
-    await writeFile4(stateFile, `${JSON.stringify(state, null, 2)}
+    await writeFile5(stateFile, `${JSON.stringify(state, null, 2)}
 `, "utf8");
     const log = async (line) => {
       const stamp = (/* @__PURE__ */ new Date()).toISOString();
-      await writeFile4(logFile, `[${stamp}] ${line}
+      await writeFile5(logFile, `[${stamp}] ${line}
 `, { encoding: "utf8", flag: "a" });
       this.logLine(line);
     };
@@ -4564,20 +4645,20 @@ var DeployManager = class {
 // src/lib/egress.mjs
 import { spawn as spawn5 } from "node:child_process";
 import { existsSync as existsSync7 } from "node:fs";
-import { readFile as readFile8, stat as stat4 } from "node:fs/promises";
-import path8 from "node:path";
+import { readFile as readFile9, stat as stat4 } from "node:fs/promises";
+import path9 from "node:path";
 import { fileURLToPath } from "node:url";
-var HERE = path8.dirname(fileURLToPath(import.meta.url));
+var HERE = path9.dirname(fileURLToPath(import.meta.url));
 function resolveEgressScript(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
-    const candidate = path8.join(current, "code", "shared", "egress-proxy.mjs");
+    const candidate = path9.join(current, "code", "shared", "egress-proxy.mjs");
     if (existsSync7(candidate)) return candidate;
-    const parent = path8.dirname(current);
+    const parent = path9.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return path8.resolve(start, "..", "..", "code", "shared", "egress-proxy.mjs");
+  return path9.resolve(start, "..", "..", "code", "shared", "egress-proxy.mjs");
 }
 var SCRIPT_PATH = resolveEgressScript(HERE);
 var REMOTE_SCRIPT = "$HOME/.dsh/mesh/egress-proxy.mjs";
@@ -4658,7 +4739,7 @@ var EgressProxy = class {
    * @returns {Promise<void>}
    */
   async #install(runner, plan) {
-    const local = await readFile8(SCRIPT_PATH, "utf8");
+    const local = await readFile9(SCRIPT_PATH, "utf8");
     const info = await stat4(SCRIPT_PATH);
     const stamp = `${String(info.size)}-${String(info.mtimeMs)}`;
     const check = await runner.runProcess("ssh", [
@@ -4723,8 +4804,8 @@ ${errors.trim()}`));
 
 // src/lib/remote-build.mjs
 import { createHash as createHash3 } from "node:crypto";
-import { open as open2, rename as rename4, rm as rm6, stat as stat5, writeFile as writeFile5 } from "node:fs/promises";
-import path9 from "node:path";
+import { open as open2, rename as rename5, rm as rm6, stat as stat5, writeFile as writeFile6 } from "node:fs/promises";
+import path10 from "node:path";
 var DEFAULT_MESH_REPO = "https://github.com/Cangjier/dsh-mesh.git";
 var REMOTE_SRC = "$HOME/.dsh/mesh/build-src";
 var REMOTE_JOBS = "$HOME/.dsh/mesh/build";
@@ -4769,7 +4850,7 @@ function remoteBuildScript(options) {
     'corepack enable --install-directory "$HOME/.dsh/mesh/bin" >/dev/null 2>&1 || true',
     `cd "${REMOTE_SRC}" || { echo "mesh checkout is missing" >&2; exit 3; }`,
     'echo "mesh head $(git rev-parse --short HEAD)"',
-    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --stream --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ""}`,
+    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --stream --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.buildStamp ? ` --build-stamp ${quote(options.buildStamp)}` : ""}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ""}`,
     "code=$?",
     `ls -1d "${out}"/* 2>/dev/null | head -n 5`,
     "exit $code",
@@ -4831,7 +4912,7 @@ function windowsBuildScript(options) {
     'if (-not (Test-Path (Join-Path $src "code\\build\\cli.mjs"))) { throw "mesh checkout is incomplete" }',
     `& (Join-Path $nodeDir 'corepack.cmd') enable --install-directory $bin | Out-Null`,
     "Set-Location $src",
-    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --stream --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(","))}${proxy2 === "" ? "" : ` --proxy ${quotePs(proxy2)}`}`,
+    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --stream --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(","))}${options.buildStamp ? ` --build-stamp ${quotePs(options.buildStamp)}` : ""}${proxy2 === "" ? "" : ` --proxy ${quotePs(proxy2)}`}`,
     "$code = $LASTEXITCODE",
     "Get-ChildItem -Directory $out -ErrorAction SilentlyContinue | Select-Object -First 5 -ExpandProperty FullName",
     "exit $code",
@@ -4881,7 +4962,7 @@ var RemoteBuilder = class {
   /**
    * Run one job on a member and settle the local job state.
    * @param {string} jobDir local job directory.
-   * @param {{plan: {os?: string, appRoot?: string}, memberName: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number}} options run options.
+   * @param {{plan: {os?: string, appRoot?: string}, memberName: string, proxyUrl?: string|null, repoUrl?: string, buildStamp?: string, heapMb?: number}} options run options.
    * @returns {Promise<object>} final local state.
    */
   async run(jobDir, options) {
@@ -4895,6 +4976,7 @@ var RemoteBuilder = class {
       targets: state.targets,
       proxyUrl: options.proxyUrl,
       repoUrl: options.repoUrl,
+      buildStamp: options.buildStamp,
       heapMb: options.heapMb,
       appRoot: options.plan.appRoot
     }) : remoteBuildScript({
@@ -4903,6 +4985,7 @@ var RemoteBuilder = class {
       targets: state.targets,
       proxyUrl: options.proxyUrl,
       repoUrl: options.repoUrl,
+      buildStamp: options.buildStamp,
       heapMb: options.heapMb
     });
     let percent = 1;
@@ -4959,7 +5042,7 @@ var RemoteBuilder = class {
         manifest: artifact.manifest ?? null,
         smoke: artifact.smoke ?? null
       });
-      await appendLog(jobDir, `pulled ${path9.basename(local)} (${String(info.size)} bytes, sha256 ${digest.slice(0, 12)}\u2026)`);
+      await appendLog(jobDir, `pulled ${path10.basename(local)} (${String(info.size)} bytes, sha256 ${digest.slice(0, 12)}\u2026)`);
     }
     return this.#update(jobDir, {
       status: "done",
@@ -4977,15 +5060,15 @@ var RemoteBuilder = class {
    * @returns {Promise<string>} local path.
    */
   async #pull(runner, remote, windows = false) {
-    const name = remote.split(/[\\/]/u).pop() ?? path9.basename(remote);
-    const local = path9.join(this.packagesDir, name);
+    const name = remote.split(/[\\/]/u).pop() ?? path10.basename(remote);
+    const local = path10.join(this.packagesDir, name);
     const temporary = `${local}.part`;
     const args = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-P", String(runner.plan.port ?? 22)];
     if (runner.plan.identityFile) args.push("-i", runner.plan.identityFile);
     args.push(`${runner.target()}:${windows ? remote.replace(/\\/gu, "/") : remote}`, temporary);
     await runner.runProcess("scp", args);
     await rm6(local, { force: true });
-    await rename4(temporary, local);
+    await rename5(temporary, local);
     return local;
   }
   /**
@@ -5026,7 +5109,7 @@ var RemoteBuilder = class {
   }
 };
 async function writeSidecar(file, digest) {
-  await writeFile5(`${file}.sha256`, `${digest}  ${path9.basename(file)}
+  await writeFile6(`${file}.sha256`, `${digest}  ${path10.basename(file)}
 `, "utf8");
 }
 
@@ -5048,16 +5131,16 @@ function signClusterRequest(secret, request) {
   const signature = createHmac("sha256", secret).update(payload).digest("base64url");
   return `${VERSION}.${String(timestamp)}.${nonce}.${signature}`;
 }
-function payloadOf(method, path16, timestamp, nonce) {
-  return [VERSION, String(method).toUpperCase(), path16, String(timestamp), nonce].join("\n");
+function payloadOf(method, path17, timestamp, nonce) {
+  return [VERSION, String(method).toUpperCase(), path17, String(timestamp), nonce].join("\n");
 }
 
 // code/build/repack.mjs
 import { execFile } from "node:child_process";
 import { createHash as createHash5 } from "node:crypto";
-import { cp as cp2, mkdir as mkdir5, mkdtemp as mkdtemp4, readFile as readFile9, readdir as readdir4, rm as rm7, stat as stat6, writeFile as writeFile6 } from "node:fs/promises";
+import { cp as cp2, mkdir as mkdir6, mkdtemp as mkdtemp4, readFile as readFile10, readdir as readdir5, rm as rm7, stat as stat6, writeFile as writeFile7 } from "node:fs/promises";
 import { createReadStream as createReadStream2, existsSync as existsSync8 } from "node:fs";
-import path10 from "node:path";
+import path11 from "node:path";
 import { promisify } from "node:util";
 var run = promisify(execFile);
 var CODE_SCRIPTS = ["install.sh", "start.sh", "stop.sh", "status.sh", "doctor.sh", "install.ps1", "start.ps1", "stop.ps1", "start.cmd", "stop.cmd", "start-stack.ps1"];
@@ -5080,43 +5163,43 @@ async function replaceFile(from, to) {
 }
 async function countFiles(dir) {
   let total = 0;
-  for (const entry of await readdir4(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) total += await countFiles(path10.join(dir, entry.name));
+  for (const entry of await readdir5(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) total += await countFiles(path11.join(dir, entry.name));
     else if (entry.isFile()) total += 1;
   }
   return total;
 }
 async function repackDirectory(packageDir, repositoryRoot) {
-  const manifestFile = path10.join(packageDir, "manifest.json");
+  const manifestFile = path11.join(packageDir, "manifest.json");
   if (!existsSync8(manifestFile)) throw new Error(`${packageDir} is not an extracted package (no manifest.json)`);
-  await replaceDirectory(path10.join(repositoryRoot, "code", "gate"), path10.join(packageDir, "gate"));
-  await replaceDirectory(path10.join(repositoryRoot, "code", "shared"), path10.join(packageDir, "shared"));
-  await replaceDirectory(path10.join(repositoryRoot, "code", "config"), path10.join(packageDir, "config"));
+  await replaceDirectory(path11.join(repositoryRoot, "code", "gate"), path11.join(packageDir, "gate"));
+  await replaceDirectory(path11.join(repositoryRoot, "code", "shared"), path11.join(packageDir, "shared"));
+  await replaceDirectory(path11.join(repositoryRoot, "code", "config"), path11.join(packageDir, "config"));
   for (const name of CODE_DIRS) {
-    await replaceDirectory(path10.join(repositoryRoot, "code", name), path10.join(packageDir, "code", name));
+    await replaceDirectory(path11.join(repositoryRoot, "code", name), path11.join(packageDir, "code", name));
   }
-  await replaceDirectory(path10.join(repositoryRoot, "docs"), path10.join(packageDir, "docs"));
+  await replaceDirectory(path11.join(repositoryRoot, "docs"), path11.join(packageDir, "docs"));
   for (const name of CODE_SCRIPTS) {
-    await replaceFile(path10.join(repositoryRoot, "code", name), path10.join(packageDir, name));
+    await replaceFile(path11.join(repositoryRoot, "code", name), path11.join(packageDir, name));
   }
   for (const name of ROOT_SCRIPTS) {
-    await replaceFile(path10.join(repositoryRoot, name), path10.join(packageDir, name));
+    await replaceFile(path11.join(repositoryRoot, name), path11.join(packageDir, name));
   }
   for (const name of PLUGIN_FILES) {
-    await replaceFile(path10.join(repositoryRoot, name), path10.join(packageDir, "plugins", "dsh-mesh", name));
+    await replaceFile(path11.join(repositoryRoot, name), path11.join(packageDir, "plugins", "dsh-mesh", name));
   }
   for (const name of PLUGIN_DIRS) {
-    await replaceDirectory(path10.join(repositoryRoot, name), path10.join(packageDir, "plugins", "dsh-mesh", name));
+    await replaceDirectory(path11.join(repositoryRoot, name), path11.join(packageDir, "plugins", "dsh-mesh", name));
   }
-  const manifest = JSON.parse(await readFile9(manifestFile, "utf8"));
-  const staticAssets = await collectStaticAssets(path10.join(packageDir, "gate"));
+  const manifest = JSON.parse(await readFile10(manifestFile, "utf8"));
+  const staticAssets = await collectStaticAssets(path11.join(packageDir, "gate"));
   manifest.staticAssets = staticAssets;
   manifest.builtAt = (/* @__PURE__ */ new Date()).toISOString();
   manifest.repackedFrom = "code/build/repack.mjs";
   manifest.files = await countFiles(packageDir);
-  await writeFile6(manifestFile, `${JSON.stringify(manifest, null, 2)}
+  await writeFile7(manifestFile, `${JSON.stringify(manifest, null, 2)}
 `, "utf8");
-  const clientBytes = (await stat6(path10.join(packageDir, "plugins", "dsh-mesh", "client.js"))).size;
+  const clientBytes = (await stat6(path11.join(packageDir, "plugins", "dsh-mesh", "client.js"))).size;
   return { packageDir, version: manifest.version, target: manifest.target, files: manifest.files, clientBytes };
 }
 async function sha256File3(file) {
@@ -5130,10 +5213,10 @@ async function sha256File3(file) {
   return hash.digest("hex");
 }
 function archiveRootName(file) {
-  return path10.basename(file).replace(/\.(tar\.gz|tgz|zip)$/u, "");
+  return path11.basename(file).replace(/\.(tar\.gz|tgz|zip)$/u, "");
 }
 async function extractArchive(file, directory) {
-  await mkdir5(directory, { recursive: true });
+  await mkdir6(directory, { recursive: true });
   if (file.endsWith(".zip")) {
     try {
       await run("unzip", ["-q", file, "-d", directory]);
@@ -5143,9 +5226,9 @@ async function extractArchive(file, directory) {
   } else {
     await run("tar", ["-xzf", file, "-C", directory]);
   }
-  const root = path10.join(directory, archiveRootName(file));
-  if (!existsSync8(path10.join(root, "manifest.json"))) {
-    throw new Error(`archive ${path10.basename(file)} has no ${archiveRootName(file)}/manifest.json`);
+  const root = path11.join(directory, archiveRootName(file));
+  if (!existsSync8(path11.join(root, "manifest.json"))) {
+    throw new Error(`archive ${path11.basename(file)} has no ${archiveRootName(file)}/manifest.json`);
   }
   return root;
 }
@@ -5163,21 +5246,21 @@ async function compressDirectory(parent, name, file) {
 }
 async function repackArchive(file, { repositoryRoot, log = () => {
 } }) {
-  const work = await mkdtemp4(path10.join(path10.dirname(file), ".repack-"));
+  const work = await mkdtemp4(path11.join(path11.dirname(file), ".repack-"));
   try {
-    log(`extracting ${path10.basename(file)}`);
+    log(`extracting ${path11.basename(file)}`);
     const packageDir = await extractArchive(file, work);
     const summary = await repackDirectory(packageDir, repositoryRoot);
     log(`replaced gateway, scripts and plugin files (${String(summary.files)} files in the package)`);
-    const parent = path10.dirname(packageDir);
-    const name = path10.basename(packageDir);
+    const parent = path11.dirname(packageDir);
+    const name = path11.basename(packageDir);
     await compressDirectory(parent, name, file);
     const bytes = (await stat6(file)).size;
     const sha256 = await sha256File3(file);
-    await writeFile6(`${file}.sha256`, `${sha256}  ${path10.basename(file)}
+    await writeFile7(`${file}.sha256`, `${sha256}  ${path11.basename(file)}
 
 `, "utf8");
-    log(`wrote ${path10.basename(file)} (${String(bytes)} bytes)`);
+    log(`wrote ${path11.basename(file)} (${String(bytes)} bytes)`);
     return { package: file, version: summary.version, target: summary.target, bytes, sha256, files: summary.files };
   } finally {
     await rm7(work, { recursive: true, force: true });
@@ -5187,7 +5270,7 @@ async function repackArchive(file, { repositoryRoot, log = () => {
 // code/shared/system-info.mjs
 import { execFile as execFile2 } from "node:child_process";
 import { existsSync as existsSync9, readFileSync as readFileSync2, statfsSync } from "node:fs";
-import os5 from "node:os";
+import os6 from "node:os";
 import { promisify as promisify2 } from "node:util";
 var execFileAsync = promisify2(execFile2);
 function round(value, digits = 1) {
@@ -5198,9 +5281,9 @@ function safeNumber(value) {
   return Number.isFinite(value) ? value : 0;
 }
 function quickSystemInfo(options = {}) {
-  const cpus = os5.cpus();
-  const total = os5.totalmem();
-  const free = os5.freemem();
+  const cpus = os6.cpus();
+  const total = os6.totalmem();
+  const free = os6.freemem();
   const used = Math.max(0, total - free);
   let cpuTotal = 0;
   let cpuIdle = 0;
@@ -5231,12 +5314,12 @@ function quickSystemInfo(options = {}) {
   }
   return {
     sampledAt: (/* @__PURE__ */ new Date()).toISOString(),
-    hostname: os5.hostname(),
+    hostname: os6.hostname(),
     platform: process.platform,
     arch: process.arch,
-    home: options.home ?? os5.homedir(),
+    home: options.home ?? os6.homedir(),
     appRoot: options.appRoot ?? process.env.DSH_PACKAGE_ROOT ?? process.cwd(),
-    user: os5.userInfo().username,
+    user: os6.userInfo().username,
     cpu: { model: cpus[0]?.model ?? "unknown", cores: cpus.length, usagePercent: cpuUsage },
     memory: {
       totalBytes: total,
@@ -5249,7 +5332,7 @@ function quickSystemInfo(options = {}) {
 }
 
 // src/lib/service.mjs
-var HERE2 = path11.dirname(fileURLToPath2(import.meta.url));
+var HERE2 = path12.dirname(fileURLToPath2(import.meta.url));
 var PROBE_GRACE_MS = 10 * 6e4;
 var PROBE_TIMEOUT_MS = 4500;
 var PROBE_RETRY_MS = 4500;
@@ -5257,19 +5340,19 @@ var PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 6e4;
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync10(path11.join(current, "build", "recipes.json")) && existsSync10(path11.join(current, "code", "build"))) {
+    if (existsSync10(path12.join(current, "build", "recipes.json")) && existsSync10(path12.join(current, "code", "build"))) {
       return current;
     }
-    const parent = path11.dirname(current);
+    const parent = path12.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return path11.resolve(start, "..", "..");
+  return path12.resolve(start, "..", "..");
 }
 var REPOSITORY_ROOT = findRepositoryRoot(HERE2);
 function packageVersion() {
   try {
-    const parsed = JSON.parse(readFileSync3(path11.join(REPOSITORY_ROOT, "package.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync3(path12.join(REPOSITORY_ROOT, "package.json"), "utf8"));
     return typeof parsed.version === "string" ? parsed.version : "0.0.0";
   } catch {
     return "0.0.0";
@@ -5300,16 +5383,16 @@ var MeshService = class {
     this.config = options.config ?? {};
     this.logLine = options.log ?? (() => {
     });
-    this.jobRoot = path11.join(this.dataDir, "build");
-    this.cacheDir = path11.join(this.dataDir, "cache");
+    this.jobRoot = path12.join(this.dataDir, "build");
+    this.cacheDir = path12.join(this.dataDir, "cache");
     this.version = packageVersion();
     this.repositoryRoot = REPOSITORY_ROOT;
-    this.recipesPath = path11.join(REPOSITORY_ROOT, "build", "recipes.json");
-    this.overlayRoot = path11.join(REPOSITORY_ROOT, "build", "overlays");
-    this.home = path11.dirname(this.dataDir);
-    this.deployRoot = path11.join(this.dataDir, "deploy");
-    this.memberTagsFile = path11.join(this.dataDir, "member-tags.json");
-    this.packagesDir = path11.join(os6.homedir(), ".dsh", "packages");
+    this.recipesPath = path12.join(REPOSITORY_ROOT, "build", "recipes.json");
+    this.overlayRoot = path12.join(REPOSITORY_ROOT, "build", "overlays");
+    this.home = path12.dirname(this.dataDir);
+    this.deployRoot = path12.join(this.dataDir, "deploy");
+    this.memberTagsFile = path12.join(this.dataDir, "member-tags.json");
+    this.packagesDir = path12.join(os7.homedir(), ".dsh", "packages");
     this.deploy = new DeployManager({
       repositoryRoot: REPOSITORY_ROOT,
       dataDir: this.deployRoot,
@@ -5321,7 +5404,7 @@ var MeshService = class {
     this.remoteBuilder = new RemoteBuilder({ packagesDir: this.packagesDir, log: (line) => this.logLine(line) });
     this.systemCache = null;
     this.probes = /* @__PURE__ */ new Map();
-    this.probeCacheFile = path11.join(this.dataDir, "probe-cache.json");
+    this.probeCacheFile = path12.join(this.dataDir, "probe-cache.json");
     this.probeCacheLoaded = false;
     this.fetchImpl = options.fetchImpl;
   }
@@ -5337,7 +5420,7 @@ var MeshService = class {
     if (this.probeCacheLoaded) return;
     this.probeCacheLoaded = true;
     try {
-      const parsed = JSON.parse(await readFile10(this.probeCacheFile, "utf8"));
+      const parsed = JSON.parse(await readFile11(this.probeCacheFile, "utf8"));
       if (parsed === null || typeof parsed !== "object") return;
       const now = Date.now();
       for (const [ip, entry] of Object.entries(parsed)) {
@@ -5361,8 +5444,8 @@ var MeshService = class {
   /** Persist the probe map; a failed write is not worth reporting. */
   async #saveProbes() {
     try {
-      await mkdir6(path11.dirname(this.probeCacheFile), { recursive: true });
-      await writeFile7(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.probes)), "utf8");
+      await mkdir7(path12.dirname(this.probeCacheFile), { recursive: true });
+      await writeFile8(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.probes)), "utf8");
     } catch {
     }
   }
@@ -5383,13 +5466,13 @@ var MeshService = class {
    * @returns {Promise<object>} status.
    */
   async status() {
-    const stateFile = path11.join(this.home, "wireguard", "state.json");
+    const stateFile = path12.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     return {
       ok: true,
       host: {
-        hostname: os6.hostname(),
+        hostname: os7.hostname(),
         platform: process.platform,
         arch: process.arch,
         version: this.version,
@@ -5445,10 +5528,10 @@ var MeshService = class {
     let host = String(member.ip ?? "");
     if (host === "") throw new Error(`member ${member.id} has no VPN address`);
     if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
-    const path16 = "/__gate/cluster/__gate/session/promote";
-    const response = await fetch(`http://${host}${path16}`, {
+    const path17 = "/__gate/cluster/__gate/session/promote";
+    const response = await fetch(`http://${host}${path17}`, {
       method: "POST",
-      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path16 }) }
+      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path17 }) }
     });
     const text = await response.text();
     if (!response.ok) throw new Error(`member ${member.name} refused the request: HTTP ${String(response.status)} ${text.slice(0, 120)}`);
@@ -5503,13 +5586,13 @@ var MeshService = class {
   }
   async members() {
     await this.#loadProbes();
-    const stateFile = path11.join(this.home, "wireguard", "state.json");
+    const stateFile = path12.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     const self = {
       id: "local",
       kind: "self",
-      name: identity?.selfName ?? os6.hostname(),
+      name: identity?.selfName ?? os7.hostname(),
       ip: identity?.selfIp ?? "",
       online: true,
       dsh: true,
@@ -5602,7 +5685,7 @@ var MeshService = class {
    */
   async memberTags() {
     try {
-      const parsed = JSON.parse(await readFile10(this.memberTagsFile, "utf8"));
+      const parsed = JSON.parse(await readFile11(this.memberTagsFile, "utf8"));
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
       const tags = {};
       for (const [id, tag] of Object.entries(parsed)) {
@@ -5626,8 +5709,8 @@ var MeshService = class {
     const tags = await this.memberTags();
     if (label === "") delete tags[memberId];
     else tags[memberId] = label;
-    await mkdir6(this.dataDir, { recursive: true });
-    await writeFile7(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
+    await mkdir7(this.dataDir, { recursive: true });
+    await writeFile8(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
 `, "utf8");
     return { ok: true, tags };
   }
@@ -5643,11 +5726,11 @@ var MeshService = class {
    */
   async cleanupBuilds(options = {}) {
     if (!existsSync10(this.jobRoot)) return [];
-    const entries = await readdir5(this.jobRoot, { withFileTypes: true });
+    const entries = await readdir6(this.jobRoot, { withFileTypes: true });
     const removed = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path11.join(this.jobRoot, entry.name);
+      const dir = path12.join(this.jobRoot, entry.name);
       let state;
       try {
         state = await readState(dir);
@@ -5656,9 +5739,9 @@ var MeshService = class {
       }
       if (this.running.has(state.id)) continue;
       if (state.id === options.keep) continue;
-      await rm8(path11.join(dir, "src"), { recursive: true, force: true });
-      await rm8(path11.join(dir, "work-order"), { recursive: true, force: true });
-      if (options.keepDist !== true) await rm8(path11.join(dir, "dist"), { recursive: true, force: true });
+      await rm8(path12.join(dir, "src"), { recursive: true, force: true });
+      await rm8(path12.join(dir, "work-order"), { recursive: true, force: true });
+      if (options.keepDist !== true) await rm8(path12.join(dir, "dist"), { recursive: true, force: true });
       removed.push(state.id);
     }
     return removed;
@@ -5709,6 +5792,10 @@ var MeshService = class {
     if (proxyMember !== null && String(proxyMember.system?.platform ?? "").toLowerCase().startsWith("win")) {
       throw new Error(`proxy member must be Linux; ${proxyMember.name} runs ${String(proxyMember.system?.platform)}`);
     }
+    const buildStamp = await nextBuildStamp({
+      stateFile: path12.join(this.dataDir, "build-stamp.json"),
+      packagesDir: this.packagesDir
+    });
     const job = await createJob({
       root: this.jobRoot,
       source,
@@ -5716,7 +5803,8 @@ var MeshService = class {
       targets,
       member: member?.id ?? null,
       proxy: proxyUrl !== "" ? proxyUrl : proxyMember !== null ? `member:${proxyMember.id}` : null,
-      mode: member === null ? "local" : "remote"
+      mode: member === null ? "local" : "remote",
+      buildStamp
     });
     if (member !== null) {
       await updateState(job.dir, {
@@ -5734,7 +5822,8 @@ var MeshService = class {
       proxyMember,
       proxyUrl,
       planOnly: request.planOnly === true,
-      version: request.version
+      version: request.version,
+      buildStamp: job.state.buildStamp
     }).catch((error) => {
       this.logLine(`mesh build job ${job.id} crashed: ${error instanceof Error ? error.message : String(error)}`);
     }).finally(() => {
@@ -5767,6 +5856,7 @@ var MeshService = class {
           cacheDir: this.cacheDir,
           planOnly: options.planOnly,
           version: options.version,
+          buildStamp: options.buildStamp,
           proxy: proxyUrl,
           full: this.config.build?.full !== false,
           nodeVersion: typeof this.config.build?.nodeVersion === "string" && this.config.build.nodeVersion !== "" ? this.config.build.nodeVersion : void 0,
@@ -5780,6 +5870,7 @@ var MeshService = class {
         plan: await this.#memberSshPlan(options.member),
         memberName: options.member.name,
         proxyUrl,
+        buildStamp: options.buildStamp,
         heapMb: typeof this.config.build?.memberHeapMb === "number" ? this.config.build.memberHeapMb : void 0
       });
     } catch (error) {
@@ -5803,14 +5894,14 @@ var MeshService = class {
     let user = "root";
     let identityFile;
     let port = 22;
-    const { state } = await readWireGuardState({ file: path11.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path12.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (Number.isSafeInteger(peer.sshPort)) port = peer.sshPort;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
         const digest = createHash6("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path11.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        const candidate = path12.join(this.home, "wireguard", "ssh", `${digest}.key`);
         if (existsSync10(candidate)) identityFile = candidate;
       }
     }
@@ -5872,6 +5963,7 @@ var MeshService = class {
       overlayRoot: this.overlayRoot,
       cacheDir: this.cacheDir,
       reuseWorktree: true,
+      buildStamp: state.buildStamp,
       full: this.config.build?.full !== false,
       nodeVersion: typeof this.config.build?.nodeVersion === "string" && this.config.build.nodeVersion !== "" ? this.config.build.nodeVersion : void 0,
       smoke: this.config.build?.smoke === false ? false : void 0,
@@ -5895,8 +5987,8 @@ var MeshService = class {
     const state = await readState(dir);
     return {
       ...state,
-      logFile: path11.join(dir, "build.log"),
-      stateFile: path11.join(dir, "state.json"),
+      logFile: path12.join(dir, "build.log"),
+      stateFile: path12.join(dir, "state.json"),
       logTail: await readLogTail(dir, 60),
       running: this.running.has(id),
       workOrderMarkdown: state.workOrder?.markdown ?? null,
@@ -5909,12 +6001,12 @@ var MeshService = class {
    */
   async jobs() {
     if (!existsSync10(this.jobRoot)) return [];
-    const entries = await readdir5(this.jobRoot, { withFileTypes: true });
+    const entries = await readdir6(this.jobRoot, { withFileTypes: true });
     const jobs = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       try {
-        const state = await readState(path11.join(this.jobRoot, entry.name));
+        const state = await readState(path12.join(this.jobRoot, entry.name));
         jobs.push(this.#summary(state));
       } catch {
       }
@@ -5989,7 +6081,7 @@ var MeshService = class {
    * @returns {Promise<object>} recipes.
    */
   async recipes() {
-    const parsed = JSON.parse(await readFile10(this.recipesPath, "utf8"));
+    const parsed = JSON.parse(await readFile11(this.recipesPath, "utf8"));
     return {
       source: parsed.source,
       ref: parsed.ref,
@@ -6007,12 +6099,12 @@ var MeshService = class {
    * @returns {Promise<object>} package list.
    */
   async packages() {
-    const entries = await readdir5(this.packagesDir, { withFileTypes: true }).catch(() => []);
+    const entries = await readdir6(this.packagesDir, { withFileTypes: true }).catch(() => []);
     const packages = [];
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(entry.name)) continue;
-      const file = path11.join(this.packagesDir, entry.name);
+      const file = path12.join(this.packagesDir, entry.name);
       const info = await stat7(file).catch(() => null);
       if (info === null) continue;
       packages.push({
@@ -6033,11 +6125,11 @@ var MeshService = class {
    */
   async removePackage(request) {
     const name = typeof request?.name === "string" ? request.name.trim() : "";
-    if (name === "" || name !== path11.basename(name) || name.startsWith(".")) {
+    if (name === "" || name !== path12.basename(name) || name.startsWith(".")) {
       throw new Error("package name is invalid");
     }
     if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`);
-    const file = path11.join(this.packagesDir, name);
+    const file = path12.join(this.packagesDir, name);
     const info = await stat7(file).catch(() => null);
     if (info === null || !info.isFile()) throw new Error(`package not found: ${name}`);
     const removed = [];
@@ -6060,7 +6152,7 @@ var MeshService = class {
   async resolvePackage(input) {
     const raw = typeof input === "string" ? input.trim() : "";
     if (raw === "") throw new Error("package is required");
-    const candidates = path11.isAbsolute(raw) ? [raw] : [path11.join(this.packagesDir, raw), path11.join(this.repositoryRoot, "dist", raw)];
+    const candidates = path12.isAbsolute(raw) ? [raw] : [path12.join(this.packagesDir, raw), path12.join(this.repositoryRoot, "dist", raw)];
     for (const file of candidates) {
       const info = await stat7(file).catch(() => null);
       if (info?.isFile()) return file;
@@ -6095,14 +6187,14 @@ var MeshService = class {
       );
     }
     if (member !== void 0) {
-      const os8 = /win(?:dows)?/iu.test(path11.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+      const os9 = /win(?:dows)?/iu.test(path12.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
       const identity = { id: member.id, name: member.name, ip: member.ip };
-      const packageOs = /win(?:dows)?/iu.test(path11.basename(packagePath)) ? "windows" : "linux";
+      const packageOs = /win(?:dows)?/iu.test(path12.basename(packagePath)) ? "windows" : "linux";
       if (test) assertTestUpgradeTarget(member, { packageOs });
       if (member.kind === "self" || member.id === "local") {
-        return this.#startLocalJob({ member, packagePath, os: os8, mode, identity });
+        return this.#startLocalJob({ member, packagePath, os: os9, mode, identity });
       }
-      const deployRequest = await this.#memberDeployRequest(member, packagePath, os8);
+      const deployRequest = await this.#memberDeployRequest(member, packagePath, os9);
       const job2 = await this.#startEngineJob({
         request: { ...deployRequest, member: member.id, test },
         member: member.id,
@@ -6112,9 +6204,9 @@ var MeshService = class {
     }
     if (host === "") throw new Error("host is required");
     if (test) throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u9700\u8981\u4E00\u4E2A\u6210\u5458\uFF08\u8981\u5728\u6210\u5458\u7684\u5B89\u88C5\u4E0A\u6F14\u7EC3\uFF09\uFF0C\u4E0D\u80FD\u76F4\u63A5\u7ED9\u88F8 SSH \u4E3B\u673A");
-    const os7 = /win(?:dows)?/iu.test(path11.basename(packagePath)) ? "windows" : "linux";
-    const appRoot = os7 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
-    const job = await this.#startEngineJob({ request: { host, package: packagePath, os: os7, appRoot }, member: null, mode });
+    const os8 = /win(?:dows)?/iu.test(path12.basename(packagePath)) ? "windows" : "linux";
+    const appRoot = os8 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
+    const job = await this.#startEngineJob({ request: { host, package: packagePath, os: os8, appRoot }, member: null, mode });
     return { ok: true, job, member: null, packagePath, layout: "bluegreen" };
   }
   /**
@@ -6188,7 +6280,7 @@ var MeshService = class {
     return {
       job,
       member: started.member,
-      logFile: path11.join(this.deployRoot, started.job.id, "deploy.log"),
+      logFile: path12.join(this.deployRoot, started.job.id, "deploy.log"),
       log: await this.deployLogs(started.job.id, 80)
     };
   }
@@ -6267,10 +6359,10 @@ var MeshService = class {
         member: "local",
         plan: null,
         request: { kind: "inplace", inplace: { package: input.packagePath, appRoot: install.appRoot } },
-        target: { host: "127.0.0.1", user: os6.userInfo().username, port: null, os: "linux", appRoot: install.appRoot },
+        target: { host: "127.0.0.1", user: os7.userInfo().username, port: null, os: "linux", appRoot: install.appRoot },
         services: ["dsh-web-app.service", "dsh-web-gate.service", "dsh-wireguard-control.service", "dsh-interop.service"],
         packagePath: input.packagePath,
-        release: path11.basename(input.packagePath)
+        release: path12.basename(input.packagePath)
       });
       return { ok: true, job: job2, member: input.identity, packagePath: input.packagePath, layout: "flat" };
     }
@@ -6288,8 +6380,8 @@ var MeshService = class {
    */
   async #queueJob(job) {
     const id = newJobId();
-    const dir = path11.join(this.deployRoot, id);
-    await mkdir6(dir, { recursive: true });
+    const dir = path12.join(this.deployRoot, id);
+    await mkdir7(dir, { recursive: true });
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const bytes = job.plan?.package?.bytes ?? (await stat7(job.packagePath).catch(() => null))?.size ?? 0;
     const state = {
@@ -6310,7 +6402,7 @@ var MeshService = class {
     };
     await writeDeployState(dir, state);
     const requestFile = jobPaths(dir).request;
-    await writeFile7(requestFile, `${JSON.stringify({ ...job.request, id, member: job.member }, null, 2)}
+    await writeFile8(requestFile, `${JSON.stringify({ ...job.request, id, member: job.member }, null, 2)}
 `, { encoding: "utf8", mode: 384 });
     const spawned = await this.spawnRunner(dir, id);
     await appendDeployLog(dir, `job queued; runner ${spawned.mode}${spawned.unit === null ? "" : ` (${spawned.unit})`}`);
@@ -6329,7 +6421,7 @@ var MeshService = class {
    * @returns {Promise<{mode: string, unit: string|null}>} how it was started.
    */
   async #spawnRunner(dir, id) {
-    const script = path11.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
+    const script = path12.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
     if (!existsSync10(script)) throw new Error(`deploy runner is missing: ${script}`);
     const node = process.execPath;
     const unit = `dsh-mesh-job-${id.replace(/^deploy-/u, "")}`;
@@ -6374,20 +6466,20 @@ var MeshService = class {
    * @returns {{appRoot: string, layout: 'flat'|'bluegreen'}|null} install, or null in a source checkout.
    */
   #localAppRoot() {
-    let candidate = path11.resolve(this.repositoryRoot, "..");
+    let candidate = path12.resolve(this.repositoryRoot, "..");
     for (let depth = 0; depth < 5; depth += 1) {
-      const parent = path11.dirname(candidate);
-      const current = path11.join(parent, "current");
+      const parent = path12.dirname(candidate);
+      const current = path12.join(parent, "current");
       if (existsSync10(current)) {
         try {
           if (realpathSync(candidate) === realpathSync(current)) return { appRoot: parent, layout: "bluegreen" };
         } catch {
         }
       }
-      if (existsSync10(path11.join(candidate, "current")) && existsSync10(path11.join(candidate, "releases"))) {
+      if (existsSync10(path12.join(candidate, "current")) && existsSync10(path12.join(candidate, "releases"))) {
         return { appRoot: candidate, layout: "bluegreen" };
       }
-      if (existsSync10(path11.join(candidate, "config", "gate.env")) && existsSync10(path11.join(candidate, "plugins", "dsh-mesh"))) {
+      if (existsSync10(path12.join(candidate, "config", "gate.env")) && existsSync10(path12.join(candidate, "plugins", "dsh-mesh"))) {
         return { appRoot: candidate, layout: "flat" };
       }
       if (parent === candidate) break;
@@ -6407,7 +6499,7 @@ var MeshService = class {
     if (this.running.has(state.id) || state.status === "running") {
       throw new Error("\u7F16\u8BD1\u8FD8\u5728\u8FD0\u884C\uFF0C\u7ED3\u675F\u540E\u518D\u6E05\u7A7A\u65E5\u5FD7");
     }
-    await writeFile7(path11.join(dir, "build.log"), "", "utf8");
+    await writeFile8(path12.join(dir, "build.log"), "", "utf8");
     return { ok: true, id: state.id };
   }
   /**
@@ -6422,10 +6514,10 @@ var MeshService = class {
    */
   async clearFinishedBuilds() {
     const cleared = [];
-    const entries = await readdir5(this.jobRoot, { withFileTypes: true }).catch(() => []);
+    const entries = await readdir6(this.jobRoot, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path11.join(this.jobRoot, entry.name);
+      const dir = path12.join(this.jobRoot, entry.name);
       const state = await readState(dir).catch(() => null);
       if (state === null) continue;
       if (this.running.has(state.id) || state.status === "running" || state.status === "queued") continue;
@@ -6441,17 +6533,17 @@ var MeshService = class {
    * @param {'linux'|'windows'} os target OS.
    * @returns {Promise<object>} deploy request.
    */
-  async #memberDeployRequest(member, packagePath, os7) {
+  async #memberDeployRequest(member, packagePath, os8) {
     if (member.ip === "") throw new Error(`member ${member.id} has no VPN address`);
     let user = "root";
     let identityFile;
-    const { state } = await readWireGuardState({ file: path11.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path12.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
         const digest = createHash6("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path11.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        const candidate = path12.join(this.home, "wireguard", "ssh", `${digest}.key`);
         if (existsSync10(candidate)) identityFile = candidate;
       }
     }
@@ -6460,7 +6552,7 @@ var MeshService = class {
     let serviceUser = typeof system?.user === "string" && system.user.trim() !== "" ? system.user.trim() : void 0;
     if (appRoot === void 0) {
       try {
-        const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os: os7 });
+        const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os: os8 });
         appRoot = detected.appRoot;
         serviceUser = serviceUser ?? detected.serviceUser;
       } catch {
@@ -6468,17 +6560,17 @@ var MeshService = class {
     }
     if (appRoot === void 0 && typeof system?.home === "string" && system.home.trim() !== "") {
       const home = system.home.trim().replace(/[\\/]+$/u, "");
-      appRoot = os7 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
+      appRoot = os8 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
     }
     if (appRoot === void 0) {
-      const home = os7 === "windows" ? `C:\\Users\\${user}` : user === "root" ? "/root" : `/home/${user}`;
-      appRoot = os7 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
+      const home = os8 === "windows" ? `C:\\Users\\${user}` : user === "root" ? "/root" : `/home/${user}`;
+      appRoot = os8 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
     }
     return {
       host: member.ip,
       user,
       identityFile,
-      os: os7,
+      os: os8,
       appRoot,
       serviceUser,
       package: packagePath
@@ -6573,9 +6665,9 @@ var MeshService = class {
     if (found.dsh !== true) {
       throw new Error(`\u6210\u5458 ${found.name} \u7684\u7F51\u5173\u6CA1\u6709\u5E94\u7B54\uFF0C\u65E0\u6CD5\u5728\u7EBF\u56DE\u6EDA\uFF1BSSH \u4E0A\u53BB\u6267\u884C code/deploy/cli.mjs rollback`);
     }
-    const os7 = String(found.system?.platform ?? "").toLowerCase().startsWith("win") ? "windows" : "linux";
-    const request = await this.#memberDeployRequest(found, "", os7);
-    const rolled = await this.deploy.rollback({ ...request, os: os7, skipPackage: true });
+    const os8 = String(found.system?.platform ?? "").toLowerCase().startsWith("win") ? "windows" : "linux";
+    const request = await this.#memberDeployRequest(found, "", os8);
+    const rolled = await this.deploy.rollback({ ...request, os: os8, skipPackage: true });
     return { ok: true, job: rolled.job ?? rolled, member: found };
   }
   /**
@@ -6585,15 +6677,15 @@ var MeshService = class {
    */
   _jobDir(id) {
     if (typeof id !== "string" || !/^[A-Za-z0-9._-]+$/u.test(id)) throw new Error("invalid job id");
-    const dir = path11.resolve(this.jobRoot, id);
-    if (!dir.startsWith(`${path11.resolve(this.jobRoot)}${path11.sep}`)) throw new Error("invalid job id");
+    const dir = path12.resolve(this.jobRoot, id);
+    if (!dir.startsWith(`${path12.resolve(this.jobRoot)}${path12.sep}`)) throw new Error("invalid job id");
     return dir;
   }
 };
 
 // code/shared/event-stream.mjs
 import { mkdirSync, readdirSync, watch } from "node:fs";
-import path12 from "node:path";
+import path13 from "node:path";
 var HEARTBEAT_MS = 15e3;
 var DEBOUNCE_MS = 120;
 var EventHub = class {
@@ -6748,7 +6840,7 @@ var JobDirectoryWatcher = class {
     for (const entry of entries) {
       if (!entry.isDirectory() || this.watchers.has(entry.name)) continue;
       try {
-        const watcher = watch(path12.join(this.root, entry.name), { persistent: false }, (_event, file) => {
+        const watcher = watch(path13.join(this.root, entry.name), { persistent: false }, (_event, file) => {
           this.#queue(entry.name, String(file ?? ""));
         });
         watcher.on("error", () => {
@@ -6786,7 +6878,7 @@ var JobDirectoryWatcher = class {
 };
 
 // src/lib/job-events.mjs
-import path13 from "node:path";
+import path14 from "node:path";
 var LOG_THROTTLE_MS = 400;
 var LOG_LINES = 200;
 var JOB_ID = /^[A-Za-z0-9._-]+$/u;
@@ -6803,12 +6895,12 @@ function startJobEvents(options) {
   }
   const watchers = [
     new JobDirectoryWatcher({
-      root: path13.join(service.dataDir, "build"),
+      root: path14.join(service.dataDir, "build"),
       log,
       onChange: (dir, file) => handle("build", dir, file)
     }),
     new JobDirectoryWatcher({
-      root: path13.join(service.dataDir, "deploy"),
+      root: path14.join(service.dataDir, "deploy"),
       log,
       onChange: (dir, file) => handle("deploy", dir, file)
     })
@@ -6912,25 +7004,25 @@ function registerApi(ctx, service) {
       try {
         const method = request.method ?? "GET";
         const url = new URL(request.url ?? "/", "http://local.invalid");
-        const path16 = url.pathname.slice(API_PREFIX.length) || "/";
-        if (method === "GET" && path16 === "/status") {
+        const path17 = url.pathname.slice(API_PREFIX.length) || "/";
+        if (method === "GET" && path17 === "/status") {
           writeJson(response, 200, await service.status());
           return;
         }
-        if (method === "GET" && path16 === "/members") {
+        if (method === "GET" && path17 === "/members") {
           writeJson(response, 200, await service.members());
           return;
         }
-        if (method === "GET" && path16 === "/member-tags") {
+        if (method === "GET" && path17 === "/member-tags") {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() });
           return;
         }
-        if (method === "POST" && path16 === "/packages/delete") {
+        if (method === "POST" && path17 === "/packages/delete") {
           const body = await readJson(request);
           writeJson(response, 200, await service.removePackage({ name: typeof body.name === "string" ? body.name : "" }));
           return;
         }
-        if (method === "POST" && path16 === "/conversations/send") {
+        if (method === "POST" && path17 === "/conversations/send") {
           const body = await readJson(request);
           writeJson(response, 200, await service.sendConversation({
             text: typeof body.text === "string" ? body.text : "",
@@ -6938,32 +7030,32 @@ function registerApi(ctx, service) {
           }));
           return;
         }
-        if (method === "POST" && path16 === "/conversations/clear") {
+        if (method === "POST" && path17 === "/conversations/clear") {
           writeJson(response, 200, await service.clearConversations());
           return;
         }
-        if (method === "GET" && path16 === "/conversations") {
+        if (method === "GET" && path17 === "/conversations") {
           writeJson(response, 200, await service.conversations());
           return;
         }
-        if (method === "GET" && path16 === "/events") {
+        if (method === "GET" && path17 === "/events") {
           hub.subscribe(request, response);
           return;
         }
-        if (method === "GET" && path16 === "/jobs") {
+        if (method === "GET" && path17 === "/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() });
           return;
         }
-        if (method === "GET" && path16 === "/packages") {
+        if (method === "GET" && path17 === "/packages") {
           writeJson(response, 200, await service.packages());
           return;
         }
-        if (method === "GET" && path16 === "/deploy/jobs") {
+        if (method === "GET" && path17 === "/deploy/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) });
           return;
         }
         if (method === "GET") {
-          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path16);
+          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path17);
           if (deployRead !== null) {
             const lines = Number.parseInt(url.searchParams.get("lines") ?? "200", 10);
             const job = await service.deployStatus(deployRead[1]);
@@ -6980,7 +7072,7 @@ function registerApi(ctx, service) {
             });
             return;
           }
-          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path16);
+          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path17);
           if (read !== null) {
             if (read[2] === "/log") {
               const lines = Number.parseInt(url.searchParams.get("lines") ?? "80", 10);
@@ -7002,7 +7094,7 @@ function registerApi(ctx, service) {
           writeJson(response, 403, { ok: false, error: { code: "forbidden", message: `Missing the ${AGENT_HEADER} header.` } });
           return;
         }
-        if (path16 === "/deploy") {
+        if (path17 === "/deploy") {
           const body = await readJson(request);
           const result = await service.deployMember({
             member: typeof body.member === "string" ? body.member : void 0,
@@ -7011,12 +7103,12 @@ function registerApi(ctx, service) {
           writeJson(response, 202, result);
           return;
         }
-        if (path16 === "/session/promote") {
+        if (path17 === "/session/promote") {
           const body = await readJson(request);
           writeJson(response, 200, await service.promoteSession(String(body.member ?? "")));
           return;
         }
-        if (path16 === "/member-tags") {
+        if (path17 === "/member-tags") {
           const body = await readJson(request);
           writeJson(response, 200, await service.setMemberTag(
             typeof body.id === "string" ? body.id : "",
@@ -7024,33 +7116,33 @@ function registerApi(ctx, service) {
           ));
           return;
         }
-        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path16);
+        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path17);
         if (clearLog !== null) {
           writeJson(response, 200, await service.clearBuildLog(clearLog[1]));
           return;
         }
-        if (path16 === "/build/logs/clear") {
+        if (path17 === "/build/logs/clear") {
           writeJson(response, 200, await service.clearFinishedBuilds());
           return;
         }
-        if (path16 === "/deploy/rollback") {
+        if (path17 === "/deploy/rollback") {
           const body = await readJson(request);
           writeJson(response, 202, await service.rollbackMember({
             member: typeof body.member === "string" ? body.member : ""
           }));
           return;
         }
-        if (path16 === "/upgrade" || path16 === "/test-upgrade") {
+        if (path17 === "/upgrade" || path17 === "/test-upgrade") {
           const body = await readJson(request);
           const request_ = {
             member: typeof body.member === "string" ? body.member : void 0,
             package: typeof body.package === "string" ? body.package : void 0
           };
-          const test = path16 === "/test-upgrade" || body.test === true;
+          const test = path17 === "/test-upgrade" || body.test === true;
           writeJson(response, 202, test ? await service.testUpgradeMember(request_) : await service.upgradeMember(request_));
           return;
         }
-        if (path16 === "/build") {
+        if (path17 === "/build") {
           const body = await readJson(request);
           const job = await service.startBuild({
             source: typeof body.source === "string" ? body.source : void 0,
@@ -7065,12 +7157,12 @@ function registerApi(ctx, service) {
           writeJson(response, 202, { ok: true, job });
           return;
         }
-        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path16);
+        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path17);
         if (resume !== null) {
           writeJson(response, 202, { ok: true, job: await service.resumeBuild(resume[1]) });
           return;
         }
-        const match = /^\/build\/([^/]+)\/learn$/u.exec(path16);
+        const match = /^\/build\/([^/]+)\/learn$/u.exec(path17);
         if (match !== null) {
           writeJson(response, 200, { ok: true, job: await service.learn(match[1]) });
           return;
@@ -7137,9 +7229,9 @@ function registerWireGuardApi(ctx) {
 
 // src/lib/member-tasks.mjs
 import { randomUUID } from "node:crypto";
-import { mkdir as mkdir7, readFile as readFile11, readdir as readdir6, rename as rename5, writeFile as writeFile8 } from "node:fs/promises";
+import { mkdir as mkdir8, readFile as readFile12, readdir as readdir7, rename as rename6, writeFile as writeFile9 } from "node:fs/promises";
 import { existsSync as existsSync11, readFileSync as readFileSync4 } from "node:fs";
-import path14 from "node:path";
+import path15 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
@@ -7172,7 +7264,7 @@ var MemberTaskService = class {
     this.dataDir = options.dataDir;
     this.logLine = options.log ?? (() => {
     });
-    this.taskRoot = path14.join(this.dataDir, "member-tasks");
+    this.taskRoot = path15.join(this.dataDir, "member-tasks");
     this.tasks = /* @__PURE__ */ new Map();
     this.monitors = /* @__PURE__ */ new Map();
     this.controllers = /* @__PURE__ */ new Map();
@@ -7202,16 +7294,16 @@ var MemberTaskService = class {
   async #ensureLoaded() {
     if (this.loaded) return;
     this.loaded = true;
-    await mkdir7(this.taskRoot, { recursive: true });
+    await mkdir8(this.taskRoot, { recursive: true });
     let files = [];
     try {
-      files = await readdir6(this.taskRoot);
+      files = await readdir7(this.taskRoot);
     } catch {
     }
     for (const file of files) {
       if (!file.endsWith(".json")) continue;
       try {
-        const task = JSON.parse(await readFile11(path14.join(this.taskRoot, file), "utf8"));
+        const task = JSON.parse(await readFile12(path15.join(this.taskRoot, file), "utf8"));
         if (task?.id === void 0) continue;
         if (task.status === "running" || task.status === "starting") {
           task.status = "interrupted";
@@ -7228,18 +7320,18 @@ var MemberTaskService = class {
   }
   async #save(task) {
     task.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const file = path14.join(this.taskRoot, `${task.id}.json`);
+    const file = path15.join(this.taskRoot, `${task.id}.json`);
     const temporary = `${file}.${process.pid}.tmp`;
-    await mkdir7(this.taskRoot, { recursive: true });
-    await writeFile8(temporary, `${JSON.stringify(task, null, 2)}
+    await mkdir8(this.taskRoot, { recursive: true });
+    await writeFile9(temporary, `${JSON.stringify(task, null, 2)}
 `, "utf8");
-    await rename5(temporary, file);
+    await rename6(temporary, file);
   }
   async #log(task, line) {
     const text = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
 `;
     try {
-      await writeFile8(path14.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
+      await writeFile9(path15.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
     } catch {
     }
     try {
@@ -7259,9 +7351,9 @@ var MemberTaskService = class {
     if (this.service.config?.interopUseGatePassword !== false) {
       if (process.env.DSH_GATE_PASSWORD) return process.env.DSH_GATE_PASSWORD;
       const candidates = [
-        path14.join(this.service.repositoryRoot, "..", "config", "gate.env"),
-        path14.join(this.service.repositoryRoot, "config", "gate.env"),
-        path14.join(this.service.dataDir, "..", "..", "config", "gate.env")
+        path15.join(this.service.repositoryRoot, "..", "config", "gate.env"),
+        path15.join(this.service.repositoryRoot, "config", "gate.env"),
+        path15.join(this.service.dataDir, "..", "..", "config", "gate.env")
       ];
       for (const file of candidates) {
         const password = envFile(file).DSH_GATE_PASSWORD;
@@ -7842,7 +7934,7 @@ var MemberTaskService = class {
     const task = this.tasks.get(String(taskId));
     if (task === void 0) return "";
     try {
-      const text = await readFile11(path14.join(this.taskRoot, `${task.id}.log`), "utf8");
+      const text = await readFile12(path15.join(this.taskRoot, `${task.id}.log`), "utf8");
       return text.split("\n").slice(-Math.max(1, Math.min(lines, 500))).join("\n");
     } catch {
       return "";
@@ -7917,7 +8009,7 @@ var MemberTaskService = class {
    * @returns {string} log path.
    */
   logPath(taskId) {
-    return path14.join(this.taskRoot, `${String(taskId)}.log`);
+    return path15.join(this.taskRoot, `${String(taskId)}.log`);
   }
 };
 
@@ -8381,8 +8473,8 @@ function formatBytes2(value) {
 // src/index.ts
 var inject = ["webServer"];
 function dataDirectory() {
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path15.join(homedir2(), ".dsh");
-  return path15.join(home, "mesh");
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path16.join(homedir2(), ".dsh");
+  return path16.join(home, "mesh");
 }
 async function apply(ctx, config = {}) {
   const service = new MeshService({

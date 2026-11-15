@@ -680,12 +680,17 @@ export async function copyExtraPlugins(options) {
  * Assemble one target package without downloading runtimes yet. This is the
  * deterministic half of packaging; the runtime/app layer is added by
  * `assembleRuntimePackage`.
- * @param {{dist: string, target: string, outputDir: string, version: string, repositoryRoot: string, log?: (line: string) => void}} options package input.
+ * @param {{dist: string, target: string, outputDir: string, version: string, buildStamp?: string|null, repositoryRoot: string, log?: (line: string) => void}} options package input.
  * @returns {Promise<{packageDir: string, manifest: object}>} package directory and manifest.
  */
 export async function assembleWebPackage(options) {
   const { os: targetOs, arch, libc } = parseTarget(options.target)
-  const packageDir = path.join(options.outputDir, `dsh-mesh-${options.version}-${targetOs}-${arch}`)
+  // The version segment is the DSH version and must never be rewritten. The
+  // build stamp is an extra segment so two packages of the same DSH version do
+  // not share a filename.
+  const buildStamp = typeof options.buildStamp === 'string' && options.buildStamp !== '' ? options.buildStamp : null
+  const identity = buildStamp === null ? options.version : `${options.version}-${buildStamp}`
+  const packageDir = path.join(options.outputDir, `dsh-mesh-${identity}-${targetOs}-${arch}`)
   await rm(packageDir, { recursive: true, force: true })
   await mkdir(path.join(packageDir, 'web'), { recursive: true })
   await cp(options.dist, path.join(packageDir, 'web'), { recursive: true })
@@ -735,7 +740,10 @@ export async function assembleWebPackage(options) {
   const manifest = {
     format: 1,
     name: 'dsh-mesh',
+    // `version` is the DSH version, unchanged. `buildStamp` is the daily
+    // build revision that appears after it in the archive name.
     version: options.version,
+    buildStamp,
     target: { os: targetOs, arch, libc },
     builtAt: new Date().toISOString(),
     source: options.source ?? null,
@@ -973,7 +981,7 @@ export async function patchInstalledClient(options) {
 /**
  * Full target package: web payload, gate, plugin, npm app, and Node runtime.
  * This is the package the install scripts expect.
- * @param {{dist: string, target: string, outputDir: string, version: string, dshVersion: string, repositoryRoot: string, source: string, ref: string, tree: string|null, nodeVersion: string, cacheDir: string, fetchImpl?: typeof fetch, log?: (line: string) => void}} options package input.
+ * @param {{dist: string, target: string, outputDir: string, version: string, buildStamp?: string|null, dshVersion: string, repositoryRoot: string, source: string, ref: string, tree: string|null, nodeVersion: string, cacheDir: string, fetchImpl?: typeof fetch, log?: (line: string) => void}} options package input.
  * @returns {Promise<{packageDir: string, manifest: object}>} package.
  */
 export async function assembleRuntimePackage(options) {

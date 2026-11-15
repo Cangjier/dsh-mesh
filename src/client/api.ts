@@ -142,6 +142,7 @@ export interface BuildJob {
   proxyMember?: string | null
   percent?: number | null
   version?: string | null
+  buildStamp?: string | null
   error?: string | null
   workOrder?: { markdown?: string; json?: string; prompt?: string } | null
   workOrderMarkdown?: string | null

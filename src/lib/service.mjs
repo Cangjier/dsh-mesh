@@ -31,6 +31,7 @@ import {
   updateState,
 } from '../../code/build/job.mjs'
 import { DEFAULT_REF, DEFAULT_SOURCE } from '../../code/build/engine.mjs'
+import { nextBuildStamp } from '../../code/build/stamp.mjs'
 import {
   appendDeployLog,
   buildDeployPlan,
@@ -591,6 +592,10 @@ export class MeshService {
       // The egress proxy is one small Node script started with `bash -s`.
       throw new Error(`proxy member must be Linux; ${proxyMember.name} runs ${String(proxyMember.system?.platform)}`)
     }
+    const buildStamp = await nextBuildStamp({
+      stateFile: path.join(this.dataDir, 'build-stamp.json'),
+      packagesDir: this.packagesDir,
+    })
     const job = await createJob({
       root: this.jobRoot,
       source,
@@ -599,6 +604,7 @@ export class MeshService {
       member: member?.id ?? null,
       proxy: proxyUrl !== '' ? proxyUrl : proxyMember !== null ? `member:${proxyMember.id}` : null,
       mode: member === null ? 'local' : 'remote',
+      buildStamp,
     })
     if (member !== null) {
       await updateState(job.dir, {
@@ -617,6 +623,7 @@ export class MeshService {
       proxyUrl,
       planOnly: request.planOnly === true,
       version: request.version,
+      buildStamp: job.state.buildStamp,
     }).catch((error) => {
       this.logLine(`mesh build job ${job.id} crashed: ${error instanceof Error ? error.message : String(error)}`)
     }).finally(() => {
@@ -650,6 +657,7 @@ export class MeshService {
           cacheDir: this.cacheDir,
           planOnly: options.planOnly,
           version: options.version,
+          buildStamp: options.buildStamp,
           proxy: proxyUrl,
           full: this.config.build?.full !== false,
           nodeVersion: typeof this.config.build?.nodeVersion === 'string' && this.config.build.nodeVersion !== '' ? this.config.build.nodeVersion : undefined,
@@ -663,6 +671,7 @@ export class MeshService {
         plan: await this.#memberSshPlan(options.member),
         memberName: options.member.name,
         proxyUrl,
+        buildStamp: options.buildStamp,
         heapMb: typeof this.config.build?.memberHeapMb === 'number' ? this.config.build.memberHeapMb : undefined,
       })
     } catch (error) {
@@ -759,6 +768,7 @@ export class MeshService {
       overlayRoot: this.overlayRoot,
       cacheDir: this.cacheDir,
       reuseWorktree: true,
+      buildStamp: state.buildStamp,
       full: this.config.build?.full !== false,
       nodeVersion: typeof this.config.build?.nodeVersion === 'string' && this.config.build.nodeVersion !== '' ? this.config.build.nodeVersion : undefined,
       smoke: this.config.build?.smoke === false ? false : undefined,

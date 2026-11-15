@@ -367,6 +367,34 @@ test('recipe prepare steps run before the web build', async () => {
   await rm(root, { recursive: true, force: true })
 })
 
+test('assembleWebPackage appends the daily stamp without changing the DSH version', async () => {
+  const dir = await tempDir()
+  try {
+    const repo = path.join(dir, 'repo')
+    const dist = path.join(dir, 'dist')
+    await write(path.join(dist, 'index.html'), '<!doctype html>')
+    await write(path.join(repo, 'index.js'), '// host')
+    await write(path.join(repo, 'package.json'), '{"name":"@local/dsh-mesh","version":"0.2.2-rc.3"}')
+    const result = await assembleWebPackage({
+      dist,
+      target: 'linux-x64',
+      outputDir: path.join(dir, 'out'),
+      version: '0.2.2-rc.3',
+      buildStamp: '20261115A',
+      repositoryRoot: repo,
+      source: 'https://github.com/deepseek-ai/deepseek-harness',
+      ref: 'dsh-v0.2.2-rc.3',
+    })
+    assert.match(result.packageDir, /dsh-mesh-0\.2\.2-rc\.3-20261115A-linux-x64$/u)
+    const manifest = JSON.parse(await readFile(path.join(result.packageDir, 'manifest.json'), 'utf8'))
+    assert.equal(manifest.version, '0.2.2-rc.3')
+    assert.equal(manifest.buildStamp, '20261115A')
+    assert.equal(manifest.ref, 'dsh-v0.2.2-rc.3')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('assembleWebPackage carries the plugins listed in build/plugins.json', async () => {
   const dir = await tempDir()
   try {

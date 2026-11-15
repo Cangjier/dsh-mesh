@@ -28,6 +28,7 @@ import {
   writeWorkOrder,
 } from './engine.mjs'
 import { runPackageSmoke } from './smoke.mjs'
+import { buildStampDate, isValidBuildStamp } from './stamp.mjs'
 
 /**
  * Default job root.
@@ -47,7 +48,7 @@ export function defaultCacheDir() {
 
 /**
  * Create one job directory and its initial state.
- * @param {{root?: string, source?: string, ref?: string, targets?: string[], member?: string|null, proxy?: string|null, mode?: string}} options job input.
+ * @param {{root?: string, source?: string, ref?: string, targets?: string[], member?: string|null, proxy?: string|null, mode?: string, buildStamp?: string|null}} options job input.
  * @returns {Promise<{id: string, dir: string, state: object}>} new job.
  */
 export async function createJob(options = {}) {
@@ -63,6 +64,9 @@ export async function createJob(options = {}) {
     source: options.source ?? DEFAULT_SOURCE,
     ref: options.ref ?? DEFAULT_REF,
     targets: options.targets ?? [...DEFAULT_TARGETS],
+    // Immutable DSH version lives in `version`; this is the daily build
+    // revision used in the package filename.
+    buildStamp: options.buildStamp ?? null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     // `member` is the build host (null = this machine); `proxy` is the outbound
@@ -147,7 +151,7 @@ export async function updateState(dir, patch) {
 /**
  * Run the deterministic build pipeline.
  * @param {string} dir job directory.
- * @param {{repositoryRoot: string, recipesPath?: string, overlayRoot?: string, cacheDir?: string, source?: string, ref?: string, targets?: string[], planOnly?: boolean, reuseWorktree?: boolean, install?: string[]|null, build?: string[], prepare?: string[][]|null, prebuild?: boolean, version?: string, full?: boolean, nodeVersion?: string, proxy?: string|null, env?: NodeJS.ProcessEnv, onLog?: (line: string) => void}} options build input.
+ * @param {{repositoryRoot: string, recipesPath?: string, overlayRoot?: string, cacheDir?: string, source?: string, ref?: string, targets?: string[], planOnly?: boolean, reuseWorktree?: boolean, install?: string[]|null, build?: string[], prepare?: string[][]|null, prebuild?: boolean, version?: string, buildStamp?: string, full?: boolean, nodeVersion?: string, proxy?: string|null, env?: NodeJS.ProcessEnv, onLog?: (line: string) => void}} options build input.
  * @returns {Promise<object>} final state.
  */
 export async function runJob(dir, options) {
@@ -156,6 +160,9 @@ export async function runJob(dir, options) {
   const overlayRoot = options.overlayRoot ?? path.join(repositoryRoot, 'build', 'overlays')
   const outbound = proxyFor({ proxy: options.proxy, env: options.env, fetchImpl: options.fetchImpl })
   let state = await readState(dir)
+  const buildStamp = options.buildStamp ?? state.buildStamp ?? `${buildStampDate()}A`
+  if (!isValidBuildStamp(buildStamp)) throw new Error(`invalid build stamp: ${String(buildStamp)}`)
+  if (state.buildStamp !== buildStamp) state = await updateState(dir, { buildStamp })
   const log = (line) => {
     void appendLog(dir, line)
     // `onLog` lets the CLI (and therefore a remote build) mirror the log to
@@ -241,6 +248,7 @@ export async function runJob(dir, options) {
         target,
         outputDir: path.join(dir, 'dist'),
         version,
+        buildStamp,
         repositoryRoot,
         source: state.source,
         ref: state.ref,

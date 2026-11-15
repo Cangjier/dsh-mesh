@@ -8,6 +8,7 @@
  */
 
 import { readFile } from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -19,6 +20,7 @@ import {
   resumeJob,
   runJob,
 } from './job.mjs'
+import { defaultStampFile, isValidBuildStamp, nextBuildStamp } from './stamp.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPOSITORY_ROOT = path.resolve(HERE, '..', '..')
@@ -142,11 +144,20 @@ async function main() {
     return
   }
   if (command === 'build' || command === 'plan') {
+    const requestedStamp = typeof values.get('build-stamp') === 'string' ? values.get('build-stamp') : ''
+    const buildStamp = requestedStamp !== ''
+      ? requestedStamp
+      : await nextBuildStamp({
+          stateFile: defaultStampFile(),
+          packagesDir: path.join(os.homedir(), '.dsh', 'packages'),
+        })
+    if (!isValidBuildStamp(buildStamp)) throw new Error(`invalid --build-stamp: ${buildStamp}`)
     const job = await createJob({
       root: typeof values.get('out') === 'string' ? values.get('out') : defaultJobRoot(),
       source,
       ref,
       targets,
+      buildStamp,
     })
     const prepareCommand = commandArg(values.get('prepare'))
     const state = await runJob(job.dir, {
@@ -160,6 +171,7 @@ async function main() {
       install: values.get('no-install') === true ? null : undefined,
       build: commandArg(values.get('build-command')),
       version: typeof values.get('version') === 'string' ? values.get('version') : undefined,
+      buildStamp,
       smoke: values.get('no-smoke') === true ? false : undefined,
       smokeRequired: values.get('require-smoke') === true,
       smokeChrome: typeof values.get('smoke-chrome') === 'string' ? values.get('smoke-chrome') : undefined,
@@ -193,6 +205,7 @@ async function main() {
     '  --stream                 mirror the build log to stdout',
     '  --build-command <cmd>    override the web build command',
     '  --version <version>      package version override',
+    '  --build-stamp <stamp>    daily build stamp, default YYYYMMDD + next letter',
     '  --no-smoke               skip the headless-Chrome package smoke test',
     '  --require-smoke          fail the build when no Chrome is available',
     '  --smoke-chrome <path>    Chrome/Chromium used by the smoke test',

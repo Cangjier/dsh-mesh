@@ -80,6 +80,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - **外网代理**：`proxyMember` 让指定成员临时启动一个只绑定其组网地址的 HTTP 代理（`code/shared/egress-proxy.mjs`），源码下载、Node 运行时和 npm 都走它；编译结束即关闭。也可以直接给 `proxy: "http://host:port"`。经 WireGuard 转发通常比成员直连慢，成员本身网络好时不必开代理。
 - **前置编译步骤**：干净工作树下 `apps/web` 依赖 workspace 里 `lib/` 产物（`dsh-client-web`、`ui-theme` 的 CSS、webworker 运行时等），`build/recipes.json` 的 `prepare` 会在 `pnpm run build:web` 之前执行这些命令（CLI 用 `--prepare` 覆盖）。
 - **构建后抓屏冒烟**：完整包归档后，在本机目标上真的启动一次（一次性沙箱 + 包内 supervisor/gate + 空闲端口），用 headless Chrome 过密码门、等 DSH 壳、点侧边栏 `Mesh`，确认面板出现并截图到 `<job>/smoke/<target>/`。页面报 `Failed to load plugins`、DSH 起不来、Mesh 面板不出现都会让构建以 `smoke-failed` 结束。跨目标、`--web-only` 或没有 Chrome 时跳过并记录原因；`--no-smoke` 关闭，`--require-smoke` 把“没有 Chrome”变成失败。详见 [Step 010](docs/Step%20010%20从源码构建多平台Web包.md)。
+- **包名与按日构建号**：归档名是 `dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>.tar.gz|zip`，例如 `dsh-mesh-0.2.2-rc.3-20261115A-linux-x64.tar.gz`。`<dshVersion>` 必须与 DSH 版本完全一致（`manifest.version` 也不改写）；`<YYYYMMDD><Letter>` 是网关按本地日期分配的构建号（A、B…Z、AA…），同一天多次编译不会重名。面板用 `<dataDir>/build-stamp.json` 计数并扫描 `~/.dsh/packages` 已有包名，CLI 用 `~/.dsh/mesh/build-stamp.json`，也可 `--build-stamp` 指定。
 - Web 构建成功后按目标打包：
   - **完整包**（默认）：`app/`（`@deepseek-ai/dsh` + 目标原生依赖）、`runtime/node/`、`gate/`、`shared/`、`plugin/`、安装脚本。
   - **只 Web 包**（`--web-only`）：只含 `web/` 前端产物，便于覆盖已有安装。
@@ -293,7 +294,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 007 升级适配清单](docs/Step%20007%20升级适配清单.md) | DSH 升级后逐项重打的检查表 |
 | [Step 008 测试与验证](docs/Step%20008%20测试与验证.md) | 端到端脚本、浏览器断言、请求数断言、失败模式对照 |
 | [Step 009 成员发现与切换](docs/Step%20009%20成员发现与切换.md) | peer 发现、`dsh_gate_target` cookie、cluster HMAC、cookie 命名空间 |
-| [Step 010 从源码构建多平台 Web 包](docs/Step%20010%20从源码构建多平台Web包.md) | 固定源/ref、源码覆盖层、工作单、自动固化/继续、目标打包、构建后 Chrome 抓屏 |
+| [Step 010 从源码构建多平台 Web 包](docs/Step%20010%20从源码构建多平台Web包.md) | 固定源/ref、源码覆盖层、工作单、自动固化/继续、目标打包、按日构建号、构建后 Chrome 抓屏 |
 | [Step 011 通过 SSH 蓝绿部署成员](docs/Step%20011%20通过%20SSH%20蓝绿部署.md) | releases/current/shared、prepare/activate、gateway 最后、回滚 |
 | [Step 012 独立服务与WireGuard控制面板](docs/Step%20012%20独立服务与WireGuard控制面板.md) | 网关/DSH/51821 三个独立服务、token 文件、内置面板代理 |
 | [Step 013 独立DSH交互HTTP服务](docs/Step%20013%20独立DSH交互HTTP服务.md) | 独立 8765、SDK stdio、创建/等待/通知/事件/回调 |
@@ -336,6 +337,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `code/build/engine.mjs` | 源码准备、覆盖层、构建、打包、Node 运行时 |
 | `code/build/job.mjs` | 构建任务状态、日志、覆盖层固化/工作树复用 |
 | `code/build/smoke.mjs` / `smoke-cli.mjs` | 构建后与测试升级的 headless Chrome 启动/抓屏检查 |
+| `code/build/stamp.mjs` | 按日构建号：日期 + A/B/C…，并持久化计数 |
 | `code/build/cli.mjs` | 命令行入口 |
 | `build/recipes.json` | 源码覆盖层清单（picker / login） |
 | `build/overlays/` | 对 DSH 源码的整文件覆盖层 |

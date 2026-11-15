@@ -154,10 +154,26 @@ linux-arm64  可选
 
 默认 `linux-x64,win-x64`。`--targets` 可覆盖。
 
+### 命名与按日构建号
+
+包名由四段组成：
+
+```text
+dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>.(tar.gz|zip)
+例：dsh-mesh-0.2.2-rc.3-20261115A-linux-x64.tar.gz
+```
+
+- `<dshVersion>` **必须**等于 DSH 自己的版本（`apps/cli/package.json` / npm 包版本），原样写入，禁止改名或加后缀。`manifest.version` 也保持这个值。
+- `<YYYYMMDD><Letter>` 是**按日递增的构建号**：本地日期 + `A`、`B`……`Z`、`AA`……；同一天多次编译不会覆盖前一个包。
+- `manifest.buildStamp` 记录这个构建号；`manifest.version` 仍是 DSH 版本。
+- 面板编译在网关分配构建号，文件是 `<dataDir>/build-stamp.json`，同时扫描 `~/.dsh/packages` 里已有的同日包名取最大字母，所以删包也不会复用字母。
+- 命令行编译用 `--build-stamp 20261115A` 显式指定；不指定时使用 `~/.dsh/mesh/build-stamp.json` 分配。
+- 包内目录名与归档名相同（归档名再加 `.tar.gz`/`.zip`），`findLatestPackage`、上传校验和面板列表都不依赖固定版本段。
+
 ### 完整包（默认）
 
 ```text
-dsh-mesh-<ver>-<os>-<arch>/
+dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>/
 ├── app/                    # npm install @deepseek-ai/dsh@<ver> --os/--cpu/--libc
 │   └── node_modules/@deepseek-ai/dsh-web-frontend/dist/  # 被新构建覆盖
 ├── runtime/node/           # 官方 Node 运行时，校验 SHASUMS256
@@ -213,7 +229,7 @@ dsh-mesh-<ver>-<os>-<arch>/
 单独复跑一个包：
 
 ```bash
-node code/build/smoke-cli.mjs --root ~/.dsh/mesh/build/<job>/dist/dsh-mesh-<ver>-linux-x64 \
+node code/build/smoke-cli.mjs --root ~/.dsh/mesh/build/<job>/dist/dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-linux-x64 \
   --target linux-x64 --screenshot-dir /tmp/dsh-smoke
 ```
 
@@ -267,6 +283,7 @@ created → running(prepare → apply → build → package) → done
 | `targets` | 目标平台列表 |
 | `planOnly` | 只应用覆盖层并写工作单 |
 | `jobId` | needs-fix 后固化工作树并继续 |
+| `buildStamp` | 按日构建号；默认由面板/CLI 分配 |
 | `keepDist` | 清理旧 build 时保留 dist |
 
 面板「成员」页只负责成员/组网，不再有构建页。
@@ -291,7 +308,7 @@ node --test test/build.test.mjs
 node --test test/service.test.mjs
 ```
 
-`test/build.test.mjs` 覆盖：tarball URL、本地源、覆盖层幂等、mismatch 工作单、learn、Web 构建产物发现、Node 归档名、前端覆盖、包装配。`test/smoke.test.mjs` 覆盖 Chrome 探测、目标匹配、跳过/必需两条路径、不完整包快速失败，以及空 profile patch 的接线修复。
+`test/build.test.mjs` 覆盖：tarball URL、本地源、覆盖层幂等、mismatch 工作单、learn、Web 构建产物发现、Node 归档名、前端覆盖、包装配、构建号命名。`test/stamp.test.mjs` 覆盖按日递增、跨日重置、扫描已有包名。`test/smoke.test.mjs` 覆盖 Chrome 探测、目标匹配、跳过/必需两条路径、不完整包快速失败，以及空 profile patch 的接线修复。
 
 真实构建（需要网络和磁盘）：
 

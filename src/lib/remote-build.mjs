@@ -66,7 +66,7 @@ export function phaseFromLine(line) {
  * a build must reflect what is on main, not whatever a previous run left in
  * the tree. A local checkout that is behind main would otherwise silently
  * build old overlays.
- * @param {{jobId: string, ref: string, targets: string[], proxyUrl?: string|null, repoUrl?: string, heapMb?: number}} options script input.
+ * @param {{jobId: string, ref: string, targets: string[], buildStamp?: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number}} options script input.
  * @returns {string} bash script.
  */
 export function remoteBuildScript(options) {
@@ -91,7 +91,7 @@ export function remoteBuildScript(options) {
     'corepack enable --install-directory "$HOME/.dsh/mesh/bin" >/dev/null 2>&1 || true',
     `cd "${REMOTE_SRC}" || { echo "mesh checkout is missing" >&2; exit 3; }`,
     'echo "mesh head $(git rev-parse --short HEAD)"',
-    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --stream --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ''}`,
+    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --stream --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.buildStamp ? ` --build-stamp ${quote(options.buildStamp)}` : ''}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ''}`,
     'code=$?',
     `ls -1d "${out}"/* 2>/dev/null | head -n 5`,
     'exit $code',
@@ -117,7 +117,7 @@ function quote(value) {
  * PowerShell. So the checkout is a codeload tarball extracted with tar, and the
  * engine runs exactly as it does on Linux — it is cross-platform and can emit a
  * linux-x64 archive from a Windows host.
- * @param {{jobId: string, ref: string, targets: string[], proxyUrl?: string|null, repoUrl?: string, heapMb?: number, appRoot?: string}} options script input.
+ * @param {{jobId: string, ref: string, targets: string[], buildStamp?: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number, appRoot?: string}} options script input.
  * @returns {string} PowerShell script.
  */
 export function windowsBuildScript(options) {
@@ -175,7 +175,7 @@ export function windowsBuildScript(options) {
     'if (-not (Test-Path (Join-Path $src "code\\build\\cli.mjs"))) { throw "mesh checkout is incomplete" }',
     `& (Join-Path $nodeDir 'corepack.cmd') enable --install-directory $bin | Out-Null`,
     'Set-Location $src',
-    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --stream --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(','))}${proxy === '' ? '' : ` --proxy ${quotePs(proxy)}`}`,
+    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --stream --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(','))}${options.buildStamp ? ` --build-stamp ${quotePs(options.buildStamp)}` : ''}${proxy === '' ? '' : ` --proxy ${quotePs(proxy)}`}`,
     '$code = $LASTEXITCODE',
     'Get-ChildItem -Directory $out -ErrorAction SilentlyContinue | Select-Object -First 5 -ExpandProperty FullName',
     'exit $code',
@@ -268,7 +268,7 @@ export class RemoteBuilder {
   /**
    * Run one job on a member and settle the local job state.
    * @param {string} jobDir local job directory.
-   * @param {{plan: {os?: string, appRoot?: string}, memberName: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number}} options run options.
+   * @param {{plan: {os?: string, appRoot?: string}, memberName: string, proxyUrl?: string|null, repoUrl?: string, buildStamp?: string, heapMb?: number}} options run options.
    * @returns {Promise<object>} final local state.
    */
   async run(jobDir, options) {
@@ -283,6 +283,7 @@ export class RemoteBuilder {
         targets: state.targets,
         proxyUrl: options.proxyUrl,
         repoUrl: options.repoUrl,
+        buildStamp: options.buildStamp,
         heapMb: options.heapMb,
         appRoot: options.plan.appRoot,
       })
@@ -292,6 +293,7 @@ export class RemoteBuilder {
         targets: state.targets,
         proxyUrl: options.proxyUrl,
         repoUrl: options.repoUrl,
+        buildStamp: options.buildStamp,
         heapMb: options.heapMb,
       })
     let percent = 1

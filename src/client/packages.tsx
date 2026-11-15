@@ -376,7 +376,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
       render: (_value, job) => (
         <Space direction="vertical" size={0}>
           <span className="dsh-pw-mono" style={{ fontSize: 12 }}>{job.ref}</span>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{(job.targets ?? []).join(' · ')}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{(job.targets ?? []).join(' · ')}{job.buildStamp ? ` · ${job.buildStamp}` : ''}</Typography.Text>
         </Space>
       ),
     },

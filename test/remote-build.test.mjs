@@ -37,6 +37,24 @@ test('remoteBuildScript pins the ref, targets, and proxy', () => {
   assert.match(script, /npm_config_https_proxy='http:\/\/10\.66\.66\.2:8888'/u)
 })
 
+test('remote build scripts pass the daily build stamp to the engine', () => {
+  const linux = remoteBuildScript({
+    jobId: 'job-stamp',
+    ref: 'dsh-v0.2.2-rc.3',
+    targets: ['linux-x64'],
+    buildStamp: '20261115A',
+  })
+  assert.match(linux, /--build-stamp '20261115A'/u)
+  const windows = windowsBuildScript({
+    jobId: 'job-stamp-win',
+    ref: 'dsh-v0.2.2-rc.3',
+    targets: ['linux-x64'],
+    buildStamp: '20261115A',
+    appRoot: 'C:\\Users\\Admin\\.dsh\\dsh-mesh\\current',
+  })
+  assert.match(windows, /--build-stamp '20261115A'/u)
+})
+
 test('remoteBuildScript escapes quotes in values', () => {
   const script = remoteBuildScript({ jobId: 'job-2', ref: "ma'in", targets: ['linux-x64'], proxyUrl: null })
   assert.match(script, /--ref 'ma'\\''in'/u)

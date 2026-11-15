@@ -3,7 +3,7 @@
  * Command-line entry point for the headless-Chrome smoke test.
  *
  *   # a freshly assembled package (the build pipeline does this in-process)
- *   node code/build/smoke-cli.mjs --root dist/dsh-mesh-0.2.2-linux-x64 \
+ *   node code/build/smoke-cli.mjs --root dist/dsh-mesh-0.2.2-rc.3-20261115A-linux-x64 \
  *        --target linux-x64 --screenshot-dir smoke/linux-x64
  *
  *   # an already-upgraded sandbox (the test-upgrade rehearsal)

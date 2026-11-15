@@ -319,11 +319,13 @@ SSH 主机密钥与 known_hosts 中的记录不一致：目标机可能重装过
 export function initialDeploySteps(options = {}) {
   const steps = [
     { key: 'upload', label: '上传安装包', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null },
-    { key: 'prepare', label: '解压并准备新版本', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null },
   ]
   if (options.test === true) {
+    // The rehearsal runs before prepare: prepare rewrites the member's live
+    // profile and gate.env, and a bad package must fail before that.
     steps.push({ key: 'rehearse', label: '平铺流程演练（沙箱）', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null })
   }
+  steps.push({ key: 'prepare', label: '解压并准备新版本', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null })
   steps.push({ key: 'activate', label: '切换并重启服务', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null })
   return steps
 }
@@ -412,11 +414,20 @@ export async function appendDeployLog(dir, line) {
  * @returns {Promise<{alive: boolean, runner: object|null}>} verdict.
  */
 export async function runnerStatus(dir) {
+  // The runner rewrites runner.json on every heartbeat. A plain truncate+write
+  // could be read back half-written, which would read as "no runner" and make
+  // a healthy job look dead — so the writer renames into place and this reader
+  // retries once before drawing that conclusion.
+  const file = path.join(dir, 'runner.json')
   let runner = null
-  try {
-    runner = JSON.parse(await readFile(path.join(dir, 'runner.json'), 'utf8'))
-  } catch {
-    runner = null
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      runner = JSON.parse(await readFile(file, 'utf8'))
+      break
+    } catch {
+      runner = null
+      if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 250))
+    }
   }
   if (runner === null || typeof runner !== 'object') return { alive: false, runner: null }
   const pid = Number(runner.pid)
@@ -1069,60 +1080,117 @@ echo "activated $RELEASE"
 /**
  * Build the Linux rehearsal script for a test upgrade.
  *
- * The gateway upgrades itself through `code/deploy/upgrade-local.sh` (a flat
- * install has no release symlink to switch). Members are blue-green, so a
- * member "upgrade test" would otherwise exercise a completely different code
- * path — exactly the gap that let a flat-only breakage ship. This script takes
- * the member's *current* plugin tree, builds a flat install out of it in a
- * throwaway sandbox, and runs the very same script the gateway runs, from a
- * copy of it, with `--stage` — the same shape `runner.mjs` uses. Nothing on
- * the member is restarted, no unit is touched.
+ * A gateway upgrade runs `code/deploy/upgrade-local.sh` from the *installed*
+ * plugin (see runner.mjs) because a flat install has no release symlink to
+ * switch. Members are blue-green, so testing there would exercise a different
+ * code path entirely — the gap that let a flat-only breakage ship. This script
+ * therefore rebuilds a flat install inside a sandbox on the member: the
+ * package is extracted, the member's *current* release files and its real
+ * `gate.env` / profile manifest are copied in, and the same script source the
+ * gateway uses is run from a copy with `--stage`. A second, deliberately
+ * failing run proves `restore()` puts the files back.
+ *
+ * It runs before `prepare`, so a package that cannot do a flat upgrade fails
+ * the job before the member's live profile or `gate.env` are touched.
  * @param {object} plan deployment plan.
  * @returns {string} shell script.
  */
 export function buildLinuxRehearseScript(plan) {
-  const stage = `${plan.releases}/${plan.release}`
   return `set -Eeuo pipefail
 APP_ROOT=${sh(plan.appRoot)}
 CURRENT="$APP_ROOT/current"
-STAGE=${sh(stage)}
-TEST_ROOT="$APP_ROOT/../.dsh-mesh-test/${plan.release}"
+SHARED=${sh(plan.shared)}
+PKG=${sh(plan.remotePackage)}
+RELEASE=${sh(plan.release)}
+TEST_PARENT="$APP_ROOT/../.dsh-mesh-test"
+TEST_ROOT="$TEST_PARENT/$RELEASE"
 APP="$TEST_ROOT/app"
 TEST_HOME="$TEST_ROOT/home"
+STAGE="$TEST_ROOT/stage"
 say() { printf '==> %s\\n' "$*"; }
 fail() { printf '[演练失败] %s\\n' "$*" >&2; exit 1; }
-[ -f "$STAGE/code/deploy/upgrade-local.sh" ] || fail "新包里没有 code/deploy/upgrade-local.sh，这个包做不了平铺升级"
+cleanup() {
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '[演练失败] 沙箱保留在 %s 供排查（下次演练会先清掉）\\n' "$TEST_ROOT" >&2
+    return 0
+  fi
+  rm -rf "$TEST_ROOT"
+  rmdir "$TEST_PARENT" 2>/dev/null || true
+}
+trap cleanup EXIT
+[ -f "$PKG" ] || fail "包不在目标机上：$PKG"
 [ -d "$CURRENT/plugins/dsh-mesh" ] || fail "目标成员当前版本里没有 plugins/dsh-mesh，无法构造升级前状态"
-NODE="$STAGE/runtime/node/bin/node"
-[ -x "$NODE" ] || NODE=$(command -v node || true)
-[ -n "$NODE" ] || fail '演练需要 node（包内 runtime 或系统 node）'
-say "平铺升级演练：在 $TEST_ROOT 复刻一份本机流程（新包 $STAGE）"
-rm -rf "$TEST_ROOT"
-mkdir -p "$APP/config" "$APP/plugins" "$TEST_HOME/profiles/web" "$TEST_ROOT/tools"
-# Resolve the sandbox path once: wire-profile writes absolute link: targets, so
-# a path containing .. would never compare equal.
+[ -f "$SHARED/config/gate.env" ] || fail "目标成员没有 $SHARED/config/gate.env，不是 dsh-mesh 安装"
+# 上一次失败留下的沙箱先清掉，避免永久堆积。
+rm -rf "$TEST_PARENT"
+mkdir -p "$APP/config" "$APP/plugins" "$TEST_HOME/profiles/web" "$TEST_ROOT/tools" "$STAGE"
+# 解析成绝对路径：wire-profile 写的是绝对 link: 目标，带 .. 的路径永远比不相等。
 TEST_ROOT=$(CDPATH= cd -- "$TEST_ROOT" && pwd)
 APP="$TEST_ROOT/app"
 TEST_HOME="$TEST_ROOT/home"
+STAGE="$TEST_ROOT/stage"
+say "平铺升级演练：解压新包并复刻目标成员当前版本（沙箱 $TEST_ROOT）"
+tar -xzf "$PKG" -C "$STAGE" --strip-components=1
+NODE="$STAGE/runtime/node/bin/node"
+[ -x "$NODE" ] || NODE=$(command -v node || true)
+[ -n "$NODE" ] || fail '演练需要 node（包内 runtime 或系统 node）'
+# 升级前的状态尽量用目标成员的真实文件，而不是只造一个 plugins 目录：
+# 备份范围（code/gate/manifest/start.sh）、真实 gate.env、真实 profile 清单都要能测到。
 cp -a "$CURRENT/plugins/." "$APP/plugins/"
-printf 'DSH_GATE_PORT=18080\\nDSH_GATE_PASSWORD=test-upgrade\\nDSH_HOME=%s\\n' "$TEST_HOME" > "$APP/config/gate.env"
+for item in code gate locale manifest.json start.sh start-dsh.sh start-interop.sh; do
+  if [ -e "$CURRENT/$item" ]; then cp -a "$CURRENT/$item" "$APP/"; fi
+done
+cp -a "$SHARED/config/gate.env" "$APP/config/gate.env"
+PROFILE_SRC="$SHARED/home/profiles/web"
+for file in package.json cordis.patch.yml; do
+  if [ -f "$PROFILE_SRC/$file" ]; then cp -a "$PROFILE_SRC/$file" "$TEST_HOME/profiles/web/"; fi
+done
+# 沙箱用自己的 DSH_HOME 和空闲端口，别碰成员真实的 80/8765。
+sed -i -e "s|^DSH_HOME=.*|DSH_HOME=$TEST_HOME|" -e "s|^DSH_GATE_PORT=.*|DSH_GATE_PORT=18080|" "$APP/config/gate.env"
+grep -q '^DSH_GATE_PORT=' "$APP/config/gate.env" || printf 'DSH_GATE_PORT=18080\\n' >> "$APP/config/gate.env"
+grep -q '^DSH_HOME=' "$APP/config/gate.env" || printf 'DSH_HOME=%s\\n' "$TEST_HOME" >> "$APP/config/gate.env"
 BEFORE=$("$NODE" -p "require('$APP/plugins/dsh-mesh/package.json').version" 2>/dev/null || echo unknown)
-say "升级前的沙箱版本：$BEFORE（以文件内容而非版本号判断是否真的覆盖）"
-cp "$STAGE/code/deploy/upgrade-local.sh" "$TEST_ROOT/tools/upgrade-local.sh"
-cp "$STAGE/code/deploy/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.mjs"
+say "升级前的沙箱版本：$BEFORE（以文件内容判断是否真的覆盖）"
+# 脚本来源与生产一致：优先用已安装插件里的那份（runner.mjs 也是这么做的），
+# 老版本插件没有 code/deploy 时才退回新包里的。
+PLUGIN_DEPLOY="$CURRENT/plugins/dsh-mesh/code/deploy"
+if [ -f "$PLUGIN_DEPLOY/upgrade-local.sh" ]; then
+  SCRIPT_SRC="$PLUGIN_DEPLOY/upgrade-local.sh"
+  say '脚本来源：已安装插件（与「升级」同源）'
+  if [ -f "$STAGE/code/deploy/upgrade-local.sh" ]; then
+    A=$(sha256sum "$SCRIPT_SRC" | cut -d' ' -f1)
+    B=$(sha256sum "$STAGE/code/deploy/upgrade-local.sh" | cut -d' ' -f1)
+    if [ "$A" != "$B" ]; then say '注意：已安装插件的脚本与新包里的不一致，按生产行为以已安装的为准'; fi
+  fi
+else
+  SCRIPT_SRC="$STAGE/code/deploy/upgrade-local.sh"
+  say '脚本来源：新包（已安装插件是早于修复的版本，没有 code/deploy）'
+fi
+[ -f "$SCRIPT_SRC" ] || fail '已安装插件和新包里都没有 code/deploy/upgrade-local.sh，这个包做不了平铺升级'
+cp "$SCRIPT_SRC" "$TEST_ROOT/tools/upgrade-local.sh"
+if [ -f "$(dirname "$SCRIPT_SRC")/wire-profile.mjs" ]; then
+  cp "$(dirname "$SCRIPT_SRC")/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.mjs"
+elif [ -f "$STAGE/code/deploy/wire-profile.mjs" ]; then
+  cp "$STAGE/code/deploy/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.mjs"
+else
+  fail '找不到 wire-profile.mjs（脚本目录和新包里都没有）'
+fi
 chmod +x "$TEST_ROOT/tools/upgrade-local.sh"
-say '执行平铺升级脚本（--no-restart：备份、覆盖、接线；不碰任何服务）'
+say '第一步：正常升级沙箱（--no-restart：备份、覆盖、接线；不碰任何服务）'
 bash "$TEST_ROOT/tools/upgrade-local.sh" --app-root "$APP" --stage "$STAGE" --dsh-home "$TEST_HOME" --port 18080 --no-restart
 say '核对升级结果'
 BACKUP_DIR=$(ls -1d "$APP/.upgrade-backup"/* 2>/dev/null | head -n1 || true)
 [ -n "$BACKUP_DIR" ] || fail '升级没有留下 .upgrade-backup 备份'
-[ -f "$BACKUP_DIR/plugins/dsh-mesh/package.json" ] || fail "备份里没有升级前的插件：$BACKUP_DIR"
-cmp -s "$BACKUP_DIR/plugins/dsh-mesh/index.js" "$CURRENT/plugins/dsh-mesh/index.js" \
-  || fail '备份里的插件与升级前不一致：备份没有真正执行'
-cmp -s "$APP/plugins/dsh-mesh/index.js" "$STAGE/plugins/dsh-mesh/index.js" \
-  || fail '覆盖后的插件与新包不一致：新文件没有真正落地'
+for item in plugins code gate manifest.json; do
+  if [ -e "$CURRENT/$item" ]; then
+    [ -e "$BACKUP_DIR/$item" ] || fail "备份缺 $item：平铺升级的备份范围不对"
+  fi
+done
+cmp -s "$BACKUP_DIR/plugins/dsh-mesh/index.js" "$CURRENT/plugins/dsh-mesh/index.js" || fail '备份里的插件不是升级前那一份'
+cmp -s "$APP/plugins/dsh-mesh/index.js" "$STAGE/plugins/dsh-mesh/index.js" || fail '覆盖后的插件不是新包那一份'
 AFTER=$("$NODE" -p "require('$APP/plugins/dsh-mesh/package.json').version")
-say "升级后的沙箱版本：$AFTER；备份与覆盖都按升级前的状态逐字节核对过"
+say "升级后的沙箱版本：$AFTER；备份与覆盖逐字节核对过"
 LINK=$("$NODE" -e "const p=require('$TEST_HOME/profiles/web/package.json');process.stdout.write(String((p.dependencies||{})['@local/dsh-mesh']||''))")
 [ "$LINK" = "link:$APP/plugins/dsh-mesh" ] || fail "profile 的 @local/dsh-mesh 接线不对：$LINK"
 say "profile 接线：$LINK"
@@ -1130,11 +1198,30 @@ if [ -d "$STAGE/plugins/xl" ]; then
   [ -e "$TEST_HOME/profiles/web/node_modules/xl" ] || fail '新包带了 xl，但 profile 没有接上 xl'
   say '随包插件 xl 已接入 profile'
 fi
-[ -f "$APP/manifest.json" ] || fail '覆盖后缺少 manifest.json'
-say "清单版本：$("$NODE" -p "require('$APP/manifest.json').version")"
-rm -rf "$TEST_ROOT"
-rmdir "$APP_ROOT/../.dsh-mesh-test" 2>/dev/null || true
-say '演练通过：新包能在一份平铺安装上完成备份、覆盖与接线；沙箱已清理'
+# 第二步：注入一次“接线”失败，验证 upgrade-local.sh 的 restore() 能把
+# 已经覆盖过的文件还原。注入方式是把 wire-profile 换成必定失败的小脚本，
+# 它会留下一个标记，证明覆盖已经发生、失败点在接线。
+say '第二步：注入接线失败，验证 restore() 能还原'
+cp -a "$STAGE/." "$TEST_ROOT/bad/"
+printf '// bad stage\n' > "$TEST_ROOT/bad/plugins/dsh-mesh/index.js"
+mv "$TEST_ROOT/tools/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.real"
+cat > "$TEST_ROOT/tools/wire-profile.mjs" <<'DSH_MESH_REHEARSE_STUB'
+import { writeFileSync } from 'node:fs'
+writeFileSync(new URL('../wiring-ran', import.meta.url), 'ran')
+process.exit(3)
+DSH_MESH_REHEARSE_STUB
+chmod +x "$TEST_ROOT/tools/wire-profile.mjs"
+MARK_BEFORE=$(sha256sum "$APP/plugins/dsh-mesh/index.js" "$APP/manifest.json" "$APP/config/gate.env")
+if bash "$TEST_ROOT/tools/upgrade-local.sh" --app-root "$APP" --stage "$TEST_ROOT/bad" --dsh-home "$TEST_HOME" --port 18080 --no-restart; then
+  fail '注入失败后脚本居然成功了：restore() 路径没有被执行'
+fi
+mv "$TEST_ROOT/tools/wire-profile.real" "$TEST_ROOT/tools/wire-profile.mjs"
+[ -f "$TEST_ROOT/wiring-ran" ] || fail '注入的失败没有走到接线步骤：备份/覆盖没有被验证'
+MARK_AFTER=$(sha256sum "$APP/plugins/dsh-mesh/index.js" "$APP/manifest.json" "$APP/config/gate.env")
+[ "$MARK_BEFORE" = "$MARK_AFTER" ] || fail 'restore() 没有把覆盖过的文件还原'
+[ -f "$APP/plugins/dsh-mesh/index.js" ] || fail 'restore() 之后 index.js 没有被还原成文件'
+say 'restore() 已验证：接线失败后文件回到升级前'
+say '演练通过：备份、覆盖、接线、失败还原都按本机「升级」的脚本走了一遍；沙箱已清理'
 `
 }
 
@@ -2087,6 +2174,18 @@ export class DeployManager {
       } else {
         await log('no deployer account to share (DSH_HOME/.credentials.yaml is missing)')
       }
+      // Rehearse *before* prepare: prepare rewrites the member's live profile
+      // and gate.env, so a package that cannot do a flat upgrade must fail the
+      // job before any of that happens.
+      if (plan.test === true && plan.os === 'linux') {
+        state.phase = 'rehearse'
+        meter('演练平铺升级', { percent: 99, indeterminate: true })
+        await mark('rehearse', 'running')
+        await log('rehearse: run the flat upgrade (backup, copy, wiring, restore) in a sandbox on the member')
+        const rehearsed = this.scripts({ ...plan, preExtracted: false })
+        await runner.script(rehearsed.rehearse, plan.os, line => note('rehearse', line))
+        await mark('rehearse', 'succeeded')
+      }
       state.phase = 'prepare'
       await mark('prepare', 'running')
       await log('prepare: extract, shared dirs, service definitions (no switch)')
@@ -2144,16 +2243,6 @@ export class DeployManager {
       })
       if (plan.os === 'linux' && entries > 0) extractProgress(entries, entries, true)
       await mark('prepare', 'succeeded')
-      if (plan.test === true && scripts.rehearse !== null) {
-        // Fail before touching the member: if the flat path cannot upgrade a
-        // sandbox, the same package would also fail on the gateway itself.
-        state.phase = 'rehearse'
-        meter('演练平铺升级', { percent: 99, indeterminate: true })
-        await mark('rehearse', 'running')
-        await log('rehearse: run the flat upgrade (backup, copy, profile) in a sandbox on the member')
-        await runner.script(scripts.rehearse, plan.os, line => note('rehearse', line))
-        await mark('rehearse', 'succeeded')
-      }
       state.phase = 'activate'
       meter('切换并重启服务', { percent: 99, indeterminate: true })
       await mark('activate', 'running')
@@ -2234,6 +2323,14 @@ export class DeployManager {
     const dir = path.join(this.dataDir, state.id)
     const runner = await runnerStatus(dir)
     if (runner.alive) return state
+    // No readable heartbeat is not immediate proof of death: the runner may be
+    // between the temporary file and the rename. Give a young job the same
+    // grace as a queued one and let its own final write settle it; a job old
+    // enough to have started without ever reporting is interrupted.
+    if (runner.runner === null) {
+      const created = Date.parse(String(state.createdAt ?? ''))
+      if (!Number.isFinite(created) || Date.now() - created < RUNNER_START_GRACE_MS) return state
+    }
     if (state.status === 'queued') {
       // The spawn happens right after the job directory is written; the runner
       // needs a moment to report in, and that must not read as "unknown job".
@@ -2257,6 +2354,10 @@ export class DeployManager {
       state.status = 'failed'
       state.phase = 'failed'
       state.error = state.error ?? 'deployment was interrupted before it finished'
+      const why = runner.runner === null
+        ? 'runner.json was unreadable'
+        : `runner pid ${String(runner.runner.pid)} is gone`
+      await appendDeployLog(dir, `settle: no live runner (${why}); the job is marked failed`).catch(() => {})
     }
     state.updatedAt = new Date().toISOString()
     await this.#save(path.join(dir, 'job.json'), state).catch(() => {})

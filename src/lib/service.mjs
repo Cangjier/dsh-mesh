@@ -96,6 +96,35 @@ function packageVersion() {
 /**
  * One host service instance.
  */
+/**
+ * Reject targets a test upgrade cannot work on, with a reason the panel shows.
+ *
+ * The rehearsal is a bash script and installs nothing: it needs a member that
+ * already runs DSH on Linux, and a Linux package for it.
+ * @param {object|null} target discovered member.
+ * @param {{packageOs?: 'linux'|'windows'}} [options] package platform.
+ * @returns {object} the same target.
+ */
+export function assertTestUpgradeTarget(target, options = {}) {
+  if (target === null || target === undefined) {
+    throw new Error('测试升级需要一个成员：请从成员列表里选一个已安装 DSH 的 Linux 成员')
+  }
+  if (target.kind === 'self' || target.id === 'local') {
+    throw new Error('测试升级要在别的成员上跑；本机升级请直接用「升级」')
+  }
+  if (options.packageOs === 'windows') {
+    throw new Error('选的是 Windows 部署包，不能用在 Linux 成员上；测试升级目前只支持 Linux')
+  }
+  const memberOs = /win/iu.test(target.system?.platform ?? '') ? 'windows' : 'linux'
+  if (memberOs !== 'linux') {
+    throw new Error(`成员 ${String(target.name ?? target.id)} 是 ${memberOs}，测试升级目前只支持 Linux 成员（演练脚本是 bash）`)
+  }
+  if (target.dsh !== true) {
+    throw new Error(`成员 ${String(target.name ?? target.id)} 还没有安装 DSH，没有可升级的安装；请先用「部署」`)
+  }
+  return target
+}
+
 export class MeshService {
   /**
    * @param {{dataDir: string, config?: object, log?: (line: string) => void, spawnRunner?: Function}} options service input.
@@ -974,11 +1003,10 @@ export class MeshService {
         ? 'windows'
         : member.system?.platform?.toLowerCase().startsWith('win') ? 'windows' : 'linux'
       const identity = { id: member.id, name: member.name, ip: member.ip }
+      if (test) assertTestUpgradeTarget(member, { packageOs: os })
       if (member.kind === 'self' || member.id === 'local') {
-        if (test) throw new Error('测试升级要在别的成员上跑；本机升级请直接用「升级」')
         return this.#startLocalJob({ member, packagePath, os, mode, identity })
       }
-      if (test && os !== 'linux') throw new Error('测试升级目前只支持 Linux 成员（平铺布局的演练脚本是 bash）')
       const deployRequest = await this.#memberDeployRequest(member, packagePath, os)
       const job = await this.#startEngineJob({
         request: { ...deployRequest, member: member.id, test },
@@ -988,6 +1016,7 @@ export class MeshService {
       return { ok: true, job, member: identity, packagePath, layout: 'bluegreen' }
     }
     if (host === '') throw new Error('host is required')
+    if (test) throw new Error('测试升级需要一个成员（要在成员的安装上演练），不能直接给裸 SSH 主机')
     const os = /win(?:dows)?/iu.test(path.basename(packagePath)) ? 'windows' : 'linux'
     const appRoot = os === 'windows' ? 'C:\\dsh-mesh' : '/opt/dsh-mesh'
     const job = await this.#startEngineJob({ request: { host, package: packagePath, os, appRoot }, member: null, mode })

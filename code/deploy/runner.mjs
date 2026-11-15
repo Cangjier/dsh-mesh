@@ -18,7 +18,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { chmod, cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -253,14 +253,19 @@ async function main(jobDir) {
   const unit = process.env.DSH_MESH_JOB_UNIT ?? null
   const runnerFile = path.join(jobDir, 'runner.json')
   const heartbeat = async () => {
-    await writeFile(runnerFile, `${JSON.stringify({
+    // Write-then-rename: a reader must never see a half-written heartbeat and
+    // conclude the job died.
+    const body = `${JSON.stringify({
       pid: process.pid,
       ppid: process.ppid,
       host: hostname(),
       unit,
       startedAt,
       heartbeatAt: new Date().toISOString(),
-    }, null, 2)}\n`, 'utf8').catch(() => {})
+    }, null, 2)}\n`
+    await writeFile(`${runnerFile}.tmp`, body, 'utf8')
+      .then(() => rename(`${runnerFile}.tmp`, runnerFile))
+      .catch(() => {})
   }
   await heartbeat()
   const timer = setInterval(() => { void heartbeat() }, RUNNER_HEARTBEAT_MS)

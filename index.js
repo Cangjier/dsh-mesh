@@ -1757,12 +1757,12 @@ SSH \u4E3B\u673A\u5BC6\u94A5\u4E0E known_hosts \u4E2D\u7684\u8BB0\u5F55\u4E0D\u4
 }
 function initialDeploySteps(options = {}) {
   const steps = [
-    { key: "upload", label: "\u4E0A\u4F20\u5B89\u88C5\u5305", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null },
-    { key: "prepare", label: "\u89E3\u538B\u5E76\u51C6\u5907\u65B0\u7248\u672C", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null }
+    { key: "upload", label: "\u4E0A\u4F20\u5B89\u88C5\u5305", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null }
   ];
   if (options.test === true) {
     steps.push({ key: "rehearse", label: "\u5E73\u94FA\u6D41\u7A0B\u6F14\u7EC3\uFF08\u6C99\u7BB1\uFF09", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null });
   }
+  steps.push({ key: "prepare", label: "\u89E3\u538B\u5E76\u51C6\u5907\u65B0\u7248\u672C", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null });
   steps.push({ key: "activate", label: "\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null });
   return steps;
 }
@@ -1794,11 +1794,16 @@ async function appendDeployLog(dir, line) {
 `, { encoding: "utf8", flag: "a" });
 }
 async function runnerStatus(dir) {
+  const file = path5.join(dir, "runner.json");
   let runner = null;
-  try {
-    runner = JSON.parse(await readFile5(path5.join(dir, "runner.json"), "utf8"));
-  } catch {
-    runner = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      runner = JSON.parse(await readFile5(file, "utf8"));
+      break;
+    } catch {
+      runner = null;
+      if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 250));
+    }
   }
   if (runner === null || typeof runner !== "object") return { alive: false, runner: null };
   const pid = Number(runner.pid);
@@ -2304,46 +2309,101 @@ echo "activated $RELEASE"
 `;
 }
 function buildLinuxRehearseScript(plan) {
-  const stage = `${plan.releases}/${plan.release}`;
   return `set -Eeuo pipefail
 APP_ROOT=${sh(plan.appRoot)}
 CURRENT="$APP_ROOT/current"
-STAGE=${sh(stage)}
-TEST_ROOT="$APP_ROOT/../.dsh-mesh-test/${plan.release}"
+SHARED=${sh(plan.shared)}
+PKG=${sh(plan.remotePackage)}
+RELEASE=${sh(plan.release)}
+TEST_PARENT="$APP_ROOT/../.dsh-mesh-test"
+TEST_ROOT="$TEST_PARENT/$RELEASE"
 APP="$TEST_ROOT/app"
 TEST_HOME="$TEST_ROOT/home"
+STAGE="$TEST_ROOT/stage"
 say() { printf '==> %s\\n' "$*"; }
 fail() { printf '[\u6F14\u7EC3\u5931\u8D25] %s\\n' "$*" >&2; exit 1; }
-[ -f "$STAGE/code/deploy/upgrade-local.sh" ] || fail "\u65B0\u5305\u91CC\u6CA1\u6709 code/deploy/upgrade-local.sh\uFF0C\u8FD9\u4E2A\u5305\u505A\u4E0D\u4E86\u5E73\u94FA\u5347\u7EA7"
+cleanup() {
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '[\u6F14\u7EC3\u5931\u8D25] \u6C99\u7BB1\u4FDD\u7559\u5728 %s \u4F9B\u6392\u67E5\uFF08\u4E0B\u6B21\u6F14\u7EC3\u4F1A\u5148\u6E05\u6389\uFF09\\n' "$TEST_ROOT" >&2
+    return 0
+  fi
+  rm -rf "$TEST_ROOT"
+  rmdir "$TEST_PARENT" 2>/dev/null || true
+}
+trap cleanup EXIT
+[ -f "$PKG" ] || fail "\u5305\u4E0D\u5728\u76EE\u6807\u673A\u4E0A\uFF1A$PKG"
 [ -d "$CURRENT/plugins/dsh-mesh" ] || fail "\u76EE\u6807\u6210\u5458\u5F53\u524D\u7248\u672C\u91CC\u6CA1\u6709 plugins/dsh-mesh\uFF0C\u65E0\u6CD5\u6784\u9020\u5347\u7EA7\u524D\u72B6\u6001"
-NODE="$STAGE/runtime/node/bin/node"
-[ -x "$NODE" ] || NODE=$(command -v node || true)
-[ -n "$NODE" ] || fail '\u6F14\u7EC3\u9700\u8981 node\uFF08\u5305\u5185 runtime \u6216\u7CFB\u7EDF node\uFF09'
-say "\u5E73\u94FA\u5347\u7EA7\u6F14\u7EC3\uFF1A\u5728 $TEST_ROOT \u590D\u523B\u4E00\u4EFD\u672C\u673A\u6D41\u7A0B\uFF08\u65B0\u5305 $STAGE\uFF09"
-rm -rf "$TEST_ROOT"
-mkdir -p "$APP/config" "$APP/plugins" "$TEST_HOME/profiles/web" "$TEST_ROOT/tools"
-# Resolve the sandbox path once: wire-profile writes absolute link: targets, so
-# a path containing .. would never compare equal.
+[ -f "$SHARED/config/gate.env" ] || fail "\u76EE\u6807\u6210\u5458\u6CA1\u6709 $SHARED/config/gate.env\uFF0C\u4E0D\u662F dsh-mesh \u5B89\u88C5"
+# \u4E0A\u4E00\u6B21\u5931\u8D25\u7559\u4E0B\u7684\u6C99\u7BB1\u5148\u6E05\u6389\uFF0C\u907F\u514D\u6C38\u4E45\u5806\u79EF\u3002
+rm -rf "$TEST_PARENT"
+mkdir -p "$APP/config" "$APP/plugins" "$TEST_HOME/profiles/web" "$TEST_ROOT/tools" "$STAGE"
+# \u89E3\u6790\u6210\u7EDD\u5BF9\u8DEF\u5F84\uFF1Awire-profile \u5199\u7684\u662F\u7EDD\u5BF9 link: \u76EE\u6807\uFF0C\u5E26 .. \u7684\u8DEF\u5F84\u6C38\u8FDC\u6BD4\u4E0D\u76F8\u7B49\u3002
 TEST_ROOT=$(CDPATH= cd -- "$TEST_ROOT" && pwd)
 APP="$TEST_ROOT/app"
 TEST_HOME="$TEST_ROOT/home"
+STAGE="$TEST_ROOT/stage"
+say "\u5E73\u94FA\u5347\u7EA7\u6F14\u7EC3\uFF1A\u89E3\u538B\u65B0\u5305\u5E76\u590D\u523B\u76EE\u6807\u6210\u5458\u5F53\u524D\u7248\u672C\uFF08\u6C99\u7BB1 $TEST_ROOT\uFF09"
+tar -xzf "$PKG" -C "$STAGE" --strip-components=1
+NODE="$STAGE/runtime/node/bin/node"
+[ -x "$NODE" ] || NODE=$(command -v node || true)
+[ -n "$NODE" ] || fail '\u6F14\u7EC3\u9700\u8981 node\uFF08\u5305\u5185 runtime \u6216\u7CFB\u7EDF node\uFF09'
+# \u5347\u7EA7\u524D\u7684\u72B6\u6001\u5C3D\u91CF\u7528\u76EE\u6807\u6210\u5458\u7684\u771F\u5B9E\u6587\u4EF6\uFF0C\u800C\u4E0D\u662F\u53EA\u9020\u4E00\u4E2A plugins \u76EE\u5F55\uFF1A
+# \u5907\u4EFD\u8303\u56F4\uFF08code/gate/manifest/start.sh\uFF09\u3001\u771F\u5B9E gate.env\u3001\u771F\u5B9E profile \u6E05\u5355\u90FD\u8981\u80FD\u6D4B\u5230\u3002
 cp -a "$CURRENT/plugins/." "$APP/plugins/"
-printf 'DSH_GATE_PORT=18080\\nDSH_GATE_PASSWORD=test-upgrade\\nDSH_HOME=%s\\n' "$TEST_HOME" > "$APP/config/gate.env"
+for item in code gate locale manifest.json start.sh start-dsh.sh start-interop.sh; do
+  if [ -e "$CURRENT/$item" ]; then cp -a "$CURRENT/$item" "$APP/"; fi
+done
+cp -a "$SHARED/config/gate.env" "$APP/config/gate.env"
+PROFILE_SRC="$SHARED/home/profiles/web"
+for file in package.json cordis.patch.yml; do
+  if [ -f "$PROFILE_SRC/$file" ]; then cp -a "$PROFILE_SRC/$file" "$TEST_HOME/profiles/web/"; fi
+done
+# \u6C99\u7BB1\u7528\u81EA\u5DF1\u7684 DSH_HOME \u548C\u7A7A\u95F2\u7AEF\u53E3\uFF0C\u522B\u78B0\u6210\u5458\u771F\u5B9E\u7684 80/8765\u3002
+sed -i -e "s|^DSH_HOME=.*|DSH_HOME=$TEST_HOME|" -e "s|^DSH_GATE_PORT=.*|DSH_GATE_PORT=18080|" "$APP/config/gate.env"
+grep -q '^DSH_GATE_PORT=' "$APP/config/gate.env" || printf 'DSH_GATE_PORT=18080\\n' >> "$APP/config/gate.env"
+grep -q '^DSH_HOME=' "$APP/config/gate.env" || printf 'DSH_HOME=%s\\n' "$TEST_HOME" >> "$APP/config/gate.env"
 BEFORE=$("$NODE" -p "require('$APP/plugins/dsh-mesh/package.json').version" 2>/dev/null || echo unknown)
-say "\u5347\u7EA7\u524D\u7684\u6C99\u7BB1\u7248\u672C\uFF1A$BEFORE\uFF08\u4EE5\u6587\u4EF6\u5185\u5BB9\u800C\u975E\u7248\u672C\u53F7\u5224\u65AD\u662F\u5426\u771F\u7684\u8986\u76D6\uFF09"
-cp "$STAGE/code/deploy/upgrade-local.sh" "$TEST_ROOT/tools/upgrade-local.sh"
-cp "$STAGE/code/deploy/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.mjs"
+say "\u5347\u7EA7\u524D\u7684\u6C99\u7BB1\u7248\u672C\uFF1A$BEFORE\uFF08\u4EE5\u6587\u4EF6\u5185\u5BB9\u5224\u65AD\u662F\u5426\u771F\u7684\u8986\u76D6\uFF09"
+# \u811A\u672C\u6765\u6E90\u4E0E\u751F\u4EA7\u4E00\u81F4\uFF1A\u4F18\u5148\u7528\u5DF2\u5B89\u88C5\u63D2\u4EF6\u91CC\u7684\u90A3\u4EFD\uFF08runner.mjs \u4E5F\u662F\u8FD9\u4E48\u505A\u7684\uFF09\uFF0C
+# \u8001\u7248\u672C\u63D2\u4EF6\u6CA1\u6709 code/deploy \u65F6\u624D\u9000\u56DE\u65B0\u5305\u91CC\u7684\u3002
+PLUGIN_DEPLOY="$CURRENT/plugins/dsh-mesh/code/deploy"
+if [ -f "$PLUGIN_DEPLOY/upgrade-local.sh" ]; then
+  SCRIPT_SRC="$PLUGIN_DEPLOY/upgrade-local.sh"
+  say '\u811A\u672C\u6765\u6E90\uFF1A\u5DF2\u5B89\u88C5\u63D2\u4EF6\uFF08\u4E0E\u300C\u5347\u7EA7\u300D\u540C\u6E90\uFF09'
+  if [ -f "$STAGE/code/deploy/upgrade-local.sh" ]; then
+    A=$(sha256sum "$SCRIPT_SRC" | cut -d' ' -f1)
+    B=$(sha256sum "$STAGE/code/deploy/upgrade-local.sh" | cut -d' ' -f1)
+    if [ "$A" != "$B" ]; then say '\u6CE8\u610F\uFF1A\u5DF2\u5B89\u88C5\u63D2\u4EF6\u7684\u811A\u672C\u4E0E\u65B0\u5305\u91CC\u7684\u4E0D\u4E00\u81F4\uFF0C\u6309\u751F\u4EA7\u884C\u4E3A\u4EE5\u5DF2\u5B89\u88C5\u7684\u4E3A\u51C6'; fi
+  fi
+else
+  SCRIPT_SRC="$STAGE/code/deploy/upgrade-local.sh"
+  say '\u811A\u672C\u6765\u6E90\uFF1A\u65B0\u5305\uFF08\u5DF2\u5B89\u88C5\u63D2\u4EF6\u662F\u65E9\u4E8E\u4FEE\u590D\u7684\u7248\u672C\uFF0C\u6CA1\u6709 code/deploy\uFF09'
+fi
+[ -f "$SCRIPT_SRC" ] || fail '\u5DF2\u5B89\u88C5\u63D2\u4EF6\u548C\u65B0\u5305\u91CC\u90FD\u6CA1\u6709 code/deploy/upgrade-local.sh\uFF0C\u8FD9\u4E2A\u5305\u505A\u4E0D\u4E86\u5E73\u94FA\u5347\u7EA7'
+cp "$SCRIPT_SRC" "$TEST_ROOT/tools/upgrade-local.sh"
+if [ -f "$(dirname "$SCRIPT_SRC")/wire-profile.mjs" ]; then
+  cp "$(dirname "$SCRIPT_SRC")/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.mjs"
+elif [ -f "$STAGE/code/deploy/wire-profile.mjs" ]; then
+  cp "$STAGE/code/deploy/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.mjs"
+else
+  fail '\u627E\u4E0D\u5230 wire-profile.mjs\uFF08\u811A\u672C\u76EE\u5F55\u548C\u65B0\u5305\u91CC\u90FD\u6CA1\u6709\uFF09'
+fi
 chmod +x "$TEST_ROOT/tools/upgrade-local.sh"
-say '\u6267\u884C\u5E73\u94FA\u5347\u7EA7\u811A\u672C\uFF08--no-restart\uFF1A\u5907\u4EFD\u3001\u8986\u76D6\u3001\u63A5\u7EBF\uFF1B\u4E0D\u78B0\u4EFB\u4F55\u670D\u52A1\uFF09'
+say '\u7B2C\u4E00\u6B65\uFF1A\u6B63\u5E38\u5347\u7EA7\u6C99\u7BB1\uFF08--no-restart\uFF1A\u5907\u4EFD\u3001\u8986\u76D6\u3001\u63A5\u7EBF\uFF1B\u4E0D\u78B0\u4EFB\u4F55\u670D\u52A1\uFF09'
 bash "$TEST_ROOT/tools/upgrade-local.sh" --app-root "$APP" --stage "$STAGE" --dsh-home "$TEST_HOME" --port 18080 --no-restart
 say '\u6838\u5BF9\u5347\u7EA7\u7ED3\u679C'
 BACKUP_DIR=$(ls -1d "$APP/.upgrade-backup"/* 2>/dev/null | head -n1 || true)
 [ -n "$BACKUP_DIR" ] || fail '\u5347\u7EA7\u6CA1\u6709\u7559\u4E0B .upgrade-backup \u5907\u4EFD'
-[ -f "$BACKUP_DIR/plugins/dsh-mesh/package.json" ] || fail "\u5907\u4EFD\u91CC\u6CA1\u6709\u5347\u7EA7\u524D\u7684\u63D2\u4EF6\uFF1A$BACKUP_DIR"
-cmp -s "$BACKUP_DIR/plugins/dsh-mesh/index.js" "$CURRENT/plugins/dsh-mesh/index.js"   || fail '\u5907\u4EFD\u91CC\u7684\u63D2\u4EF6\u4E0E\u5347\u7EA7\u524D\u4E0D\u4E00\u81F4\uFF1A\u5907\u4EFD\u6CA1\u6709\u771F\u6B63\u6267\u884C'
-cmp -s "$APP/plugins/dsh-mesh/index.js" "$STAGE/plugins/dsh-mesh/index.js"   || fail '\u8986\u76D6\u540E\u7684\u63D2\u4EF6\u4E0E\u65B0\u5305\u4E0D\u4E00\u81F4\uFF1A\u65B0\u6587\u4EF6\u6CA1\u6709\u771F\u6B63\u843D\u5730'
+for item in plugins code gate manifest.json; do
+  if [ -e "$CURRENT/$item" ]; then
+    [ -e "$BACKUP_DIR/$item" ] || fail "\u5907\u4EFD\u7F3A $item\uFF1A\u5E73\u94FA\u5347\u7EA7\u7684\u5907\u4EFD\u8303\u56F4\u4E0D\u5BF9"
+  fi
+done
+cmp -s "$BACKUP_DIR/plugins/dsh-mesh/index.js" "$CURRENT/plugins/dsh-mesh/index.js" || fail '\u5907\u4EFD\u91CC\u7684\u63D2\u4EF6\u4E0D\u662F\u5347\u7EA7\u524D\u90A3\u4E00\u4EFD'
+cmp -s "$APP/plugins/dsh-mesh/index.js" "$STAGE/plugins/dsh-mesh/index.js" || fail '\u8986\u76D6\u540E\u7684\u63D2\u4EF6\u4E0D\u662F\u65B0\u5305\u90A3\u4E00\u4EFD'
 AFTER=$("$NODE" -p "require('$APP/plugins/dsh-mesh/package.json').version")
-say "\u5347\u7EA7\u540E\u7684\u6C99\u7BB1\u7248\u672C\uFF1A$AFTER\uFF1B\u5907\u4EFD\u4E0E\u8986\u76D6\u90FD\u6309\u5347\u7EA7\u524D\u7684\u72B6\u6001\u9010\u5B57\u8282\u6838\u5BF9\u8FC7"
+say "\u5347\u7EA7\u540E\u7684\u6C99\u7BB1\u7248\u672C\uFF1A$AFTER\uFF1B\u5907\u4EFD\u4E0E\u8986\u76D6\u9010\u5B57\u8282\u6838\u5BF9\u8FC7"
 LINK=$("$NODE" -e "const p=require('$TEST_HOME/profiles/web/package.json');process.stdout.write(String((p.dependencies||{})['@local/dsh-mesh']||''))")
 [ "$LINK" = "link:$APP/plugins/dsh-mesh" ] || fail "profile \u7684 @local/dsh-mesh \u63A5\u7EBF\u4E0D\u5BF9\uFF1A$LINK"
 say "profile \u63A5\u7EBF\uFF1A$LINK"
@@ -2351,10 +2411,31 @@ if [ -d "$STAGE/plugins/xl" ]; then
   [ -e "$TEST_HOME/profiles/web/node_modules/xl" ] || fail '\u65B0\u5305\u5E26\u4E86 xl\uFF0C\u4F46 profile \u6CA1\u6709\u63A5\u4E0A xl'
   say '\u968F\u5305\u63D2\u4EF6 xl \u5DF2\u63A5\u5165 profile'
 fi
-[ -f "$APP/manifest.json" ] || fail '\u8986\u76D6\u540E\u7F3A\u5C11 manifest.json'
-say "\u6E05\u5355\u7248\u672C\uFF1A$("$NODE" -p "require('$APP/manifest.json').version")"
-rm -rf "$TEST_ROOT"
-say '\u6F14\u7EC3\u901A\u8FC7\uFF1A\u65B0\u5305\u80FD\u5728\u4E00\u4EFD\u5E73\u94FA\u5B89\u88C5\u4E0A\u5B8C\u6210\u5907\u4EFD\u3001\u8986\u76D6\u4E0E\u63A5\u7EBF\uFF1B\u6C99\u7BB1\u5DF2\u6E05\u7406'
+# \u7B2C\u4E8C\u6B65\uFF1A\u6CE8\u5165\u4E00\u6B21\u201C\u63A5\u7EBF\u201D\u5931\u8D25\uFF0C\u9A8C\u8BC1 upgrade-local.sh \u7684 restore() \u80FD\u628A
+# \u5DF2\u7ECF\u8986\u76D6\u8FC7\u7684\u6587\u4EF6\u8FD8\u539F\u3002\u6CE8\u5165\u65B9\u5F0F\u662F\u628A wire-profile \u6362\u6210\u5FC5\u5B9A\u5931\u8D25\u7684\u5C0F\u811A\u672C\uFF0C
+# \u5B83\u4F1A\u7559\u4E0B\u4E00\u4E2A\u6807\u8BB0\uFF0C\u8BC1\u660E\u8986\u76D6\u5DF2\u7ECF\u53D1\u751F\u3001\u5931\u8D25\u70B9\u5728\u63A5\u7EBF\u3002
+say '\u7B2C\u4E8C\u6B65\uFF1A\u6CE8\u5165\u63A5\u7EBF\u5931\u8D25\uFF0C\u9A8C\u8BC1 restore() \u80FD\u8FD8\u539F'
+cp -a "$STAGE/." "$TEST_ROOT/bad/"
+printf '// bad stage
+' > "$TEST_ROOT/bad/plugins/dsh-mesh/index.js"
+mv "$TEST_ROOT/tools/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.real"
+cat > "$TEST_ROOT/tools/wire-profile.mjs" <<'DSH_MESH_REHEARSE_STUB'
+import { writeFileSync } from 'node:fs'
+writeFileSync(new URL('../wiring-ran', import.meta.url), 'ran')
+process.exit(3)
+DSH_MESH_REHEARSE_STUB
+chmod +x "$TEST_ROOT/tools/wire-profile.mjs"
+MARK_BEFORE=$(sha256sum "$APP/plugins/dsh-mesh/index.js" "$APP/manifest.json" "$APP/config/gate.env")
+if bash "$TEST_ROOT/tools/upgrade-local.sh" --app-root "$APP" --stage "$TEST_ROOT/bad" --dsh-home "$TEST_HOME" --port 18080 --no-restart; then
+  fail '\u6CE8\u5165\u5931\u8D25\u540E\u811A\u672C\u5C45\u7136\u6210\u529F\u4E86\uFF1Arestore() \u8DEF\u5F84\u6CA1\u6709\u88AB\u6267\u884C'
+fi
+mv "$TEST_ROOT/tools/wire-profile.real" "$TEST_ROOT/tools/wire-profile.mjs"
+[ -f "$TEST_ROOT/wiring-ran" ] || fail '\u6CE8\u5165\u7684\u5931\u8D25\u6CA1\u6709\u8D70\u5230\u63A5\u7EBF\u6B65\u9AA4\uFF1A\u5907\u4EFD/\u8986\u76D6\u6CA1\u6709\u88AB\u9A8C\u8BC1'
+MARK_AFTER=$(sha256sum "$APP/plugins/dsh-mesh/index.js" "$APP/manifest.json" "$APP/config/gate.env")
+[ "$MARK_BEFORE" = "$MARK_AFTER" ] || fail 'restore() \u6CA1\u6709\u628A\u8986\u76D6\u8FC7\u7684\u6587\u4EF6\u8FD8\u539F'
+[ -f "$APP/plugins/dsh-mesh/index.js" ] || fail 'restore() \u4E4B\u540E index.js \u6CA1\u6709\u88AB\u8FD8\u539F\u6210\u6587\u4EF6'
+say 'restore() \u5DF2\u9A8C\u8BC1\uFF1A\u63A5\u7EBF\u5931\u8D25\u540E\u6587\u4EF6\u56DE\u5230\u5347\u7EA7\u524D'
+say '\u6F14\u7EC3\u901A\u8FC7\uFF1A\u5907\u4EFD\u3001\u8986\u76D6\u3001\u63A5\u7EBF\u3001\u5931\u8D25\u8FD8\u539F\u90FD\u6309\u672C\u673A\u300C\u5347\u7EA7\u300D\u7684\u811A\u672C\u8D70\u4E86\u4E00\u904D\uFF1B\u6C99\u7BB1\u5DF2\u6E05\u7406'
 `;
 }
 function buildLinuxRollbackScript(plan) {
@@ -3200,6 +3281,15 @@ var DeployManager = class {
       } else {
         await log("no deployer account to share (DSH_HOME/.credentials.yaml is missing)");
       }
+      if (plan.test === true && plan.os === "linux") {
+        state.phase = "rehearse";
+        meter("\u6F14\u7EC3\u5E73\u94FA\u5347\u7EA7", { percent: 99, indeterminate: true });
+        await mark("rehearse", "running");
+        await log("rehearse: run the flat upgrade (backup, copy, wiring, restore) in a sandbox on the member");
+        const rehearsed = this.scripts({ ...plan, preExtracted: false });
+        await runner.script(rehearsed.rehearse, plan.os, (line) => note("rehearse", line));
+        await mark("rehearse", "succeeded");
+      }
       state.phase = "prepare";
       await mark("prepare", "running");
       await log("prepare: extract, shared dirs, service definitions (no switch)");
@@ -3247,14 +3337,6 @@ var DeployManager = class {
       });
       if (plan.os === "linux" && entries > 0) extractProgress(entries, entries, true);
       await mark("prepare", "succeeded");
-      if (plan.test === true && scripts.rehearse !== null) {
-        state.phase = "rehearse";
-        meter("\u6F14\u7EC3\u5E73\u94FA\u5347\u7EA7", { percent: 99, indeterminate: true });
-        await mark("rehearse", "running");
-        await log("rehearse: run the flat upgrade (backup, copy, profile) in a sandbox on the member");
-        await runner.script(scripts.rehearse, plan.os, (line) => note("rehearse", line));
-        await mark("rehearse", "succeeded");
-      }
       state.phase = "activate";
       meter("\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", { percent: 99, indeterminate: true });
       await mark("activate", "running");
@@ -3331,6 +3413,10 @@ var DeployManager = class {
     const dir = path5.join(this.dataDir, state.id);
     const runner = await runnerStatus(dir);
     if (runner.alive) return state;
+    if (runner.runner === null) {
+      const created = Date.parse(String(state.createdAt ?? ""));
+      if (!Number.isFinite(created) || Date.now() - created < RUNNER_START_GRACE_MS) return state;
+    }
     if (state.status === "queued") {
       const created = Date.parse(String(state.createdAt ?? ""));
       if (Number.isFinite(created) && Date.now() - created < RUNNER_START_GRACE_MS) return state;
@@ -3352,6 +3438,9 @@ var DeployManager = class {
       state.status = "failed";
       state.phase = "failed";
       state.error = state.error ?? "deployment was interrupted before it finished";
+      const why = runner.runner === null ? "runner.json was unreadable" : `runner pid ${String(runner.runner.pid)} is gone`;
+      await appendDeployLog(dir, `settle: no live runner (${why}); the job is marked failed`).catch(() => {
+      });
     }
     state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     await this.#save(path5.join(dir, "job.json"), state).catch(() => {
@@ -4187,6 +4276,25 @@ function packageVersion() {
     return "0.0.0";
   }
 }
+function assertTestUpgradeTarget(target, options = {}) {
+  if (target === null || target === void 0) {
+    throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u9700\u8981\u4E00\u4E2A\u6210\u5458\uFF1A\u8BF7\u4ECE\u6210\u5458\u5217\u8868\u91CC\u9009\u4E00\u4E2A\u5DF2\u5B89\u88C5 DSH \u7684 Linux \u6210\u5458");
+  }
+  if (target.kind === "self" || target.id === "local") {
+    throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u8981\u5728\u522B\u7684\u6210\u5458\u4E0A\u8DD1\uFF1B\u672C\u673A\u5347\u7EA7\u8BF7\u76F4\u63A5\u7528\u300C\u5347\u7EA7\u300D");
+  }
+  if (options.packageOs === "windows") {
+    throw new Error("\u9009\u7684\u662F Windows \u90E8\u7F72\u5305\uFF0C\u4E0D\u80FD\u7528\u5728 Linux \u6210\u5458\u4E0A\uFF1B\u6D4B\u8BD5\u5347\u7EA7\u76EE\u524D\u53EA\u652F\u6301 Linux");
+  }
+  const memberOs = /win/iu.test(target.system?.platform ?? "") ? "windows" : "linux";
+  if (memberOs !== "linux") {
+    throw new Error(`\u6210\u5458 ${String(target.name ?? target.id)} \u662F ${memberOs}\uFF0C\u6D4B\u8BD5\u5347\u7EA7\u76EE\u524D\u53EA\u652F\u6301 Linux \u6210\u5458\uFF08\u6F14\u7EC3\u811A\u672C\u662F bash\uFF09`);
+  }
+  if (target.dsh !== true) {
+    throw new Error(`\u6210\u5458 ${String(target.name ?? target.id)} \u8FD8\u6CA1\u6709\u5B89\u88C5 DSH\uFF0C\u6CA1\u6709\u53EF\u5347\u7EA7\u7684\u5B89\u88C5\uFF1B\u8BF7\u5148\u7528\u300C\u90E8\u7F72\u300D`);
+  }
+  return target;
+}
 var MeshService = class {
   /**
    * @param {{dataDir: string, config?: object, log?: (line: string) => void, spawnRunner?: Function}} options service input.
@@ -4987,11 +5095,10 @@ var MeshService = class {
     if (member !== void 0) {
       const os7 = /win(?:dows)?/iu.test(path9.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
       const identity = { id: member.id, name: member.name, ip: member.ip };
+      if (test) assertTestUpgradeTarget(member, { packageOs: os7 });
       if (member.kind === "self" || member.id === "local") {
-        if (test) throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u8981\u5728\u522B\u7684\u6210\u5458\u4E0A\u8DD1\uFF1B\u672C\u673A\u5347\u7EA7\u8BF7\u76F4\u63A5\u7528\u300C\u5347\u7EA7\u300D");
         return this.#startLocalJob({ member, packagePath, os: os7, mode, identity });
       }
-      if (test && os7 !== "linux") throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u76EE\u524D\u53EA\u652F\u6301 Linux \u6210\u5458\uFF08\u5E73\u94FA\u5E03\u5C40\u7684\u6F14\u7EC3\u811A\u672C\u662F bash\uFF09");
       const deployRequest = await this.#memberDeployRequest(member, packagePath, os7);
       const job2 = await this.#startEngineJob({
         request: { ...deployRequest, member: member.id, test },
@@ -5001,6 +5108,7 @@ var MeshService = class {
       return { ok: true, job: job2, member: identity, packagePath, layout: "bluegreen" };
     }
     if (host === "") throw new Error("host is required");
+    if (test) throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u9700\u8981\u4E00\u4E2A\u6210\u5458\uFF08\u8981\u5728\u6210\u5458\u7684\u5B89\u88C5\u4E0A\u6F14\u7EC3\uFF09\uFF0C\u4E0D\u80FD\u76F4\u63A5\u7ED9\u88F8 SSH \u4E3B\u673A");
     const os6 = /win(?:dows)?/iu.test(path9.basename(packagePath)) ? "windows" : "linux";
     const appRoot = os6 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
     const job = await this.#startEngineJob({ request: { host, package: packagePath, os: os6, appRoot }, member: null, mode });

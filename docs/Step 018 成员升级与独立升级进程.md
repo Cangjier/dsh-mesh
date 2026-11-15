@@ -75,13 +75,19 @@ profile 接线会扫描 `<root>/plugins/*` 找随包插件（现在有 `xl`）�
 
 蓝绿成员升级和本机平铺升级是两条不同的代码路径。只在成员上验证，平铺那条路径一行都不会跑——2026-11-15 的事故就是这么来的（成员升级全绿，网关点升级直接失败）。
 
-「测试升级」按钮（成员页，只对**其他** Linux 成员显示）把一个 job 分成两段：
+「测试升级」按钮（成员页，只对**其他** Linux 成员显示）把一个 job 分成两段，并且**演练放在 prepare 之前**，因为 prepare 会改写成员真实的 profile 和 `gate.env`：
 
-1. **平铺流程演练**：在目标成员上建 `<appRoot>/../.dsh-mesh-test/<release>` 沙箱，用它**当前版本**的 `plugins/*` 拼出一份平铺安装，把新包里的 `code/deploy/upgrade-local.sh`、`wire-profile.mjs` 复制到沙箱 `tools/`（与 `runner.mjs` 同形：脚本先复制再执行，包内容用 `--stage` 指定），跑 `--no-restart`。随后逐字节核对：备份里是升级前的文件、覆盖后是新包的文件、profile 接到了沙箱 app、随包插件（xl）已接入、manifest 存在，最后删沙箱。整个演练不会碰目标成员的单元、端口和服务。
-2. **真实升级**：按目标成员自己的布局（蓝绿）走完整流程——prepare → activate（重启服务，gateway 最后）→ 健康检查，失败按 `previous` 回滚。
+1. **平铺流程演练**（`rehearse`）：在目标成员上把包解压到 `<appRoot>/../.dsh-mesh-test/<release>/stage`，用**该成员当前版本**的 `plugins/`、`code/`、`gate/`、`manifest.json`、`start.sh` 加上它真实的 `shared/config/gate.env` 和 `shared/home/profiles/web/{package.json,cordis.patch.yml}` 拼出一份平铺安装；沙箱的 `DSH_HOME` 与端口（18080）都改到沙箱里。然后跑**已安装插件里那份** `code/deploy/upgrade-local.sh`（与 `runner.mjs` 同源，老版本插件没有 `code/deploy` 时才退回包内那份，并在日志里说明），脚本同样先复制到沙箱 `tools/` 再执行，包内容用 `--stage` 指定。
+   - 第一步正常升级，核对：备份里是升级前的文件（`plugins/` 与 `code/gate/manifest.json` 都要在）、覆盖后是新包的文件、profile 接的是沙箱 app、随包插件（xl）已接入、manifest 存在。
+   - 第二步注入一次接线失败（把 `wire-profile.mjs` 换成必定失败的桩，桩会留下标记证明覆盖确实发生过），验证 `upgrade-local.sh` 的 `restore()` 把文件还原。
+   - 全程不重启、不安装任何单元，不碰成员真实的端口与服务。
+2. **真实升级**：演练通过后才按目标成员自己的布局（蓝绿）走 prepare → activate（重启服务，gateway 最后）→ 健康检查，失败按 `previous` 回滚。
 
-演练失败时 job 停在 `failed`，**不会**继续 activate，所以一个坏包不会先把成员升坏再去验证。两段用的是同一个包、同一份脚本；演练那一段就是本机「升级」执行的东西。
+演练失败时 job 停在 `failed`，**不会**继续，成员保持原样。失败留下的沙箱会保留供排查（路径写在日志里），下次演练开始时先整目录清掉，不会累积。
 
+**它覆盖不到什么**：平铺升级的第 4–6 步（重装 `dsh-web-app`/`dsh-web-gate` 单元、健康检查、失败回滚）在成员上跑不了——`install-split.sh` 写死 `/etc/systemd/system/dsh-web-app.service` 并重启它，对着沙箱跑会把成员的真实单元改成指向沙箱。想 100% 覆盖这几步，需要一个专门的平铺测试机（或容器），把 unit 名/端口参数化之后才行。演练覆盖的是这次事故的那类问题：包里缺 `code/deploy`、备份范围不对、profile 接线错、覆盖/还原不干净。
+
+## 面板
 ## 面板
 
 - **成员** 的 `操作` 列：**只有本机（`当前` 行）显示「升级」**——升级会重启目标机器上的 dsh / gate，这个决定应该由那台机器自己的面板来做，网关面板只负责给自己换包；未安装的远程成员仍然显示「部署」（首次安装），已安装的远程成员只保留「切换」。

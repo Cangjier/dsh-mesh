@@ -108,6 +108,10 @@ test('Linux prepare extracts and prepares but never restarts a service', async (
     assert.match(script, /99-dsh-mesh-net\.conf/)
     assert.match(script, /net\.ipv4\.tcp_congestion_control=bbr/)
     assert.match(script, /sysctl --system >\/dev\/null 2>&1 \|\| true/)
+    // Boot persistence for the tunnel: a member that only joined has no unit,
+    // so a reboot used to leave it offline. Enable, never restart.
+    assert.match(script, /systemctl enable "wg-quick@\$iface"/)
+    assert.match(script, /Managed by the dsh-wireguard client bootstrap/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

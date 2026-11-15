@@ -210,9 +210,12 @@ function etaText(speed: number, remaining: number): string {
 /** Detail view for one deployment: upload meter, steps, and log tail. */
 /** Share of the whole job each step owns, so one number covers upload → live. */
 const DEPLOY_STEP_SHARE: Record<string, [number, number]> = {
-  upload: [0, 60],
-  prepare: [60, 90],
-  activate: [90, 100],
+  upload: [0, 55],
+  // 测试升级在 prepare 之前多一段演练（解压 + 两次 300 MB 拷贝），把它算进来，
+  // 否则进度条会在演练的几分钟里一直停在 0%。
+  rehearse: [55, 80],
+  prepare: [80, 92],
+  activate: [92, 100],
 }
 
 /**

@@ -57,6 +57,18 @@
 
 `--no-restart` 只做 1–3 步（验证脚本本身用），`DSH_MESH_UPGRADE_NO_RESTART=1` 让 runner 透传这个开关。
 
+### 平铺升级用哪份脚本、哪份包内容
+
+跑升级的脚本**不在包里**，而是当前装着的那份插件里的 `code/deploy/upgrade-local.sh`：
+
+- runner 先把脚本和 `wire-profile.mjs` 复制到 `<job>/tools/` 再执行，因为接下来的覆盖步骤会重写 `plugins/dsh-mesh`，而 bash 是边读边执行的，直接跑安装目录里的那份等于在解释器脚下改文件；
+- 包内容用 `--stage <解压目录>` 显式指定，脚本默认的「脚本往上两级就是包」只在从解压目录里手跑时成立；
+- 好处是脚本和 runner 永远同版本，修脚本不用重新打 300 MiB 的包（rc.3 就是因为包里没有 `code/deploy` 直接失败）。
+
+包里必须带的东西（`assembleWebPackage` / `repack` 都复制）：`code/dsh-service/`（否则装完只有单服务、平铺升级也没法重装单元）、`code/deploy/`（包里自带一份，用于手跑兜底）、`start-dsh.sh`、以及 `plugins/dsh-mesh/code/deploy`。
+
+profile 接线会扫描 `<root>/plugins/*` 找随包插件（现在有 `xl`），但会跳过备份目录：`plugins/dsh-mesh.bak-20261111-1541` 里留着同名 `@local/dsh-mesh`，接错了就会把面板指到旧代码上。
+
 布局是自动判断的：从插件目录往上找，遇到 `<root>/current` + `<root>/releases` 就是蓝绿，遇到 `<root>/config/gate.env` + `<root>/plugins/dsh-mesh` 就是平铺。远程目标由 `probeTarget()` 读 systemd unit 的 `WorkingDirectory`（并去掉结尾的 `/current`）。
 
 ## 面板

@@ -1224,9 +1224,12 @@ function Panel({ ctx }: { ctx: any }) {
             </Button>
           )
         }
-        // Every installed member — including this machine — can be upgraded
-        // from here; an installed member also keeps its 切换 button.
-        const installed = member.dsh || member.kind === 'self'
+        // Only this machine can be upgraded from here: an upgrade restarts the
+        // services of the member it targets, and that is a decision the member's
+        // own panel should own. Remote members that are not installed yet can
+        // still be deployed to (首次安装), and installed ones keep 切换.
+        const isSelf = member.kind === 'self'
+        const installed = member.dsh || isSelf
         const canSwitch = member.dsh && gateAvailable && member.port !== null && member.id !== currentTarget
         return (
           <span className="dsh-pw-member-actions">
@@ -1241,8 +1244,8 @@ function Panel({ ctx }: { ctx: any }) {
                 切换
               </Button>
             ) : null}
-            {installed ? (
-              <Tooltip title="选择部署包，把这一台升级到该版本">
+            {isSelf ? (
+              <Tooltip title="选择部署包，把本机升级到该版本">
                 <Button
                   size="small"
                   icon={<CloudUploadOutlined />}
@@ -1251,7 +1254,7 @@ function Panel({ ctx }: { ctx: any }) {
                   升级
                 </Button>
               </Tooltip>
-            ) : (
+            ) : installed ? null : (
               <Button
                 size="small"
                 icon={<CloudDownloadOutlined />}
@@ -1679,10 +1682,10 @@ function Panel({ ctx }: { ctx: any }) {
           <Alert
             type="info"
             showIcon
-            message={deployTarget?.kind === 'self' ? '本机升级会重启当前面板所在的服务' : '升级在独立进程里执行'}
-            description={deployTarget?.kind === 'self'
+            message={deployIntent === 'upgrade' ? '本机升级会重启当前面板所在的服务' : '部署包会安装到成员上并启动服务'}
+            description={deployIntent === 'upgrade'
               ? '升级进程用 systemd 临时单元单独运行，dsh-web / gate 重启不会打断它；本页面会断开约 30–60 秒，之后自动恢复并显示升级结果。'
-              : '升级进程与面板进程分离：面板或网关重启都不会中断升级；成员服务重启期间面板会短暂断开。'}
+              : '部署包从本机上传到成员，安装完成后成员上的 dsh / gate / 控制服务会重启一次；进度在任务对话框里查看。'}
           />
           {deployTarget !== null ? (() => {
             const job = latestJobOf(deployTarget)

@@ -274,19 +274,21 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
    * Truncate one finished job's log.
    *
    * The log is where a failed build explains itself, so a running job keeps
-   * its log; the button is disabled until it settles.
+   * its log; the button stays enabled for a finished job even when the log is
+   * already empty, so a click always answers instead of silently doing nothing.
    */
   const clearLog = useCallback(async () => {
     if (logJob === null) return
+    const hadLines = logLines.some(line => line.trim() !== '')
     try {
       await api.clearBuildLog(logJob.id)
       setLogLines([])
       setLogCleared(true)
-      messageApi.success('日志已清空')
+      messageApi.success(hadLines ? '日志已清空' : '日志本来就是空的')
     } catch (failure) {
       messageApi.error(errorText(failure))
     }
-  }, [logJob, messageApi])
+  }, [logJob, logLines, messageApi])
 
   /** Empty every finished job's log in one go (the card's toolbar button). */
   const clearAllLogs = useCallback(async () => {
@@ -615,10 +617,10 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
               okText="清空"
               cancelText="取消"
               okButtonProps={{ danger: true }}
-              disabled={activeJob === null || activeJob.status === 'running' || visibleLines.length === 0}
+              disabled={activeJob === null || activeJob.status === 'running'}
               onConfirm={() => { void clearLog() }}
             >
-              <Button danger disabled={activeJob === null || activeJob.status === 'running' || visibleLines.length === 0}>清空日志</Button>
+              <Button danger disabled={activeJob === null || activeJob.status === 'running'}>清空日志</Button>
             </Popconfirm>
             <Button onClick={() => setLogJob(null)}>关闭</Button>
           </Space>
@@ -644,7 +646,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
               status={activeJob.status === 'failed' ? 'exception' : activeJob.status === 'done' ? 'success' : 'active'}
             />
             <pre className="dsh-pw-deploy-log" ref={logRef}>
-              {visibleLines.length > 0 ? visibleLines.join('\n') : logCleared ? '日志已清空' : logLoading ? '读取日志…' : '等待日志…'}
+              {visibleLines.length > 0 ? visibleLines.join('\n') : logCleared ? '日志已清空' : logLoading ? '读取日志…' : activeJob.status === 'running' ? '等待日志…' : '这个任务没有日志'}
             </pre>
           </Space>
         )}

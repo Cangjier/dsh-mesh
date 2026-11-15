@@ -1955,6 +1955,14 @@ function buildLinuxPrepareScript(plan) {
   fi
 fi
 `;
+  const wgPersist = plan.os === "linux" ? `for conf in /etc/wireguard/*.conf; do
+  [ -f "$conf" ] || continue
+  grep -q '^# Managed by the dsh-wireguard client bootstrap' "$conf" || continue
+  iface=$(basename "$conf" .conf)
+  systemctl enable "wg-quick@$iface" >/dev/null 2>&1 || true
+  echo "wg-quick@$iface enabled for boot"
+done
+` : "";
   return `#!/usr/bin/env bash
 set -euo pipefail
 APP_ROOT=${sh(plan.appRoot)}
@@ -2027,7 +2035,7 @@ if [ ! -x "$NODE_BIN" ]; then NODE_BIN="$NEW/runtime/node/node"; fi
 if [ ! -x "$NODE_BIN" ]; then echo "missing the node binary under $NEW/runtime/node" >&2; exit 1; fi
 chmod +x "$NODE_BIN" 2>/dev/null || true
 "$NODE_BIN" --check "$NEW/gate/server.mjs"
-${netTune}"$NODE_BIN" - "$SHARED/home/profiles/web" "$NEW/plugins/dsh-mesh" ${llmArgs}<<'DSH_MESH_PROFILE_WIRE'
+${netTune}${wgPersist}"$NODE_BIN" - "$SHARED/home/profiles/web" "$NEW/plugins/dsh-mesh" ${llmArgs}<<'DSH_MESH_PROFILE_WIRE'
 ${PROFILE_WIRE_SCRIPT}
 DSH_MESH_PROFILE_WIRE
 # The deployer's account grants make this member signed in without a QR scan.

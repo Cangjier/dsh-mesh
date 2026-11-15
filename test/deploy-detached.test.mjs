@@ -318,6 +318,8 @@ test('upgrade-local.sh replaces files, keeps config and stops before the restart
       '--no-restart',
     ], { env: { ...process.env, PATH: `${stub}:${process.env.PATH ?? ''}` } })
     assert.match(result.stdout, /--no-restart/u)
+    // A rehearsal must not arm the acceptance page: no service was restarted.
+    assert.equal(existsSync(path.join(root, 'data', 'upgrade-pending.json')), false)
     // New file arrived, config stayed.
     assert.equal(JSON.parse(await readFile(path.join(root, 'plugins', 'dsh-mesh', 'package.json'), 'utf8')).version, '0.0.2-new')
     assert.equal(JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8')).version, '0.0.2-new')

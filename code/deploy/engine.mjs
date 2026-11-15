@@ -1012,6 +1012,41 @@ if [ -n "$OLD" ]; then
 fi
 ln -sfn "$NEW" "$CURRENT"
 
+# After an upgrade the member's gate shows the acceptance page first. A first
+# install has no previous release and nothing to accept, so it writes nothing.
+PENDING="$SHARED/data/upgrade-pending.json"
+rm -f "$PENDING" 2>/dev/null || true
+if [ -n "$OLD" ] && grep -q '__gate/fallback' "$NEW/gate/server.mjs" 2>/dev/null; then
+  MARKER_NODE="$NEW/runtime/node/bin/node"
+  [ -x "$MARKER_NODE" ] || MARKER_NODE="$NEW/runtime/node/node"
+  [ -x "$MARKER_NODE" ] || MARKER_NODE=$(command -v node || true)
+  if [ -n "$MARKER_NODE" ]; then
+    FROM_VERSION=$("$MARKER_NODE" -e 'try{process.stdout.write(String(require(process.argv[1]).version||""))}catch(e){}' "$OLD/manifest.json" 2>/dev/null || true)
+    TO_VERSION=$("$MARKER_NODE" -e 'try{process.stdout.write(String(require(process.argv[1]).version||""))}catch(e){}' "$NEW/manifest.json" 2>/dev/null || true)
+    FROM_VERSION=\${FROM_VERSION:-unknown}
+    TO_VERSION=\${TO_VERSION:-unknown}
+    mkdir -p "$SHARED/data"
+    "$MARKER_NODE" - "$PENDING" "$APP_ROOT" "$NEW" "$OLD" "$FROM_VERSION" "$TO_VERSION" "$PORT" "$SHARED/home" <<'DSH_MESH_PENDING'
+const fs = require('fs')
+const [file, root, release, previous, from, to, port, dshHome] = process.argv.slice(2)
+const state = {
+  format: 1,
+  status: 'pending',
+  layout: 'bluegreen',
+  root,
+  release,
+  previous,
+  from,
+  to,
+  port: Number(port) || 80,
+  dshHome,
+  upgradedAt: new Date().toISOString(),
+}
+fs.writeFileSync(file, JSON.stringify(state, null, 2) + "\\n", { mode: 0o600 })
+DSH_MESH_PENDING
+  fi
+fi
+
 # A failing systemctl restart must not abort the script: with set -e that
 # used to exit *after* current had already moved, leaving the member on a
 # release whose services never came up — and no rollback. Collect the failures
@@ -1034,6 +1069,7 @@ ROLLED_BACK=0
 rollback() {
   if [ "$ROLLED_BACK" = "1" ]; then return 0; fi
   ROLLED_BACK=1
+  rm -f "$SHARED/data/upgrade-pending.json" 2>/dev/null || true
   if [ -z "$OLD" ]; then
     echo "no previous release to roll back to; $CURRENT stays on $RELEASE" >&2
     return 1

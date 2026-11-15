@@ -6,7 +6,7 @@
  * module keeps them and replaces only the files the repository owns:
  *
  *   - `gate/`, `shared/`, `config/`
- *   - `code/{windows-service,interop-service,wireguard}`
+ *   - `code/{windows-service,interop-service,wireguard,dsh-service,deploy}`
  *   - the root scripts and `VERSION`
  *   - `plugins/dsh-mesh/`
  *   - `docs/`
@@ -31,9 +31,9 @@ const ROOT_SCRIPTS = ['start-interop.sh', 'install-interop-service.sh', 'uninsta
 /** Plugin files copied from the repository root. */
 const PLUGIN_FILES = ['index.js', 'client.js', 'cordis.patch.yml', 'package.json']
 /** Plugin directories copied from the repository root. */
-const PLUGIN_DIRS = ['locale', 'build', 'code/build', 'code/shared']
+const PLUGIN_DIRS = ['locale', 'build', 'code/build', 'code/shared', 'code/deploy']
 /** Directories copied from `code/` into the package's `code/`. */
-const CODE_DIRS = ['windows-service', 'interop-service', 'wireguard']
+const CODE_DIRS = ['windows-service', 'interop-service', 'wireguard', 'dsh-service', 'deploy']
 
 /**
  * Remove a path if it exists.

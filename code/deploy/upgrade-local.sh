@@ -43,6 +43,7 @@ die() { printf '[error] %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" = 0 ] || die '升级需要 root（要重写 systemd 单元）'
 [ -n "$APP_ROOT" ] || die '--app-root is required'
+APP_ROOT=$(CDPATH= cd -- "$APP_ROOT" && pwd) || die "无效的 --app-root：$APP_ROOT"
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # 默认把脚本所在目录的上一级当作部署包（脚本位于 <包>/code/deploy/）。
 # --stage 用于从插件目录里的脚本升级：脚本与 runner 同版本，包内容另行指定。
@@ -57,6 +58,11 @@ ENV_FILE="$APP_ROOT/config/gate.env"
 [ -f "$STAGE/manifest.json" ] || die "部署包不完整：缺少 $STAGE/manifest.json"
 [ -f "$STAGE/start.sh" ] || die "部署包不完整：缺少 $STAGE/start.sh"
 [ -d "$STAGE/plugins/dsh-mesh" ] || die "部署包不完整：缺少 $STAGE/plugins/dsh-mesh"
+
+# The gateway shows the acceptance page from this marker. Clear a stale one
+# first: an aborted run must not leave the next page redirecting forever.
+PENDING_MARKER="$APP_ROOT/data/upgrade-pending.json"
+rm -f "$PENDING_MARKER" 2>/dev/null || true
 
 # 空间预检：要同时放得下新包、旧文件的备份，以及解压/复制过程中的临时占用。
 # 磁盘写满发生在复制中途是最坏的情况——备份也可能写不进去，只能人工救。
@@ -119,6 +125,7 @@ FINISHED=0
 restore() {
   if [ "$RESTORED" = "1" ]; then return 0; fi
   RESTORED=1
+  rm -f "$PENDING_MARKER" 2>/dev/null || true
   warn "开始回滚到升级前的文件（备份 $BACKUP）"
   for item in config code gate plugins locale docs package.json manifest.json start.sh start-dsh.sh start-interop.sh install.sh deploy; do
     if [ -e "$BACKUP/$item" ]; then
@@ -197,6 +204,45 @@ if [ "$NO_RESTART" = "1" ]; then
   FINISHED=1
   exit 0
 fi
+
+# ── 3.5 写待验收标记（新网关会先显示回退页） ──────────────────────────────
+write_pending_marker() {
+  if [ "$NO_RESTART" = "1" ]; then return 0; fi
+  # A package built before the acceptance page must not leave a marker the old
+  # gateway cannot understand.
+  if ! grep -q '__gate/fallback' "$APP_ROOT/gate/server.mjs" 2>/dev/null; then
+    rm -f "$PENDING_MARKER" 2>/dev/null || true
+    return 0
+  fi
+  local from_version to_version
+  from_version=$("$NODE" -e 'try{process.stdout.write(String(require(process.argv[1]).version||""))}catch(e){}' "$BACKUP/manifest.json" 2>/dev/null || true)
+  to_version=$("$NODE" -e 'try{process.stdout.write(String(require(process.argv[1]).version||""))}catch(e){}' "$APP_ROOT/manifest.json" 2>/dev/null || true)
+  mkdir -p "$APP_ROOT/data"
+  if "$NODE" - "$PENDING_MARKER" "$APP_ROOT" "$BACKUP" "${from_version:-unknown}" "${to_version:-unknown}" "$PORT" "$DSH_HOME" <<'DSH_MESH_PENDING'
+const fs = require('fs')
+const [file, root, backup, from, to, port, dshHome] = process.argv.slice(2)
+const state = {
+  format: 1,
+  status: 'pending',
+  layout: 'flat',
+  root,
+  backup,
+  from,
+  to,
+  port: Number(port) || 80,
+  dshHome,
+  upgradedAt: new Date().toISOString(),
+}
+fs.writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
+DSH_MESH_PENDING
+  then
+    say "待验收标记已写入（$PENDING_MARKER）：打开网页会先进入回退/验收页"
+  else
+    warn '写待验收标记失败；升级本身已完成，但不会显示回退页'
+    rm -f "$PENDING_MARKER" 2>/dev/null || true
+  fi
+}
+write_pending_marker
 
 # ── 4. 重装 systemd 单元并重启 ─────────────────────────────────────────────
 say '重装 DSH app + gateway 服务（会重启 dsh-web-app / dsh-web-gate）'

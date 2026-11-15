@@ -29,13 +29,13 @@
 import { spawn } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs'
-import { readFile, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import { createServer as createSecureServer } from 'node:https'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { loginPage, page, accountLoginPage, PAGE_CSP } from './pages.mjs'
+import { loginPage, page, accountLoginPage, fallbackPage, PAGE_CSP } from './pages.mjs'
 import { AccountLogin } from './account-login.mjs'
 import { InteractiveBrowser } from './windows-browser.mjs'
 import { HysteriaService } from './hysteria.mjs'
@@ -217,6 +217,19 @@ const CONFIG = {
 }
 /** Peer requests are signed with a secret derived from the gateway password. */
 CONFIG.clusterKey = deriveClusterSecret(CONFIG.password)
+
+/**
+ * A browser that clicked `查看` may use DSH until it closes the browser. This
+ * is a session cookie on purpose: the fallback page is the default for every
+ * new browser until `验收` removes the pending marker.
+ */
+const PREVIEW_COOKIE = 'dsh_gate_preview'
+
+/** The upgrade marker written by `upgrade-local.sh` / the activate script. */
+const PENDING_FILE = path.join(CONFIG.dataDir, 'upgrade-pending.json')
+
+/** Statuses that keep the acceptance page in front of DSH. */
+const ACTIVE_UPGRADE_STATUSES = new Set(['pending', 'rolling-back', 'failed'])
 
 /**
  * Send plain-HTTP browser traffic to the TLS listener. On by default whenever
@@ -1399,6 +1412,226 @@ async function handleSessionPromote(res) {
   res.end(body)
 }
 
+// ─── post-upgrade acceptance ───────────────────────────────────────────────
+
+/**
+ * Read the pending-upgrade marker. A missing or unreadable file means there is
+ * nothing to accept, so the gate must not lock the operator out of DSH.
+ * @returns {Promise<object|null>} marker.
+ */
+async function readUpgradeState() {
+  try {
+    const parsed = JSON.parse(await readFile(PENDING_FILE, 'utf8'))
+    return parsed !== null && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Replace the marker atomically: the fallback page and the rollback process are
+ * different processes, and a half-written status would show the wrong buttons.
+ * @param {object} state marker.
+ * @returns {Promise<void>} completion.
+ */
+async function writeUpgradeState(state) {
+  await mkdir(CONFIG.dataDir, { recursive: true })
+  const temporary = `${PENDING_FILE}.${String(process.pid)}.tmp`
+  await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
+  await rename(temporary, PENDING_FILE)
+}
+
+/**
+ * Whether this marker still owns the browser's first page.
+ * @param {object|null} state marker.
+ * @returns {boolean} true while pending, rolling back, or showing a failure.
+ */
+function upgradePending(state) {
+  return state !== null && (state.status === undefined || ACTIVE_UPGRADE_STATUSES.has(String(state.status)))
+}
+
+/** Whether this browser already chose `查看`. */
+function hasPreviewCookie(req) {
+  return cookieFrom(req, PREVIEW_COOKIE) === '1'
+}
+
+/** A browser navigation (not an API call or an asset). */
+function isDocumentNavigation(req) {
+  if (req.method !== 'GET') return false
+  const accept = String(req.headers.accept ?? '')
+  return accept.includes('text/html') || req.headers['sec-fetch-mode'] === 'navigate'
+}
+
+/** Send an unauthenticated browser to the password form and come back. */
+function redirectToLogin(req, res, next) {
+  res.writeHead(303, {
+    'cache-control': 'no-store',
+    location: `/__gate/login?next=${encodeURIComponent(next)}`,
+    'referrer-policy': 'no-referrer',
+  })
+  res.end()
+}
+
+/** Send an admitted browser back to the app. */
+function redirectToRoot(res) {
+  res.writeHead(303, {
+    'cache-control': 'no-store',
+    location: '/',
+    'referrer-policy': 'no-referrer',
+  })
+  res.end()
+}
+
+/**
+ * Locate a deploy helper in the packaged install or the source checkout.
+ * @param {string} name file name under `code/deploy`.
+ * @returns {string|null} absolute path.
+ */
+function resolveDeployScript(name) {
+  const candidates = [
+    path.join(PACKAGE_ROOT, 'code', 'deploy', name),
+    path.join(HERE, '..', 'deploy', name),
+    path.join(HERE, '..', '..', 'code', 'deploy', name),
+  ]
+  return candidates.find(candidate => existsSync(candidate)) ?? null
+}
+
+/**
+ * Start the rollback in a transient systemd unit, so restarting the gateway
+ * does not kill the very process that is restoring it.
+ * @param {object} state marker.
+ * @returns {Promise<{unit: string}>} how it was launched.
+ */
+async function launchRollback(state) {
+  const script = resolveDeployScript('rollback-local.sh')
+  if (script === null) throw new Error('rollback-local.sh is missing from this install')
+  const root = typeof state.root === 'string' && path.isAbsolute(state.root) && existsSync(state.root)
+    ? state.root
+    : PACKAGE_ROOT
+  const tools = path.join(CONFIG.dataDir, 'rollback-tools')
+  await mkdir(tools, { recursive: true })
+  const copy = path.join(tools, `rollback-local-${String(Date.now())}.sh`)
+  await copyFile(script, copy)
+  await chmod(copy, 0o755)
+  const unit = `dsh-mesh-rollback-${String(Date.now())}`
+  const systemdRun = ['/usr/bin/systemd-run', '/bin/systemd-run', '/usr/local/bin/systemd-run']
+    .find(candidate => existsSync(candidate))
+  const command = systemdRun === undefined ? 'bash' : systemdRun
+  const bash = existsSync('/bin/bash') ? '/bin/bash' : 'bash'
+  const args = systemdRun === undefined
+    ? [copy, '--root', root]
+    : ['--unit', unit, '--collect', '--property=Type=oneshot', bash, copy, '--root', root]
+  const child = spawn(command, args, { detached: true, stdio: 'ignore' })
+  child.once('error', (error) => {
+    void writeUpgradeState({ ...state, status: 'failed', error: `cannot start rollback: ${error.message}` })
+  })
+  child.unref()
+  return { unit: systemdRun === undefined ? 'detached' : unit }
+}
+
+/** The fields the acceptance page needs. */
+function fallbackOptions(state) {
+  return {
+    from: typeof state.from === 'string' ? state.from : '',
+    to: typeof state.to === 'string' ? state.to : '',
+    upgradedAt: typeof state.upgradedAt === 'string' ? state.upgradedAt : '',
+    status: typeof state.status === 'string' ? state.status : 'pending',
+    error: typeof state.error === 'string' ? state.error : '',
+    canRollback: (typeof state.backup === 'string' && state.backup !== '')
+      || (typeof state.previous === 'string' && state.previous !== ''),
+  }
+}
+
+/** The acceptance page itself. */
+async function handleFallbackPage(req, res) {
+  if (!isAdmitted(req)) {
+    redirectToLogin(req, res, '/__gate/fallback')
+    return
+  }
+  const state = await readUpgradeState()
+  if (!upgradePending(state)) {
+    redirectToRoot(res)
+    return
+  }
+  sendHtml(res, 200, fallbackPage(fallbackOptions(state)))
+}
+
+/** `查看`: open DSH in a new tab without accepting the upgrade. */
+function handleFallbackView(req, res) {
+  if (!isAdmitted(req)) {
+    redirectToLogin(req, res, '/')
+    return
+  }
+  const secure = req.socket.encrypted === true ? '; Secure' : ''
+  res.writeHead(303, {
+    'cache-control': 'no-store',
+    location: '/',
+    'set-cookie': `${PREVIEW_COOKIE}=1; Path=/; HttpOnly; SameSite=Lax${secure}`,
+    'referrer-policy': 'no-referrer',
+  })
+  res.end()
+}
+
+/** `验收`: remove the marker, so every later visit goes straight to DSH. */
+async function handleFallbackAccept(req, res) {
+  if (!isAdmitted(req)) {
+    redirectToLogin(req, res, '/__gate/fallback')
+    return
+  }
+  if (!loginSubmissionAllowed(req)) {
+    sendHtml(res, 403, page({ title: '请求被拒绝', heading: '请求被拒绝', body: '验收请求必须来自本页面。' }))
+    return
+  }
+  const state = await readUpgradeState()
+  if (state !== null && state.status === 'rolling-back') {
+    res.writeHead(303, { 'cache-control': 'no-store', location: '/__gate/fallback' })
+    res.end()
+    return
+  }
+  await rm(PENDING_FILE, { force: true })
+  redirectToRoot(res)
+}
+
+/** `回退`: launch the restore script and show a polling page. */
+async function handleFallbackRollback(req, res) {
+  if (!isAdmitted(req)) {
+    redirectToLogin(req, res, '/__gate/fallback')
+    return
+  }
+  if (!loginSubmissionAllowed(req)) {
+    sendHtml(res, 403, page({ title: '请求被拒绝', heading: '请求被拒绝', body: '回退请求必须来自本页面。' }))
+    return
+  }
+  let state = await readUpgradeState()
+  if (!upgradePending(state)) {
+    redirectToRoot(res)
+    return
+  }
+  if (state.status === 'rolling-back') {
+    sendHtml(res, 200, fallbackPage(fallbackOptions(state)))
+    return
+  }
+  if (!((typeof state.backup === 'string' && state.backup !== '') || (typeof state.previous === 'string' && state.previous !== ''))) {
+    state = { ...state, status: 'failed', error: '没有可回退的上一版本' }
+    await writeUpgradeState(state)
+    sendHtml(res, 200, fallbackPage(fallbackOptions(state)))
+    return
+  }
+  state = { ...state, status: 'rolling-back', error: null, rollbackStartedAt: new Date().toISOString() }
+  await writeUpgradeState(state)
+  try {
+    const launched = await launchRollback(state)
+    state.rollbackUnit = launched.unit
+    await writeUpgradeState(state)
+  } catch (error) {
+    state = { ...state, status: 'failed', error: error instanceof Error ? error.message : String(error) }
+    await writeUpgradeState(state)
+    sendHtml(res, 200, fallbackPage(fallbackOptions(state)))
+    return
+  }
+  sendHtml(res, 200, fallbackPage(fallbackOptions(state)))
+}
+
 async function dispatch(req, res) {
   const url = new URL(req.url ?? '/', 'http://gate.invalid')
   const pathname = url.pathname
@@ -1424,6 +1657,24 @@ async function dispatch(req, res) {
         'x-content-type-options': 'nosniff',
       })
       res.end(script)
+      return
+    }
+    // The acceptance page must answer while DSH is still starting, and it
+    // must never be swallowed by the static-asset or member routes.
+    if (pathname === '/__gate/fallback') {
+      await handleFallbackPage(req, res)
+      return
+    }
+    if (pathname === '/__gate/fallback/view' && req.method === 'GET') {
+      handleFallbackView(req, res)
+      return
+    }
+    if (pathname === '/__gate/fallback/accept' && req.method === 'POST') {
+      await handleFallbackAccept(req, res)
+      return
+    }
+    if (pathname === '/__gate/fallback/rollback' && req.method === 'POST') {
+      await handleFallbackRollback(req, res)
       return
     }
     // Installation binaries are public; configuration endpoints below are not.
@@ -1513,6 +1764,22 @@ async function dispatch(req, res) {
   if (target.kind === 'unavailable') {
     members.sendUnavailable(res, target.id, target.reason)
     return
+  }
+
+  // After an upgrade the operator must see the acceptance page before DSH.
+  // `查看` installs a session cookie so the preview tab can pass this check;
+  // `验收` removes the marker, which makes the page disappear for everyone.
+  if (target.kind === 'local' && pathname === '/' && isDocumentNavigation(req) && !hasPreviewCookie(req)) {
+    const upgrade = await readUpgradeState()
+    if (upgradePending(upgrade)) {
+      res.writeHead(303, {
+        'cache-control': 'no-store',
+        location: '/__gate/fallback',
+        'referrer-policy': 'no-referrer',
+      })
+      res.end()
+      return
+    }
   }
 
   // A browser holding the gate cookie but no DSH cookie yet (first visit,

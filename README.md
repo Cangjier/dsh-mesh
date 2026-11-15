@@ -6,6 +6,7 @@
 
 - **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` 工具。
 - **可观察的部署**：点「部署」后按钮变为「正在部署」，随时点开查看上传进度（字节、速度、剩余时间）、上传/解压准备/切换重启三步状态与远端脚本日志尾部，结束后直接给出成功或失败原因。进度与日志走 **SSE 推送**（`/api/dsh-mesh/events`、`/__gate/hysteria/events`），面板里没有定时轮询。
+- **升级验收页**：升级成功后，浏览器第一次打开网页先到 `/__gate/fallback`，有「查看 / 验收 / 回退」三个按钮：查看在新标签页打开 DSH，验收后以后直接进 DSH，回退恢复到升级前的版本并重启。marker 由升级脚本写、由网关拦截 `GET /` 读取；回退在独立 systemd 临时单元里跑。详见 [Step 019](docs/Step%20019%20升级验收与回退页.md)。
 - **网关**：`code/gate/`，负责密码门、反向代理、成员 cluster 认证、目标 cookie。
 - **构建引擎**：`code/build/`，从 DSH GitHub 源码确定性地应用覆盖层、构建 Web 前端、按目标系统和架构打包。
 - **WireGuard 控制服务源码**：`src/wireguard/`（引擎 + 51821 面板），`pnpm build` 会把 `code/wireguard/control-service.js` 从源码重建；引擎测试在 `test/wireguard/`，用 `pnpm test:wireguard` 跑。
@@ -118,7 +119,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - 支持 `scope=dsh`：只重启 DSH/控制面板，不重启网关。
 - 健康检查失败自动切回 `previous` 并重启；`rollback` 可手动回滚。
 - 成功激活后只保留最近 3 个 release，`current`/`previous` 指向的目录永不删除。
-- 面板的「升级」只对**本机**开放（远端成员的升级由那台机器自己的面板做）；它用同一套引擎换包，升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以它重启 `dsh-web`/网关时不会把自己打断。平铺安装（网关这种没有 `current` 的布局）走 `code/deploy/upgrade-local.sh`：备份 → 覆盖文件（保留 config/data/home/workspace）→ 重写 profile 与单元 → 健康检查，失败整体回滚。
+- 面板的「升级」只对**本机**开放（远端成员的升级由那台机器自己的面板做）；它用同一套引擎换包，升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以它重启 `dsh-web`/网关时不会把自己打断。平铺安装（网关这种没有 `current` 的布局）走 `code/deploy/upgrade-local.sh`：备份 → 覆盖文件（保留 config/data/home/workspace）→ 重写 profile 与单元 → 健康检查，失败整体回滚；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。
 - 详见 [Step 018](docs/Step%20018%20成员升级与独立升级进程.md)。
 
 ### 6. 独立 DSH 交互 HTTP 服务
@@ -301,6 +302,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 016 入网即双向 SSH](docs/Step%20016%20入网即双向SSH.md) | 成员自带密钥、`from=` 限制、`/ssh/authorize`、托管 config 块、撤销 |
 | [Step 017 发起任务](docs/Step%20017%20发起任务.md) | 对象树（source/define/children）、平铺与树形视图、模板、经 SDK 发起对话、历史快照 |
 | [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、蓝绿/平铺两条路径、清空编译日志 |
+| [Step 019 升级验收与回退页](docs/Step%20019%20升级验收与回退页.md) | 升级后先看后验收、查看/验收/回退三个按钮、marker、独立进程回退 |
 
 ## 代码位置
 
@@ -313,6 +315,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `code/deploy/runner.mjs` | 独立升级进程：心跳、job 状态、蓝绿或就地升级二选一 |
 | `code/deploy/upgrade-local.sh` | 平铺安装的就地升级：备份、覆盖、接线、重装单元、健康检查、回滚 |
 | `code/deploy/wire-profile.mjs` | 就地升级后的 `gate.env` 与 profile 接线 |
+| `code/deploy/rollback-local.sh` | 验收页「回退」：平铺恢复备份 / 蓝绿切回 previous |
 | `code/interop-service/server.mjs` | 独立 HTTP 服务：SDK stdio、创建/等待/通知/事件/回调 |
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |

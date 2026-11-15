@@ -227,6 +227,7 @@ test('assembleWebPackage copies the web payload, gate, and plugin', async () => 
     await write(path.join(repo, 'code', 'install.sh'), '#!/bin/sh')
     await write(path.join(repo, 'code', 'dsh-service', 'install-split.sh'), '#!/bin/sh')
     await write(path.join(repo, 'code', 'deploy', 'upgrade-local.sh'), '#!/usr/bin/env bash')
+    await write(path.join(repo, 'code', 'deploy', 'rollback-local.sh'), '#!/usr/bin/env bash')
     await write(path.join(repo, 'code', 'deploy', 'wire-profile.mjs'), '// wire')
     await write(path.join(repo, 'start-dsh.sh'), '#!/bin/sh')
     await write(path.join(repo, 'index.js'), '// host')
@@ -254,9 +255,11 @@ test('assembleWebPackage copies the web payload, gate, and plugin', async () => 
     assert.match(await readFile(path.join(result.packageDir, 'code', 'dsh-service', 'install-split.sh'), 'utf8'), /sh/u)
     assert.match(await readFile(path.join(result.packageDir, 'code', 'deploy', 'upgrade-local.sh'), 'utf8'), /bash/u)
     assert.match(await readFile(path.join(result.packageDir, 'code', 'deploy', 'wire-profile.mjs'), 'utf8'), /wire/u)
+    assert.match(await readFile(path.join(result.packageDir, 'code', 'deploy', 'rollback-local.sh'), 'utf8'), /bash/u)
     assert.match(await readFile(path.join(result.packageDir, 'start-dsh.sh'), 'utf8'), /sh/u)
     // ...and the plugin keeps its own copy for a member that upgrades itself.
     assert.match(await readFile(path.join(result.packageDir, 'plugins', 'dsh-mesh', 'code', 'deploy', 'upgrade-local.sh'), 'utf8'), /bash/u)
+    assert.match(await readFile(path.join(result.packageDir, 'plugins', 'dsh-mesh', 'code', 'deploy', 'rollback-local.sh'), 'utf8'), /bash/u)
     // The post-build / test-upgrade smoke script and its CDP driver must be
     // inside the plugin, because that is what runs on the upgraded sandbox.
     assert.match(await readFile(path.join(result.packageDir, 'plugins', 'dsh-mesh', 'code', 'build', 'smoke.mjs'), 'utf8'), /smoke/u)

@@ -57,6 +57,15 @@
 
 `--no-restart` 只做 1–3 步（验证脚本本身用），`DSH_MESH_UPGRADE_NO_RESTART=1` 让 runner 透传这个开关。
 
+### 升级后的验收页
+
+无论是网关的平铺升级，还是 Linux 成员的蓝绿 activate，成功之后都会写一份 `upgrade-pending.json`：
+
+- 平铺：`<root>/data/upgrade-pending.json`
+- 蓝绿：`<root>/shared/data/upgrade-pending.json`
+
+网关读到 marker 后，浏览器打开 `/` 不再直接进 DSH，而是先到 `/__gate/fallback`，给「查看 / 验收 / 回退」三个选择。验收删 marker，回退在独立 systemd 临时单元里跑 `code/deploy/rollback-local.sh`（平铺恢复 `.upgrade-backup`，蓝绿把 `current` 切回 `previous`）。详见 [Step 019](Step%20019%20升级验收与回退页.md)。`--no-restart` 演练不写 marker，也不会出现验收页。
+
 ### 平铺升级用哪份脚本、哪份包内容
 
 跑升级的脚本**不在包里**，而是当前装着的那份插件里的 `code/deploy/upgrade-local.sh`：

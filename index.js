@@ -3050,7 +3050,7 @@ for unit in dsh-web-gate.service dsh-web.service dsh-mesh.service; do
   fi
 done
 if [ -z "$root" ]; then
-  root="$HOME/.dsh/dsh-mesh"
+  root="\${HOME:-/root}/.dsh/dsh-mesh"
 fi
 case "$root" in
   */current) root=$(dirname "$root") ;;

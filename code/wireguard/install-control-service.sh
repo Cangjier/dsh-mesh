@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-DSH_HOME=${DSH_HOME:-$HOME/.dsh}
+# The upgrade runner is started by systemd without HOME in some environments.
+# Defer the default until after --dsh-home is parsed, and never expand an
+# unset HOME under `set -u`.
+DSH_HOME=${DSH_HOME:-}
 NODE=${DSH_WIREGUARD_NODE:-$(command -v node || true)}
-UNIT=/etc/systemd/system/dsh-wireguard-control.service
+UNIT=${DSH_WIREGUARD_UNIT_FILE:-/etc/systemd/system/dsh-wireguard-control.service}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -13,6 +16,12 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
+if [ -z "$DSH_HOME" ]; then
+  if [ -z "${HOME:-}" ]; then
+    HOME=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)
+  fi
+  DSH_HOME=${HOME:-/root}/.dsh
+fi
 if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
   echo "node not found; pass --node <path>" >&2
   exit 1

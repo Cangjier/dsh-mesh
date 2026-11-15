@@ -444,3 +444,64 @@ test('proxying sends the browser home when a member refuses the signature', asyn
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a timed out peer keeps its last known install state in the gate snapshot', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-grace-'))
+  const stateFile = path.join(dir, 'state.json')
+  await writeFile(stateFile, JSON.stringify({
+    role: 'server',
+    settings: { vpnCidr: '10.66.66.0/24', serverIp: '10.66.66.1' },
+    server: { running: true, hostname: 'self', peers: [{ name: 'peer', ip: '10.66.66.2', online: true }] },
+    client: {},
+  }), 'utf8')
+  // A peer that answers once and then stops: the probe never touches the real
+  // network, so the test cannot pick up a gate running on port 80.
+  let down = false
+  const fetchImpl = async (url) => {
+    if (!String(url).includes('/__gate/member')) throw new Error(`unexpected fetch ${String(url)}`)
+    if (down) throw new Error('connect ETIMEDOUT')
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { ok: true, service: 'dsh-mesh', name: 'peer', gatePort: 80, system: { platform: 'linux', appRoot: '/opt/peer' } }
+      },
+    }
+  }
+  const fresh = () => new MemberService({
+    clusterKey: '',
+    memberPort: 80,
+    stateFile,
+    discoveryTimeoutMs: 300,
+    discoveryCacheMs: 0,
+    version: 'test',
+    fetchImpl,
+    log: () => {},
+    isAdmitted: () => true,
+    isUpstreamReady: () => true,
+    forwardableHeaders: () => ({}),
+    agent: new http.Agent({ keepAlive: false }),
+    page: () => '',
+    sendHtml: () => {},
+  })
+  try {
+    const members = fresh()
+    const first = (await members.snapshot({ force: true })).members.find(candidate => candidate.id === '10.66.66.2')
+    assert.equal(first.dsh, true)
+    assert.equal(first.port, 80)
+
+    // The peer stops answering: the row keeps the last good answer, flagged.
+    down = true
+    const stale = (await members.snapshot({ force: true })).members.find(candidate => candidate.id === '10.66.66.2')
+    assert.equal(stale.dsh, true)
+    assert.equal(stale.probeStale, true)
+    assert.equal(stale.port, 80)
+
+    // A gate restart reads the saved probe instead of forgetting the install.
+    const restored = (await fresh().snapshot({ force: true })).members.find(candidate => candidate.id === '10.66.66.2')
+    assert.equal(restored.dsh, true)
+    assert.equal(restored.probeStale, true)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

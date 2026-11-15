@@ -3933,8 +3933,10 @@ function quickSystemInfo(options = {}) {
 
 // src/lib/service.mjs
 var HERE2 = path9.dirname(fileURLToPath2(import.meta.url));
-var PROBE_GRACE_MS = 45e3;
-var PROBE_RETRY_MS = 3e3;
+var PROBE_GRACE_MS = 10 * 6e4;
+var PROBE_TIMEOUT_MS = 4500;
+var PROBE_RETRY_MS = 4500;
+var PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 6e4;
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
@@ -3986,6 +3988,50 @@ var MeshService = class {
     this.remoteBuilder = new RemoteBuilder({ packagesDir: this.packagesDir, log: (line) => this.logLine(line) });
     this.systemCache = null;
     this.probes = /* @__PURE__ */ new Map();
+    this.probeCacheFile = path9.join(this.dataDir, "probe-cache.json");
+    this.probeCacheLoaded = false;
+    this.fetchImpl = options.fetchImpl;
+  }
+  /**
+   * Seed the probe map from the last run.
+   *
+   * The map lives in memory, so a panel reload used to forget that a peer was
+   * installed and show 未部署 (with a tempting 部署 button) until the slow peer
+   * answered again. The file keeps that knowledge across restarts; entries age
+   * out after a week so an uninstalled member is eventually re-detected.
+   */
+  async #loadProbes() {
+    if (this.probeCacheLoaded) return;
+    this.probeCacheLoaded = true;
+    try {
+      const parsed = JSON.parse(await readFile8(this.probeCacheFile, "utf8"));
+      if (parsed === null || typeof parsed !== "object") return;
+      const now = Date.now();
+      for (const [ip, entry] of Object.entries(parsed)) {
+        if (this.probes.has(ip) || entry === null || typeof entry !== "object") continue;
+        const at = Number(entry.at);
+        if (!Number.isFinite(at)) continue;
+        const expiresAt = at + PROBE_CACHE_TTL_MS;
+        if (expiresAt <= now) continue;
+        this.probes.set(ip, {
+          port: Number.isInteger(entry.port) ? entry.port : null,
+          gate: entry.gate ?? null,
+          system: entry.system ?? null,
+          latencyMs: Number(entry.latencyMs) || 0,
+          at,
+          expiresAt
+        });
+      }
+    } catch {
+    }
+  }
+  /** Persist the probe map; a failed write is not worth reporting. */
+  async #saveProbes() {
+    try {
+      await mkdir5(path9.dirname(this.probeCacheFile), { recursive: true });
+      await writeFile6(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.probes)), "utf8");
+    } catch {
+    }
   }
   /** Cached local host inventory for the member table. */
   async systemInfo() {
@@ -4123,6 +4169,7 @@ var MeshService = class {
     return tasks.clearConversations();
   }
   async members() {
+    await this.#loadProbes();
     const stateFile = path9.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
@@ -4143,12 +4190,15 @@ var MeshService = class {
       state,
       stateError: error,
       self,
-      ports: Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080]
+      ports: Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080],
+      timeoutMs: PROBE_TIMEOUT_MS,
+      fetchImpl: this.fetchImpl
     });
     const tags = await this.memberTags();
     self.tag = tags[self.id] ?? null;
     const ports = Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080];
     const now = Date.now();
+    let probed = false;
     const members = await Promise.all(snapshot.members.map(async (member) => {
       const tag = tags[member.id] ?? null;
       const known = this.probes.get(member.ip);
@@ -4158,21 +4208,29 @@ var MeshService = class {
           gate: member.gate,
           system: member.system,
           latencyMs: member.latencyMs,
-          at: now
+          at: now,
+          expiresAt: now + PROBE_GRACE_MS
         });
+        probed = true;
         return { ...member, tag };
       }
       if (known === void 0) return { ...member, tag };
       const retryPorts = known.port === null ? ports : [known.port];
-      const retry = await probeMember(member.ip, { ports: retryPorts, timeoutMs: PROBE_RETRY_MS }).catch(() => null);
+      const retry = await probeMember(member.ip, {
+        ports: retryPorts,
+        timeoutMs: PROBE_RETRY_MS,
+        fetchImpl: this.fetchImpl
+      }).catch(() => null);
       if (retry !== null && retry.ok) {
         this.probes.set(member.ip, {
           port: retry.port,
           gate: retry.info,
           system: retry.info?.system ?? null,
           latencyMs: retry.latencyMs,
-          at: now
+          at: now,
+          expiresAt: now + PROBE_GRACE_MS
         });
+        probed = true;
         return {
           ...member,
           dsh: true,
@@ -4184,7 +4242,7 @@ var MeshService = class {
           tag
         };
       }
-      if (now - known.at > PROBE_GRACE_MS) return { ...member, tag };
+      if (known.expiresAt === void 0 || now > known.expiresAt) return { ...member, tag };
       return {
         ...member,
         dsh: true,
@@ -4197,9 +4255,10 @@ var MeshService = class {
         probeStale: true
       };
     }));
+    if (probed) void this.#saveProbes();
     if (this.probes.size > 64) {
       for (const [ip, cached] of this.probes) {
-        if (now - cached.at > PROBE_GRACE_MS) this.probes.delete(ip);
+        if (cached.expiresAt !== void 0 && now > cached.expiresAt) this.probes.delete(ip);
       }
     }
     return { ...snapshot, self, members, local: self };

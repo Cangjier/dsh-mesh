@@ -50,10 +50,14 @@ import { quickSystemInfo } from '../../code/shared/system-info.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
-/** A good member probe outlives a failed re-probe by this long. */
-const PROBE_GRACE_MS = 45_000
+/** A good member probe outlives repeated failed re-probes by this long. */
+const PROBE_GRACE_MS = 10 * 60_000
+/** Budget for one probe. A 165 ms VPN hop with a retransmit still fits. */
+const PROBE_TIMEOUT_MS = 4_500
 /** Budget for the second probe attempt before a peer is called unreachable. */
-const PROBE_RETRY_MS = 3_000
+const PROBE_RETRY_MS = 4_500
+/** How long a result saved on disk keeps counting after a restart. */
+const PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 60_000
 
 /**
  * Find the package root both when this module runs from `src/lib` and when it
@@ -138,6 +142,55 @@ export class MeshService {
      * @type {Map<string, {port: number|null, gate: object|null, system: object|null, latencyMs: number, at: number}>}
      */
     this.probes = new Map()
+    this.probeCacheFile = path.join(this.dataDir, 'probe-cache.json')
+    this.probeCacheLoaded = false
+    /** Injectable for tests: every member probe goes through this fetch. */
+    this.fetchImpl = options.fetchImpl
+  }
+
+  /**
+   * Seed the probe map from the last run.
+   *
+   * The map lives in memory, so a panel reload used to forget that a peer was
+   * installed and show 未部署 (with a tempting 部署 button) until the slow peer
+   * answered again. The file keeps that knowledge across restarts; entries age
+   * out after a week so an uninstalled member is eventually re-detected.
+   */
+  async #loadProbes() {
+    if (this.probeCacheLoaded) return
+    this.probeCacheLoaded = true
+    try {
+      const parsed = JSON.parse(await readFile(this.probeCacheFile, 'utf8'))
+      if (parsed === null || typeof parsed !== 'object') return
+      const now = Date.now()
+      for (const [ip, entry] of Object.entries(parsed)) {
+        if (this.probes.has(ip) || entry === null || typeof entry !== 'object') continue
+        const at = Number(entry.at)
+        if (!Number.isFinite(at)) continue
+        const expiresAt = at + PROBE_CACHE_TTL_MS
+        if (expiresAt <= now) continue
+        this.probes.set(ip, {
+          port: Number.isInteger(entry.port) ? entry.port : null,
+          gate: entry.gate ?? null,
+          system: entry.system ?? null,
+          latencyMs: Number(entry.latencyMs) || 0,
+          at,
+          expiresAt,
+        })
+      }
+    } catch {
+      // No cache yet (or an unreadable one): the next probe refills it.
+    }
+  }
+
+  /** Persist the probe map; a failed write is not worth reporting. */
+  async #saveProbes() {
+    try {
+      await mkdir(path.dirname(this.probeCacheFile), { recursive: true })
+      await writeFile(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.probes)), 'utf8')
+    } catch {
+      // Best effort: the in-memory map still serves this process.
+    }
   }
 
   /** Cached local host inventory for the member table. */
@@ -284,6 +337,7 @@ export class MeshService {
   }
 
   async members() {
+    await this.#loadProbes()
     const stateFile = path.join(this.home, 'wireguard', 'state.json')
     const { state, error } = await readWireGuardState({ file: stateFile })
     const identity = state === null ? null : wireGuardIdentity(state)
@@ -305,6 +359,8 @@ export class MeshService {
       stateError: error,
       self,
       ports: Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080],
+      timeoutMs: PROBE_TIMEOUT_MS,
+      fetchImpl: this.fetchImpl,
     })
     // Keep the gate and host responses shaped the same: `local` is the row for
     // this machine, `members` are the peers.
@@ -312,6 +368,7 @@ export class MeshService {
     self.tag = tags[self.id] ?? null
     const ports = Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080]
     const now = Date.now()
+    let probed = false
     const members = await Promise.all(snapshot.members.map(async (member) => {
       const tag = tags[member.id] ?? null
       const known = this.probes.get(member.ip)
@@ -322,7 +379,9 @@ export class MeshService {
           system: member.system,
           latencyMs: member.latencyMs,
           at: now,
+          expiresAt: now + PROBE_GRACE_MS,
         })
+        probed = true
         return { ...member, tag }
       }
       // One lost packet must not read as "not deployed": a peer that answered
@@ -332,7 +391,11 @@ export class MeshService {
       // Retry the port that answered last time instead of walking every port
       // again: one extra request, not two more timeouts.
       const retryPorts = known.port === null ? ports : [known.port]
-      const retry = await probeMember(member.ip, { ports: retryPorts, timeoutMs: PROBE_RETRY_MS }).catch(() => null)
+      const retry = await probeMember(member.ip, {
+        ports: retryPorts,
+        timeoutMs: PROBE_RETRY_MS,
+        fetchImpl: this.fetchImpl,
+      }).catch(() => null)
       if (retry !== null && retry.ok) {
         this.probes.set(member.ip, {
           port: retry.port,
@@ -340,7 +403,9 @@ export class MeshService {
           system: retry.info?.system ?? null,
           latencyMs: retry.latencyMs,
           at: now,
+          expiresAt: now + PROBE_GRACE_MS,
         })
+        probed = true
         return {
           ...member,
           dsh: true,
@@ -352,7 +417,7 @@ export class MeshService {
           tag,
         }
       }
-      if (now - known.at > PROBE_GRACE_MS) return { ...member, tag }
+      if (known.expiresAt === undefined || now > known.expiresAt) return { ...member, tag }
       return {
         ...member,
         dsh: true,
@@ -365,9 +430,10 @@ export class MeshService {
         probeStale: true,
       }
     }))
+    if (probed) void this.#saveProbes()
     if (this.probes.size > 64) {
       for (const [ip, cached] of this.probes) {
-        if (now - cached.at > PROBE_GRACE_MS) this.probes.delete(ip)
+        if (cached.expiresAt !== undefined && now > cached.expiresAt) this.probes.delete(ip)
       }
     }
     return { ...snapshot, self, members, local: self }

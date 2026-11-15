@@ -1331,7 +1331,13 @@ function Panel({ ctx }: { ctx: any }) {
             {member.kind === 'self'
               ? <Tag color="blue">本机</Tag>
               : member.dsh
-                ? <Tag color="cyan">DSH :{String(member.port ?? '?')}</Tag>
+                ? (
+                  <Tooltip title={member.probeStale === true ? '这次探测超时，显示的是最近一次成功的结果' : `DSH 在 ${String(member.port ?? '?')} 端口应答`}>
+                    <Tag color={member.probeStale === true ? 'gold' : 'cyan'}>
+                      DSH :{String(member.port ?? '?')}{member.probeStale === true ? '?' : ''}
+                    </Tag>
+                  </Tooltip>
+                )
                 : <Tag>未部署</Tag>}
             {member.latencyMs > 0 ? <Typography.Text type="secondary" style={{ fontSize: 11 }}>{String(member.latencyMs)} ms</Typography.Text> : null}
           </Space>

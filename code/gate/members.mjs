@@ -16,6 +16,8 @@
 
 import http from 'node:http'
 import os from 'node:os'
+import path from 'node:path'
+import { readFile, writeFile } from 'node:fs/promises'
 import {
   CLUSTER_HEADER,
   ClusterReplayCache,
@@ -89,8 +91,24 @@ export class MemberService {
     this.memberPort = Number.isInteger(options.memberPort) ? options.memberPort : 80
     this.discoveryPorts = [...new Set((options.discoveryPorts ?? []).filter(port => Number.isInteger(port) && port > 0))]
     this.stateFile = options.stateFile
-    this.discoveryTimeoutMs = options.discoveryTimeoutMs ?? 2_500
+    // A long-haul peer (165 ms RTT over WireGuard) loses the odd packet; a
+    // 2.5 s budget turned those retransmits into "未部署". 4.5 s covers one
+    // retransmit and still fails fast for a peer that is truly gone.
+    this.discoveryTimeoutMs = options.discoveryTimeoutMs ?? 4_500
     this.discoveryCacheMs = options.discoveryCacheMs ?? DEFAULT_CACHE_MS
+    // Last good probe per peer: one timeout must not flip a member that was
+    // installed to "未部署" (and offer 部署 on top of an existing install).
+    this.probeGraceMs = Number.isInteger(options.probeGraceMs) && options.probeGraceMs > 0
+      ? options.probeGraceMs
+      : 10 * 60_000
+    this.probeCacheTtlMs = Number.isInteger(options.probeCacheTtlMs) && options.probeCacheTtlMs > 0
+      ? options.probeCacheTtlMs
+      : 7 * 24 * 60 * 60_000
+    this.knownProbes = new Map()
+    this.probeCacheLoaded = false
+    this.probeCacheFile = typeof options.probeCacheFile === 'string'
+      ? options.probeCacheFile
+      : (typeof options.stateFile === 'string' ? path.join(path.dirname(options.stateFile), 'probe-cache.json') : null)
     this.checkTimeoutMs = Number.isInteger(options.checkTimeoutMs) && options.checkTimeoutMs > 0
       ? options.checkTimeoutMs
       : MEMBER_CHECK_TIMEOUT_MS
@@ -141,6 +159,51 @@ export class MemberService {
   }
 
   /**
+   * Seed the last-good probe map from disk.
+   *
+   * Without it a gate restart forgot which peers were installed, and the first
+   * slow answer after the restart read as 未部署. Entries older than the TTL are
+   * ignored so a member that was really uninstalled is detected again.
+   */
+  async #loadProbes() {
+    if (this.probeCacheLoaded) return
+    this.probeCacheLoaded = true
+    if (this.probeCacheFile === null) return
+    try {
+      const parsed = JSON.parse(await readFile(this.probeCacheFile, 'utf8'))
+      if (parsed === null || typeof parsed !== 'object') return
+      const now = this.now()
+      for (const [ip, entry] of Object.entries(parsed)) {
+        if (this.knownProbes.has(ip) || entry === null || typeof entry !== 'object') continue
+        const at = Number(entry.at)
+        if (!Number.isFinite(at)) continue
+        const expiresAt = at + this.probeCacheTtlMs
+        if (expiresAt <= now) continue
+        this.knownProbes.set(ip, {
+          port: Number.isInteger(entry.port) ? entry.port : null,
+          gate: entry.gate ?? null,
+          system: entry.system ?? null,
+          latencyMs: Number(entry.latencyMs) || 0,
+          at,
+          expiresAt,
+        })
+      }
+    } catch {
+      // First run, or a corrupt file: the next probe rewrites it.
+    }
+  }
+
+  /** Persist the probe map; a failed write is not worth a log line. */
+  async #saveProbes() {
+    if (this.probeCacheFile === null) return
+    try {
+      await writeFile(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.knownProbes)), 'utf8')
+    } catch {
+      // Best effort only.
+    }
+  }
+
+  /**
    * Discover every member and cache the result briefly.
    * @param {{force?: boolean}} [options] cache control.
    * @returns {Promise<object>} discovery snapshot.
@@ -165,6 +228,34 @@ export class MemberService {
       timeoutMs: this.discoveryTimeoutMs,
       fetchImpl: this.fetchImpl,
     })
+    await this.#loadProbes()
+    const now = this.now()
+    let probed = false
+    for (const member of snapshot.members) {
+      if (member.dsh === true) {
+        this.knownProbes.set(member.ip, {
+          port: member.port,
+          gate: member.gate ?? null,
+          system: member.system ?? null,
+          latencyMs: member.latencyMs,
+          at: now,
+          expiresAt: now + this.probeGraceMs,
+        })
+        probed = true
+        continue
+      }
+      const known = this.knownProbes.get(member.ip)
+      if (known === undefined) continue
+      if (known.expiresAt !== undefined && now > known.expiresAt) continue
+      member.dsh = true
+      member.port = known.port
+      member.latencyMs = known.latencyMs
+      member.gate = known.gate
+      member.system = known.system
+      member.error = null
+      member.probeStale = true
+    }
+    if (probed) void this.#saveProbes()
     snapshot.cluster = {
       configured: this.clusterKey !== '',
       memberPort: this.memberPort,

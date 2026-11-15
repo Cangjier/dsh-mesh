@@ -25,6 +25,8 @@ export interface Member {
   gate: Record<string, unknown> | null
   system?: SystemInfo | null
   tag?: string | null
+  /** The last probe failed; `dsh`/`port` come from the last good answer. */
+  probeStale?: boolean
   error: string | null
 }
 

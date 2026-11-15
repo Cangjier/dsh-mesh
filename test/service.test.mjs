@@ -243,3 +243,62 @@ test('clearing finished builds deletes their job directories and keeps a running
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a timed out probe keeps the last known install state, across a restart', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-probe-cache-'))
+  const home = path.join(dir, 'home')
+  const dataDir = path.join(home, 'mesh')
+  try {
+    await mkdir(path.join(home, 'wireguard'), { recursive: true })
+    await writeFile(path.join(home, 'wireguard', 'state.json'), JSON.stringify({
+      version: 1,
+      role: 'server',
+      settings: { serverIp: '10.66.66.1', listenPort: 51820 },
+      server: {
+        publicKey: 'server-key',
+        peers: [{
+          ip: '10.66.66.2',
+          name: 'B',
+          publicKey: 'peer-key',
+          online: true,
+          lastHandshakeAt: new Date().toISOString(),
+        }],
+      },
+      client: { connected: false },
+    }), 'utf8')
+    let down = false
+    const fetchImpl = async () => {
+      if (down) throw new Error('connect ETIMEDOUT')
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { ok: true, service: 'dsh-mesh', id: '10.66.66.2', name: 'B', gatePort: 80, system: { platform: 'linux', appRoot: '/opt/b' } }
+        },
+      }
+    }
+    const config = { memberPorts: [80] }
+    const service = new MeshService({ dataDir, config, log: () => {}, fetchImpl })
+    const online = (await service.members()).members.find(member => member.ip === '10.66.66.2')
+    assert.equal(online.dsh, true)
+
+    // The peer stops answering: the row keeps its last good answer, flagged.
+    down = true
+    const stale = (await service.members()).members.find(member => member.ip === '10.66.66.2')
+    assert.equal(stale.dsh, true)
+    assert.equal(stale.probeStale, true)
+
+    // A panel reload (new instance, empty memory) reads the saved probe.
+    const restarted = new MeshService({ dataDir, config, log: () => {}, fetchImpl })
+    const restored = (await restarted.members()).members.find(member => member.ip === '10.66.66.2')
+    assert.equal(restored.dsh, true)
+    assert.equal(restored.probeStale, true)
+
+    // Once that saved answer ages out, a silent peer is 未部署 again.
+    service.probes.get('10.66.66.2').expiresAt = Date.now() - 1
+    const expired = (await service.members()).members.find(member => member.ip === '10.66.66.2')
+    assert.equal(expired.dsh, false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

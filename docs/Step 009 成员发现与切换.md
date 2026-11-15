@@ -113,6 +113,8 @@ x-dsh-cluster: v1.<timestamp>.<nonce>.<base64url HMAC-SHA256>
 
 发现结果缓存 10 秒（`DSH_GATE_DISCOVERY_CACHE_MS`）。面板刷新会重新走缓存；需要立即重扫可重启或改小缓存。
 
+**探测预算与「最后成功的结果」**：单次探测 4.5 秒（`discoveryTimeoutMs`），足够跨一次 WireGuard 重传——`.2` 这种 165 ms RTT 的云主机，响应通常在 0.33 s，偶发一次重传就到 2.3 s 以上，2.5 s 的旧预算会偶发超时，把已装好的成员显示成「未部署」（还会给出「部署」按钮，等于往已有安装上再装一遍）。现在一次超时不再改变结论：最近一次成功的结果保留 10 分钟（`probeGraceMs`），这期间面板显示 `DSH :80?`（金色，悬停说明「这次探测超时，显示的是最近一次成功的结果」）。这份结果还会写进 `$DSH_HOME/wireguard/probe-cache.json`（gate）和 `$DSH_HOME/mesh/probe-cache.json`（插件），重启后仍然有效，最多存 7 天（`probeCacheTtlMs`），之后才重新判定。
+
 ## 部署清单
 
 每个成员：

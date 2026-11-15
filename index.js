@@ -1759,7 +1759,7 @@ function initialDeploySteps(options = {}) {
   const steps = [
     { key: "upload", label: "\u4E0A\u4F20\u5B89\u88C5\u5305", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null }
   ];
-  if (options.test === true) {
+  if (options.test === true && options.os !== "windows") {
     steps.push({ key: "rehearse", label: "\u5E73\u94FA\u6D41\u7A0B\u6F14\u7EC3\uFF08\u6C99\u7BB1\uFF09", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null });
   }
   steps.push({ key: "prepare", label: "\u89E3\u538B\u5E76\u51C6\u5907\u65B0\u7248\u672C", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null });
@@ -3179,7 +3179,7 @@ var DeployManager = class {
       status: "running",
       phase: "starting",
       error: null,
-      steps: initialDeploySteps({ test: plan.test === true }),
+      steps: initialDeploySteps({ test: plan.test === true, os: plan.os }),
       progress: { bytes: 0, totalBytes: plan.package.bytes, percent: 0, speed: 0, indeterminate: false }
     };
     if (this.states.size >= 100) {
@@ -4283,12 +4283,9 @@ function assertTestUpgradeTarget(target, options = {}) {
   if (target.kind === "self" || target.id === "local") {
     throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u8981\u5728\u522B\u7684\u6210\u5458\u4E0A\u8DD1\uFF1B\u672C\u673A\u5347\u7EA7\u8BF7\u76F4\u63A5\u7528\u300C\u5347\u7EA7\u300D");
   }
-  if (options.packageOs === "windows") {
-    throw new Error("\u9009\u7684\u662F Windows \u90E8\u7F72\u5305\uFF0C\u4E0D\u80FD\u7528\u5728 Linux \u6210\u5458\u4E0A\uFF1B\u6D4B\u8BD5\u5347\u7EA7\u76EE\u524D\u53EA\u652F\u6301 Linux");
-  }
   const memberOs = /win/iu.test(target.system?.platform ?? "") ? "windows" : "linux";
-  if (memberOs !== "linux") {
-    throw new Error(`\u6210\u5458 ${String(target.name ?? target.id)} \u662F ${memberOs}\uFF0C\u6D4B\u8BD5\u5347\u7EA7\u76EE\u524D\u53EA\u652F\u6301 Linux \u6210\u5458\uFF08\u6F14\u7EC3\u811A\u672C\u662F bash\uFF09`);
+  if (options.packageOs !== void 0 && options.packageOs !== memberOs) {
+    throw new Error(`\u9009\u7684\u662F ${options.packageOs === "windows" ? "Windows" : "Linux"} \u90E8\u7F72\u5305\uFF0C\u4F46\u6210\u5458 ${String(target.name ?? target.id)} \u662F ${memberOs}\uFF1B\u6362\u4E00\u4E2A\u5339\u914D\u7684\u5305`);
   }
   if (target.dsh !== true) {
     throw new Error(`\u6210\u5458 ${String(target.name ?? target.id)} \u8FD8\u6CA1\u6709\u5B89\u88C5 DSH\uFF0C\u6CA1\u6709\u53EF\u5347\u7EA7\u7684\u5B89\u88C5\uFF1B\u8BF7\u5148\u7528\u300C\u90E8\u7F72\u300D`);
@@ -5095,7 +5092,8 @@ var MeshService = class {
     if (member !== void 0) {
       const os7 = /win(?:dows)?/iu.test(path9.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
       const identity = { id: member.id, name: member.name, ip: member.ip };
-      if (test) assertTestUpgradeTarget(member, { packageOs: os7 });
+      const packageOs = /win(?:dows)?/iu.test(path9.basename(packagePath)) ? "windows" : "linux";
+      if (test) assertTestUpgradeTarget(member, { packageOs });
       if (member.kind === "self" || member.id === "local") {
         return this.#startLocalJob({ member, packagePath, os: os7, mode, identity });
       }
@@ -5302,7 +5300,7 @@ var MeshService = class {
       status: "queued",
       phase: "starting",
       error: null,
-      steps: initialDeploySteps({ test: job.plan?.test === true }),
+      steps: initialDeploySteps({ test: job.plan?.test === true, os: job.plan?.os }),
       progress: { label: "\u542F\u52A8\u72EC\u7ACB\u5347\u7EA7\u8FDB\u7A0B", percent: 0, bytes: 0, totalBytes: bytes, speed: 0, indeterminate: false }
     };
     await writeDeployState(dir, state);

@@ -188,10 +188,17 @@ test('a test job reports the rehearsal step before prepare', () => {
   assert.deepEqual(initialDeploySteps({ test: true }).map(step => step.key), ['upload', 'rehearse', 'prepare', 'activate'])
 })
 
-test('test upgrades are refused on this machine, on Windows members, and without an install', () => {
+test('test upgrades are refused on this machine, on a platform mismatch, and without an install', () => {
   assert.throws(() => assertTestUpgradeTarget({ id: 'local', kind: 'self', name: 'gateway', dsh: true }, {}), /本机升级请直接用「升级」/u)
-  assert.throws(() => assertTestUpgradeTarget({ id: '10.66.66.4', kind: 'peer', name: 'win', dsh: true, system: { platform: 'win32' } }, {}), /只支持 Linux/u)
-  assert.throws(() => assertTestUpgradeTarget({ id: '10.66.66.9', kind: 'peer', name: 'linux', dsh: true }, { packageOs: 'windows' }), /Windows 部署包/u)
+  assert.throws(() => assertTestUpgradeTarget({ id: '10.66.66.9', kind: 'peer', name: 'linux', dsh: true }, { packageOs: 'windows' }), /是 linux；换一个匹配的包/u)
+  assert.throws(() => assertTestUpgradeTarget({ id: '10.66.66.4', kind: 'peer', name: 'win', dsh: true, system: { platform: 'win32' } }, { packageOs: 'linux' }), /是 windows；换一个匹配的包/u)
   assert.throws(() => assertTestUpgradeTarget({ id: '10.66.66.9', kind: 'peer', name: 'blank', dsh: false }, {}), /还没有安装 DSH/u)
-  assert.equal(assertTestUpgradeTarget({ id: '10.66.66.3', kind: 'peer', name: 'ok', dsh: true }).id, '10.66.66.3')
+  assert.equal(assertTestUpgradeTarget({ id: '10.66.66.3', kind: 'peer', name: 'ok', dsh: true }, { packageOs: 'linux' }).id, '10.66.66.3')
+  // A Windows member is allowed with a Windows package; it simply has no step.
+  assert.equal(assertTestUpgradeTarget({ id: '10.66.66.4', kind: 'peer', name: 'win', dsh: true, system: { platform: 'win32' } }, { packageOs: 'windows' }).id, '10.66.66.4')
+})
+
+test('a Windows test job has no rehearsal step (nothing flat to rehearse)', () => {
+  assert.deepEqual(initialDeploySteps({ test: true, os: 'windows' }).map(step => step.key), ['upload', 'prepare', 'activate'])
+  assert.deepEqual(initialDeploySteps({ test: true, os: 'linux' }).map(step => step.key), ['upload', 'rehearse', 'prepare', 'activate'])
 })

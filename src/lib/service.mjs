@@ -112,12 +112,11 @@ export function assertTestUpgradeTarget(target, options = {}) {
   if (target.kind === 'self' || target.id === 'local') {
     throw new Error('测试升级要在别的成员上跑；本机升级请直接用「升级」')
   }
-  if (options.packageOs === 'windows') {
-    throw new Error('选的是 Windows 部署包，不能用在 Linux 成员上；测试升级目前只支持 Linux')
-  }
   const memberOs = /win/iu.test(target.system?.platform ?? '') ? 'windows' : 'linux'
-  if (memberOs !== 'linux') {
-    throw new Error(`成员 ${String(target.name ?? target.id)} 是 ${memberOs}，测试升级目前只支持 Linux 成员（演练脚本是 bash）`)
+  // A Windows member has no flat install to rehearse in: its test upgrade is
+  // the normal Windows upgrade. Only the package platform has to match.
+  if (options.packageOs !== undefined && options.packageOs !== memberOs) {
+    throw new Error(`选的是 ${options.packageOs === 'windows' ? 'Windows' : 'Linux'} 部署包，但成员 ${String(target.name ?? target.id)} 是 ${memberOs}；换一个匹配的包`)
   }
   if (target.dsh !== true) {
     throw new Error(`成员 ${String(target.name ?? target.id)} 还没有安装 DSH，没有可升级的安装；请先用「部署」`)
@@ -1003,7 +1002,10 @@ export class MeshService {
         ? 'windows'
         : member.system?.platform?.toLowerCase().startsWith('win') ? 'windows' : 'linux'
       const identity = { id: member.id, name: member.name, ip: member.ip }
-      if (test) assertTestUpgradeTarget(member, { packageOs: os })
+      // The package platform is what decides whether the target can take it;
+      // `os` above falls back to the member's platform when the name is silent.
+      const packageOs = /win(?:dows)?/iu.test(path.basename(packagePath)) ? 'windows' : 'linux'
+      if (test) assertTestUpgradeTarget(member, { packageOs })
       if (member.kind === 'self' || member.id === 'local') {
         return this.#startLocalJob({ member, packagePath, os, mode, identity })
       }
@@ -1221,7 +1223,7 @@ export class MeshService {
       status: 'queued',
       phase: 'starting',
       error: null,
-      steps: initialDeploySteps({ test: job.plan?.test === true }),
+      steps: initialDeploySteps({ test: job.plan?.test === true, os: job.plan?.os }),
       progress: { label: '启动独立升级进程', percent: 0, bytes: 0, totalBytes: bytes, speed: 0, indeterminate: false },
     }
     await writeDeployState(dir, state)

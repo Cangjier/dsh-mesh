@@ -1280,20 +1280,21 @@ function Panel({ ctx }: { ctx: any }) {
                 </Button>
               </Tooltip>
             ) : installed ? (
-              // A member upgrade only proves the blue-green path. 测试升级
-              // rehearses the flat path (what 升级 does on this machine) in a
-              // sandbox on that member first, then upgrades it for real.
-              preferredTarget(member) === 'windows' ? null : (
-                <Tooltip title="在这个成员上演练本机那套平铺升级（沙箱里备份/覆盖/接线/失败还原），通过后再真实升级它自己的安装；演练失败不会动它，也不会动本机">
-                  <Button
-                    size="small"
-                    icon={<ExperimentOutlined />}
-                    onClick={() => openDeploy(member, 'test')}
-                  >
-                    测试升级
-                  </Button>
-                </Tooltip>
-              )
+              // A member upgrade only proves the blue-green path. On a Linux
+              // member 测试升级 first rehearses the flat path (what 升级 does on
+              // this machine) in a sandbox there. A Windows member has no flat
+              // install to rehearse in, so its test upgrade is the real upgrade.
+              <Tooltip title={preferredTarget(member) === 'windows'
+                ? '在 Windows 成员上直接执行真实升级（平铺演练只适用于 Linux 平铺安装，本机就是那种布局）'
+                : '在这个成员上演练本机那套平铺升级（沙箱里备份/覆盖/接线/失败还原），通过后再真实升级它自己的安装；演练失败不会动它，也不会动本机'}>
+                <Button
+                  size="small"
+                  icon={<ExperimentOutlined />}
+                  onClick={() => openDeploy(member, 'test')}
+                >
+                  测试升级
+                </Button>
+              </Tooltip>
             ) : (
               <Button
                 size="small"
@@ -1734,7 +1735,9 @@ function Panel({ ctx }: { ctx: any }) {
                 ? '测试升级只影响这个成员，不会动本机'
                 : '部署包会安装到成员上并启动服务'}
             description={deployIntent === 'test'
-              ? '两步：① 在沙箱里用该成员当前版本的插件和它真实的 gate.env／profile 清单搭一份平铺安装，跑与本机「升级」同源的平铺升级脚本（备份、覆盖、接线，再注入一次失败验证 restore），不碰成员的任何服务；② 演练通过后才按该成员自己的布局真实升级，并重启它的服务。演练失败会把任务停在失败上，成员保持原样。注意：单元重装与健康检查只在第②步跑，沙箱里跑不了。'
+              ? (deployTarget !== null && preferredTarget(deployTarget) === 'windows'
+                ? '这个成员是 Windows：它没有平铺安装可以演练，所以直接执行真实升级（prepare → activate → 健康检查），会重启它的服务。平铺演练只适用于 Linux 平铺安装（本机就是那种布局）。'
+                : '两步：① 在沙箱里用该成员当前版本的插件和它真实的 gate.env／profile 清单搭一份平铺安装，跑与本机「升级」同源的平铺升级脚本（备份、覆盖、接线，再注入一次失败验证 restore），不碰成员的任何服务；② 演练通过后才按该成员自己的布局真实升级，并重启它的服务。演练失败会把任务停在失败上，成员保持原样。注意：单元重装与健康检查只在第②步跑，沙箱里跑不了。')
               : deployIntent === 'upgrade'
                 ? '升级进程用 systemd 临时单元单独运行，dsh-web / gate 重启不会打断它；本页面会断开约 30–60 秒，之后自动恢复并显示升级结果。'
               : '部署包从本机上传到成员，安装完成后成员上的 dsh / gate / 控制服务会重启一次；进度在任务对话框里查看。'}

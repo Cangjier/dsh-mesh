@@ -320,7 +320,9 @@ export function initialDeploySteps(options = {}) {
   const steps = [
     { key: 'upload', label: '上传安装包', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null },
   ]
-  if (options.test === true) {
+  // The rehearsal is a bash script for a flat Linux install; a Windows member
+  // has no flat layout to rehearse, so its test upgrade is the normal upgrade.
+  if (options.test === true && options.os !== 'windows') {
     // The rehearsal runs before prepare: prepare rewrites the member's live
     // profile and gate.env, and a bad package must fail before that.
     steps.push({ key: 'rehearse', label: '平铺流程演练（沙箱）', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null })
@@ -2065,7 +2067,7 @@ export class DeployManager {
       status: 'running',
       phase: 'starting',
       error: null,
-      steps: initialDeploySteps({ test: plan.test === true }),
+      steps: initialDeploySteps({ test: plan.test === true, os: plan.os }),
       progress: { bytes: 0, totalBytes: plan.package.bytes, percent: 0, speed: 0, indeterminate: false },
     }
     if (this.states.size >= 100) {

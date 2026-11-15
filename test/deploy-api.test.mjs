@@ -88,6 +88,20 @@ test('the panel can upgrade a member with a chosen package', async () => {
   assert.deepEqual(calls, [{ member: '10.66.66.2', package: 'dsh-mesh-0.2.3-linux-x64.tar.gz' }])
 })
 
+test('the panel can test-upgrade a member instead of this machine', async () => {
+  const calls = []
+  const call = apiCaller({
+    async testUpgradeMember(request) {
+      calls.push(request)
+      return { ok: true, job: { id: 'deploy-test', mode: 'test', status: 'queued' }, member: { id: '10.66.66.3' }, layout: 'bluegreen' }
+    },
+  })
+  const response = await call('POST', '/api/dsh-mesh/test-upgrade', { member: '10.66.66.3', package: 'dsh-mesh-0.2.2-rc.3-linux-x64.tar.gz' })
+  assert.equal(response.status, 202)
+  assert.equal(response.body.job.mode, 'test')
+  assert.deepEqual(calls, [{ member: '10.66.66.3', package: 'dsh-mesh-0.2.2-rc.3-linux-x64.tar.gz' }])
+})
+
 test('build logs can be cleared one job or in bulk', async () => {
   const cleared = []
   const call = apiCaller({

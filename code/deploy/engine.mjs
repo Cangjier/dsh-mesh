@@ -316,12 +316,16 @@ SSH 主机密钥与 known_hosts 中的记录不一致：目标机可能重装过
 }
 
 /** Deployment steps reported by the panel while a job runs. */
-export function initialDeploySteps() {
-  return [
+export function initialDeploySteps(options = {}) {
+  const steps = [
     { key: 'upload', label: '上传安装包', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null },
     { key: 'prepare', label: '解压并准备新版本', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null },
-    { key: 'activate', label: '切换并重启服务', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null },
   ]
+  if (options.test === true) {
+    steps.push({ key: 'rehearse', label: '平铺流程演练（沙箱）', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null })
+  }
+  steps.push({ key: 'activate', label: '切换并重启服务', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null })
+  return steps
 }
 
 /** A job whose runner has not written its heartbeat yet still counts as alive. */
@@ -667,6 +671,11 @@ export async function buildDeployPlan(options) {
     remotePackage: os === 'linux'
       ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path.extname(packagePath)}`
       : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path.extname(packagePath)}`,
+    // A test upgrade rehearses the *flat* upgrade (the path the gateway uses
+    // on itself) in a sandbox on the member before touching it, then runs the
+    // normal blue-green upgrade. Without this a member test proves nothing
+    // about the local path.
+    test: options.test === true,
     // The deployer's account grants travel with the deploy so a fresh member
     // needs no QR scan of its own.
     remoteCredentials: os === 'linux'
@@ -1054,6 +1063,78 @@ for ((i=${plan.retention}; i<\${#RELEASES[@]}; i++)); do
   rm -rf "$old" || true
 done
 echo "activated $RELEASE"
+`
+}
+
+/**
+ * Build the Linux rehearsal script for a test upgrade.
+ *
+ * The gateway upgrades itself through `code/deploy/upgrade-local.sh` (a flat
+ * install has no release symlink to switch). Members are blue-green, so a
+ * member "upgrade test" would otherwise exercise a completely different code
+ * path — exactly the gap that let a flat-only breakage ship. This script takes
+ * the member's *current* plugin tree, builds a flat install out of it in a
+ * throwaway sandbox, and runs the very same script the gateway runs, from a
+ * copy of it, with `--stage` — the same shape `runner.mjs` uses. Nothing on
+ * the member is restarted, no unit is touched.
+ * @param {object} plan deployment plan.
+ * @returns {string} shell script.
+ */
+export function buildLinuxRehearseScript(plan) {
+  const stage = `${plan.releases}/${plan.release}`
+  return `set -Eeuo pipefail
+APP_ROOT=${sh(plan.appRoot)}
+CURRENT="$APP_ROOT/current"
+STAGE=${sh(stage)}
+TEST_ROOT="$APP_ROOT/../.dsh-mesh-test/${plan.release}"
+APP="$TEST_ROOT/app"
+TEST_HOME="$TEST_ROOT/home"
+say() { printf '==> %s\\n' "$*"; }
+fail() { printf '[演练失败] %s\\n' "$*" >&2; exit 1; }
+[ -f "$STAGE/code/deploy/upgrade-local.sh" ] || fail "新包里没有 code/deploy/upgrade-local.sh，这个包做不了平铺升级"
+[ -d "$CURRENT/plugins/dsh-mesh" ] || fail "目标成员当前版本里没有 plugins/dsh-mesh，无法构造升级前状态"
+NODE="$STAGE/runtime/node/bin/node"
+[ -x "$NODE" ] || NODE=$(command -v node || true)
+[ -n "$NODE" ] || fail '演练需要 node（包内 runtime 或系统 node）'
+say "平铺升级演练：在 $TEST_ROOT 复刻一份本机流程（新包 $STAGE）"
+rm -rf "$TEST_ROOT"
+mkdir -p "$APP/config" "$APP/plugins" "$TEST_HOME/profiles/web" "$TEST_ROOT/tools"
+# Resolve the sandbox path once: wire-profile writes absolute link: targets, so
+# a path containing .. would never compare equal.
+TEST_ROOT=$(CDPATH= cd -- "$TEST_ROOT" && pwd)
+APP="$TEST_ROOT/app"
+TEST_HOME="$TEST_ROOT/home"
+cp -a "$CURRENT/plugins/." "$APP/plugins/"
+printf 'DSH_GATE_PORT=18080\\nDSH_GATE_PASSWORD=test-upgrade\\nDSH_HOME=%s\\n' "$TEST_HOME" > "$APP/config/gate.env"
+BEFORE=$("$NODE" -p "require('$APP/plugins/dsh-mesh/package.json').version" 2>/dev/null || echo unknown)
+say "升级前的沙箱版本：$BEFORE（以文件内容而非版本号判断是否真的覆盖）"
+cp "$STAGE/code/deploy/upgrade-local.sh" "$TEST_ROOT/tools/upgrade-local.sh"
+cp "$STAGE/code/deploy/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.mjs"
+chmod +x "$TEST_ROOT/tools/upgrade-local.sh"
+say '执行平铺升级脚本（--no-restart：备份、覆盖、接线；不碰任何服务）'
+bash "$TEST_ROOT/tools/upgrade-local.sh" --app-root "$APP" --stage "$STAGE" --dsh-home "$TEST_HOME" --port 18080 --no-restart
+say '核对升级结果'
+BACKUP_DIR=$(ls -1d "$APP/.upgrade-backup"/* 2>/dev/null | head -n1 || true)
+[ -n "$BACKUP_DIR" ] || fail '升级没有留下 .upgrade-backup 备份'
+[ -f "$BACKUP_DIR/plugins/dsh-mesh/package.json" ] || fail "备份里没有升级前的插件：$BACKUP_DIR"
+cmp -s "$BACKUP_DIR/plugins/dsh-mesh/index.js" "$CURRENT/plugins/dsh-mesh/index.js" \
+  || fail '备份里的插件与升级前不一致：备份没有真正执行'
+cmp -s "$APP/plugins/dsh-mesh/index.js" "$STAGE/plugins/dsh-mesh/index.js" \
+  || fail '覆盖后的插件与新包不一致：新文件没有真正落地'
+AFTER=$("$NODE" -p "require('$APP/plugins/dsh-mesh/package.json').version")
+say "升级后的沙箱版本：$AFTER；备份与覆盖都按升级前的状态逐字节核对过"
+LINK=$("$NODE" -e "const p=require('$TEST_HOME/profiles/web/package.json');process.stdout.write(String((p.dependencies||{})['@local/dsh-mesh']||''))")
+[ "$LINK" = "link:$APP/plugins/dsh-mesh" ] || fail "profile 的 @local/dsh-mesh 接线不对：$LINK"
+say "profile 接线：$LINK"
+if [ -d "$STAGE/plugins/xl" ]; then
+  [ -e "$TEST_HOME/profiles/web/node_modules/xl" ] || fail '新包带了 xl，但 profile 没有接上 xl'
+  say '随包插件 xl 已接入 profile'
+fi
+[ -f "$APP/manifest.json" ] || fail '覆盖后缺少 manifest.json'
+say "清单版本：$("$NODE" -p "require('$APP/manifest.json').version")"
+rm -rf "$TEST_ROOT"
+rmdir "$APP_ROOT/../.dsh-mesh-test" 2>/dev/null || true
+say '演练通过：新包能在一份平铺安装上完成备份、覆盖与接线；沙箱已清理'
 `
 }
 
@@ -1847,6 +1928,7 @@ export class DeployManager {
     if (plan.os === 'linux') {
       return {
         prepare: buildLinuxPrepareScript(plan),
+        rehearse: plan.test === true ? buildLinuxRehearseScript(plan) : null,
         activate: buildLinuxActivateScript(plan),
         rollback: buildLinuxRollbackScript(plan),
       }
@@ -1883,9 +1965,9 @@ export class DeployManager {
     const logFile = path.join(dir, 'deploy.log')
     const state = {
       id,
-      // `install` and `upgrade` run the same phases; the panel only changes the
-      // wording, and a job started by the panel keeps the label it was queued with.
-      mode: request.mode === 'upgrade' ? 'upgrade' : 'install',
+      // `install`, `upgrade` and `test` run the same phases; the panel only
+      // changes the wording, and a job keeps the label it was queued with.
+      mode: request.mode === 'upgrade' ? 'upgrade' : request.mode === 'test' ? 'test' : 'install',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       member: typeof request.member === 'string' && request.member !== '' ? request.member : null,
@@ -1896,7 +1978,7 @@ export class DeployManager {
       status: 'running',
       phase: 'starting',
       error: null,
-      steps: initialDeploySteps(),
+      steps: initialDeploySteps({ test: plan.test === true }),
       progress: { bytes: 0, totalBytes: plan.package.bytes, percent: 0, speed: 0, indeterminate: false },
     }
     if (this.states.size >= 100) {
@@ -2062,6 +2144,16 @@ export class DeployManager {
       })
       if (plan.os === 'linux' && entries > 0) extractProgress(entries, entries, true)
       await mark('prepare', 'succeeded')
+      if (plan.test === true && scripts.rehearse !== null) {
+        // Fail before touching the member: if the flat path cannot upgrade a
+        // sandbox, the same package would also fail on the gateway itself.
+        state.phase = 'rehearse'
+        meter('演练平铺升级', { percent: 99, indeterminate: true })
+        await mark('rehearse', 'running')
+        await log('rehearse: run the flat upgrade (backup, copy, profile) in a sandbox on the member')
+        await runner.script(scripts.rehearse, plan.os, line => note('rehearse', line))
+        await mark('rehearse', 'succeeded')
+      }
       state.phase = 'activate'
       meter('切换并重启服务', { percent: 99, indeterminate: true })
       await mark('activate', 'running')

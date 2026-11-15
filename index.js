@@ -1045,11 +1045,13 @@ async function assembleWebPackage(options) {
   await copyIfExists(path3.join(options.repositoryRoot, "code", "windows-service"), path3.join(packageDir, "code", "windows-service"));
   await copyIfExists(path3.join(options.repositoryRoot, "code", "interop-service"), path3.join(packageDir, "code", "interop-service"));
   await copyIfExists(path3.join(options.repositoryRoot, "code", "wireguard"), path3.join(packageDir, "code", "wireguard"));
+  await copyIfExists(path3.join(options.repositoryRoot, "code", "dsh-service"), path3.join(packageDir, "code", "dsh-service"));
+  await copyIfExists(path3.join(options.repositoryRoot, "code", "deploy"), path3.join(packageDir, "code", "deploy"));
   await copyIfExists(path3.join(options.repositoryRoot, "docs"), path3.join(packageDir, "docs"));
   for (const file of ["install.sh", "start.sh", "stop.sh", "status.sh", "doctor.sh", "install.ps1", "start.ps1", "stop.ps1", "start.cmd", "stop.cmd", "start-stack.ps1", "VERSION"]) {
     await copyIfExists(path3.join(options.repositoryRoot, "code", file), path3.join(packageDir, file));
   }
-  for (const file of ["start-interop.sh", "install-interop-service.sh", "uninstall-interop-service.sh"]) {
+  for (const file of ["start-dsh.sh", "start-interop.sh", "install-interop-service.sh", "uninstall-interop-service.sh"]) {
     await copyIfExists(path3.join(options.repositoryRoot, file), path3.join(packageDir, file));
   }
   for (const file of ["index.js", "client.js", "cordis.patch.yml", "package.json"]) {
@@ -1593,8 +1595,12 @@ console.log('profile-wire: dsh loads @local/dsh-mesh from ' + target)
 // the package declares one. Skipping this would leave the files in the release
 // without DSH ever loading them.
 const pluginsRoot = path.dirname(pluginDir)
-for (const entry of fs.readdirSync(pluginsRoot)) {
+const wired = new Set()
+for (const entry of fs.readdirSync(pluginsRoot).sort()) {
   if (entry === path.basename(pluginDir)) continue
+  // Backup copies (dsh-mesh.bak-20261111-1541) keep the original package
+  // name; wiring one would load stale code instead of the release.
+  if (entry.startsWith('.') || /[.~_]/u.test(entry)) continue
   const dir = path.join(pluginsRoot, entry)
   const manifestPath = path.join(dir, 'package.json')
   if (!fs.existsSync(manifestPath)) continue
@@ -1606,6 +1612,8 @@ for (const entry of fs.readdirSync(pluginsRoot)) {
     continue
   }
   const name = typeof pkg.name === 'string' && pkg.name !== '' ? pkg.name : entry
+  if (path.basename(name) !== entry || wired.has(name)) continue
+  wired.add(name)
   const parts = name.split('/')
   const linkTarget = path.join(profileDir, 'node_modules', ...parts)
   fs.mkdirSync(path.dirname(linkTarget), { recursive: true })
@@ -1747,12 +1755,16 @@ function describeDeployFailure(message) {
 
 SSH \u4E3B\u673A\u5BC6\u94A5\u4E0E known_hosts \u4E2D\u7684\u8BB0\u5F55\u4E0D\u4E00\u81F4\uFF1A\u76EE\u6807\u673A\u53EF\u80FD\u91CD\u88C5\u8FC7\u7CFB\u7EDF\uFF0C\u6216\u8FD9\u4E2A VPN \u5730\u5740\u5DF2\u7ECF\u5C5E\u4E8E\u53E6\u4E00\u53F0\u673A\u5668\u3002\u8BF7\u5728 WireGuard \u9762\u677F\u5BF9\u8BE5\u6210\u5458\u91CD\u65B0\u6267\u884C\u4E00\u6B21\u300CSSH \u6388\u6743\u300D\uFF08\u751F\u6210\u547D\u4EE4\u65F6\u4F1A\u540C\u65F6\u5237\u65B0\u672C\u673A known_hosts\uFF09\uFF0C\u6216\u8005\u624B\u52A8\u6267\u884C ssh-keygen -R <\u76EE\u6807\u5730\u5740> \u540E\u91CD\u8BD5\u3002`;
 }
-function initialDeploySteps() {
-  return [
+function initialDeploySteps(options = {}) {
+  const steps = [
     { key: "upload", label: "\u4E0A\u4F20\u5B89\u88C5\u5305", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null },
-    { key: "prepare", label: "\u89E3\u538B\u5E76\u51C6\u5907\u65B0\u7248\u672C", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null },
-    { key: "activate", label: "\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null }
+    { key: "prepare", label: "\u89E3\u538B\u5E76\u51C6\u5907\u65B0\u7248\u672C", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null }
   ];
+  if (options.test === true) {
+    steps.push({ key: "rehearse", label: "\u5E73\u94FA\u6D41\u7A0B\u6F14\u7EC3\uFF08\u6C99\u7BB1\uFF09", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null });
+  }
+  steps.push({ key: "activate", label: "\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", status: "pending", startedAt: null, finishedAt: null, detail: "", progress: null });
+  return steps;
 }
 var RUNNER_START_GRACE_MS = 45e3;
 var RUNNER_STALE_MS = 12e4;
@@ -1953,6 +1965,11 @@ async function buildDeployPlan(options) {
     // Named by content, not by release, so a retried deploy of the same package
     // reuses the upload instead of pushing hundreds of megabytes again.
     remotePackage: os6 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path5.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path5.extname(packagePath)}`,
+    // A test upgrade rehearses the *flat* upgrade (the path the gateway uses
+    // on itself) in a sandbox on the member before touching it, then runs the
+    // normal blue-green upgrade. Without this a member test proves nothing
+    // about the local path.
+    test: options.test === true,
     // The deployer's account grants travel with the deploy so a fresh member
     // needs no QR scan of its own.
     remoteCredentials: os6 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}.account` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}.account`
@@ -2284,6 +2301,60 @@ for ((i=${plan.retention}; i<\${#RELEASES[@]}; i++)); do
   rm -rf "$old" || true
 done
 echo "activated $RELEASE"
+`;
+}
+function buildLinuxRehearseScript(plan) {
+  const stage = `${plan.releases}/${plan.release}`;
+  return `set -Eeuo pipefail
+APP_ROOT=${sh(plan.appRoot)}
+CURRENT="$APP_ROOT/current"
+STAGE=${sh(stage)}
+TEST_ROOT="$APP_ROOT/../.dsh-mesh-test/${plan.release}"
+APP="$TEST_ROOT/app"
+TEST_HOME="$TEST_ROOT/home"
+say() { printf '==> %s\\n' "$*"; }
+fail() { printf '[\u6F14\u7EC3\u5931\u8D25] %s\\n' "$*" >&2; exit 1; }
+[ -f "$STAGE/code/deploy/upgrade-local.sh" ] || fail "\u65B0\u5305\u91CC\u6CA1\u6709 code/deploy/upgrade-local.sh\uFF0C\u8FD9\u4E2A\u5305\u505A\u4E0D\u4E86\u5E73\u94FA\u5347\u7EA7"
+[ -d "$CURRENT/plugins/dsh-mesh" ] || fail "\u76EE\u6807\u6210\u5458\u5F53\u524D\u7248\u672C\u91CC\u6CA1\u6709 plugins/dsh-mesh\uFF0C\u65E0\u6CD5\u6784\u9020\u5347\u7EA7\u524D\u72B6\u6001"
+NODE="$STAGE/runtime/node/bin/node"
+[ -x "$NODE" ] || NODE=$(command -v node || true)
+[ -n "$NODE" ] || fail '\u6F14\u7EC3\u9700\u8981 node\uFF08\u5305\u5185 runtime \u6216\u7CFB\u7EDF node\uFF09'
+say "\u5E73\u94FA\u5347\u7EA7\u6F14\u7EC3\uFF1A\u5728 $TEST_ROOT \u590D\u523B\u4E00\u4EFD\u672C\u673A\u6D41\u7A0B\uFF08\u65B0\u5305 $STAGE\uFF09"
+rm -rf "$TEST_ROOT"
+mkdir -p "$APP/config" "$APP/plugins" "$TEST_HOME/profiles/web" "$TEST_ROOT/tools"
+# Resolve the sandbox path once: wire-profile writes absolute link: targets, so
+# a path containing .. would never compare equal.
+TEST_ROOT=$(CDPATH= cd -- "$TEST_ROOT" && pwd)
+APP="$TEST_ROOT/app"
+TEST_HOME="$TEST_ROOT/home"
+cp -a "$CURRENT/plugins/." "$APP/plugins/"
+printf 'DSH_GATE_PORT=18080\\nDSH_GATE_PASSWORD=test-upgrade\\nDSH_HOME=%s\\n' "$TEST_HOME" > "$APP/config/gate.env"
+BEFORE=$("$NODE" -p "require('$APP/plugins/dsh-mesh/package.json').version" 2>/dev/null || echo unknown)
+say "\u5347\u7EA7\u524D\u7684\u6C99\u7BB1\u7248\u672C\uFF1A$BEFORE\uFF08\u4EE5\u6587\u4EF6\u5185\u5BB9\u800C\u975E\u7248\u672C\u53F7\u5224\u65AD\u662F\u5426\u771F\u7684\u8986\u76D6\uFF09"
+cp "$STAGE/code/deploy/upgrade-local.sh" "$TEST_ROOT/tools/upgrade-local.sh"
+cp "$STAGE/code/deploy/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.mjs"
+chmod +x "$TEST_ROOT/tools/upgrade-local.sh"
+say '\u6267\u884C\u5E73\u94FA\u5347\u7EA7\u811A\u672C\uFF08--no-restart\uFF1A\u5907\u4EFD\u3001\u8986\u76D6\u3001\u63A5\u7EBF\uFF1B\u4E0D\u78B0\u4EFB\u4F55\u670D\u52A1\uFF09'
+bash "$TEST_ROOT/tools/upgrade-local.sh" --app-root "$APP" --stage "$STAGE" --dsh-home "$TEST_HOME" --port 18080 --no-restart
+say '\u6838\u5BF9\u5347\u7EA7\u7ED3\u679C'
+BACKUP_DIR=$(ls -1d "$APP/.upgrade-backup"/* 2>/dev/null | head -n1 || true)
+[ -n "$BACKUP_DIR" ] || fail '\u5347\u7EA7\u6CA1\u6709\u7559\u4E0B .upgrade-backup \u5907\u4EFD'
+[ -f "$BACKUP_DIR/plugins/dsh-mesh/package.json" ] || fail "\u5907\u4EFD\u91CC\u6CA1\u6709\u5347\u7EA7\u524D\u7684\u63D2\u4EF6\uFF1A$BACKUP_DIR"
+cmp -s "$BACKUP_DIR/plugins/dsh-mesh/index.js" "$CURRENT/plugins/dsh-mesh/index.js"   || fail '\u5907\u4EFD\u91CC\u7684\u63D2\u4EF6\u4E0E\u5347\u7EA7\u524D\u4E0D\u4E00\u81F4\uFF1A\u5907\u4EFD\u6CA1\u6709\u771F\u6B63\u6267\u884C'
+cmp -s "$APP/plugins/dsh-mesh/index.js" "$STAGE/plugins/dsh-mesh/index.js"   || fail '\u8986\u76D6\u540E\u7684\u63D2\u4EF6\u4E0E\u65B0\u5305\u4E0D\u4E00\u81F4\uFF1A\u65B0\u6587\u4EF6\u6CA1\u6709\u771F\u6B63\u843D\u5730'
+AFTER=$("$NODE" -p "require('$APP/plugins/dsh-mesh/package.json').version")
+say "\u5347\u7EA7\u540E\u7684\u6C99\u7BB1\u7248\u672C\uFF1A$AFTER\uFF1B\u5907\u4EFD\u4E0E\u8986\u76D6\u90FD\u6309\u5347\u7EA7\u524D\u7684\u72B6\u6001\u9010\u5B57\u8282\u6838\u5BF9\u8FC7"
+LINK=$("$NODE" -e "const p=require('$TEST_HOME/profiles/web/package.json');process.stdout.write(String((p.dependencies||{})['@local/dsh-mesh']||''))")
+[ "$LINK" = "link:$APP/plugins/dsh-mesh" ] || fail "profile \u7684 @local/dsh-mesh \u63A5\u7EBF\u4E0D\u5BF9\uFF1A$LINK"
+say "profile \u63A5\u7EBF\uFF1A$LINK"
+if [ -d "$STAGE/plugins/xl" ]; then
+  [ -e "$TEST_HOME/profiles/web/node_modules/xl" ] || fail '\u65B0\u5305\u5E26\u4E86 xl\uFF0C\u4F46 profile \u6CA1\u6709\u63A5\u4E0A xl'
+  say '\u968F\u5305\u63D2\u4EF6 xl \u5DF2\u63A5\u5165 profile'
+fi
+[ -f "$APP/manifest.json" ] || fail '\u8986\u76D6\u540E\u7F3A\u5C11 manifest.json'
+say "\u6E05\u5355\u7248\u672C\uFF1A$("$NODE" -p "require('$APP/manifest.json').version")"
+rm -rf "$TEST_ROOT"
+say '\u6F14\u7EC3\u901A\u8FC7\uFF1A\u65B0\u5305\u80FD\u5728\u4E00\u4EFD\u5E73\u94FA\u5B89\u88C5\u4E0A\u5B8C\u6210\u5907\u4EFD\u3001\u8986\u76D6\u4E0E\u63A5\u7EBF\uFF1B\u6C99\u7BB1\u5DF2\u6E05\u7406'
 `;
 }
 function buildLinuxRollbackScript(plan) {
@@ -2980,6 +3051,7 @@ var DeployManager = class {
     if (plan.os === "linux") {
       return {
         prepare: buildLinuxPrepareScript(plan),
+        rehearse: plan.test === true ? buildLinuxRehearseScript(plan) : null,
         activate: buildLinuxActivateScript(plan),
         rollback: buildLinuxRollbackScript(plan)
       };
@@ -3013,9 +3085,9 @@ var DeployManager = class {
     const logFile = path5.join(dir, "deploy.log");
     const state = {
       id,
-      // `install` and `upgrade` run the same phases; the panel only changes the
-      // wording, and a job started by the panel keeps the label it was queued with.
-      mode: request.mode === "upgrade" ? "upgrade" : "install",
+      // `install`, `upgrade` and `test` run the same phases; the panel only
+      // changes the wording, and a job keeps the label it was queued with.
+      mode: request.mode === "upgrade" ? "upgrade" : request.mode === "test" ? "test" : "install",
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
       updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
       member: typeof request.member === "string" && request.member !== "" ? request.member : null,
@@ -3026,7 +3098,7 @@ var DeployManager = class {
       status: "running",
       phase: "starting",
       error: null,
-      steps: initialDeploySteps(),
+      steps: initialDeploySteps({ test: plan.test === true }),
       progress: { bytes: 0, totalBytes: plan.package.bytes, percent: 0, speed: 0, indeterminate: false }
     };
     if (this.states.size >= 100) {
@@ -3175,6 +3247,14 @@ var DeployManager = class {
       });
       if (plan.os === "linux" && entries > 0) extractProgress(entries, entries, true);
       await mark("prepare", "succeeded");
+      if (plan.test === true && scripts.rehearse !== null) {
+        state.phase = "rehearse";
+        meter("\u6F14\u7EC3\u5E73\u94FA\u5347\u7EA7", { percent: 99, indeterminate: true });
+        await mark("rehearse", "running");
+        await log("rehearse: run the flat upgrade (backup, copy, profile) in a sandbox on the member");
+        await runner.script(scripts.rehearse, plan.os, (line) => note("rehearse", line));
+        await mark("rehearse", "succeeded");
+      }
       state.phase = "activate";
       meter("\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", { percent: 99, indeterminate: true });
       await mark("activate", "running");
@@ -4888,7 +4968,8 @@ var MeshService = class {
    * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string, layout: string}>} queued job.
    */
   async startDeploy(request) {
-    const mode = request.mode === "upgrade" ? "upgrade" : "install";
+    const mode = request.mode === "upgrade" ? "upgrade" : request.mode === "test" ? "test" : "install";
+    const test = request.test === true || mode === "test";
     const host = typeof request.host === "string" ? request.host.trim() : "";
     const memberId = typeof request.member === "string" ? request.member.trim() : "";
     const packagePath = await this.resolvePackage(request.package);
@@ -4899,7 +4980,7 @@ var MeshService = class {
     const busy = await this.#activeDeployFor(member?.id ?? null, member?.ip ?? host);
     if (busy !== null) {
       throw Object.assign(
-        new Error(`\u8BE5\u76EE\u6807\u5DF2\u6709\u6B63\u5728\u8FDB\u884C\u7684${busy.mode === "upgrade" ? "\u5347\u7EA7" : "\u90E8\u7F72"}\u4EFB\u52A1\uFF1A${busy.id}`),
+        new Error(`\u8BE5\u76EE\u6807\u5DF2\u6709\u6B63\u5728\u8FDB\u884C\u7684${busy.mode === "upgrade" ? "\u5347\u7EA7" : busy.mode === "test" ? "\u6D4B\u8BD5\u5347\u7EA7" : "\u90E8\u7F72"}\u4EFB\u52A1\uFF1A${busy.id}`),
         { status: 409 }
       );
     }
@@ -4907,10 +4988,16 @@ var MeshService = class {
       const os7 = /win(?:dows)?/iu.test(path9.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
       const identity = { id: member.id, name: member.name, ip: member.ip };
       if (member.kind === "self" || member.id === "local") {
+        if (test) throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u8981\u5728\u522B\u7684\u6210\u5458\u4E0A\u8DD1\uFF1B\u672C\u673A\u5347\u7EA7\u8BF7\u76F4\u63A5\u7528\u300C\u5347\u7EA7\u300D");
         return this.#startLocalJob({ member, packagePath, os: os7, mode, identity });
       }
+      if (test && os7 !== "linux") throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u76EE\u524D\u53EA\u652F\u6301 Linux \u6210\u5458\uFF08\u5E73\u94FA\u5E03\u5C40\u7684\u6F14\u7EC3\u811A\u672C\u662F bash\uFF09");
       const deployRequest = await this.#memberDeployRequest(member, packagePath, os7);
-      const job2 = await this.#startEngineJob({ request: { ...deployRequest, member: member.id }, member: member.id, mode });
+      const job2 = await this.#startEngineJob({
+        request: { ...deployRequest, member: member.id, test },
+        member: member.id,
+        mode
+      });
       return { ok: true, job: job2, member: identity, packagePath, layout: "bluegreen" };
     }
     if (host === "") throw new Error("host is required");
@@ -4946,6 +5033,27 @@ var MeshService = class {
    */
   async upgradeMember(request) {
     const result = await this.startDeploy({ member: request.member, package: request.package, mode: "upgrade" });
+    return {
+      ok: true,
+      job: result.job,
+      member: result.member,
+      layout: result.layout,
+      packagesDir: this.packagesDir
+    };
+  }
+  /**
+   * Test-upgrade one package on another member.
+   *
+   * The job does what a member upgrade does — upload, extract, switch, restart,
+   * health check, rollback on failure — and, before touching the member, runs
+   * the flat upgrade the gateway runs on itself against a sandbox built from
+   * the member's current version. That way the local path is exercised on a
+   * machine that is not this one.
+   * @param {{member?: string, package?: string}} request member id/ip and package filename.
+   * @returns {Promise<object>} queued job.
+   */
+  async testUpgradeMember(request) {
+    const result = await this.startDeploy({ member: request.member, package: request.package, mode: "test", test: true });
     return {
       ok: true,
       job: result.job,
@@ -5086,7 +5194,7 @@ var MeshService = class {
       status: "queued",
       phase: "starting",
       error: null,
-      steps: initialDeploySteps(),
+      steps: initialDeploySteps({ test: job.plan?.test === true }),
       progress: { label: "\u542F\u52A8\u72EC\u7ACB\u5347\u7EA7\u8FDB\u7A0B", percent: 0, bytes: 0, totalBytes: bytes, speed: 0, indeterminate: false }
     };
     await writeDeployState(dir, state);
@@ -5821,12 +5929,14 @@ function registerApi(ctx, service) {
           }));
           return;
         }
-        if (path14 === "/upgrade") {
+        if (path14 === "/upgrade" || path14 === "/test-upgrade") {
           const body = await readJson(request);
-          writeJson(response, 202, await service.upgradeMember({
+          const request_ = {
             member: typeof body.member === "string" ? body.member : void 0,
             package: typeof body.package === "string" ? body.package : void 0
-          }));
+          };
+          const test = path14 === "/test-upgrade" || body.test === true;
+          writeJson(response, 202, test ? await service.testUpgradeMember(request_) : await service.upgradeMember(request_));
           return;
         }
         if (path14 === "/build") {

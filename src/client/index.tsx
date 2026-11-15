@@ -31,6 +31,7 @@ import {
   DeleteOutlined,
   CloudDownloadOutlined,
   CloudUploadOutlined,
+  ExperimentOutlined,
   EditOutlined,
   InfoCircleOutlined,
   LoadingOutlined,
@@ -257,7 +258,7 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
   const logLines = Array.isArray(lines) ? lines : String(lines ?? '').split(/\r?\n/u)
   // An upgrade and a first install run the same phases; only the wording
   // differs, and the operator needs to know which one is happening.
-  const action = job.mode === 'upgrade' ? '升级' : '部署'
+  const action = job.mode === 'upgrade' ? '升级' : job.mode === 'test' ? '测试升级' : '部署'
   const progress = job.progress
   const total = progress?.totalBytes ?? 0
   const bytes = progress?.bytes ?? 0
@@ -938,7 +939,7 @@ function Panel({ ctx }: { ctx: any }) {
   const [deployTarget, setDeployTarget] = useState<Member | null>(null)
   // The same dialog installs a fresh member and upgrades an existing one; the
   // intent only decides the wording and which API is called.
-  const [deployIntent, setDeployIntent] = useState<'install' | 'upgrade'>('install')
+  const [deployIntent, setDeployIntent] = useState<'install' | 'upgrade' | 'test'>('install')
   const [packages, setPackages] = useState<PackageInfo[]>([])
   const [packagesDir, setPackagesDir] = useState('')
   const [packagesLoading, setPackagesLoading] = useState(false)
@@ -1087,11 +1088,11 @@ function Panel({ ctx }: { ctx: any }) {
       const previous = deployStatusRef.current[job.id]
       deployStatusRef.current[job.id] = job.status
       if (previous === 'running' && job.status === 'succeeded') {
-        messageApi.success(`${job.mode === 'upgrade' ? '升级' : '部署'}完成：${job.release}`)
+        messageApi.success(`${job.mode === 'upgrade' ? '升级' : job.mode === 'test' ? '测试升级' : '部署'}完成：${job.release}`)
         finished = true
       }
       if (previous === 'running' && job.status === 'failed') {
-        messageApi.error(`${job.mode === 'upgrade' ? '升级' : '部署'}失败：${job.error ?? job.id}`)
+        messageApi.error(`${job.mode === 'upgrade' ? '升级' : job.mode === 'test' ? '测试升级' : '部署'}失败：${job.error ?? job.id}`)
         finished = true
       }
     }
@@ -1187,7 +1188,7 @@ function Panel({ ctx }: { ctx: any }) {
     }
   }, [])
 
-  const openDeploy = useCallback((member: Member, intent: 'install' | 'upgrade') => {
+  const openDeploy = useCallback((member: Member, intent: 'install' | 'upgrade' | 'test') => {
     setDeployTarget(member)
     setDeployIntent(intent)
     setPackages([])
@@ -1203,12 +1204,14 @@ function Panel({ ctx }: { ctx: any }) {
     try {
       const result = deployIntent === 'upgrade'
         ? await api.upgrade(deployTarget.id, selectedPackage)
-        : await api.deploy(deployTarget.id, selectedPackage)
+        : deployIntent === 'test'
+          ? await api.testUpgrade(deployTarget.id, selectedPackage)
+          : await api.deploy(deployTarget.id, selectedPackage)
       setDeployTarget(null)
       setError(null)
       setDeployJobs(current => [result.job, ...current.filter(job => job.id !== result.job.id)])
       openProgress(result.job)
-      messageApi.info(`${deployIntent === 'upgrade' ? '升级' : '部署'}已开始：${result.job.id}`)
+      messageApi.info(`${deployIntent === 'upgrade' ? '升级' : deployIntent === 'test' ? '测试升级' : '部署'}已开始：${result.job.id}`)
     } catch (failure) {
       // The dialog closes only on success, so the reason has to be visible on
       // top of it; the page banner sits behind the mask.
@@ -1239,7 +1242,7 @@ function Panel({ ctx }: { ctx: any }) {
               icon={<LoadingOutlined />}
               onClick={() => openProgress(activeJob)}
             >
-              {activeJob.mode === 'upgrade' ? '正在升级' : '正在部署'} {deployPercent(activeJob)}%
+              {activeJob.mode === 'upgrade' ? '正在升级' : activeJob.mode === 'test' ? '正在测试升级' : '正在部署'} {deployPercent(activeJob)}%
             </Button>
           )
         }
@@ -1273,7 +1276,22 @@ function Panel({ ctx }: { ctx: any }) {
                   升级
                 </Button>
               </Tooltip>
-            ) : installed ? null : (
+            ) : installed ? (
+              // A member upgrade only proves the blue-green path. 测试升级
+              // rehearses the flat path (what 升级 does on this machine) in a
+              // sandbox on that member first, then upgrades it for real.
+              /win/i.test(member.system?.platform ?? '') ? null : (
+                <Tooltip title="在这个成员上演练一遍升级：先用沙箱跑本机那套平铺升级流程，通过后再真实升级它。失败不会影响本机">
+                  <Button
+                    size="small"
+                    icon={<ExperimentOutlined />}
+                    onClick={() => openDeploy(member, 'test')}
+                  >
+                    测试升级
+                  </Button>
+                </Tooltip>
+              )
+            ) : (
               <Button
                 size="small"
                 icon={<CloudDownloadOutlined />}
@@ -1684,8 +1702,8 @@ function Panel({ ctx }: { ctx: any }) {
 
       <Modal
         open={deployTarget !== null}
-        title={`${deployIntent === 'upgrade' ? '升级' : '部署到'} ${deployTarget?.name ?? ''}`}
-        okText={deployIntent === 'upgrade' ? '开始升级' : '开始部署'}
+        title={`${deployIntent === 'upgrade' ? '升级' : deployIntent === 'test' ? '测试升级' : '部署到'} ${deployTarget?.name ?? ''}`}
+        okText={deployIntent === 'upgrade' ? '开始升级' : deployIntent === 'test' ? '开始测试升级' : '开始部署'}
         cancelText="取消"
         confirmLoading={busy !== ''}
         okButtonProps={{ disabled: selectedPackage === undefined }}
@@ -1695,7 +1713,7 @@ function Panel({ ctx }: { ctx: any }) {
       >
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {deployIntent === 'upgrade' ? '升级包来自本机：' : '部署包来自本机：'}
+            {deployIntent === 'install' ? '部署包来自本机：' : '升级包来自本机：'}
             <span className="dsh-pw-mono">{packagesDir || '~/.dsh/packages'}</span>
           </Typography.Text>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -1707,9 +1725,15 @@ function Panel({ ctx }: { ctx: any }) {
           <Alert
             type="info"
             showIcon
-            message={deployIntent === 'upgrade' ? '本机升级会重启当前面板所在的服务' : '部署包会安装到成员上并启动服务'}
-            description={deployIntent === 'upgrade'
-              ? '升级进程用 systemd 临时单元单独运行，dsh-web / gate 重启不会打断它；本页面会断开约 30–60 秒，之后自动恢复并显示升级结果。'
+            message={deployIntent === 'upgrade'
+              ? '本机升级会重启当前面板所在的服务'
+              : deployIntent === 'test'
+                ? '测试升级只影响这个成员，不会动本机'
+                : '部署包会安装到成员上并启动服务'}
+            description={deployIntent === 'test'
+              ? '两步：① 用该成员当前版本在这个成员上搭一份沙箱安装，跑与本机「升级」完全相同的平铺升级脚本（备份、覆盖、接线），不碰任何服务；② 演练通过后才按该成员自己的布局真实升级并重启它的服务。演练失败会把任务停在失败上，不会动本机。'
+              : deployIntent === 'upgrade'
+                ? '升级进程用 systemd 临时单元单独运行，dsh-web / gate 重启不会打断它；本页面会断开约 30–60 秒，之后自动恢复并显示升级结果。'
               : '部署包从本机上传到成员，安装完成后成员上的 dsh / gate / 控制服务会重启一次；进度在任务对话框里查看。'}
           />
           {deployTarget !== null ? (() => {
@@ -1767,7 +1791,7 @@ function Panel({ ctx }: { ctx: any }) {
 
       <Modal
         open={progressJob !== null}
-        title={`${progressJob?.mode === 'upgrade' ? '升级' : '部署'}进度 · ${
+        title={`${progressJob?.mode === 'upgrade' ? '升级' : progressJob?.mode === 'test' ? '测试升级' : '部署'}进度 · ${
           progressJob === null
             ? ''
             : memberRows.find(row => row.id === progressJob.member || row.ip === progressJob.target.host)?.name

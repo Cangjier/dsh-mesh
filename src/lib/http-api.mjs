@@ -202,12 +202,18 @@ export function registerApi(ctx, service) {
           }))
           return
         }
-        if (path === '/upgrade') {
+        if (path === '/upgrade' || path === '/test-upgrade') {
           const body = await readJson(request)
-          writeJson(response, 202, await service.upgradeMember({
+          const request_ = {
             member: typeof body.member === 'string' ? body.member : undefined,
             package: typeof body.package === 'string' ? body.package : undefined,
-          }))
+          }
+          // `/test-upgrade` runs the same upgrade on another member, plus a
+          // rehearsal of the flat (local) path in a sandbox there.
+          const test = path === '/test-upgrade' || body.test === true
+          writeJson(response, 202, test
+            ? await service.testUpgradeMember(request_)
+            : await service.upgradeMember(request_))
           return
         }
         if (path === '/build') {

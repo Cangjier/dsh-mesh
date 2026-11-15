@@ -368,6 +368,21 @@ export const api = {
     })
   },
 
+  /**
+   * Run the same upgrade on another member, after rehearsing the flat
+   * (this-machine) upgrade path in a sandbox there.
+   * @param {string} member member id.
+   * @param {string} packageName package file name.
+   * @returns {Promise<DeployResponse>} queued job.
+   */
+  testUpgrade(member: string, packageName: string): Promise<DeployResponse> {
+    return request<DeployResponse>('/api/dsh-mesh/test-upgrade', {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: JSON.stringify({ member, package: packageName }),
+    })
+  },
+
   rollback(member: string): Promise<DeployResponse> {
     return request<DeployResponse>('/api/dsh-mesh/deploy/rollback', {
       method: 'POST',

@@ -945,7 +945,11 @@ export class MeshService {
    * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string, layout: string}>} queued job.
    */
   async startDeploy(request) {
-    const mode = request.mode === 'upgrade' ? 'upgrade' : 'install'
+    const mode = request.mode === 'upgrade' ? 'upgrade' : request.mode === 'test' ? 'test' : 'install'
+    // A test upgrade rehearses the flat path on a *member*, then upgrades that
+    // member normally. It is never a local job: the whole point is not to be
+    // the machine being tested.
+    const test = request.test === true || mode === 'test'
     const host = typeof request.host === 'string' ? request.host.trim() : ''
     const memberId = typeof request.member === 'string' ? request.member.trim() : ''
     const packagePath = await this.resolvePackage(request.package)
@@ -961,7 +965,7 @@ export class MeshService {
     const busy = await this.#activeDeployFor(member?.id ?? null, member?.ip ?? host)
     if (busy !== null) {
       throw Object.assign(
-        new Error(`该目标已有正在进行的${busy.mode === 'upgrade' ? '升级' : '部署'}任务：${busy.id}`),
+        new Error(`该目标已有正在进行的${busy.mode === 'upgrade' ? '升级' : busy.mode === 'test' ? '测试升级' : '部署'}任务：${busy.id}`),
         { status: 409 },
       )
     }
@@ -971,10 +975,16 @@ export class MeshService {
         : member.system?.platform?.toLowerCase().startsWith('win') ? 'windows' : 'linux'
       const identity = { id: member.id, name: member.name, ip: member.ip }
       if (member.kind === 'self' || member.id === 'local') {
+        if (test) throw new Error('测试升级要在别的成员上跑；本机升级请直接用「升级」')
         return this.#startLocalJob({ member, packagePath, os, mode, identity })
       }
+      if (test && os !== 'linux') throw new Error('测试升级目前只支持 Linux 成员（平铺布局的演练脚本是 bash）')
       const deployRequest = await this.#memberDeployRequest(member, packagePath, os)
-      const job = await this.#startEngineJob({ request: { ...deployRequest, member: member.id }, member: member.id, mode })
+      const job = await this.#startEngineJob({
+        request: { ...deployRequest, member: member.id, test },
+        member: member.id,
+        mode,
+      })
       return { ok: true, job, member: identity, packagePath, layout: 'bluegreen' }
     }
     if (host === '') throw new Error('host is required')
@@ -1012,6 +1022,28 @@ export class MeshService {
    */
   async upgradeMember(request) {
     const result = await this.startDeploy({ member: request.member, package: request.package, mode: 'upgrade' })
+    return {
+      ok: true,
+      job: result.job,
+      member: result.member,
+      layout: result.layout,
+      packagesDir: this.packagesDir,
+    }
+  }
+
+  /**
+   * Test-upgrade one package on another member.
+   *
+   * The job does what a member upgrade does — upload, extract, switch, restart,
+   * health check, rollback on failure — and, before touching the member, runs
+   * the flat upgrade the gateway runs on itself against a sandbox built from
+   * the member's current version. That way the local path is exercised on a
+   * machine that is not this one.
+   * @param {{member?: string, package?: string}} request member id/ip and package filename.
+   * @returns {Promise<object>} queued job.
+   */
+  async testUpgradeMember(request) {
+    const result = await this.startDeploy({ member: request.member, package: request.package, mode: 'test', test: true })
     return {
       ok: true,
       job: result.job,
@@ -1160,7 +1192,7 @@ export class MeshService {
       status: 'queued',
       phase: 'starting',
       error: null,
-      steps: initialDeploySteps(),
+      steps: initialDeploySteps({ test: job.plan?.test === true }),
       progress: { label: '启动独立升级进程', percent: 0, bytes: 0, totalBytes: bytes, speed: 0, indeterminate: false },
     }
     await writeDeployState(dir, state)

@@ -47,6 +47,18 @@ ENV_FILE="$APP_ROOT/config/gate.env"
 [ -d "$APP_ROOT/plugins/dsh-mesh" ] || die "缺少 $APP_ROOT/plugins/dsh-mesh"
 [ -f "$STAGE/manifest.json" ] || die "部署包不完整：缺少 $STAGE/manifest.json"
 [ -f "$STAGE/start.sh" ] || die "部署包不完整：缺少 $STAGE/start.sh"
+[ -d "$STAGE/plugins/dsh-mesh" ] || die "部署包不完整：缺少 $STAGE/plugins/dsh-mesh"
+
+# 空间预检：要同时放得下新包、旧文件的备份，以及解压/复制过程中的临时占用。
+# 磁盘写满发生在复制中途是最坏的情况——备份也可能写不进去，只能人工救。
+avail_kb=$(df -Pk "$APP_ROOT" | awk 'NR==2{print $4}')
+stage_kb=$(du -sk "$STAGE" 2>/dev/null | cut -f1)
+stage_kb=${stage_kb:-0}
+need_kb=$((stage_kb * 2 + 204800))
+if [ "$avail_kb" -lt "$need_kb" ]; then
+  die "磁盘空间不足：$APP_ROOT 需要约 $((need_kb / 1024)) MiB 可用（新包 $((stage_kb / 1024)) MiB ×2 + 余量），当前只有 $((avail_kb / 1024)) MiB；未做任何修改"
+fi
+say "空间预检通过（可用 $((avail_kb / 1024)) MiB，需要 $((need_kb / 1024)) MiB）"
 
 NODE="$STAGE/runtime/node/bin/node"
 [ -x "$NODE" ] || NODE="$APP_ROOT/runtime/node/bin/node"
@@ -93,8 +105,12 @@ cp -a "$PROFILE/package.json" "$BACKUP/profile-package.json" 2>/dev/null || true
 cp -a "$PROFILE/cordis.patch.yml" "$BACKUP/profile-cordis.patch.yml" 2>/dev/null || true
 say "备份到 $BACKUP"
 
+RESTORED=0
+FINISHED=0
 restore() {
-  warn '开始回滚到升级前的文件'
+  if [ "$RESTORED" = "1" ]; then return 0; fi
+  RESTORED=1
+  warn "开始回滚到升级前的文件（备份 $BACKUP）"
   for item in config code gate plugins locale docs package.json manifest.json start.sh start-dsh.sh start-interop.sh install.sh deploy; do
     if [ -e "$BACKUP/$item" ]; then
       rm -rf "${APP_ROOT:?}/$item"
@@ -107,10 +123,37 @@ restore() {
   if [ -f "$BACKUP/profile-cordis.patch.yml" ]; then
     cp -a "$BACKUP/profile-cordis.patch.yml" "$PROFILE/cordis.patch.yml" 2>/dev/null || true
   fi
+  if [ "$NO_RESTART" = "1" ]; then
+    warn '--no-restart：只恢复文件，不重启服务'
+    return 0
+  fi
   systemctl daemon-reload 2>/dev/null || true
   systemctl restart dsh-web-app.service dsh-web-gate.service dsh-wireguard-control.service 2>/dev/null || true
   systemctl restart dsh-interop.service 2>/dev/null || true
+  # 回滚后必须自己验一次：只“重启过”不等于“能访问”。
+  ok=0
+  for _ in $(seq 1 30); do
+    if curl -fsS "http://127.0.0.1:$PORT/__gate/health" >/dev/null 2>&1; then ok=1; break; fi
+    sleep 2
+  done
+  if [ "$ok" = "1" ]; then
+    warn '回滚完成：网关健康，安装已回到升级前的文件'
+  else
+    warn '回滚完成但仍不健康：文件已恢复，手动执行 systemctl restart dsh-web-app dsh-web-gate 并用 journalctl 看原因'
+  fi
 }
+
+# 意外中断（脚本报错、进程被 SIGTERM、systemctl stop 掉升级任务）也要回到升级前，
+# 否则会留下“文件是新的一半、服务是旧的一半”的目录，比不升级更糟。
+on_exit() {
+  code=$?
+  if [ "$FINISHED" != "1" ] && [ "$RESTORED" != "1" ]; then
+    warn "升级中断（exit $code），用备份恢复"
+    restore
+  fi
+}
+trap on_exit EXIT
+trap 'exit 143' TERM INT
 
 # ── 2. 覆盖文件 ────────────────────────────────────────────────────────────
 say '复制新版本文件（保留 config/data/home/workspace）'
@@ -137,6 +180,7 @@ say '重写 gate.env 与 profile 接线'
 
 if [ "$NO_RESTART" = "1" ]; then
   say '--no-restart：跳过服务重装与重启'
+  FINISHED=1
   exit 0
 fi
 
@@ -190,6 +234,7 @@ if [ "$control_ok" != "1" ]; then
   die '控制服务（51821）健康检查失败'
 fi
 say '网关与控制服务都健康'
+FINISHED=1
 
 # ── 6. 只保留最近 3 份升级备份 ─────────────────────────────────────────────
 mapfile -t BACKUPS < <(ls -1dt "$APP_ROOT/.upgrade-backup"/* 2>/dev/null || true)

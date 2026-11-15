@@ -106,3 +106,17 @@ test('build logs can be cleared one job or in bulk', async () => {
   assert.equal(all.status, 200)
   assert.deepEqual(all.body.cleared, ['job-a', 'job-b'])
 })
+
+test('the panel can roll a member back to its previous release', async () => {
+  const calls = []
+  const call = apiCaller({
+    async rollbackMember(request) {
+      calls.push(request)
+      return { ok: true, job: { id: 'deploy-rb', status: 'running' }, member: { id: '10.66.66.2' } }
+    },
+  })
+  const response = await call('POST', '/api/dsh-mesh/deploy/rollback', { member: '10.66.66.2' })
+  assert.equal(response.status, 202)
+  assert.equal(response.body.job.id, 'deploy-rb')
+  assert.deepEqual(calls, [{ member: '10.66.66.2' }])
+})

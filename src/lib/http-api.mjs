@@ -195,6 +195,13 @@ export function registerApi(ctx, service) {
           writeJson(response, 200, await service.clearFinishedBuilds())
           return
         }
+        if (path === '/deploy/rollback') {
+          const body = await readJson(request)
+          writeJson(response, 202, await service.rollbackMember({
+            member: typeof body.member === 'string' ? body.member : '',
+          }))
+          return
+        }
         if (path === '/upgrade') {
           const body = await readJson(request)
           writeJson(response, 202, await service.upgradeMember({

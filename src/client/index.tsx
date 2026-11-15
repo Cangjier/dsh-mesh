@@ -10,6 +10,7 @@ import {
   Grid,
   Input,
   Modal,
+  Popconfirm,
   Progress,
   Select,
   Space,
@@ -1023,6 +1024,24 @@ function Panel({ ctx }: { ctx: any }) {
     return () => { window.clearTimeout(timer) }
   }, [startupRetry, load])
 
+  /**
+   * Put a member back on the release it ran before the failed upgrade.
+   *
+   * A broken member often keeps its gateway down, so the panel that started the
+   * upgrade is the only place left that can fix it without a shell.
+   */
+  const rollbackDeployJob = useCallback(async (job: DeployJob) => {
+    if (job.member === null || job.member === undefined || job.member === 'local') return
+    try {
+      const result = await api.rollback(job.member)
+      messageApi.info(`回滚已开始：${result.job.id}`)
+      setProgressJob(result.job)
+      await refreshDeployJobs()
+    } catch (failure) {
+      messageApi.error(errorText(failure))
+    }
+  }, [messageApi])
+
   const refreshDeployJobs = useCallback(async () => {
     try {
       const result = await api.deployJobs()
@@ -1755,7 +1774,25 @@ function Panel({ ctx }: { ctx: any }) {
               ?? progressJob.target.host
         }`}
         onCancel={() => setProgressJob(null)}
-        footer={<Button onClick={() => setProgressJob(null)}>关闭</Button>}
+        footer={(
+          <Space>
+            {progressJob !== null && progressJob.status === 'failed' && progressJob.member !== null && progressJob.member !== undefined && progressJob.member !== 'local'
+              ? (
+                <Popconfirm
+                  title="把这个成员回滚到上一版？"
+                  description="把 current 切回 previous 并重启它的服务；上一版不存在时会失败。"
+                  okText="回滚"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => { void rollbackDeployJob(progressJob) }}
+                >
+                  <Button danger>回滚到上一版</Button>
+                </Popconfirm>
+              )
+              : null}
+            <Button onClick={() => setProgressJob(null)}>关闭</Button>
+          </Space>
+        )}
         width={760}
         destroyOnHidden
       >

@@ -1419,6 +1419,35 @@ export class MeshService {
   }
 
   /**
+   * Roll one discovered member back to the release it ran before the last
+   * deploy.
+   *
+   * This is the escape hatch for "the upgrade came up broken": the panel that
+   * started the upgrade is still alive (it is a different machine), so it can
+   * put the member back without a shell. A flat install has no blue-green
+   * `previous`, so it is refused with a pointer at its upgrade backup.
+   * @param {{member: string}} request member id, VPN address, or name.
+   * @returns {Promise<object>} rollback job.
+   */
+  async rollbackMember({ member = '' } = {}) {
+    if (member === '') throw new Error('which member should roll back?')
+    const snapshot = await this.members()
+    const everyone = [snapshot.local, ...snapshot.members].filter(entry => entry !== null && entry !== undefined)
+    const found = everyone.find(entry => entry.id === member || entry.name === member || entry.ip === member)
+    if (found === undefined) throw new Error(`member not found: ${member}`)
+    if (found.kind === 'self') {
+      throw new Error('本机是平铺安装，没有 blue-green 的上一版可切；回滚用 .upgrade-backup 里的备份恢复')
+    }
+    if (found.dsh !== true) {
+      throw new Error(`成员 ${found.name} 的网关没有应答，无法在线回滚；SSH 上去执行 code/deploy/cli.mjs rollback`)
+    }
+    const os = String(found.system?.platform ?? '').toLowerCase().startsWith('win') ? 'windows' : 'linux'
+    const request = await this.#memberDeployRequest(found, '', os)
+    const job = await this.deploy.rollback({ ...request, os, skipPackage: true })
+    return { ok: true, job, member: found }
+  }
+
+  /**
    * Resolve and validate one job directory.
    * @param {string} id job id.
    * @returns {string} path.

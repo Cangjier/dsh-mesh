@@ -984,8 +984,14 @@ if [ -n "$OLD" ]; then
 fi
 ln -sfn "$NEW" "$CURRENT"
 
+# A failing systemctl restart must not abort the script: with set -e that
+# used to exit *after* current had already moved, leaving the member on a
+# release whose services never came up — and no rollback. Collect the failures
+# and let the single rollback path below decide.
 restart_services() {
-${restart.split('\n').map(line => `  ${line}`).join('\n')}
+  local failed=0
+${restart.split('\n').map(line => `  ${line} || failed=1`).join('\n')}
+  return "$failed"
 }
 health() {
   for _ in $(seq 1 30); do
@@ -996,20 +1002,43 @@ health() {
   done
   return 1
 }
-restart_services
+ROLLED_BACK=0
+rollback() {
+  if [ "$ROLLED_BACK" = "1" ]; then return 0; fi
+  ROLLED_BACK=1
+  if [ -z "$OLD" ]; then
+    echo "no previous release to roll back to; $CURRENT stays on $RELEASE" >&2
+    return 1
+  fi
+  echo "rolling back to $OLD" >&2
+  ln -sfn "$OLD" "$CURRENT"
+${rollbackRestart.split('\n').map(line => `  ${line} || true`).join('\n')}
+  systemctl restart dsh-interop.service 2>/dev/null || true
+  if health; then
+    echo "rollback finished: $OLD answers the health check" >&2
+  else
+    echo "rollback finished but $OLD did not answer the health check; it needs a manual look" >&2
+  fi
+  return 0
+}
+# Any unexpected failure after the switch (a missing binary, a full disk) takes
+# the same rollback path instead of leaving the release half-applied.
+set -E
+trap 'rollback || true' ERR
+if ! restart_services; then
+  echo "a service failed to restart on $RELEASE; rolling back" >&2
+  rollback || true
+  exit 1
+fi
 if [ -d "/etc/systemd/system/dsh-interop.service.d" ]; then
   systemctl restart dsh-interop.service 2>/dev/null || echo "dsh-interop.service did not start; member delegation stays unavailable" >&2
 fi
 if ! health; then
   echo "health check failed on $RELEASE; rolling back" >&2
-  if [ -n "$OLD" ]; then
-    ln -sfn "$OLD" "$CURRENT"
-${rollbackRestart.split('\n').map(line => `    ${line}`).join('\n')}
-    systemctl restart dsh-interop.service 2>/dev/null || true
-    health || true
-  fi
+  rollback || true
   exit 1
 fi
+trap - ERR
 # Retention: keep the newest N releases and never the current/previous target.
 mapfile -t RELEASES < <(ls -1dt "$APP_ROOT/releases"/* 2>/dev/null || true)
 for ((i=${plan.retention}; i<\${#RELEASES[@]}; i++)); do
@@ -1228,7 +1257,12 @@ if ($old) {
 }
 if (Test-Path $Current) { & cmd.exe /c rmdir "$Current" | Out-Null }
 & cmd.exe /c mklink /J "$Current" "$New" | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "could not switch current to $New" }
+if ($LASTEXITCODE -ne 0) {
+  # Without the junction the member has no current link at all: put the old one
+  # back before failing, or every service definition points at nothing.
+  if ($old) { & cmd.exe /c mklink /J "$Current" "$old" | Out-Null }
+  throw "could not switch current to $New"
+}
 function Test-Health {
   for ($i = 0; $i -lt 30; $i++) {
     try {
@@ -1239,15 +1273,36 @@ function Test-Health {
   }
   return $false
 }
+# A restart that throws must not skip the health check and the rollback: with
+# ErrorActionPreference=Stop it used to abort the script right here, after
+# current had already moved.
+$restartFailed = $false
+try {
 ${restart}
-if (-not (Test-Health)) {
-  Write-Error "health check failed on $Release; rolling back"
-  if ($old) {
-    if (Test-Path $Current) { & cmd.exe /c rmdir "$Current" | Out-Null }
-    & cmd.exe /c mklink /J "$Current" "$old" | Out-Null
-${rollbackRestart}
-    Test-Health | Out-Null
+} catch {
+  $restartFailed = $true
+  Write-Host "a service failed to restart on $Release: $($_.Exception.Message)"
+}
+function Invoke-Rollback {
+  # Logging must not throw here: with ErrorActionPreference=Stop a Write-Error
+  # would abort the rollback itself.
+  $ErrorActionPreference = 'Continue'
+  if (-not $old) {
+    Write-Host "no previous release to roll back to; current stays on $Release"
+    return
   }
+  Write-Host "rolling back to $old"
+  if (Test-Path $Current) { & cmd.exe /c rmdir "$Current" | Out-Null }
+  & cmd.exe /c mklink /J "$Current" "$old" | Out-Null
+  try {
+${rollbackRestart.split('\n').map(line => `    ${line}`).join('\n')}
+  } catch { Write-Host "rollback restart failed: $($_.Exception.Message)" }
+  if (Test-Health) { Write-Host "rollback finished: $old answers the health check" }
+  else { Write-Host "rollback finished but $old did not answer the health check; it needs a manual look" }
+}
+if ($restartFailed -or -not (Test-Health)) {
+  if (-not $restartFailed) { Write-Host "health check failed on $Release; rolling back" }
+  Invoke-Rollback
   exit 1
 }
 # Retention: keep the newest N releases and never the current/previous target.

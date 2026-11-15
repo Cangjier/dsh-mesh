@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { execFile, spawn } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
 import { promisify } from 'node:util'
 import os from 'node:os'
 import path from 'node:path'
@@ -432,6 +433,115 @@ test('DeployManager.wait settles a deployment and leaves a log', async () => {
     const job = await manager.wait(started.job.id)
     assert.equal(job.status, 'succeeded')
     assert.match(await manager.logs(started.job.id, 20), /deployment succeeded/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('Linux activation rolls back when a service restart fails, not only on a failed health check', async () => {
+  if (process.platform === 'win32') return
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-activate-'))
+  try {
+    const root = path.join(dir, 'app')
+    const oldRelease = path.join(root, 'releases', 'r1')
+    const newRelease = path.join(root, 'releases', 'r2')
+    await mkdir(oldRelease, { recursive: true })
+    await mkdir(newRelease, { recursive: true })
+    await mkdir(path.join(root, 'shared', 'config'), { recursive: true })
+    await writeFile(path.join(root, 'shared', 'config', 'gate.env'), 'DSH_GATE_PORT=18080\n', 'utf8')
+    await symlink(oldRelease, path.join(root, 'current'))
+
+    const bin = path.join(dir, 'bin')
+    await mkdir(bin, { recursive: true })
+    // systemctl records every call and fails for the app unit, which is the
+    // case that used to abort the script before any rollback could run.
+    await writeFile(path.join(bin, 'systemctl'), [
+      '#!/bin/sh',
+      'echo "systemctl $*" >> "$CALLS"',
+      'case "$*" in',
+      '  *dsh-web-app*) exit 1 ;;',
+      'esac',
+      'exit 0',
+      '',
+    ].join('\n'), { mode: 0o755 })
+    await writeFile(path.join(bin, 'sleep'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    await writeFile(path.join(bin, 'curl'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+    const plan = await buildDeployPlan({
+      host: 'example', os: 'linux', skipPackage: true, release: 'r2', appRoot: root,
+      services: [
+        { name: 'dsh-web-app.service', role: 'dsh' },
+        { name: 'dsh-web-gate.service', role: 'gate' },
+      ],
+    })
+    const script = path.join(dir, 'activate.sh')
+    await writeFile(script, buildLinuxActivateScript(plan))
+    const calls = path.join(dir, 'calls.log')
+    const result = await new Promise((resolve) => {
+      const child = spawn('bash', [script], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, CALLS: calls },
+      })
+      let output = ''
+      child.stdout.on('data', (chunk) => { output += String(chunk) })
+      child.stderr.on('data', (chunk) => { output += String(chunk) })
+      child.once('exit', code => resolve({ code, output }))
+    })
+    assert.equal(result.code, 1)
+    assert.match(result.output, /a service failed to restart/u)
+    assert.match(result.output, /rolling back to/u)
+    assert.equal(realpathSync(path.join(root, 'current')), realpathSync(oldRelease))
+    // The rollback restarted the services against the old release.
+    const log = await readFile(calls, 'utf8')
+    assert.ok(log.includes('restart dsh-web-app.service'))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('Linux activation rolls back when the new release fails its health check', async () => {
+  if (process.platform === 'win32') return
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-activate-'))
+  try {
+    const root = path.join(dir, 'app')
+    const oldRelease = path.join(root, 'releases', 'r1')
+    const newRelease = path.join(root, 'releases', 'r2')
+    await mkdir(oldRelease, { recursive: true })
+    await mkdir(newRelease, { recursive: true })
+    await mkdir(path.join(root, 'shared', 'config'), { recursive: true })
+    await writeFile(path.join(root, 'shared', 'config', 'gate.env'), 'DSH_GATE_PORT=18080\n', 'utf8')
+    await symlink(oldRelease, path.join(root, 'current'))
+    const bin = path.join(dir, 'bin')
+    await mkdir(bin, { recursive: true })
+    await writeFile(path.join(bin, 'systemctl'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    await writeFile(path.join(bin, 'sleep'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    // Healthy only once `current` points at the old release again.
+    await writeFile(path.join(bin, 'curl'), [
+      '#!/bin/sh',
+      'case "$(readlink -f "$CURRENT")" in',
+      `  "${oldRelease}") exit 0 ;;`,
+      'esac',
+      'exit 1',
+      '',
+    ].join('\n'), { mode: 0o755 })
+    const plan = await buildDeployPlan({
+      host: 'example', os: 'linux', skipPackage: true, release: 'r2', appRoot: root,
+      services: [{ name: 'dsh-web-app.service', role: 'dsh' }, { name: 'dsh-web-gate.service', role: 'gate' }],
+    })
+    const script = path.join(dir, 'activate.sh')
+    await writeFile(script, buildLinuxActivateScript(plan))
+    const result = await new Promise((resolve) => {
+      const child = spawn('bash', [script], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, CURRENT: path.join(root, 'current') },
+      })
+      let output = ''
+      child.stdout.on('data', (chunk) => { output += String(chunk) })
+      child.stderr.on('data', (chunk) => { output += String(chunk) })
+      child.once('exit', code => resolve({ code, output }))
+    })
+    assert.equal(result.code, 1)
+    assert.match(result.output, /health check failed/u)
+    assert.match(result.output, /rollback finished: .* answers the health check/u)
+    assert.equal(realpathSync(path.join(root, 'current')), realpathSync(oldRelease))
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

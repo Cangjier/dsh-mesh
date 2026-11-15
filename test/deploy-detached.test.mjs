@@ -21,6 +21,27 @@ import {
 const run = promisify(execFile)
 const here = path.dirname(new URL(import.meta.url).pathname)
 
+/**
+ * Build a PATH entry whose systemctl only records calls.
+ *
+ * upgrade-local.sh runs real systemctl commands in production; a test must not
+ * be able to restart the DSH services it is running under.
+ * @param {string} base temp directory.
+ * @returns {Promise<string>} directory to prepend to PATH.
+ */
+async function stubSystemBin(base) {
+  const bin = path.join(base, 'stubbin')
+  await mkdir(bin, { recursive: true })
+  await writeFile(path.join(bin, 'systemctl'), [
+    '#!/bin/sh',
+    `echo "systemctl $*" >> ${JSON.stringify(path.join(base, 'systemctl.log'))}`,
+    'exit 0',
+    '',
+  ].join('\n'), { mode: 0o755 })
+  await writeFile(path.join(bin, 'sleep'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  return bin
+}
+
 /** A deploy job directory with a state file and no live runner. */
 async function seedJob(dir, state) {
   await mkdir(dir, { recursive: true })
@@ -284,12 +305,13 @@ test('upgrade-local.sh replaces files, keeps config and stops before the restart
     await cp(path.join(repository, 'code', 'deploy', 'upgrade-local.sh'), path.join(stage, 'code', 'deploy', 'upgrade-local.sh'))
     await cp(path.join(repository, 'code', 'deploy', 'wire-profile.mjs'), path.join(stage, 'code', 'deploy', 'wire-profile.mjs'))
 
+    const stub = await stubSystemBin(dir)
     const result = await run('bash', [
       path.join(stage, 'code', 'deploy', 'upgrade-local.sh'),
       '--app-root', root,
       '--dsh-home', path.join(dir, 'home'),
       '--no-restart',
-    ])
+    ], { env: { ...process.env, PATH: `${stub}:${process.env.PATH ?? ''}` } })
     assert.match(result.stdout, /--no-restart/u)
     // New file arrived, config stayed.
     assert.equal(JSON.parse(await readFile(path.join(root, 'plugins', 'dsh-mesh', 'package.json'), 'utf8')).version, '0.0.2-new')
@@ -362,8 +384,9 @@ test('the detached runner drives an in-place upgrade and settles the job', async
       inplace: { package: archive, appRoot: root },
     }), 'utf8')
 
+    const stub = await stubSystemBin(dir)
     await run(process.execPath, [path.join(repository, 'code', 'deploy', 'runner.mjs'), '--job', jobDir], {
-      env: { ...process.env, DSH_MESH_UPGRADE_NO_RESTART: '1' },
+      env: { ...process.env, DSH_MESH_UPGRADE_NO_RESTART: '1', PATH: `${stub}:${process.env.PATH ?? ''}` },
     })
 
     const state = JSON.parse(await readFile(path.join(jobDir, 'job.json'), 'utf8'))
@@ -376,6 +399,47 @@ test('the detached runner drives an in-place upgrade and settles the job', async
     assert.match(await readFile(path.join(jobDir, 'deploy.log'), 'utf8'), /deployment succeeded/u)
     // The extracted staging tree is removed once the job is done.
     assert.equal(existsSync(path.join(jobDir, 'stage')), false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a local upgrade without a systemd unit refuses before touching the install', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-local-guard-'))
+  const repository = path.join(here, '..')
+  try {
+    const jobDir = path.join(dir, 'deploy-guard-1')
+    await mkdir(jobDir, { recursive: true })
+    await writeDeployState(jobDir, {
+      id: 'deploy-guard-1',
+      mode: 'upgrade',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      member: 'local',
+      target: { host: '127.0.0.1', user: 'root', port: null, os: 'linux', appRoot: dir },
+      release: 'local',
+      status: 'queued',
+      phase: 'starting',
+      error: null,
+      steps: [],
+      progress: {},
+    })
+    await writeFile(path.join(jobDir, 'request.json'), JSON.stringify({
+      kind: 'inplace',
+      id: 'deploy-guard-1',
+      member: 'local',
+      inplace: { package: path.join(dir, 'never-used.tar.gz'), appRoot: dir },
+    }), 'utf8')
+    const env = { ...process.env, DSH_MESH_UPGRADE_NO_RESTART: '0' }
+    delete env.DSH_MESH_JOB_UNIT
+    // The runner refuses with exit code 1; that is the expected outcome here.
+    await run(process.execPath, [path.join(repository, 'code', 'deploy', 'runner.mjs'), '--job', jobDir], { env })
+      .catch(error => assert.equal(error.code, 1))
+    const state = JSON.parse(await readFile(path.join(jobDir, 'job.json'), 'utf8'))
+    assert.equal(state.status, 'failed')
+    assert.match(state.error, /systemd 临时单元/u)
+    const log = await readFile(path.join(jobDir, 'deploy.log'), 'utf8')
+    assert.match(log, /deployment failed: .*systemd 临时单元/u)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

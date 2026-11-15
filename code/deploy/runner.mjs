@@ -258,6 +258,13 @@ async function main(jobDir) {
     progress: {},
   }
   if (!Array.isArray(state.steps) || state.steps.length === 0) state.steps = initialDeploySteps()
+  // Upgrading *this* machine restarts dsh-web, and systemd kills the whole
+  // cgroup of the unit it restarts. A runner that is not in its own transient
+  // unit would be killed halfway through the copy — the worst possible state.
+  // Refuse before touching anything; the panel shows this message.
+  const localTarget = kind === 'inplace' || request?.options?.local === true
+  const noRestart = process.env.DSH_MESH_UPGRADE_NO_RESTART === '1'
+  const localWithoutIsolation = localTarget && unit === null && !noRestart
   state.status = 'running'
   state.phase = 'starting'
   state.updatedAt = new Date().toISOString()
@@ -294,6 +301,9 @@ async function main(jobDir) {
   /** True once the engine branch has written its own terminal state. */
   let engineOwnsState = false
   try {
+    if (localWithoutIsolation) {
+      throw new Error('本机升级需要 systemd 临时单元保护（systemd-run 不可用或不是 root），否则重启 dsh-web 会把升级进程一起杀掉；未做任何修改，请改用成员部署或修复 systemd 后重试')
+    }
     if (kind === 'engine') {
       // The engine writes `deploy.log` itself; a log callback here would
       // duplicate every line.

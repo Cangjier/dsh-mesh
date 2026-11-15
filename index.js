@@ -2219,8 +2219,14 @@ if [ -n "$OLD" ]; then
 fi
 ln -sfn "$NEW" "$CURRENT"
 
+# A failing systemctl restart must not abort the script: with set -e that
+# used to exit *after* current had already moved, leaving the member on a
+# release whose services never came up \u2014 and no rollback. Collect the failures
+# and let the single rollback path below decide.
 restart_services() {
-${restart.split("\n").map((line) => `  ${line}`).join("\n")}
+  local failed=0
+${restart.split("\n").map((line) => `  ${line} || failed=1`).join("\n")}
+  return "$failed"
 }
 health() {
   for _ in $(seq 1 30); do
@@ -2231,20 +2237,43 @@ health() {
   done
   return 1
 }
-restart_services
+ROLLED_BACK=0
+rollback() {
+  if [ "$ROLLED_BACK" = "1" ]; then return 0; fi
+  ROLLED_BACK=1
+  if [ -z "$OLD" ]; then
+    echo "no previous release to roll back to; $CURRENT stays on $RELEASE" >&2
+    return 1
+  fi
+  echo "rolling back to $OLD" >&2
+  ln -sfn "$OLD" "$CURRENT"
+${rollbackRestart.split("\n").map((line) => `  ${line} || true`).join("\n")}
+  systemctl restart dsh-interop.service 2>/dev/null || true
+  if health; then
+    echo "rollback finished: $OLD answers the health check" >&2
+  else
+    echo "rollback finished but $OLD did not answer the health check; it needs a manual look" >&2
+  fi
+  return 0
+}
+# Any unexpected failure after the switch (a missing binary, a full disk) takes
+# the same rollback path instead of leaving the release half-applied.
+set -E
+trap 'rollback || true' ERR
+if ! restart_services; then
+  echo "a service failed to restart on $RELEASE; rolling back" >&2
+  rollback || true
+  exit 1
+fi
 if [ -d "/etc/systemd/system/dsh-interop.service.d" ]; then
   systemctl restart dsh-interop.service 2>/dev/null || echo "dsh-interop.service did not start; member delegation stays unavailable" >&2
 fi
 if ! health; then
   echo "health check failed on $RELEASE; rolling back" >&2
-  if [ -n "$OLD" ]; then
-    ln -sfn "$OLD" "$CURRENT"
-${rollbackRestart.split("\n").map((line) => `    ${line}`).join("\n")}
-    systemctl restart dsh-interop.service 2>/dev/null || true
-    health || true
-  fi
+  rollback || true
   exit 1
 fi
+trap - ERR
 # Retention: keep the newest N releases and never the current/previous target.
 mapfile -t RELEASES < <(ls -1dt "$APP_ROOT/releases"/* 2>/dev/null || true)
 for ((i=${plan.retention}; i<\${#RELEASES[@]}; i++)); do
@@ -2435,7 +2464,12 @@ if ($old) {
 }
 if (Test-Path $Current) { & cmd.exe /c rmdir "$Current" | Out-Null }
 & cmd.exe /c mklink /J "$Current" "$New" | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "could not switch current to $New" }
+if ($LASTEXITCODE -ne 0) {
+  # Without the junction the member has no current link at all: put the old one
+  # back before failing, or every service definition points at nothing.
+  if ($old) { & cmd.exe /c mklink /J "$Current" "$old" | Out-Null }
+  throw "could not switch current to $New"
+}
 function Test-Health {
   for ($i = 0; $i -lt 30; $i++) {
     try {
@@ -2446,15 +2480,36 @@ function Test-Health {
   }
   return $false
 }
+# A restart that throws must not skip the health check and the rollback: with
+# ErrorActionPreference=Stop it used to abort the script right here, after
+# current had already moved.
+$restartFailed = $false
+try {
 ${restart}
-if (-not (Test-Health)) {
-  Write-Error "health check failed on $Release; rolling back"
-  if ($old) {
-    if (Test-Path $Current) { & cmd.exe /c rmdir "$Current" | Out-Null }
-    & cmd.exe /c mklink /J "$Current" "$old" | Out-Null
-${rollbackRestart}
-    Test-Health | Out-Null
+} catch {
+  $restartFailed = $true
+  Write-Host "a service failed to restart on $Release: $($_.Exception.Message)"
+}
+function Invoke-Rollback {
+  # Logging must not throw here: with ErrorActionPreference=Stop a Write-Error
+  # would abort the rollback itself.
+  $ErrorActionPreference = 'Continue'
+  if (-not $old) {
+    Write-Host "no previous release to roll back to; current stays on $Release"
+    return
   }
+  Write-Host "rolling back to $old"
+  if (Test-Path $Current) { & cmd.exe /c rmdir "$Current" | Out-Null }
+  & cmd.exe /c mklink /J "$Current" "$old" | Out-Null
+  try {
+${rollbackRestart.split("\n").map((line) => `    ${line}`).join("\n")}
+  } catch { Write-Host "rollback restart failed: $($_.Exception.Message)" }
+  if (Test-Health) { Write-Host "rollback finished: $old answers the health check" }
+  else { Write-Host "rollback finished but $old did not answer the health check; it needs a manual look" }
+}
+if ($restartFailed -or -not (Test-Health)) {
+  if (-not $restartFailed) { Write-Host "health check failed on $Release; rolling back" }
+  Invoke-Rollback
   exit 1
 }
 # Retention: keep the newest N releases and never the current/previous target.
@@ -5276,6 +5331,34 @@ var MeshService = class {
     return this.deploy.rollback(request);
   }
   /**
+   * Roll one discovered member back to the release it ran before the last
+   * deploy.
+   *
+   * This is the escape hatch for "the upgrade came up broken": the panel that
+   * started the upgrade is still alive (it is a different machine), so it can
+   * put the member back without a shell. A flat install has no blue-green
+   * `previous`, so it is refused with a pointer at its upgrade backup.
+   * @param {{member: string}} request member id, VPN address, or name.
+   * @returns {Promise<object>} rollback job.
+   */
+  async rollbackMember({ member = "" } = {}) {
+    if (member === "") throw new Error("which member should roll back?");
+    const snapshot = await this.members();
+    const everyone = [snapshot.local, ...snapshot.members].filter((entry) => entry !== null && entry !== void 0);
+    const found = everyone.find((entry) => entry.id === member || entry.name === member || entry.ip === member);
+    if (found === void 0) throw new Error(`member not found: ${member}`);
+    if (found.kind === "self") {
+      throw new Error("\u672C\u673A\u662F\u5E73\u94FA\u5B89\u88C5\uFF0C\u6CA1\u6709 blue-green \u7684\u4E0A\u4E00\u7248\u53EF\u5207\uFF1B\u56DE\u6EDA\u7528 .upgrade-backup \u91CC\u7684\u5907\u4EFD\u6062\u590D");
+    }
+    if (found.dsh !== true) {
+      throw new Error(`\u6210\u5458 ${found.name} \u7684\u7F51\u5173\u6CA1\u6709\u5E94\u7B54\uFF0C\u65E0\u6CD5\u5728\u7EBF\u56DE\u6EDA\uFF1BSSH \u4E0A\u53BB\u6267\u884C code/deploy/cli.mjs rollback`);
+    }
+    const os6 = String(found.system?.platform ?? "").toLowerCase().startsWith("win") ? "windows" : "linux";
+    const request = await this.#memberDeployRequest(found, "", os6);
+    const job = await this.deploy.rollback({ ...request, os: os6, skipPackage: true });
+    return { ok: true, job, member: found };
+  }
+  /**
    * Resolve and validate one job directory.
    * @param {string} id job id.
    * @returns {string} path.
@@ -5728,6 +5811,13 @@ function registerApi(ctx, service) {
         }
         if (path14 === "/build/logs/clear") {
           writeJson(response, 200, await service.clearFinishedBuilds());
+          return;
+        }
+        if (path14 === "/deploy/rollback") {
+          const body = await readJson(request);
+          writeJson(response, 202, await service.rollbackMember({
+            member: typeof body.member === "string" ? body.member : ""
+          }));
           return;
         }
         if (path14 === "/upgrade") {

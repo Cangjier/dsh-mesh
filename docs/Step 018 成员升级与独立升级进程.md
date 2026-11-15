@@ -74,6 +74,39 @@
 - 接口：`POST /api/dsh-mesh/build/:id/log/clear`、`POST /api/dsh-mesh/build/logs/clear`；只截断 `build.log`，`state.json`、产物、包都不动。
 - 顺带修掉一个显示 bug：空日志文件 `readLogTail` 返回 `['']`，面板因此渲染一个空框而不是「等待日志」。现在空文件返回 `[]`。
 
+## 升级失败怎么办（三道保险）
+
+升级动的是「正在跑的机器」，所以每一步都必须是可回退的。现在的保证是：
+
+1. **prepare 不动 current**。新版本只解压到 `releases/<release>`，共享的 `config/data/home/workspace` 被软链进来。解压失败（包不完整、磁盘满、吃了一半的 tar）只会留下一个半成品 release 目录，`current` 还是旧版本，服务没有被碰过。半成品目录下次部署会被同一个 release 名挡住（`release already exists`），删掉它重来即可。
+2. **activate 一个失败出口**。重启列表里的任何一条 `systemctl restart` 失败、健康检查 60 秒内不通过、或者脚本里出现任何意外错误（有 `ERR` 陷阱），都会走同一个 `rollback()`：把 `current` 切回 `previous`，按相反顺序重启服务，然后再自己验一次健康。日志里会明确写 `rolling back to <old>` 和回滚后的健康结果；脚本以 1 退出，面板把这次任务标成「升级失败」而不是假装成功。
+3. **本机（平铺）升级失败/被打断也会恢复**。`upgrade-local.sh` 先做磁盘空间预检（不够就完全不动手），然后备份到 `<root>/.upgrade-backup/<ts>`，再复制、接线、重装单元、健康检查。任何一步失败、脚本报错、甚至升级任务被 `systemctl stop` 掉（SIGTERM），`EXIT` 陷阱都会用备份恢复文件、重启服务并再验一次健康；`--no-restart` 模式只改文件、完全不碰服务，也不会触发恢复。
+4. **本机升级必须有 systemd 临时单元**。重启 `dsh-web` 会杀掉它整个 cgroup；没有独立临时单元的 runner 会死在半路。遇到这种情况 runner 在动手前直接失败并写明原因，不会留下半新半旧的目录。
+
+出问题时的处理顺序：
+
+```bash
+# 1. 先看这次升级到底卡在哪一步（面板「日志」按钮读的就是它）
+cat ~/.dsh/mesh/deploy/<job>/job.json
+tail -n 200 ~/.dsh/mesh/deploy/<job>/deploy.log
+
+# 2. 蓝绿安装：当前指向哪一版、上一版是谁
+readlink -f <root>/current <root>/previous
+
+# 3. 面板上直接回滚（升级那台面板没坏时最快）
+#    「升级进度」里失败的任务 → 回滚到上一版
+#    等价于 SSH 上执行：
+node <root>/current/plugins/dsh-mesh/code/deploy/cli.mjs rollback --host <member> --app-root <root>
+
+# 4. 平铺安装：用升级备份手工兜底
+ls -1dt <root>/.upgrade-backup/* | head -1
+cp -a <root>/.upgrade-backup/<ts>/code <root>/.upgrade-backup/<ts>/gate <root>/
+systemctl restart dsh-web-app dsh-web-gate dsh-wireguard-control dsh-interop
+curl -fsS http://127.0.0.1/__gate/health
+```
+
+回滚只切回 `previous`（上一版），不会删任何 release；保留策略始终跳过 `current` 与 `previous` 指向的目录。
+
 ## 部署包里的第二个插件：xl
 
 `build/plugins.json` 是「随包携带的插件」清单。现在只有一条：

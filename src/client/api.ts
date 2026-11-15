@@ -368,6 +368,14 @@ export const api = {
     })
   },
 
+  rollback(member: string): Promise<DeployResponse> {
+    return request<DeployResponse>('/api/dsh-mesh/deploy/rollback', {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: JSON.stringify({ member }),
+    })
+  },
+
   clearBuildLog(id: string): Promise<{ ok: boolean; id: string }> {
     return request<{ ok: boolean; id: string }>(`/api/dsh-mesh/build/${encodeURIComponent(id)}/log/clear`, {
       method: 'POST',

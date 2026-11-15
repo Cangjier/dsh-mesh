@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
+import { createReadStream } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
+import { Readable } from 'node:stream'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -11,6 +14,7 @@ import {
   nodeArchiveName,
   overlayFrontend,
   prepareSource,
+  readExtraPlugins,
   runCommand,
   runWebBuild,
   sha256Text,
@@ -336,4 +340,54 @@ test('recipe prepare steps run before the web build', async () => {
   assert.equal(result.ok, true)
   assert.equal(await readFile(marker, 'utf8'), 'ok')
   await rm(root, { recursive: true, force: true })
+})
+
+test('assembleWebPackage carries the plugins listed in build/plugins.json', async () => {
+  const dir = await tempDir()
+  try {
+    const repo = path.join(dir, 'repo')
+    const dist = path.join(dir, 'dist')
+    await write(path.join(dist, 'index.html'), '<!doctype html>')
+    await write(path.join(repo, 'index.js'), '// host')
+    await write(path.join(repo, 'package.json'), '{}')
+    await write(path.join(repo, 'build', 'plugins.json'), JSON.stringify({
+      format: 1,
+      plugins: [{ name: 'xl', dir: 'plugins/xl', repo: 'https://github.com/Cangjier/xl', ref: 'main' }],
+    }))
+    const parsed = await readExtraPlugins(repo)
+    assert.deepEqual(parsed, [{ name: 'xl', dir: 'plugins/xl', repo: 'https://github.com/Cangjier/xl', ref: 'main' }])
+
+    // A real tarball, served by a fake fetch: the copy path and the recorded
+    // hash are what make a package traceable back to the plugin commit.
+    const source = path.join(dir, 'src', 'xl-main')
+    await write(path.join(source, 'package.json'), '{"name":"xl"}')
+    await write(path.join(source, 'cordis.patch.yml'), '[]')
+    const archive = path.join(dir, 'xl.tar.gz')
+    execFileSync('tar', ['-czf', archive, '-C', path.join(dir, 'src'), 'xl-main'])
+    const fetchImpl = async () => ({
+      ok: true,
+      status: 200,
+      body: Readable.toWeb(createReadStream(archive)),
+    })
+    const result = await assembleWebPackage({
+      dist,
+      target: 'linux-x64',
+      outputDir: path.join(dir, 'out'),
+      version: '1.2.3',
+      repositoryRoot: repo,
+      source: 'https://github.com/deepseek-ai/deepseek-harness',
+      ref: 'master',
+      cacheDir: path.join(dir, 'cache'),
+      fetchImpl,
+    })
+    assert.match(await readFile(path.join(result.packageDir, 'plugins', 'xl', 'package.json'), 'utf8'), /"xl"/u)
+    assert.match(await readFile(path.join(result.packageDir, 'plugins', 'xl', 'cordis.patch.yml'), 'utf8'), /\[\]/u)
+    const manifest = JSON.parse(await readFile(path.join(result.packageDir, 'manifest.json'), 'utf8'))
+    assert.equal(manifest.extraPlugins.length, 1)
+    assert.equal(manifest.extraPlugins[0].name, 'xl')
+    assert.equal(manifest.extraPlugins[0].ref, 'main')
+    assert.equal(manifest.extraPlugins[0].archiveSha256.length, 64)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

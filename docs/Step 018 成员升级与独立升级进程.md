@@ -74,6 +74,21 @@
 - 接口：`POST /api/dsh-mesh/build/:id/log/clear`、`POST /api/dsh-mesh/build/logs/clear`；只截断 `build.log`，`state.json`、产物、包都不动。
 - 顺带修掉一个显示 bug：空日志文件 `readLogTail` 返回 `['']`，面板因此渲染一个空框而不是「等待日志」。现在空文件返回 `[]`。
 
+## 部署包里的第二个插件：xl
+
+`build/plugins.json` 是「随包携带的插件」清单。现在只有一条：
+
+```json
+{ "plugins": [{ "name": "xl", "dir": "plugins/xl", "repo": "https://github.com/Cangjier/xl", "ref": "main" }] }
+```
+
+- 编译时（`assembleWebPackage`）按 `codeload…/tar.gz/refs/heads/main` 现拉一份，解压到包里的 `plugins/xl`；每次编译都重下，保证包里是编译那一刻的 main。解析出的 tarball sha256 写进 `manifest.json` 的 `extraPlugins`。
+- 装的时候必须「接上线」，否则文件在包里但 DSH 不会加载：
+  - 蓝绿/本机升级：`PROFILE_WIRE_SCRIPT` 会遍历 `<release>/plugins/*`（除 dsh-mesh），逐个拷进 profile 的 `node_modules/<name>`、写 `dependencies`，包里有 `dsh.bundle` 的再追加到 `dsh.profile.bundles`；
+  - 平铺就地升级：`code/deploy/wire-profile.mjs` 对 `<root>/plugins/*` 做同样的事（软链 + 依赖 + bundle）；
+  - 于是升级完重启 DSH，`xl` 服务与 `xl_*` 工具就在 Web profile 里了（`xl-cli` 行按它自己的规则只在 `xl` profile 下启用）。
+- 想再加一个插件：往 `build/plugins.json` 加一条即可，不用改代码；`manifest.json` 会记录每个插件的来源与归档哈希。
+
 ## 运维手册
 
 ```bash

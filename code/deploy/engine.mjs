@@ -129,6 +129,36 @@ fs.cpSync(pluginDir, target, { recursive: true })
 fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\\n')
 console.log('profile-wire: dsh loads @local/dsh-mesh from ' + target)
 
+// Every other plugin shipped next to dsh-mesh (today: xl) is wired the same
+// way: copy it into the profile, link the dependency, and add its bundle when
+// the package declares one. Skipping this would leave the files in the release
+// without DSH ever loading them.
+const pluginsRoot = path.dirname(pluginDir)
+for (const entry of fs.readdirSync(pluginsRoot)) {
+  if (entry === path.basename(pluginDir)) continue
+  const dir = path.join(pluginsRoot, entry)
+  const manifestPath = path.join(dir, 'package.json')
+  if (!fs.existsSync(manifestPath)) continue
+  let pkg
+  try {
+    pkg = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  } catch {
+    console.error('profile-wire: ' + manifestPath + ' is not valid JSON; skipped')
+    continue
+  }
+  const name = typeof pkg.name === 'string' && pkg.name !== '' ? pkg.name : entry
+  const parts = name.split('/')
+  const linkTarget = path.join(profileDir, 'node_modules', ...parts)
+  fs.mkdirSync(path.dirname(linkTarget), { recursive: true })
+  fs.rmSync(linkTarget, { recursive: true, force: true })
+  fs.cpSync(dir, linkTarget, { recursive: true })
+  manifest.dependencies[name] = 'link:./node_modules/' + name
+  const isBundle = pkg.dsh && typeof pkg.dsh === 'object' && pkg.dsh.bundle
+  if (isBundle && !bundles.includes(name)) bundles.push(name)
+  console.log('profile-wire: dsh loads ' + name + ' from ' + linkTarget)
+}
+fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\\n')
+
 // The member inherits the deployer's account grants, but a fresh profile still
 // defaults to the API-key route and then fails with MISSING_CREDENTIAL. Point
 // its default model at the same provider route the deployer uses.

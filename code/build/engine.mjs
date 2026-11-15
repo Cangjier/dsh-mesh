@@ -601,6 +601,82 @@ export async function listFiles(dir) {
 }
 
 /**
+ * Read the plugins that every package carries besides dsh-mesh itself.
+ *
+ * The list lives in `build/plugins.json` so a build stays reproducible from the
+ * repository alone: adding a plugin is a data change, not a code change.
+ * @param {string} repositoryRoot package root.
+ * @returns {Promise<Array<{name: string, dir: string, repo: string, ref: string}>>} plugin entries.
+ */
+export async function readExtraPlugins(repositoryRoot) {
+  const file = path.join(repositoryRoot, 'build', 'plugins.json')
+  if (!existsSync(file)) return []
+  const parsed = JSON.parse(await readFile(file, 'utf8'))
+  const list = parsed !== null && typeof parsed === 'object' && Array.isArray(parsed.plugins) ? parsed.plugins : []
+  return list
+    .filter(entry => entry !== null && typeof entry === 'object')
+    .map(entry => ({
+      name: typeof entry.name === 'string' ? entry.name.trim() : '',
+      dir: typeof entry.dir === 'string' && entry.dir.trim() !== '' ? entry.dir.trim() : '',
+      repo: typeof entry.repo === 'string' ? entry.repo.trim() : '',
+      ref: typeof entry.ref === 'string' && entry.ref.trim() !== '' ? entry.ref.trim() : 'main',
+    }))
+    .filter(entry => entry.name !== '' && entry.repo !== '')
+    .map(entry => ({ ...entry, dir: entry.dir !== '' ? entry.dir : path.join('plugins', entry.name) }))
+}
+
+/**
+ * Download every extra plugin and copy it into the package.
+ *
+ * Branch refs are re-downloaded on every build (the point is to ship the
+ * current main), a 40-hex ref is immutable and therefore also safe to refetch.
+ * The archive hash goes into the manifest next to dsh-mesh's own source hash.
+ * @param {{packageDir: string, repositoryRoot: string, cacheDir?: string, fetchImpl?: typeof fetch, log?: (line: string) => void}} options copy input.
+ * @returns {Promise<object[]>} manifest records.
+ */
+export async function copyExtraPlugins(options) {
+  const plugins = await readExtraPlugins(options.repositoryRoot)
+  if (plugins.length === 0) return []
+  const cacheDir = options.cacheDir ?? defaultCacheDir()
+  const log = options.log ?? (() => {})
+  const records = []
+  for (const plugin of plugins) {
+    const classified = classifySource(plugin.repo)
+    if (classified.kind !== 'github') {
+      throw new Error(`extra plugin ${plugin.name} must be a github.com repository, not ${plugin.repo}`)
+    }
+    const archive = path.join(cacheDir, 'plugins', `${plugin.name}.tar.gz`)
+    await mkdir(path.dirname(archive), { recursive: true })
+    await rm(archive, { force: true })
+    let downloaded = false
+    for (const url of tarballUrls(classified, plugin.ref)) {
+      downloaded = await download(url, archive, { fetchImpl: options.fetchImpl, log })
+      if (downloaded) break
+    }
+    if (!downloaded) {
+      throw new Error(`cannot download extra plugin ${plugin.name} from ${plugin.repo}@${plugin.ref}`)
+    }
+    const tree = path.join(cacheDir, 'plugins', `${plugin.name}-tree`)
+    await rm(tree, { recursive: true, force: true })
+    await extractTarball(archive, tree, { log })
+    const target = path.join(options.packageDir, plugin.dir)
+    await rm(target, { recursive: true, force: true })
+    await mkdir(path.dirname(target), { recursive: true })
+    await cp(tree, target, { recursive: true })
+    await rm(tree, { recursive: true, force: true })
+    records.push({
+      name: plugin.name,
+      dir: plugin.dir,
+      repo: plugin.repo,
+      ref: plugin.ref,
+      archiveSha256: await sha256File(archive),
+    })
+    log(`extra plugin ${plugin.name}@${plugin.ref} -> ${plugin.dir}`)
+  }
+  return records
+}
+
+/**
  * Assemble one target package without downloading runtimes yet. This is the
  * deterministic half of packaging; the runtime/app layer is added by
  * `assembleRuntimePackage`.
@@ -635,6 +711,15 @@ export async function assembleWebPackage(options) {
   await copyIfExists(path.join(options.repositoryRoot, 'build'), path.join(packageDir, 'plugins', 'dsh-mesh', 'build'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'build'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'build'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'shared'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'shared'))
+  // Plugins that travel with dsh-mesh (currently xl): fetched from main at build
+  // time, so a package built today carries today's plugin code.
+  const extraPlugins = await copyExtraPlugins({
+    packageDir,
+    repositoryRoot: options.repositoryRoot,
+    cacheDir: options.cacheDir,
+    fetchImpl: options.fetchImpl,
+    log: options.log,
+  })
   const staticAssets = await collectStaticAssets(path.join(options.repositoryRoot, 'code', 'gate'))
   const manifest = {
     format: 1,
@@ -647,6 +732,7 @@ export async function assembleWebPackage(options) {
     tree: options.tree ?? null,
     files: (await listFiles(packageDir)).length,
     staticAssets,
+    extraPlugins,
   }
   await writeFile(path.join(packageDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8')
   return { packageDir, manifest }

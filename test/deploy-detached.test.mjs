@@ -201,6 +201,8 @@ test('wire-profile rewrites gate.env and links the profile to the install', asyn
   const profile = path.join(dir, 'home', 'profiles', 'web')
   try {
     await mkdir(path.join(root, 'plugins', 'dsh-mesh'), { recursive: true })
+    await mkdir(path.join(root, 'plugins', 'xl'), { recursive: true })
+    await writeFile(path.join(root, 'plugins', 'xl', 'package.json'), JSON.stringify({ name: 'xl', dsh: { bundle: { patch: './cordis.patch.yml' } } }), 'utf8')
     await mkdir(profile, { recursive: true })
     const envFile = path.join(root, 'config', 'gate.env')
     await mkdir(path.dirname(envFile), { recursive: true })
@@ -232,8 +234,11 @@ test('wire-profile rewrites gate.env and links the profile to the install', asyn
     const manifest = JSON.parse(await readFile(path.join(profile, 'package.json'), 'utf8'))
     assert.equal(manifest.dependencies['@local/dsh-mesh'], `link:${path.join(root, 'plugins', 'dsh-mesh')}`)
     assert.equal(manifest.dependencies['@local/dsh-wireguard'], undefined)
-    assert.deepEqual(manifest.dsh.profile.bundles, ['@deepseek-ai/dsh-base', '@local/dsh-mesh'])
+    assert.deepEqual(manifest.dsh.profile.bundles, ['@deepseek-ai/dsh-base', '@local/dsh-mesh', 'xl'])
     assert.equal(existsSync(path.join(profile, 'node_modules', '@local', 'dsh-mesh')), true)
+    // The sibling plugin in the install is linked and enabled too.
+    assert.equal(manifest.dependencies.xl, `link:${path.join(root, 'plugins', 'xl')}`)
+    assert.equal(existsSync(path.join(profile, 'node_modules', 'xl')), true)
 
     const patch = await readFile(path.join(profile, 'cordis.patch.yml'), 'utf8')
     assert.match(patch, /# BEGIN dsh-mesh deploy/u)

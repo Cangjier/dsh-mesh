@@ -246,6 +246,7 @@ export async function runJob(dir, options) {
         tree: recipes.tree ?? null,
         fetchImpl: outbound.fetchImpl,
         env: outbound.env,
+        cacheDir: options.cacheDir ?? defaultCacheDir(),
         log,
       }
       const assembled = full

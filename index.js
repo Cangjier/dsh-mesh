@@ -979,6 +979,60 @@ async function listFiles(dir) {
   if (existsSync2(dir)) await walk(dir);
   return out;
 }
+async function readExtraPlugins(repositoryRoot) {
+  const file = path3.join(repositoryRoot, "build", "plugins.json");
+  if (!existsSync2(file)) return [];
+  const parsed = JSON.parse(await readFile3(file, "utf8"));
+  const list = parsed !== null && typeof parsed === "object" && Array.isArray(parsed.plugins) ? parsed.plugins : [];
+  return list.filter((entry) => entry !== null && typeof entry === "object").map((entry) => ({
+    name: typeof entry.name === "string" ? entry.name.trim() : "",
+    dir: typeof entry.dir === "string" && entry.dir.trim() !== "" ? entry.dir.trim() : "",
+    repo: typeof entry.repo === "string" ? entry.repo.trim() : "",
+    ref: typeof entry.ref === "string" && entry.ref.trim() !== "" ? entry.ref.trim() : "main"
+  })).filter((entry) => entry.name !== "" && entry.repo !== "").map((entry) => ({ ...entry, dir: entry.dir !== "" ? entry.dir : path3.join("plugins", entry.name) }));
+}
+async function copyExtraPlugins(options) {
+  const plugins = await readExtraPlugins(options.repositoryRoot);
+  if (plugins.length === 0) return [];
+  const cacheDir = options.cacheDir ?? defaultCacheDir();
+  const log = options.log ?? (() => {
+  });
+  const records = [];
+  for (const plugin of plugins) {
+    const classified = classifySource(plugin.repo);
+    if (classified.kind !== "github") {
+      throw new Error(`extra plugin ${plugin.name} must be a github.com repository, not ${plugin.repo}`);
+    }
+    const archive = path3.join(cacheDir, "plugins", `${plugin.name}.tar.gz`);
+    await mkdir(path3.dirname(archive), { recursive: true });
+    await rm(archive, { force: true });
+    let downloaded = false;
+    for (const url of tarballUrls(classified, plugin.ref)) {
+      downloaded = await download(url, archive, { fetchImpl: options.fetchImpl, log });
+      if (downloaded) break;
+    }
+    if (!downloaded) {
+      throw new Error(`cannot download extra plugin ${plugin.name} from ${plugin.repo}@${plugin.ref}`);
+    }
+    const tree = path3.join(cacheDir, "plugins", `${plugin.name}-tree`);
+    await rm(tree, { recursive: true, force: true });
+    await extractTarball(archive, tree, { log });
+    const target = path3.join(options.packageDir, plugin.dir);
+    await rm(target, { recursive: true, force: true });
+    await mkdir(path3.dirname(target), { recursive: true });
+    await cp(tree, target, { recursive: true });
+    await rm(tree, { recursive: true, force: true });
+    records.push({
+      name: plugin.name,
+      dir: plugin.dir,
+      repo: plugin.repo,
+      ref: plugin.ref,
+      archiveSha256: await sha256File(archive)
+    });
+    log(`extra plugin ${plugin.name}@${plugin.ref} -> ${plugin.dir}`);
+  }
+  return records;
+}
 async function assembleWebPackage(options) {
   const { os: targetOs, arch, libc } = parseTarget(options.target);
   const packageDir = path3.join(options.outputDir, `dsh-mesh-${options.version}-${targetOs}-${arch}`);
@@ -1005,6 +1059,13 @@ async function assembleWebPackage(options) {
   await copyIfExists(path3.join(options.repositoryRoot, "build"), path3.join(packageDir, "plugins", "dsh-mesh", "build"));
   await copyIfExists(path3.join(options.repositoryRoot, "code", "build"), path3.join(packageDir, "plugins", "dsh-mesh", "code", "build"));
   await copyIfExists(path3.join(options.repositoryRoot, "code", "shared"), path3.join(packageDir, "plugins", "dsh-mesh", "code", "shared"));
+  const extraPlugins = await copyExtraPlugins({
+    packageDir,
+    repositoryRoot: options.repositoryRoot,
+    cacheDir: options.cacheDir,
+    fetchImpl: options.fetchImpl,
+    log: options.log
+  });
   const staticAssets = await collectStaticAssets(path3.join(options.repositoryRoot, "code", "gate"));
   const manifest = {
     format: 1,
@@ -1016,7 +1077,8 @@ async function assembleWebPackage(options) {
     ref: options.ref ?? null,
     tree: options.tree ?? null,
     files: (await listFiles(packageDir)).length,
-    staticAssets
+    staticAssets,
+    extraPlugins
   };
   await writeFile(path3.join(packageDir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
   return { packageDir, manifest };
@@ -1229,7 +1291,7 @@ async function assembleRuntimePackage(options) {
 function defaultJobRoot() {
   return path4.join(os3.homedir(), ".dsh", "mesh", "build");
 }
-function defaultCacheDir() {
+function defaultCacheDir2() {
   return path4.join(os3.homedir(), ".dsh", "mesh", "cache");
 }
 async function createJob(options = {}) {
@@ -1305,7 +1367,7 @@ async function runJob(dir, options) {
     const prepared = options.reuseWorktree === true && existsSync3(path4.join(dir, "src")) ? { dir: path4.join(dir, "src"), source: state.source, ref: state.ref, local: false, archiveSha256: state.archiveSha256 ?? null } : await prepareSource({
       source: state.source,
       ref: state.ref,
-      cacheDir: options.cacheDir ?? defaultCacheDir(),
+      cacheDir: options.cacheDir ?? defaultCacheDir2(),
       workDir: dir,
       fetchImpl: outbound.fetchImpl,
       log
@@ -1383,13 +1445,14 @@ async function runJob(dir, options) {
         tree: recipes.tree ?? null,
         fetchImpl: outbound.fetchImpl,
         env: outbound.env,
+        cacheDir: options.cacheDir ?? defaultCacheDir2(),
         log
       };
       const assembled = full ? await assembleRuntimePackage({
         ...shared,
         dshVersion: version,
         nodeVersion: options.nodeVersion ?? process.versions.node,
-        cacheDir: options.cacheDir ?? defaultCacheDir()
+        cacheDir: options.cacheDir ?? defaultCacheDir2()
       }) : await assembleWebPackage(shared);
       const archive = await archivePackage(assembled.packageDir, target, { log });
       const info = await stat2(archive);
@@ -1523,6 +1586,36 @@ fs.rmSync(target, { recursive: true, force: true })
 fs.cpSync(pluginDir, target, { recursive: true })
 fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\\n')
 console.log('profile-wire: dsh loads @local/dsh-mesh from ' + target)
+
+// Every other plugin shipped next to dsh-mesh (today: xl) is wired the same
+// way: copy it into the profile, link the dependency, and add its bundle when
+// the package declares one. Skipping this would leave the files in the release
+// without DSH ever loading them.
+const pluginsRoot = path.dirname(pluginDir)
+for (const entry of fs.readdirSync(pluginsRoot)) {
+  if (entry === path.basename(pluginDir)) continue
+  const dir = path.join(pluginsRoot, entry)
+  const manifestPath = path.join(dir, 'package.json')
+  if (!fs.existsSync(manifestPath)) continue
+  let pkg
+  try {
+    pkg = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  } catch {
+    console.error('profile-wire: ' + manifestPath + ' is not valid JSON; skipped')
+    continue
+  }
+  const name = typeof pkg.name === 'string' && pkg.name !== '' ? pkg.name : entry
+  const parts = name.split('/')
+  const linkTarget = path.join(profileDir, 'node_modules', ...parts)
+  fs.mkdirSync(path.dirname(linkTarget), { recursive: true })
+  fs.rmSync(linkTarget, { recursive: true, force: true })
+  fs.cpSync(dir, linkTarget, { recursive: true })
+  manifest.dependencies[name] = 'link:./node_modules/' + name
+  const isBundle = pkg.dsh && typeof pkg.dsh === 'object' && pkg.dsh.bundle
+  if (isBundle && !bundles.includes(name)) bundles.push(name)
+  console.log('profile-wire: dsh loads ' + name + ' from ' + linkTarget)
+}
+fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\\n')
 
 // The member inherits the deployer's account grants, but a fresh profile still
 // defaults to the API-key route and then fails with MISSING_CREDENTIAL. Point

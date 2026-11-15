@@ -91,3 +91,39 @@ test('the profile wire script creates a profile DSH has not initialized yet', ()
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('the profile wire script also wires the plugins shipped next to dsh-mesh', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-wire-xl-'))
+  try {
+    const plugins = path.join(dir, 'release', 'plugins')
+    const mesh = path.join(plugins, 'dsh-mesh')
+    mkdirSync(mesh, { recursive: true })
+    writeFileSync(path.join(mesh, 'package.json'), '{"name":"@local/dsh-mesh","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}')
+    const xl = path.join(plugins, 'xl')
+    mkdirSync(xl, { recursive: true })
+    writeFileSync(path.join(xl, 'package.json'), '{"name":"xl","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}')
+    writeFileSync(path.join(xl, 'cordis.patch.yml'), '[]\n')
+    const profile = path.join(dir, 'home', 'profiles', 'web')
+    mkdirSync(profile, { recursive: true })
+    writeFileSync(path.join(profile, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-web',
+      private: true,
+      dependencies: {},
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
+    }, null, 2) + '\n')
+    const run = () => execFileSync(process.execPath, ['-', profile, mesh], { input: PROFILE_WIRE_SCRIPT, encoding: 'utf8' })
+    run()
+    run()
+    const manifest = JSON.parse(readFileSync(path.join(profile, 'package.json'), 'utf8'))
+    assert.deepEqual(manifest.dsh.profile.bundles, [
+      '@deepseek-ai/dsh-base',
+      '@deepseek-ai/dsh-web-app',
+      '@local/dsh-mesh',
+      'xl',
+    ])
+    assert.equal(manifest.dependencies.xl, 'link:./node_modules/xl')
+    assert.equal(readFileSync(path.join(profile, 'node_modules', 'xl', 'package.json'), 'utf8'), '{"name":"xl","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

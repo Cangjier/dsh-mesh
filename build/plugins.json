@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "comment": "Plugins that ride along in every dsh-mesh package. Each entry is fetched from GitHub at build time (same main-tracking rule as dsh-mesh itself) and copied to <package>/<dir>; the resolved tarball hash lands in manifest.json so a package can be traced back to the exact source.",
+  "plugins": [
+    {
+      "name": "xl",
+      "dir": "plugins/xl",
+      "repo": "https://github.com/Cangjier/xl",
+      "ref": "main"
+    }
+  ]
+}

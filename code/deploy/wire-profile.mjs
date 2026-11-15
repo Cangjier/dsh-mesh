@@ -123,12 +123,44 @@ function wireProfile(profileDir, root, token) {
     changes.push('bundles')
   }
   manifest.dsh.profile.bundles = bundles
-  fs.writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`)
 
   const target = path.join(profileDir, 'node_modules', '@local', 'dsh-mesh')
   fs.mkdirSync(path.dirname(target), { recursive: true })
   fs.rmSync(target, { recursive: true, force: true })
   fs.symlinkSync(path.join(root, 'plugins', 'dsh-mesh'), target, 'dir')
+
+  // Every sibling plugin in this install (today: xl) rides along: link it into
+  // the profile and add its bundle, otherwise the files sit in plugins/ without
+  // DSH ever loading them.
+  const pluginsRoot = path.join(root, 'plugins')
+  for (const entry of fs.existsSync(pluginsRoot) ? fs.readdirSync(pluginsRoot) : []) {
+    if (entry === 'dsh-mesh') continue
+    const dir = path.join(pluginsRoot, entry)
+    const pkgFile = path.join(dir, 'package.json')
+    if (!fs.existsSync(pkgFile)) continue
+    let pkg
+    try {
+      pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'))
+    } catch {
+      continue
+    }
+    const name = typeof pkg.name === 'string' && pkg.name !== '' ? pkg.name : entry
+    const linkTarget = path.join(profileDir, 'node_modules', ...name.split('/'))
+    fs.mkdirSync(path.dirname(linkTarget), { recursive: true })
+    fs.rmSync(linkTarget, { recursive: true, force: true })
+    fs.symlinkSync(dir, linkTarget, 'dir')
+    const wanted = `link:${dir}`
+    if (manifest.dependencies[name] !== wanted) {
+      manifest.dependencies[name] = wanted
+      changes.push(`dependencies:${name}`)
+    }
+    const isBundle = pkg.dsh !== null && typeof pkg.dsh === 'object' && pkg.dsh.bundle !== undefined
+    if (isBundle && !bundles.includes(name)) {
+      bundles.push(name)
+      changes.push(`bundles:${name}`)
+    }
+  }
+  fs.writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`)
 
   // Interop rows: keep an existing block (and its plugin id) and only refresh
   // the token; add the block when the install predates it.

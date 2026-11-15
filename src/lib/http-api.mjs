@@ -192,7 +192,7 @@ export function registerApi(ctx, service) {
           return
         }
         if (path === '/build/logs/clear') {
-          writeJson(response, 200, await service.clearFinishedBuildLogs())
+          writeJson(response, 200, await service.clearFinishedBuilds())
           return
         }
         if (path === '/upgrade') {

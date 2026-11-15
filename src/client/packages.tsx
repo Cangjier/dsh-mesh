@@ -290,15 +290,22 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
     }
   }, [logJob, logLines, messageApi])
 
-  /** Empty every finished job's log in one go (the card's toolbar button). */
+  /**
+   * Remove every finished job in one go (the card's toolbar button).
+   *
+   * The server deletes the job directory, so the table really empties: a
+   * truncation-only clear left the rows in place and looked like nothing had
+   * happened. An open log dialog is closed only when its job went away.
+   */
   const clearAllLogs = useCallback(async () => {
     try {
       const result = await api.clearBuildLogs()
       if (logJob !== null && result.cleared.includes(logJob.id)) {
         setLogLines([])
-        setLogCleared(true)
+        setLogCleared(false)
+        setLogJob(null)
       }
-      messageApi.success(result.cleared.length === 0 ? '没有需要清空的日志' : `已清空 ${String(result.cleared.length)} 个任务的日志`)
+      messageApi.success(result.cleared.length === 0 ? '没有已结束的任务可清理' : `已清理 ${String(result.cleared.length)} 个任务`)
       await loadJobs()
     } catch (failure) {
       messageApi.error(errorText(failure))
@@ -560,8 +567,8 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
             <Space size={10}>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>保留最近的任务与日志</Typography.Text>
               <Popconfirm
-                title="清空所有已结束任务的日志？"
-                description="只截断日志文件；任务记录与编译产物保留。"
+                title="清空所有已结束的任务？"
+                description="任务记录、日志和编译工作目录会一起删除；部署包与正在编译的任务不受影响。"
                 okText="清空"
                 cancelText="取消"
                 okButtonProps={{ danger: true }}
@@ -613,7 +620,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
           <Space>
             <Popconfirm
               title="清空这个任务的日志？"
-              description={activeJob?.status === 'running' ? '编译还在运行，结束后才能清空。' : '日志文件会被截断为空。'}
+              description={activeJob?.status === 'running' ? '编译还在运行，结束后才能清空。' : '只清空日志文件，任务记录保留；要连同记录一起清掉用卡片右上角的清空日志。'}
               okText="清空"
               cancelText="取消"
               okButtonProps={{ danger: true }}

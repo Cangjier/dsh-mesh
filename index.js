@@ -4984,21 +4984,25 @@ var MeshService = class {
     return { ok: true, id: state.id };
   }
   /**
-   * Empty every finished build job's log.
+   * Drop every finished build job: its record, its log and its worktree.
+   *
+   * Truncating `build.log` alone looked like a no-op in the panel, because the
+   * row stayed in the table. The bulk action now deletes the job directory, so
+   * the list really goes back to empty; the archives themselves were already
+   * copied to `~/.dsh/packages`, which this never touches. A running or queued
+   * job is left alone.
    * @returns {Promise<{ok: boolean, cleared: string[]}>} cleared job ids.
    */
-  async clearFinishedBuildLogs() {
+  async clearFinishedBuilds() {
     const cleared = [];
     const entries = await readdir5(this.jobRoot, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const dir = path9.join(this.jobRoot, entry.name);
       const state = await readState(dir).catch(() => null);
-      if (state === null || this.running.has(state.id) || state.status === "running") continue;
-      const file = path9.join(dir, "build.log");
-      const info = await stat7(file).catch(() => null);
-      if (info === null || info.size === 0) continue;
-      await writeFile6(file, "", "utf8");
+      if (state === null) continue;
+      if (this.running.has(state.id) || state.status === "running" || state.status === "queued") continue;
+      await rm6(dir, { recursive: true, force: true });
       cleared.push(state.id);
     }
     return { ok: true, cleared };
@@ -5571,7 +5575,7 @@ function registerApi(ctx, service) {
           return;
         }
         if (path14 === "/build/logs/clear") {
-          writeJson(response, 200, await service.clearFinishedBuildLogs());
+          writeJson(response, 200, await service.clearFinishedBuilds());
           return;
         }
         if (path14 === "/upgrade") {

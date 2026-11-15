@@ -213,3 +213,33 @@ test('a second job for the same target is refused while one is running', async (
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('clearing finished builds deletes their job directories and keeps a running one', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-clear-builds-'))
+  try {
+    const service = new MeshService({ dataDir: path.join(dir, 'mesh'), config: {}, log: () => {} })
+    const root = service.jobRoot
+    const done = path.join(root, '2026-11-14T02-44-03-181Z-958eaf')
+    const failed = path.join(root, '2026-11-14T02-37-30-036Z-235630')
+    const running = path.join(root, '2026-11-15T06-00-00-000Z-runn1ng')
+    for (const [jobDir, id, status] of [
+      [done, '2026-11-14T02-44-03-181Z-958eaf', 'done'],
+      [failed, '2026-11-14T02-37-30-036Z-235630', 'failed'],
+      [running, '2026-11-15T06-00-00-000Z-runn1ng', 'running'],
+    ]) {
+      await mkdir(path.join(jobDir, 'src'), { recursive: true })
+      await writeFile(path.join(jobDir, 'src', 'index.js'), 'x', 'utf8')
+      await writeFile(path.join(jobDir, 'build.log'), 'line\n', 'utf8')
+      await writeFile(path.join(jobDir, 'state.json'), JSON.stringify({ id, status }), 'utf8')
+    }
+    const result = await service.clearFinishedBuilds()
+    assert.deepEqual(result.cleared.sort(), ['2026-11-14T02-37-30-036Z-235630', '2026-11-14T02-44-03-181Z-958eaf'])
+    assert.equal(existsSync(done), false)
+    assert.equal(existsSync(failed), false)
+    assert.equal(existsSync(path.join(running, 'build.log')), true)
+    // The panel's table keeps only the job that is still running.
+    assert.deepEqual((await service.jobs()).map(job => job.id), ['2026-11-15T06-00-00-000Z-runn1ng'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

@@ -95,7 +95,7 @@ test('build logs can be cleared one job or in bulk', async () => {
       cleared.push(id)
       return { ok: true, id }
     },
-    async clearFinishedBuildLogs() {
+    async clearFinishedBuilds() {
       return { ok: true, cleared: ['job-a', 'job-b'] }
     },
   })

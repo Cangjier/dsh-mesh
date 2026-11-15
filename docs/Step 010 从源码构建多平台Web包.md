@@ -186,6 +186,39 @@ dsh-mesh-<ver>-<os>-<arch>/
 
 只保留 `web/`、`gate/`、`shared/`、`plugin/`、脚本和 manifest，不含 `app/` 与 `runtime/`。适合覆盖已有安装或快速验证前端。
 
+### 构建后抓屏冒烟（默认执行）
+
+打包完成不等于能启动。客户端的 plugin bundle、`app/` 里的 DSH 版本和 profile 接线只要有一处对不上，`/__gate/health` 仍然可能是 200，而页面停在 `Failed to load plugins`。所以每个**本机目标**的完整包在归档之后都会被真正启动一次，并用 headless Chrome 抓屏：
+
+1. 在任务目录 `smoke/<target>/install/` 里用软链搭一份一次性平铺安装（`app/`、`code/`、`gate/`、`plugins/`、`shared/` 指回包内，`config/`、`data/`、`home/`、`workspace/` 是新的）；
+2. 用包自带的 `code/deploy/wire-profile.mjs` 把 `@local/dsh-mesh` 接进临时 DSH profile；
+3. 启动包里的 `code/dsh-service/supervisor.mjs` 和 `gate/server.mjs`，端口取空闲端口，`DSH_HOME`/`DSH_WORKDIR` 全部指向沙箱；
+4. 先 POST `/__gate/login` 拿 `dsh_gate` cookie，再用 CDP 写入浏览器，打开网关首页；这样登录表单不占用渲染主线程；
+5. 等待 DSH 壳出现，断言：没有 `Failed to load plugins`、侧边栏有 `Mesh`、点击 `Mesh` 后 `.dsh-pw-page`（或至少 `.dsh-pw-boot`）出现；
+6. 截图写到 `<job>/smoke/<target>/dsh-<target>.png` 与 `mesh-<target>.png`，浏览器和进程日志写到同目录的 `smoke.log`。
+
+结果跟着产物一起写进 `state.json` 的 `artifacts[].smoke`。失败时任务状态是 `smoke-failed`，日志会写明是 DSH 没启动、页面报了插件错误，还是 Mesh 面板没出现；截图保留在任务目录。冒烟失败后不会继续下一个目标。面板的编译任务状态列会额外显示「抓屏通过 / 未抓屏 / 抓屏失败」，悬停「抓屏通过」可看截图路径；「未抓屏」一定带原因（跨目标、web-only、关掉冒烟或没有 Chrome）。
+
+开关（CLI 与 `runJob` 同名参数）：
+
+| 参数 | 行为 |
+|---|---|
+| 默认 | 本机目标执行；目标不是本机、`--web-only`、或找不到 Chrome 时跳过并写 `skipped` 原因 |
+| `--no-smoke` | 不启动、不抓屏 |
+| `--require-smoke` | 找不到 Chrome 时让构建失败，而不是跳过 |
+| `--smoke-chrome <path>` | 指定 Chrome/Chromium；也可用 `DSH_MESH_SMOKE_CHROME` |
+| `--smoke-start-timeout <ms>` | DSH 打印启动 URL 的预算（默认 180000） |
+| `--smoke-page-timeout <ms>` | 浏览器等 DSH 壳的预算（默认 180000） |
+
+单独复跑一个包：
+
+```bash
+node code/build/smoke-cli.mjs --root ~/.dsh/mesh/build/<job>/dist/dsh-mesh-<ver>-linux-x64 \
+  --target linux-x64 --screenshot-dir /tmp/dsh-smoke
+```
+
+退出码：`0` 通过，`1` 失败，`3` 跳过（没有 Chrome 等）。测试升级的沙箱会调用同一支脚本（见 Step 018）。
+
 ### 快速旁路：从已安装的 Web shell 出包
 
 如果构建机不方便跑完整的 monorepo `pnpm install`，可以用：
@@ -248,6 +281,7 @@ created → running(prepare → apply → build → package) → done
 | `npm install @deepseek-ai/dsh` 失败 | 版本不存在 / 目标原生包缺失 | 检查 `dshVersion` 与目标矩阵 |
 | Node 运行时 404 | 该版本没有对应平台包 | 显式 `nodeVersion`，或换目标 |
 | 包能装但页面是旧前端 | 覆盖 `dsh-web-frontend/dist` 失败 | 看 `overlayFrontend` 日志；确认包路径 |
+| 构建完成但页面 `Failed to load plugins` | 包内 client bundle 与 `app/` 的 DSH 版本不匹配 | 构建后抓屏会直接把它判成 `smoke-failed`，看 `smoke/<target>/smoke.log` 与截图 |
 | Windows 成员启动失败 | 端口 80 权限 / 防火墙 | 用 8080，`install.ps1` 加防火墙规则 |
 
 ## 测试
@@ -257,7 +291,7 @@ node --test test/build.test.mjs
 node --test test/service.test.mjs
 ```
 
-`test/build.test.mjs` 覆盖：tarball URL、本地源、覆盖层幂等、mismatch 工作单、learn、Web 构建产物发现、Node 归档名、前端覆盖、包装配。
+`test/build.test.mjs` 覆盖：tarball URL、本地源、覆盖层幂等、mismatch 工作单、learn、Web 构建产物发现、Node 归档名、前端覆盖、包装配。`test/smoke.test.mjs` 覆盖 Chrome 探测、目标匹配、跳过/必需两条路径、不完整包快速失败，以及空 profile patch 的接线修复。
 
 真实构建（需要网络和磁盘）：
 

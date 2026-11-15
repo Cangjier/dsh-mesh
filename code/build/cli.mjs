@@ -83,6 +83,18 @@ function commandArg(value) {
   return value.split(/\s+/u).filter(Boolean)
 }
 
+/**
+ * Parse one positive integer option.
+ * @param {Map<string, string|true>} values parsed arguments.
+ * @param {string} name option name.
+ * @returns {number|undefined} value.
+ */
+function numberArg(values, name) {
+  const value = values.get(name)
+  if (typeof value !== 'string' || !/^\d+$/u.test(value)) return undefined
+  return Number(value)
+}
+
 async function main() {
   const { command, values } = parseArgs(process.argv.slice(2))
   const defaults = await recipeDefaults()
@@ -113,6 +125,11 @@ async function main() {
       repositoryRoot: REPOSITORY_ROOT,
       proxy: typeof values.get('proxy') === 'string' ? values.get('proxy') : undefined,
       version: typeof values.get('version') === 'string' ? values.get('version') : undefined,
+      smoke: values.get('no-smoke') === true ? false : undefined,
+      smokeRequired: values.get('require-smoke') === true,
+      smokeChrome: typeof values.get('smoke-chrome') === 'string' ? values.get('smoke-chrome') : undefined,
+      smokeStartTimeoutMs: numberArg(values, 'smoke-start-timeout'),
+      smokePageTimeoutMs: numberArg(values, 'smoke-page-timeout'),
     })
     process.stdout.write(`${JSON.stringify(state, null, 2)}\n`)
     return
@@ -143,6 +160,11 @@ async function main() {
       install: values.get('no-install') === true ? null : undefined,
       build: commandArg(values.get('build-command')),
       version: typeof values.get('version') === 'string' ? values.get('version') : undefined,
+      smoke: values.get('no-smoke') === true ? false : undefined,
+      smokeRequired: values.get('require-smoke') === true,
+      smokeChrome: typeof values.get('smoke-chrome') === 'string' ? values.get('smoke-chrome') : undefined,
+      smokeStartTimeoutMs: numberArg(values, 'smoke-start-timeout'),
+      smokePageTimeoutMs: numberArg(values, 'smoke-page-timeout'),
     })
     process.stdout.write(`${JSON.stringify(state, null, 2)}\n`)
     return
@@ -171,6 +193,11 @@ async function main() {
     '  --stream                 mirror the build log to stdout',
     '  --build-command <cmd>    override the web build command',
     '  --version <version>      package version override',
+    '  --no-smoke               skip the headless-Chrome package smoke test',
+    '  --require-smoke          fail the build when no Chrome is available',
+    '  --smoke-chrome <path>    Chrome/Chromium used by the smoke test',
+    '  --smoke-start-timeout <ms>  DSH startup budget (default 180000)',
+    '  --smoke-page-timeout <ms>   browser boot budget (default 180000)',
     '',
   ].join('\n'))
   process.exitCode = 1

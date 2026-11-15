@@ -82,6 +82,16 @@ async function memberTree(dir, options = {}) {
     await writeFile(path.join(pkgDir, 'plugins', 'dsh-mesh', 'index.js'), '// new plugin\n', 'utf8')
     await mkdir(path.join(pkgDir, 'plugins', 'xl'), { recursive: true })
     await writeFile(path.join(pkgDir, 'plugins', 'xl', 'package.json'), JSON.stringify({ name: 'xl' }), 'utf8')
+    // The rehearsal starts the upgraded sandbox in Chrome. The unit test
+    // cannot start a real DSH here, so the package carries a stub that proves
+    // the rehearsal invoked it and handled its exit code.
+    const smokeDir = path.join(pkgDir, 'plugins', 'dsh-mesh', 'code', 'build')
+    await mkdir(smokeDir, { recursive: true })
+    await writeFile(path.join(smokeDir, 'smoke-cli.mjs'), [
+      "console.log('stub smoke')",
+      `process.exit(${String(options.smokeExit ?? 0)})`,
+      '',
+    ].join('\n'), 'utf8')
   }
   if (options.packagedDeploy !== false) {
     await mkdir(path.join(pkgDir, 'code', 'deploy'), { recursive: true })
@@ -121,12 +131,32 @@ test('the rehearsal upgrades a sandbox built from the member and proves restore 
       env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
     })
     assert.match(result.stdout, /脚本来源：已安装插件/u)
+    assert.match(result.stdout, /抓屏通过/u)
     assert.match(result.stdout, /restore\(\) 已验证/u)
     assert.match(result.stdout, /演练通过/u)
     assert.equal(existsSync(sandboxParent), false)
     // The member's own install is untouched.
     assert.equal(JSON.parse(await readFile(path.join(app, 'current', 'plugins', 'dsh-mesh', 'package.json'), 'utf8')).version, '0.9.0')
     assert.match(await readFile(path.join(app, 'shared', 'config', 'gate.env'), 'utf8'), /DSH_HOME=\/real\/home/u)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the rehearsal records a missing browser as a skip, not a failed upgrade', async () => {
+  if (process.platform !== 'linux' || process.getuid?.() !== 0) {
+    test.skip('rehearsal needs Linux and root')
+    return
+  }
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-rehearse-skip-'))
+  try {
+    const { plan } = await memberTree(dir, { smokeExit: 3 })
+    const bin = await stubBin(dir)
+    const result = await run('bash', ['-c', buildLinuxRehearseScript(plan)], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+    })
+    assert.match(result.stdout, /抓屏跳过：目标成员没有 Chrome/u)
+    assert.match(result.stdout, /演练通过/u)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

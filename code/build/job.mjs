@@ -27,6 +27,7 @@ import {
   runWebBuild,
   writeWorkOrder,
 } from './engine.mjs'
+import { runPackageSmoke } from './smoke.mjs'
 
 /**
  * Default job root.
@@ -259,14 +260,53 @@ export async function runJob(dir, options) {
         : await assembleWebPackage(shared)
       const archive = await archivePackage(assembled.packageDir, target, { log })
       const info = await stat(archive)
-      artifacts.push({
+      // A package that installs cleanly can still ship a UI that never boots.
+      // Start it and look at it with headless Chrome before calling the build
+      // done; the screenshots and the browser checks travel in the job state.
+      let smoke = null
+      if (options.smoke === false) {
+        smoke = { ok: true, status: 'skipped', reason: 'smoke test disabled for this build', checks: [], screenshots: [] }
+      } else if (!full) {
+        smoke = { ok: true, status: 'skipped', reason: 'web-only package has no app/runtime to start', checks: [], screenshots: [] }
+      } else {
+        state = await updateState(dir, { phase: 'smoke', percent: 92 })
+        log(`smoke ${target}: starting the packaged DSH under headless Chrome`)
+        smoke = await runPackageSmoke({
+          packageRoot: assembled.packageDir,
+          target,
+          workDir: path.join(dir, 'smoke', target),
+          screenshotDir: path.join(dir, 'smoke', target),
+          chrome: options.smokeChrome,
+          required: options.smokeRequired === true,
+          startTimeoutMs: options.smokeStartTimeoutMs,
+          pageTimeoutMs: options.smokePageTimeoutMs,
+          log,
+        })
+        if (smoke.status === 'skipped') log(`smoke ${target}: skipped (${smoke.reason})`)
+        else log(`smoke ${target}: ${smoke.status}${Array.isArray(smoke.screenshots) && smoke.screenshots.length > 0 ? ` (${smoke.screenshots.join(', ')})` : ''}`)
+        if (smoke.status !== 'failed') state = await updateState(dir, { phase: 'smoke', percent: 96 })
+      }
+      const artifact = {
         target,
         packageDir: assembled.packageDir,
         archive,
         bytes: info.size,
         manifest: assembled.manifest,
-      })
+        smoke,
+      }
+      artifacts.push(artifact)
       log(`packaged ${target}: ${archive}`)
+      if (smoke?.status === 'failed') {
+        state = await updateState(dir, {
+          status: 'smoke-failed',
+          phase: 'smoke',
+          percent: 100,
+          error: `${target} smoke test failed: ${smoke.error ?? 'see smoke.log'}`,
+          artifacts,
+        })
+        log(`smoke ${target}: failed; stopping before the next target`)
+        return state
+      }
     }
     state = await updateState(dir, { status: 'done', phase: 'done', artifacts })
     log('build complete')

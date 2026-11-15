@@ -50,7 +50,10 @@ export function phaseFromLine(line) {
   if (text.includes('installing')) return { phase: 'build', percent: 25 }
   if (text.includes('$ pnpm run build:web') || text.includes('$ pnpm build')) return { phase: 'build', percent: 45 }
   if (text.includes('frontend installed') || text.includes('patching ')) return { phase: 'package', percent: 70 }
-  if (text.includes('packaged ')) return { phase: 'package', percent: 85 }
+  if (/packaged \S+: \//u.test(text)) return { phase: 'package', percent: 85 }
+  if (text.includes('smoke ') && text.includes(': starting')) return { phase: 'smoke', percent: 92 }
+  if (text.includes('smoke ') && text.includes(': passed')) return { phase: 'smoke', percent: 96 }
+  if (text.includes('smoke ') && text.includes(': failed')) return { phase: 'smoke', percent: 100, status: 'smoke-failed' }
   if (text.includes('build complete')) return { phase: 'done', percent: 100 }
   if (text.includes('failed:')) return { phase: 'failed', percent: 100, status: 'failed' }
   return null
@@ -315,7 +318,7 @@ export class RemoteBuilder {
     if (remote.status !== 'done') {
       const message = typeof remote.error === 'string' && remote.error !== '' ? remote.error : `member build ended with status ${String(remote.status)}`
       await appendLog(jobDir, `member job ${String(remote.status)}: ${message}`)
-      const status = remote.status === 'needs-fix' ? 'needs-fix' : 'failed'
+      const status = remote.status === 'needs-fix' ? 'needs-fix' : remote.status === 'smoke-failed' ? 'smoke-failed' : 'failed'
       return this.#update(jobDir, {
         status,
         phase: remote.phase ?? 'failed',
@@ -343,6 +346,7 @@ export class RemoteBuilder {
         bytes: info.size,
         sha256: digest,
         manifest: artifact.manifest ?? null,
+        smoke: artifact.smoke ?? null,
       })
       await appendLog(jobDir, `pulled ${path.basename(local)} (${String(info.size)} bytes, sha256 ${digest.slice(0, 12)}…)`)
     }

@@ -94,15 +94,41 @@ function jobStatusTag(job: BuildJob): JSX.Element {
     case 'failed':
     case 'build-failed':
       return <Tag color="error">失败</Tag>
+    case 'smoke-failed':
+      return <Tag color="error">抓屏失败</Tag>
     default:
       return <Tag>{job.status}</Tag>
   }
 }
 
+/**
+ * The browser check that ran after packaging, if the job carries one.
+ *
+ * A done job with a passed smoke test is the only combination that says the
+ * archive was actually started and its UI rendered; "未抓屏" is deliberately
+ * visible instead of silently looking like a verified build.
+ * @param job build job.
+ * @returns status tag or null.
+ */
+function smokeTag(job: BuildJob): JSX.Element | null {
+  const results = (job.artifacts ?? [])
+    .map(artifact => artifact.smoke)
+    .filter((smoke): smoke is NonNullable<typeof smoke> => smoke !== undefined && smoke !== null)
+  if (results.length === 0) return null
+  if (results.some(smoke => smoke.status === 'failed')) return <Tag color="error">抓屏失败</Tag>
+  const passed = results.filter(smoke => smoke.status === 'passed')
+  if (passed.length > 0) {
+    const shots = passed.flatMap(smoke => smoke.screenshots ?? []).join('\n')
+    return <Tooltip title={shots === '' ? 'headless Chrome 已确认 DSH 启动且 Mesh 面板出现' : shots}><Tag color="green">抓屏通过</Tag></Tooltip>
+  }
+  const reason = results.map(smoke => smoke.reason).filter(Boolean).join('；')
+  return <Tooltip title={reason === '' ? '这个任务没有执行抓屏' : reason}><Tag>未抓屏</Tag></Tooltip>
+}
+
 function jobPercent(job: BuildJob): number {
   if (job.status === 'done') return 100
   if (typeof job.percent === 'number') return Math.max(0, Math.min(100, job.percent))
-  if (job.status === 'failed' || job.status === 'needs-fix') return 100
+  if (job.status === 'failed' || job.status === 'build-failed' || job.status === 'smoke-failed' || job.status === 'needs-fix') return 100
   return 0
 }
 
@@ -327,7 +353,12 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
       title: '状态',
       dataIndex: 'status',
       width: 90,
-      render: (_value, job) => jobStatusTag(job),
+      render: (_value, job) => (
+        <Space size={4} wrap>
+          {jobStatusTag(job)}
+          {job.status === 'done' ? smokeTag(job) : null}
+        </Space>
+      ),
     },
     {
       title: '成员',

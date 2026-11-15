@@ -78,6 +78,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - **在成员上编译**：`member` 指定编译成员（Linux），网关通过 SSH 在成员的 dsh-mesh 检出里跑同一套 `code/build` 引擎，日志流回面板，产物自动拉回网关的 `~/.dsh/packages`。
 - **外网代理**：`proxyMember` 让指定成员临时启动一个只绑定其组网地址的 HTTP 代理（`code/shared/egress-proxy.mjs`），源码下载、Node 运行时和 npm 都走它；编译结束即关闭。也可以直接给 `proxy: "http://host:port"`。经 WireGuard 转发通常比成员直连慢，成员本身网络好时不必开代理。
 - **前置编译步骤**：干净工作树下 `apps/web` 依赖 workspace 里 `lib/` 产物（`dsh-client-web`、`ui-theme` 的 CSS、webworker 运行时等），`build/recipes.json` 的 `prepare` 会在 `pnpm run build:web` 之前执行这些命令（CLI 用 `--prepare` 覆盖）。
+- **构建后抓屏冒烟**：完整包归档后，在本机目标上真的启动一次（一次性沙箱 + 包内 supervisor/gate + 空闲端口），用 headless Chrome 过密码门、等 DSH 壳、点侧边栏 `Mesh`，确认面板出现并截图到 `<job>/smoke/<target>/`。页面报 `Failed to load plugins`、DSH 起不来、Mesh 面板不出现都会让构建以 `smoke-failed` 结束。跨目标、`--web-only` 或没有 Chrome 时跳过并记录原因；`--no-smoke` 关闭，`--require-smoke` 把“没有 Chrome”变成失败。详见 [Step 010](docs/Step%20010%20从源码构建多平台Web包.md)。
 - Web 构建成功后按目标打包：
   - **完整包**（默认）：`app/`（`@deepseek-ai/dsh` + 目标原生依赖）、`runtime/node/`、`gate/`、`shared/`、`plugin/`、安装脚本。
   - **只 Web 包**（`--web-only`）：只含 `web/` 前端产物，便于覆盖已有安装。
@@ -239,6 +240,8 @@ node code/build/cli.mjs status --job <job-dir>
 node code/build/cli.mjs logs --job <job-dir>
 node code/build/cli.mjs learn --job <job-dir>      # 把改好的工作树固化成覆盖层
 node code/build/cli.mjs resume --job <job-dir>     # 复用工作树继续构建
+node code/build/cli.mjs build --no-smoke            # 跳过构建后的 Chrome 抓屏
+node code/build/smoke-cli.mjs --root <package> --screenshot-dir /tmp/smoke  # 单独复跑一个包
 ```
 
 首次真实构建需要网络、`pnpm`、`npm` 和足够磁盘（完整包每个目标约 0.7–1 GB 依赖 + Node 运行时）。如果上游源码已经变了，第一次会按设计返回 needs-fix 工作单，而不是假装成功。构建会执行源码仓库的 `pnpm install` / build 脚本；只对可信源码使用。
@@ -289,7 +292,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 007 升级适配清单](docs/Step%20007%20升级适配清单.md) | DSH 升级后逐项重打的检查表 |
 | [Step 008 测试与验证](docs/Step%20008%20测试与验证.md) | 端到端脚本、浏览器断言、请求数断言、失败模式对照 |
 | [Step 009 成员发现与切换](docs/Step%20009%20成员发现与切换.md) | peer 发现、`dsh_gate_target` cookie、cluster HMAC、cookie 命名空间 |
-| [Step 010 从源码构建多平台 Web 包](docs/Step%20010%20从源码构建多平台Web包.md) | 固定源/ref、源码覆盖层、工作单、自动固化/继续、目标打包 |
+| [Step 010 从源码构建多平台 Web 包](docs/Step%20010%20从源码构建多平台Web包.md) | 固定源/ref、源码覆盖层、工作单、自动固化/继续、目标打包、构建后 Chrome 抓屏 |
 | [Step 011 通过 SSH 蓝绿部署成员](docs/Step%20011%20通过%20SSH%20蓝绿部署.md) | releases/current/shared、prepare/activate、gateway 最后、回滚 |
 | [Step 012 独立服务与WireGuard控制面板](docs/Step%20012%20独立服务与WireGuard控制面板.md) | 网关/DSH/51821 三个独立服务、token 文件、内置面板代理 |
 | [Step 013 独立DSH交互HTTP服务](docs/Step%20013%20独立DSH交互HTTP服务.md) | 独立 8765、SDK stdio、创建/等待/通知/事件/回调 |
@@ -323,12 +326,13 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `code/gate/server.mjs` | 网关：密码门、目标路由、反向代理、WebSocket |
 | `code/gate/members.mjs` | 成员发现、`/__gate/select`、cluster 代理、cookie 隔离 |
 | `code/gate/pages.mjs` | 登录页 / 扫码页 / 状态页 |
-| `code/gate/chrome.mjs` / `account-login.mjs` | 账号扫码登录辅助 |
+| `code/shared/chrome.mjs` / `code/gate/account-login.mjs` | CDP 驱动与账号扫码登录辅助 |
 | `code/shared/wireguard.mjs` | WireGuard 状态读取、peer 探测、成员快照 |
 | `code/shared/cluster.mjs` | cluster HMAC 签名/验证、nonce 防重放 |
 | `code/shared/cookies.mjs` | 成员 cookie 命名空间 |
 | `code/build/engine.mjs` | 源码准备、覆盖层、构建、打包、Node 运行时 |
 | `code/build/job.mjs` | 构建任务状态、日志、覆盖层固化/工作树复用 |
+| `code/build/smoke.mjs` / `smoke-cli.mjs` | 构建后与测试升级的 headless Chrome 启动/抓屏检查 |
 | `code/build/cli.mjs` | 命令行入口 |
 | `build/recipes.json` | 源码覆盖层清单（picker / login） |
 | `build/overlays/` | 对 DSH 源码的整文件覆盖层 |

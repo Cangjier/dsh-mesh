@@ -653,6 +653,9 @@ export class MeshService {
           proxy: proxyUrl,
           full: this.config.build?.full !== false,
           nodeVersion: typeof this.config.build?.nodeVersion === 'string' && this.config.build.nodeVersion !== '' ? this.config.build.nodeVersion : undefined,
+          smoke: this.config.build?.smoke === false ? false : undefined,
+          smokeRequired: this.config.build?.requireSmoke === true,
+          smokeChrome: typeof this.config.build?.chrome === 'string' && this.config.build.chrome !== '' ? this.config.build.chrome : undefined,
         })
         return
       }
@@ -758,6 +761,9 @@ export class MeshService {
       reuseWorktree: true,
       full: this.config.build?.full !== false,
       nodeVersion: typeof this.config.build?.nodeVersion === 'string' && this.config.build.nodeVersion !== '' ? this.config.build.nodeVersion : undefined,
+      smoke: this.config.build?.smoke === false ? false : undefined,
+      smokeRequired: this.config.build?.requireSmoke === true,
+      smokeChrome: typeof this.config.build?.chrome === 'string' && this.config.build.chrome !== '' ? this.config.build.chrome : undefined,
     }).catch((error) => {
       this.logLine(`mesh build job ${id} crashed: ${error instanceof Error ? error.message : String(error)}`)
     }).finally(() => {

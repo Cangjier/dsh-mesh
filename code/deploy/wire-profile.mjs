@@ -185,7 +185,19 @@ function wireProfile(profileDir, root, token) {
       '    interopUseGatePassword: false',
       '# END dsh-mesh deploy',
     ]
-    patch = `${patch.replace(/\n+$/u, '')}${patch.trim() === '' ? '' : '\n'}${rows.join('\n')}\n`
+    // A freshly initialised profile starts with the comments above and an
+    // empty document (`[]`). Appending `- id:` after that empty array is
+    // invalid YAML (no document separator), so replace the placeholder
+    // instead of appending to it.
+    const lines = patch.split(/\r?\n/u)
+    const emptyArray = lines.findIndex(line => /^\s*\[\s*\]\s*$/u.test(line))
+    const meaningful = lines.filter(line => line.trim() !== '' && !line.trim().startsWith('#'))
+    if (emptyArray !== -1 && meaningful.length === 1) {
+      lines.splice(emptyArray, 1, ...rows)
+      patch = `${lines.join('\n').replace(/\n+$/u, '')}\n`
+    } else {
+      patch = `${patch.replace(/\n+$/u, '')}${patch.trim() === '' ? '' : '\n'}${rows.join('\n')}\n`
+    }
     changes.push('patch block added')
   } else if (token !== '') {
     const body = block.groups?.body ?? ''
@@ -195,6 +207,19 @@ function wireProfile(profileDir, root, token) {
       patch = `${patch.slice(0, block.index)}# BEGIN ${owner} deploy\n${updated}# END ${owner} deploy${patch.slice(block.index + block[0].length)}`
       changes.push('interopToken')
     }
+  }
+  // A profile that was initialised empty carries a `[]` document placeholder.
+  // Once any entry exists, that placeholder is a second document with no
+  // separator and DSH refuses the whole profile. Drop it before writing; an
+  // empty profile with only `[]` is left alone.
+  const patchLines = patch.split(/\r?\n/u)
+  const hasEntries = patchLines.some(line => {
+    const trimmed = line.trim()
+    return trimmed !== '' && !trimmed.startsWith('#') && !/^\[\s*\]$/u.test(trimmed)
+  })
+  if (hasEntries && patchLines.some(line => /^\s*\[\s*\]\s*$/u.test(line))) {
+    patch = `${patchLines.filter(line => !/^\s*\[\s*\]\s*$/u.test(line)).join('\n').replace(/\n+$/u, '')}\n`
+    changes.push('drop empty patch placeholder')
   }
   fs.writeFileSync(patchFile, patch)
   return changes

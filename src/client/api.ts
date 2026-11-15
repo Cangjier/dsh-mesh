@@ -149,7 +149,17 @@ export interface BuildJob {
   logTail?: string[]
   running?: boolean
   learnedAt?: string | null
-  artifacts?: Array<{ target: string; archive: string; bytes: number }>
+  artifacts?: Array<{
+    target: string
+    archive: string
+    bytes: number
+    smoke?: {
+      status: string
+      reason?: string
+      error?: string
+      screenshots?: string[]
+    }
+  }>
 }
 
 export interface PackageInfo {

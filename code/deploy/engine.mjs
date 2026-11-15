@@ -1143,6 +1143,7 @@ cp -a "$CURRENT/plugins/." "$APP/plugins/"
 for item in code gate locale manifest.json start.sh start-dsh.sh start-interop.sh; do
   if [ -e "$CURRENT/$item" ]; then cp -a "$CURRENT/$item" "$APP/"; fi
 done
+if [ -d "$CURRENT/config" ]; then cp -a "$CURRENT/config/." "$APP/config/"; fi
 cp -a "$SHARED/config/gate.env" "$APP/config/gate.env"
 PROFILE_SRC="$SHARED/home/profiles/web"
 for file in package.json cordis.patch.yml; do
@@ -1200,10 +1201,30 @@ if [ -d "$STAGE/plugins/xl" ]; then
   [ -e "$TEST_HOME/profiles/web/node_modules/xl" ] || fail '新包带了 xl，但 profile 没有接上 xl'
   say '随包插件 xl 已接入 profile'
 fi
-# 第二步：注入一次“接线”失败，验证 upgrade-local.sh 的 restore() 能把
+say '第二步：Chrome headless 抓屏确认升级后的 DSH 能启动、Mesh 面板能出现'
+SMOKE_SCRIPT="$APP/plugins/dsh-mesh/code/build/smoke-cli.mjs"
+[ -f "$SMOKE_SCRIPT" ] || SMOKE_SCRIPT="$STAGE/plugins/dsh-mesh/code/build/smoke-cli.mjs"
+[ -f "$SMOKE_SCRIPT" ] || fail '新包里没有 code/build/smoke-cli.mjs，无法验证 DSH 启动与 Mesh 面板'
+# 截图留在沙箱外面：成功会删 TEST_ROOT，失败要留证据。
+SMOKE_SHOT="$APP_ROOT/.dsh-mesh-test-$RELEASE"
+rm -rf "$SMOKE_SHOT"
+mkdir -p "$SMOKE_SHOT"
+if "$NODE" "$SMOKE_SCRIPT" --install --root "$APP" --port 18081 --home "$TEST_HOME" \
+    --workdir "$TEST_ROOT/workspace" --screenshot-dir "$SMOKE_SHOT"; then
+  say "抓屏通过：DSH 已启动，Mesh 面板已出现（截图 $SMOKE_SHOT）"
+else
+  smoke_rc=$?
+  if [ "$smoke_rc" = "3" ]; then
+    say '抓屏跳过：目标成员没有 Chrome/Chromium（构建机上的「构建后抓屏」仍会执行）'
+  else
+    fail "升级后的沙箱没有通过 Chrome 抓屏冒烟（退出码 $smoke_rc）；截图与日志在 $SMOKE_SHOT"
+  fi
+fi
+
+# 第三步：注入一次“接线”失败，验证 upgrade-local.sh 的 restore() 能把
 # 已经覆盖过的文件还原。注入方式是把 wire-profile 换成必定失败的小脚本，
 # 它会留下一个标记，证明覆盖已经发生、失败点在接线。
-say '第二步：注入接线失败，验证 restore() 能还原'
+say '第三步：注入接线失败，验证 restore() 能还原'
 cp -a "$STAGE/." "$TEST_ROOT/bad/"
 printf '// bad stage\n' > "$TEST_ROOT/bad/plugins/dsh-mesh/index.js"
 mv "$TEST_ROOT/tools/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.real"

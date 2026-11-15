@@ -18,7 +18,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const ROOT = path.resolve(HERE, '..', '..')
+// An explicit root lets a smoke test run this supervisor from a symlinked
+// scratch install without writing its data into the package directory.
+const ROOT = path.resolve(process.env.DSH_PACKAGE_ROOT || path.join(HERE, '..', '..'))
 const DATA = path.join(ROOT, 'data')
 const TOKEN_FILE = path.join(DATA, 'dsh-web.json')
 const LOG_FILE = path.join(DATA, 'dsh-service.log')

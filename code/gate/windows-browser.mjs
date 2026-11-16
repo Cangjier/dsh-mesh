@@ -47,6 +47,24 @@ export async function consoleUser() {
 }
 
 /**
+ * WSH launcher that starts a PowerShell script with no console window at all.
+ *
+ * Task Scheduler would create a console for powershell.exe first and
+ * `-WindowStyle Hidden` would only hide it afterwards, which flashes a window
+ * on the operator's desktop. wscript.exe is a GUI-subsystem program, so
+ * Run(..., 0, True) creates PowerShell hidden from the start and waits so
+ * the task keeps reporting the helper as running.
+ * @param {string} scriptFile PowerShell script to start.
+ * @returns {string} VBScript source.
+ */
+function hiddenLauncher(scriptFile) {
+  return `' Start a helper without a console window.
+Set shell = CreateObject("WScript.Shell")
+shell.Run "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File " & Chr(34) & "${String(scriptFile).replace(/["\r\n]/gu, '')}" & Chr(34), 0, True
+`
+}
+
+/**
  * The launcher script the interactive task runs. It is written on every start
  * so the binary and profile path always match this gate.
  * @param {{binary: string, profileDir: string, port: number}} options launch input.
@@ -113,9 +131,13 @@ export class InteractiveBrowser {
       port: this.port,
     }), 'utf8')
     const account = user.includes('\\') ? user.slice(user.indexOf('\\') + 1) : user
+    // The browser itself has no window (--headless=new); the PowerShell host
+    // that starts it must not flash one either.
+    const launcherFile = path.join(this.directory, 'login-browser.vbs')
+    await writeFile(launcherFile, hiddenLauncher(scriptFile), 'utf8')
     await run('schtasks.exe', [
       '/create', '/tn', LOGIN_BROWSER_TASK,
-      '/tr', `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${scriptFile}"`,
+      '/tr', `wscript.exe //B //Nologo "${launcherFile}"`,
       '/sc', 'once', '/st', '00:00', '/ru', account, '/it', '/f',
     ], { windowsHide: true })
     await run('schtasks.exe', ['/run', '/tn', LOGIN_BROWSER_TASK], { windowsHide: true })

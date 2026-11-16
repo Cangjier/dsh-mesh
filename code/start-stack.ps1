@@ -10,20 +10,12 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $env:DSH_PACKAGE_ROOT = $Root
 
 # The service hands this script to a scheduled task with an interactive token so
-# the sandbox has a logon SID and can reach the desktop. That token also opens a
-# console window on the operator's screen, which nobody needs: hide it and send
-# the gate log to data\gate.out instead.
-$signature = @'
-[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
-[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-'@
-try {
-  $console = Add-Type -MemberDefinition $signature -Name ConsoleWindow -Namespace DshMesh -PassThru -ErrorAction Stop
-  $handle = $console::GetConsoleWindow()
-  if ($handle -ne [IntPtr]::Zero) { [void]$console::ShowWindow($handle, 0) }
-} catch {
-  # No console (session 0 or a redirected run) means there is nothing to hide.
-}
+# the sandbox has a logon SID and can reach the desktop. That token would also
+# put a console window on the operator's screen. It is not hidden here: a window
+# that already exists flashes before ShowWindow can hide it. The task starts
+# wscript.exe (a GUI-subsystem host) with a small launcher that creates this
+# PowerShell process hidden from the very first moment. See CreateTask in
+# DshMeshService.cs and the "-InstallTask" branch of install.ps1.
 
 # The stack reads its settings from config\gate.env (gate) and config\interop.env
 # (the interop service). Both live on the shared volume, so a release switch does

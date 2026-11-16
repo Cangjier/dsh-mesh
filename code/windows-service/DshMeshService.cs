@@ -252,11 +252,51 @@ namespace DshMesh
             string script = Path.Combine(root, "start-stack.ps1");
             if (!File.Exists(script)) { Log("missing " + script); return false; }
             EndTask();
-            string taskCommand = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"";
+            // A task that runs powershell.exe creates a console window before
+            // the script's first line can run; -WindowStyle Hidden only hides
+            // it after creation, so the operator still sees it flash. wscript
+            // is a GUI-subsystem host with no console of its own, and it starts
+            // PowerShell with SW_HIDE from the very first moment: no window is
+            // ever shown, so there is nothing to hide afterwards.
+            string launcher = WriteHiddenLauncher("start-stack-hidden.vbs", script);
+            if (launcher == "") { Log("cannot write the hidden launcher for " + script); return false; }
+            string taskCommand = "wscript.exe //B //Nologo \"" + launcher + "\"";
             int created = Run(Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
                 "/Create /F /TN \"" + StackTask + "\" /TR \"" + taskCommand + "\" /SC ONCE /ST 00:00 /RU \"" + user + "\" /IT /RL HIGHEST");
             if (created != 0) { Log("schtasks create failed with " + created); return false; }
             return true;
+        }
+
+        /// <summary>
+        /// Write a WSH launcher that starts one PowerShell script with no window.
+        ///
+        /// The launcher lives in data\ so a release switch does not delete it,
+        /// and it is rewritten every time the task is created. Chr(34) keeps
+        /// the quoted path readable without double-doubling every quote.
+        /// </summary>
+        /// <param name="name">launcher file name.</param>
+        /// <param name="script">PowerShell script to start.</param>
+        /// <returns>launcher path, or an empty string on failure.</returns>
+        private string WriteHiddenLauncher(string name, string script)
+        {
+            try
+            {
+                string dir = Path.Combine(root, "data");
+                Directory.CreateDirectory(dir);
+                string file = Path.Combine(dir, name);
+                string body =
+                    "' Start " + Path.GetFileName(script) + " without a console window.\r\n" +
+                    "' wscript.exe has no console; Run(..., 0, True) creates PowerShell hidden and waits.\r\n" +
+                    "Set shell = CreateObject(\"WScript.Shell\")\r\n" +
+                    "shell.Run \"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \" & Chr(34) & \"" + script + "\" & Chr(34), 0, True\r\n";
+                File.WriteAllText(file, body, new System.Text.UTF8Encoding(false));
+                return file;
+            }
+            catch (Exception error)
+            {
+                Log("cannot write hidden launcher: " + error.Message);
+                return "";
+            }
         }
 
         private bool RunTask()

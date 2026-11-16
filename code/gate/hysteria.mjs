@@ -1087,7 +1087,7 @@ for ($i = 0; $i -lt 300; $i++) {
     await rm(local, { force: true }).catch(() => {})
   }
   await runScript(target, `$ErrorActionPreference='Stop'
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\\ProgramData\\hysteria2\\client-route.ps1"'
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\\ProgramData\\hysteria2\\client-route.ps1"'
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(10))
 Unregister-ScheduledTask -TaskName 'hysteria2-client-route' -Confirm:$false -ErrorAction SilentlyContinue

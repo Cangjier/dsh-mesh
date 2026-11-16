@@ -60,7 +60,19 @@ try {
 
 if ($InstallTask) {
   try {
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Root\start.ps1`""
+    # Start hidden from the beginning. wscript.exe has no console, so it can
+    # create the PowerShell process with SW_HIDE; a task that runs
+    # powershell.exe -WindowStyle Hidden still shows a window for a moment
+    # before PowerShell hides itself.
+    $launcher = Join-Path $Root 'start-hidden.vbs'
+    $startScript = Join-Path $Root 'start.ps1'
+    $vbs = @(
+      "' Start DSH Person Web without a console window.",
+      "Set shell = CreateObject(""WScript.Shell"")",
+      ('shell.Run "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File " & Chr(34) & "' + $startScript + '" & Chr(34), 0, True')
+    ) -join "`r`n"
+    [System.IO.File]::WriteAllText($launcher, $vbs, [System.Text.UTF8Encoding]::new($false))
+    $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "//B //Nologo `"$launcher`""
     $trigger = New-ScheduledTaskTrigger -AtLogOn
     $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
     Register-ScheduledTask -TaskName 'DSH Person Web' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null

@@ -80,6 +80,22 @@ function shortMemberName(name: string): string {
   return chars.length > MEMBER_NAME_LIMIT ? `${chars.slice(0, MEMBER_NAME_LIMIT).join('')}…` : name
 }
 
+/**
+ * Minimum member-table width per breakpoint: the summed widths of the columns
+ * that breakpoint still shows (the action column is 170 everywhere). Once the
+ * container is narrower than this, the table scrolls sideways instead of
+ * squeezing the cells into a ball on a phone.
+ *
+ * An unmeasured viewport (`screens` empty on first render) falls through to the
+ * desktop width so a desktop never flashes a narrow table.
+ */
+function memberTableMinWidth(screens: Partial<Record<'sm' | 'md' | 'lg', boolean>>): number {
+  if (screens.lg !== false) return 820
+  if (screens.md !== false) return 770
+  if (screens.sm !== false) return 650
+  return 460
+}
+
 function useThemeMode(ctx: any): 'light' | 'dark' {
   const [snapshot, setSnapshot] = useState<any>(() => ctx.theme.getTheme())
   useEffect(() => ctx.on('theme/change', (next: any) => setSnapshot(next)), [ctx])
@@ -1264,7 +1280,9 @@ function Panel({ ctx }: { ctx: any }) {
       key: 'action',
       // 切换 + the 更多 icon need ~120px; the rest is headroom for the running
       // pill (spinner + "正在测试升级 62%"), which is the widest cell content.
-      width: screens.lg === true ? 170 : 130,
+      // The width is the same on every breakpoint: the table scrolls sideways
+      // on a phone, so narrowing this column would only clip the pill.
+      width: 170,
       align: 'right',
       render: (_value, member) => {
         // `queued` is the second between the panel writing the job and its
@@ -1610,18 +1628,18 @@ function Panel({ ctx }: { ctx: any }) {
                 dataSource={memberRows}
                 columns={columns}
                 scroll={{
-                  // 820 keeps the last column inside the card at lg; a larger
-                  // minimum made the table wider than its container and clipped
-                  // the running-deploy pill.
-                  x: screens.lg === true ? 820 : undefined,
+                  // A number (not undefined) is what makes rc-table wrap the
+                  // grid in a horizontally scrollable content box. Below lg the
+                  // minimum is the summed width of the columns still shown, so
+                  // a phone keeps readable cells and scrolls instead of
+                  // squashing them.
+                  x: memberTableMinWidth(screens),
                   ...(memberRows.length > 8 ? { y: 'max(240px, calc(100vh - 320px))' } : {}),
                 }}
-                // Automatic layout sizes the action column by whatever the long
-                // 系统 strings leave over, which wrapped 测试升级 onto a second
-                // line. Fixed layout honours the percentages and the action
-                // width instead; below lg the table keeps auto layout so it can
-                // still shrink to a phone.
-                tableLayout={screens.lg === true ? 'fixed' : undefined}
+                // Fixed layout honours the declared widths and the percentages
+                // from the first row; with the x minimum above it is what keeps
+                // the columns aligned instead of collapsing below lg.
+                tableLayout="fixed"
                 pagination={{
                   pageSize: 10,
                   showSizeChanger: true,

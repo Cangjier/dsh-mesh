@@ -21,6 +21,7 @@ import {
   readWireGuardState,
   wireGuardIdentity,
 } from '../../code/shared/wireguard.mjs'
+import { readDeployment } from '../../code/shared/deployment.mjs'
 import {
   appendLog,
   createJob,
@@ -383,6 +384,10 @@ export class MeshService {
       system: await this.systemInfo(),
       error: null,
     }
+    // This row is the machine answering the request; no probe can report on
+    // itself, so read its own release from the install it runs out of.
+    const install = this.#localAppRoot()
+    if (install !== null) self.deployment = readDeployment(install.appRoot)
     const snapshot = await discoverMembers({
       state,
       stateError: error,

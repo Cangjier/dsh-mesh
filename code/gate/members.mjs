@@ -76,6 +76,7 @@ export class MemberService {
    * @param {string[]} [options.clusterAllow] extra exact source addresses allowed to call the cluster endpoint.
    * @param {boolean} [options.memberPublic] expose `/__gate/member` to non-private sources.
    * @param {string} [options.version] plugin version reported in member info.
+   * @param {object} [options.deployment] release this gate runs from (see shared/deployment.mjs).
    * @param {typeof fetch} [options.fetchImpl] fetch implementation (tests).
    * @param {(line: string) => void} options.log logger.
    * @param {(req: import('node:http').IncomingMessage) => boolean} options.isAdmitted gate admission check.
@@ -115,6 +116,9 @@ export class MemberService {
     this.clusterAllow = new Set((options.clusterAllow ?? []).map(normalizeAddress).filter(Boolean))
     this.memberPublic = options.memberPublic === true
     this.version = options.version ?? '0.0.0'
+    // The release this gate started from: the panel shows it per member so an
+    // operator can tell whether every machine is on the same build.
+    this.deployment = options.deployment ?? null
     this.fetchImpl = options.fetchImpl ?? fetch
     this.log = options.log
     this.isAdmitted = options.isAdmitted
@@ -143,7 +147,10 @@ export class MemberService {
     return {
       ok: true,
       service: 'dsh-mesh',
-      version: this.version,
+      // The packaged release, not the plugin's package.json (which never
+      // existed at the install root and made every member report 0.0.0).
+      version: this.deployment?.version ?? this.version,
+      deployment: this.deployment,
       id: vpnIp !== '' ? vpnIp : os.hostname(),
       name,
       hostname: os.hostname(),

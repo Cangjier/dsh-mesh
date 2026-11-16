@@ -12,6 +12,22 @@ export interface SystemInfo {
   disks?: Array<{ mount?: string; totalBytes?: number; usedBytes?: number; freeBytes?: number; availableBytes?: number; usedPercent?: number }>
 }
 
+/**
+ * The packaged release one member runs.
+ *
+ * A member reports this through its own gate (`/__gate/member`), so it is the
+ * tree that gate actually started from, not a guess from its install path.
+ */
+export interface DeploymentInfo {
+  version: string | null
+  buildStamp?: string | null
+  builtAt?: string | null
+  /** Release directory name; blue-green installs only. */
+  release?: string | null
+  layout?: 'flat' | 'bluegreen' | string
+  target?: Record<string, unknown> | null
+}
+
 export interface Member {
   id: string
   kind: 'self' | 'peer'
@@ -23,6 +39,8 @@ export interface Member {
   latencyMs: number
   lastHandshakeAt: string | null
   gate: Record<string, unknown> | null
+  /** Set for the row this panel runs on; peers report it inside `gate`. */
+  deployment?: DeploymentInfo | null
   system?: SystemInfo | null
   tag?: string | null
   /** The last probe failed; `dsh`/`port` come from the last good answer. */

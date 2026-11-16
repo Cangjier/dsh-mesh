@@ -43,6 +43,7 @@ import { PackageUploads } from './packages.mjs'
 import { StaticAssets } from './static-assets.mjs'
 import { CLUSTER_PREFIX, MemberService } from './members.mjs'
 import { deriveClusterSecret } from '../shared/cluster.mjs'
+import { readDeployment } from '../shared/deployment.mjs'
 import { TARGET_COOKIE, readWireGuardState } from '../shared/wireguard.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -55,6 +56,9 @@ const PACKAGE_VERSION = (() => {
     return '0.0.0'
   }
 })()
+// Read once: the manifest only changes when a new release is installed, which
+// restarts this gate anyway.
+const DEPLOYMENT = readDeployment(PACKAGE_ROOT)
 
 /** Read one env value, falling back to the given default. */
 function env(name, fallback) {
@@ -1097,6 +1101,7 @@ const members = new MemberService({
   clusterAllow: CONFIG.clusterAllow,
   memberPublic: CONFIG.memberPublic,
   version: PACKAGE_VERSION,
+  deployment: DEPLOYMENT,
   fetchImpl: fetch,
   log,
   isAdmitted,

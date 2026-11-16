@@ -803,3 +803,12 @@
     gap: 6px;
   }
 }
+
+/* A version cell stacks the release over its build stamp, so both stay inside
+   the column at the narrow widths the member table can hit. */
+.dsh-pw-member-version {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.25;
+}

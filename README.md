@@ -120,7 +120,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - 支持 `scope=dsh`：只重启 DSH/控制面板，不重启网关。
 - 健康检查失败自动切回 `previous` 并重启；`rollback` 可手动回滚。
 - 成功激活后只保留最近 3 个 release，`current`/`previous` 指向的目录永不删除。
-- 面板的「升级」对本机和每个已安装的成员都开放（Linux 成员另有「测试升级」先演练平铺路径）；它用同一套引擎换包，升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的 `dsh-web`/网关不会把升级本身打断，也不会带走发起升级的面板。平铺安装（网关这种没有 `current` 的布局）走 `code/deploy/upgrade-local.sh`：备份 → 覆盖文件（保留 config/data/home/workspace）→ 重写 profile 与单元 → 健康检查，失败整体回滚；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。
+- 面板的「升级」对本机和每个已安装的成员都开放，收在操作列的纯图标「更多」菜单里（Linux 成员同一菜单另有「测试升级」，先演练平铺路径）；成员表还有一列「版本」，显示每台成员当前运行的部署包；它用同一套引擎换包，升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的 `dsh-web`/网关不会把升级本身打断，也不会带走发起升级的面板。平铺安装（网关这种没有 `current` 的布局）走 `code/deploy/upgrade-local.sh`：备份 → 覆盖文件（保留 config/data/home/workspace）→ 重写 profile 与单元 → 健康检查，失败整体回滚；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。
 - 详见 [Step 018](docs/Step%20018%20成员升级与独立升级进程.md)。
 
 ### 6. 独立 DSH 交互 HTTP 服务

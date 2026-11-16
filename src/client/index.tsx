@@ -6,6 +6,7 @@ import {
   Collapse,
   ConfigProvider,
   Descriptions,
+  Dropdown,
   Empty,
   Grid,
   Input,
@@ -33,6 +34,7 @@ import {
   CloudUploadOutlined,
   ExperimentOutlined,
   EditOutlined,
+  EllipsisOutlined,
   InfoCircleOutlined,
   LoadingOutlined,
   ReloadOutlined,
@@ -54,6 +56,7 @@ import {
   type ConversationGroup,
   type ConversationSnapshot,
   type DeployJob,
+  type DeploymentInfo,
   type Member,
   type MemberConversation,
   type PackageInfo,
@@ -139,6 +142,27 @@ function formatGb(value: number): string {
 
 function memberSystem(member: Member): SystemInfo | null {
   return member.system ?? ((member.gate as { system?: SystemInfo } | null)?.system ?? null)
+}
+
+/** The release a member reports: its own row when local, else its gate's answer. */
+function memberDeployment(member: Member): DeploymentInfo | null {
+  const direct = member.deployment
+  if (direct !== null && direct !== undefined && typeof direct === 'object') return direct
+  const nested = (member.gate as { deployment?: DeploymentInfo } | null)?.deployment
+  return nested !== null && nested !== undefined && typeof nested === 'object' ? nested : null
+}
+
+/**
+ * Version and build stamp encoded in a deployment package filename.
+ *
+ * Older members do not report their release yet, so the newest successful
+ * deploy/upgrade job is the best available answer until they do.
+ */
+function packageDeployment(job: DeployJob | undefined): { version: string; buildStamp: string | null } | null {
+  const name = (job?.package ?? '').split(/[\\/]/u).pop() ?? ''
+  const match = /^dsh-mesh-(.+?)(?:-(\d{8}[A-Z]))?-(?:linux|win(?:dows)?)-/u.exec(name)
+  if (match === null || match[1] === undefined) return null
+  return { version: match[1], buildStamp: match[2] ?? null }
 }
 
 function systemText(member: Member): string {
@@ -1111,6 +1135,12 @@ function Panel({ ctx }: { ctx: any }) {
     return deployJobs.find(job => job.member === member.id || job.target?.host === member.ip)
   }, [deployJobs])
 
+  /** Newest successful deploy/upgrade of a member; the version fallback for old gates. */
+  const latestSucceededJobOf = useCallback((member: Member): DeployJob | undefined => {
+    return deployJobs.find(job => job.status === 'succeeded' && job.package !== undefined
+      && (job.member === member.id || job.target?.host === member.ip))
+  }, [deployJobs])
+
   const progressId = progressJob?.id ?? ''
   // One read when the dialog opens; every later change is pushed.
   useEffect(() => {
@@ -1229,9 +1259,9 @@ function Panel({ ctx }: { ctx: any }) {
     const actionColumn: ColumnsType<Member>[number] = {
       title: '操作',
       key: 'action',
-      // Wide enough for the running pill (spinner + "正在升级 62%") and for
-      // 切换 + 升级 + 测试升级 on one line; a narrower column wraps the label.
-      width: screens.lg === true ? 264 : 200,
+      // 切换 + the 更多 icon need ~120px; the rest is headroom for the running
+      // pill (spinner + "正在测试升级 62%"), which is the widest cell content.
+      width: screens.lg === true ? 170 : 130,
       align: 'right',
       render: (_value, member) => {
         // `queued` is the second between the panel writing the job and its
@@ -1270,34 +1300,33 @@ function Panel({ ctx }: { ctx: any }) {
               </Button>
             ) : null}
             {installed ? (
-              <Tooltip title={isSelf
-                ? '选择部署包，把本机升级到该版本'
-                : '选择部署包，把这个成员升级到该版本（会重启它的 dsh / gate）'}>
+              // Upgrade used to be one labelled button per path; with 版本 in
+              // the table, three labels no longer fit next to 切换. Both paths
+              // live under one icon-only menu instead.
+              <Dropdown
+                trigger={['click']}
+                menu={{
+                  items: isSelf
+                    ? [{ key: 'upgrade', icon: <CloudUploadOutlined />, label: '升级' }]
+                    : [
+                        { key: 'upgrade', icon: <CloudUploadOutlined />, label: '升级' },
+                        // On a Linux member 测试升级 first rehearses the flat
+                        // path (what 升级 does on this machine) in a sandbox
+                        // there; a Windows member has no flat install to
+                        // rehearse, so its test upgrade is the real upgrade.
+                        { key: 'test', icon: <ExperimentOutlined />, label: '测试升级' },
+                      ],
+                  onClick: ({ key }) => { openDeploy(member, key === 'test' ? 'test' : 'upgrade') },
+                }}
+              >
                 <Button
                   size="small"
-                  icon={<CloudUploadOutlined />}
-                  onClick={() => openDeploy(member, 'upgrade')}
-                >
-                  升级
-                </Button>
-              </Tooltip>
-            ) : null}
-            {installed && !isSelf ? (
-              // A member upgrade only proves the blue-green path. On a Linux
-              // member 测试升级 first rehearses the flat path (what 升级 does on
-              // this machine) in a sandbox there. A Windows member has no flat
-              // install to rehearse in, so its test upgrade is the real upgrade.
-              <Tooltip title={preferredTarget(member) === 'windows'
-                ? '在 Windows 成员上直接执行真实升级（平铺演练只适用于 Linux 平铺安装，本机就是那种布局）'
-                : '在这个成员上演练本机那套平铺升级（沙箱里备份/覆盖/接线/失败还原），通过后再真实升级它自己的安装；演练失败不会动它，也不会动本机'}>
-                <Button
-                  size="small"
-                  icon={<ExperimentOutlined />}
-                  onClick={() => openDeploy(member, 'test')}
-                >
-                  测试升级
-                </Button>
-              </Tooltip>
+                  icon={<EllipsisOutlined />}
+                  aria-label="更多操作"
+                  title={isSelf ? '更多：升级本机' : '更多：升级 / 测试升级'}
+                  loading={busy === member.id}
+                />
+              </Dropdown>
             ) : null}
             {!installed ? (
               <Button
@@ -1316,7 +1345,7 @@ function Panel({ ctx }: { ctx: any }) {
       {
         title: '成员',
         key: 'member',
-        width: screens.lg === true ? '14%' : 170,
+        width: screens.lg === true ? '15%' : 170,
         render: (_value, member) => (
           <span className="dsh-pw-member">
             <Tooltip title={member.name}>
@@ -1348,9 +1377,49 @@ function Panel({ ctx }: { ctx: any }) {
         ),
       },
       {
+        title: '版本',
+        key: 'deployment',
+        width: screens.lg === true ? '11%' : 120,
+        render: (_value, member) => {
+          const job = latestSucceededJobOf(member)
+          const deployment = memberDeployment(member)
+          const fallback = deployment === null ? packageDeployment(job) : null
+          const version = deployment?.version ?? fallback?.version ?? null
+          if (version === null) {
+            return (
+              <Tooltip title="还没有版本信息：这个成员的网关上报部署版本后会自动出现">
+                <Typography.Text type="secondary">—</Typography.Text>
+              </Tooltip>
+            )
+          }
+          const stamp = deployment?.buildStamp ?? fallback?.buildStamp ?? null
+          const inferred = deployment === null
+          const packageName = (job?.package ?? '').split(/[\\/]/u).pop() ?? ''
+          const details = [
+            inferred
+              ? `推断自最近一次成功的升级包${packageName === '' ? '' : `：${packageName}`}；成员网关上报部署版本后自动以它为准`
+              : '这个成员正在运行的部署包',
+            deployment?.builtAt !== null && deployment?.builtAt !== undefined
+              ? `打包时间 ${new Date(deployment.builtAt).toLocaleString()}`
+              : '',
+            deployment?.release !== null && deployment?.release !== undefined ? `release ${deployment.release}` : '',
+          ].filter(line => line !== '').join('\n')
+          return (
+            <Tooltip title={<pre style={{ margin: 0, fontFamily: 'inherit', whiteSpace: 'pre-wrap' }}>{details}</pre>}>
+              <span className="dsh-pw-member-version">
+                <Typography.Text className="dsh-pw-mono" style={{ fontSize: 12 }} type={inferred ? 'secondary' : undefined}>
+                  {version}
+                </Typography.Text>
+                {stamp !== null ? <Typography.Text type="secondary" style={{ fontSize: 11 }}>{stamp}</Typography.Text> : null}
+              </span>
+            </Tooltip>
+          )
+        },
+      },
+      {
         title: '标签',
         key: 'tag',
-        width: screens.lg === true ? '8%' : 120,
+        width: screens.lg === true ? '10%' : 120,
         responsive: ['md'],
         render: (_value, member) => (
           <Space size={4} wrap>
@@ -1368,7 +1437,7 @@ function Panel({ ctx }: { ctx: any }) {
       {
         title: '状态',
         key: 'status',
-        width: screens.lg === true ? '15%' : 190,
+        width: screens.lg === true ? '14%' : 190,
         responsive: ['sm'],
         render: (_value, member) => (
           <Space size={6} wrap>
@@ -1394,7 +1463,7 @@ function Panel({ ctx }: { ctx: any }) {
         // Percentages plus the fixed action width must fit the card, or the
         // extra width becomes a horizontal scrollbar and the row actions stop
         // lining up with their header.
-        width: screens.lg === true ? '23%' : 240,
+        width: screens.lg === true ? '21%' : 240,
         responsive: ['lg'],
         render: (_value, member) => (
           <Tooltip title={<pre style={{ margin: 0, fontFamily: 'inherit', whiteSpace: 'pre-wrap' }}>{systemDetails(member)}</pre>}>
@@ -1404,7 +1473,7 @@ function Panel({ ctx }: { ctx: any }) {
       },
     ]
     return [...base, actionColumn]
-  }, [busy, currentTarget, deployJobs, gateAvailable, openDeploy, openProgress, openTag, screens, switchMember, tags])
+  }, [busy, currentTarget, deployJobs, gateAvailable, latestSucceededJobOf, openDeploy, openProgress, openTag, screens, switchMember, tags])
 
   if (loading && snapshot === null) {
     return (
@@ -1695,6 +1764,24 @@ function Panel({ ctx }: { ctx: any }) {
                 key: 'latency',
                 label: '延迟',
                 children: detailTarget.latencyMs > 0 ? `${String(detailTarget.latencyMs)} ms` : '—',
+              },
+              {
+                key: 'deployment',
+                label: '部署版本',
+                children: (() => {
+                  const deployment = memberDeployment(detailTarget)
+                  const fallback = deployment === null ? packageDeployment(latestSucceededJobOf(detailTarget)) : null
+                  const version = deployment?.version ?? fallback?.version ?? null
+                  if (version === null) return '—'
+                  const stamp = deployment?.buildStamp ?? fallback?.buildStamp ?? null
+                  return (
+                    <Space size={6} wrap>
+                      <Typography.Text className="dsh-pw-mono">{version}</Typography.Text>
+                      {stamp !== null ? <Tag>{stamp}</Tag> : null}
+                      {deployment === null ? <Tag color="gold">推断</Tag> : <Tag color="green">上报</Tag>}
+                    </Space>
+                  )
+                })(),
               },
               {
                 key: 'host',

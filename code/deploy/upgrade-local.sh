@@ -66,10 +66,12 @@ rm -f "$PENDING_MARKER" 2>/dev/null || true
 
 # 空间预检：要同时放得下新包、旧文件的备份，以及解压/复制过程中的临时占用。
 # 磁盘写满发生在复制中途是最坏的情况——备份也可能写不进去，只能人工救。
+# 备份现在包含 app/runtime/web（回退必须把运行时的每一层都换回去），所以
+# 峰值大约是“旧安装 + 同等大小的备份 + 覆盖新文件”。
 avail_kb=$(df -Pk "$APP_ROOT" | awk 'NR==2{print $4}')
 stage_kb=$(du -sk "$STAGE" 2>/dev/null | cut -f1)
 stage_kb=${stage_kb:-0}
-need_kb=$((stage_kb * 2 + 204800))
+need_kb=$((stage_kb * 2 + 524288))
 if [ "$avail_kb" -lt "$need_kb" ]; then
   die "磁盘空间不足：$APP_ROOT 需要约 $((need_kb / 1024)) MiB 可用（新包 $((stage_kb / 1024)) MiB ×2 + 余量），当前只有 $((avail_kb / 1024)) MiB；未做任何修改"
 fi
@@ -112,12 +114,25 @@ say "升级 $APP_ROOT（DSH_HOME=$DSH_HOME，端口 $PORT）"
 say "新包 $STAGE"
 
 # ── 1. 备份 ────────────────────────────────────────────────────────────────
+# 覆盖步骤（第 2 步的 tar）会替换 app/runtime/web 和下面这些脚本/目录；备份
+# 必须覆盖同一个集合，否则“回退”只是把旧工具搭在新运行时上，页面照样起不来。
+# 2026-11-16 的平铺升级就是这样失败的：备份只有 config/code/gate/plugins/docs，
+# 回退后 app/web/runtime 仍是坏的那一版。改动这里时同步 rollback-local.sh。
+BACKUP_ITEMS=(
+  app runtime web shared code gate plugins locale docs config deploy
+  VERSION manifest.json package.json cordis.patch.yml browse-picker.patch.yml
+  install.sh install.ps1 install-interop-service.sh uninstall-interop-service.sh
+  start.sh start.ps1 start-dsh.sh start-interop.sh start.cmd start-stack.ps1
+  stop.sh stop.ps1 stop.cmd status.sh doctor.sh
+)
 STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP="$APP_ROOT/.upgrade-backup/$STAMP"
 mkdir -p "$BACKUP"
-for item in config manifest.json install.sh start.sh start-dsh.sh start-interop.sh code gate plugins locale docs package.json deploy cordis.patch.yml; do
+for item in "${BACKUP_ITEMS[@]}"; do
   if [ -e "$APP_ROOT/$item" ]; then
-    cp -a "$APP_ROOT/$item" "$BACKUP/" 2>/dev/null || warn "备份 $item 失败（继续）"
+    # A missing app/runtime in the backup makes rollback impossible; stop
+    # before the install is touched instead of discovering that later.
+    cp -a "$APP_ROOT/$item" "$BACKUP/" 2>/dev/null || die "备份 $item 失败，未做任何修改"
   fi
 done
 cp -a "$PROFILE/package.json" "$BACKUP/profile-package.json" 2>/dev/null || true
@@ -131,12 +146,14 @@ restore() {
   RESTORED=1
   rm -f "$PENDING_MARKER" 2>/dev/null || true
   warn "开始回滚到升级前的文件（备份 $BACKUP）"
-  for item in config code gate plugins locale docs package.json manifest.json start.sh start-dsh.sh start-interop.sh install.sh deploy; do
+  for item in "${BACKUP_ITEMS[@]}"; do
     if [ -e "$BACKUP/$item" ]; then
       rm -rf "${APP_ROOT:?}/$item"
       cp -a "$BACKUP/$item" "$APP_ROOT/" 2>/dev/null || warn "恢复 $item 失败"
     fi
   done
+  chmod +x "$APP_ROOT"/*.sh 2>/dev/null || true
+  chmod +x "$APP_ROOT/runtime/node/bin/node" 2>/dev/null || true
   if [ -f "$BACKUP/profile-package.json" ]; then
     cp -a "$BACKUP/profile-package.json" "$PROFILE/package.json" 2>/dev/null || true
   fi

@@ -1577,6 +1577,110 @@ async function overlayFrontend(options) {
   log(`frontend installed at ${target}`);
   return target;
 }
+async function inspectShellSeedTable(distDir) {
+  const index = path5.join(distDir, "index.html");
+  if (!existsSync3(index)) return null;
+  const html = await readFile4(index, "utf8");
+  const sources = [...html.matchAll(/<script[^>]+src="\.?\/?([^"]+\.js)"/gu)].map((match) => match[1]);
+  for (const relative of sources) {
+    const file = path5.join(distDir, relative);
+    if (!existsSync3(file)) continue;
+    const text = await readFile4(file, "utf8");
+    const call = /staticModules:([A-Za-z_$][\w$]*)\(\)/u.exec(text);
+    if (call === null) continue;
+    const name = call[1];
+    const array = new RegExp(`function ${name}\\(\\)\\{return Object\\.values\\(`, "u").test(text);
+    const record = new RegExp(`function ${name}\\(\\)\\{return\\{`, "u").test(text);
+    return {
+      file,
+      name,
+      shape: array ? "array" : record ? "record" : "unknown",
+      hasRankByName: text.includes("rankByName")
+    };
+  }
+  return null;
+}
+async function inspectAppModuleLoader(appDir) {
+  const root = path5.join(appDir, "node_modules", "@deepseek-ai", "dsh-client-modules");
+  const file = path5.join(root, "lib", "client.js");
+  if (!existsSync3(file)) return null;
+  const text = await readFile4(file, "utf8");
+  let version = null;
+  try {
+    version = JSON.parse(await readFile4(path5.join(root, "package.json"), "utf8")).version ?? null;
+  } catch {
+    version = null;
+  }
+  return {
+    file,
+    version,
+    recordOnly: /new Map\(Object\.entries\(options\.staticModules\)/u.test(text),
+    arrayAware: /Array\.isArray\(options\.staticModules\)/u.test(text) || /options\.staticModules\.map\(/u.test(text),
+    // A recovery patch (data/seed-patch on an affected install) adds the
+    // missing export to the loader itself; the shell then does not need it.
+    providesRankByName: text.includes("rankByName")
+  };
+}
+async function findClientBundleUsing(appDir, exportName) {
+  const scope = path5.join(appDir, "node_modules", "@deepseek-ai");
+  if (!existsSync3(scope)) return null;
+  const entries = await readdir2(scope, { withFileTypes: true }).catch(() => []);
+  const pattern = new RegExp(`\\.${exportName}\\b`, "u");
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name === "dsh-client-ui-primitives" || entry.name === "dsh-client-modules") continue;
+    const file = path5.join(scope, entry.name, "lib", "client.js");
+    if (!existsSync3(file)) continue;
+    const text = await readFile4(file, "utf8").catch(() => "");
+    if (pattern.test(text)) return entry.name;
+  }
+  return null;
+}
+async function checkFrontendAppContract(options) {
+  const log = options.log ?? (() => {
+  });
+  const shell = await inspectShellSeedTable(options.dist);
+  if (shell === null) {
+    log("frontend/app contract check: the shell static module table was not found; skipped");
+    return { shell: null, loader: null };
+  }
+  const loader = await inspectAppModuleLoader(options.appDir);
+  if (loader === null) {
+    throw new Error("frontend/app contract check: app/node_modules/@deepseek-ai/dsh-client-modules is missing");
+  }
+  const version = loader.version === null ? "" : `@${loader.version}`;
+  if (shell.shape === "array" && loader.recordOnly && !loader.arrayAware) {
+    throw new Error(
+      `the built web shell passes staticModules as a descriptor array, but @deepseek-ai/dsh-client-modules${version} in app/ only accepts a record (\`new Map(Object.entries(options.staticModules))\`). The source tree is ahead of the npm DSH app it is packaged with; every client plugin would fail with "Failed to load plugins". Pin --ref to the release commit of this DSH version (or build app/ from the same source tree) and rebuild.`
+    );
+  }
+  if (!shell.hasRankByName && !loader.providesRankByName) {
+    const user = await findClientBundleUsing(options.appDir, "rankByName");
+    if (user !== null) {
+      throw new Error(
+        `the installed client plugin ${user} calls rankByName from @deepseek-ai/dsh-client-ui-primitives, but the built web shell's bundled copy does not export it. The source tree and the npm DSH app are from different revisions; pin --ref to the release commit of this DSH version (or build app/ from the same source tree) and rebuild.`
+      );
+    }
+  }
+  log(`frontend/app contract check: seed table ${shell.shape}, loader${version} ${loader.recordOnly && !loader.arrayAware ? "record-only" : "array-aware"}`);
+  return { shell, loader };
+}
+async function chooseFrontend(options) {
+  const log = options.log ?? (() => {
+  });
+  try {
+    await checkFrontendAppContract({ appDir: options.appDir, dist: options.dist, log });
+    return { source: "built", dist: options.dist, reason: null };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    log(`source-built frontend is incompatible with app/: ${reason}`);
+    const published = path5.join(options.appDir, "node_modules", "@deepseek-ai", "dsh-web-frontend", "dist");
+    if (!existsSync3(path5.join(published, "index.html"))) throw error;
+    log("keeping the published frontend from app/ (its client bundles match by construction); the UI overlays still apply through patchInstalledClient");
+    await checkFrontendAppContract({ appDir: options.appDir, dist: published, log });
+    return { source: "published", dist: published, reason };
+  }
+}
 async function patchInstalledClient(options) {
   const log = options.log ?? (() => {
   });
@@ -1632,7 +1736,14 @@ async function assembleRuntimePackage(options) {
     log
   });
   await patchInstalledClient({ appDir, repositoryRoot: options.repositoryRoot, log });
-  await overlayFrontend({ appDir, dist: options.dist, log });
+  const frontend = await chooseFrontend({ appDir, dist: options.dist, log });
+  if (frontend.source === "built") {
+    await overlayFrontend({ appDir, dist: frontend.dist, log });
+  } else {
+    const web = path5.join(packageDir, "web");
+    await rm(web, { recursive: true, force: true });
+    await cp(frontend.dist, web, { recursive: true });
+  }
   await installNodeRuntime({
     version: options.nodeVersion,
     target: options.target,
@@ -1652,6 +1763,10 @@ async function assembleRuntimePackage(options) {
     kind: "offline-runtime",
     dshVersion: options.dshVersion,
     nodeVersion: options.nodeVersion,
+    // Which shell this package serves: the freshly built one, or the one that
+    // shipped in the app because the two revisions disagreed. `reason` keeps
+    // the drift visible on the package instead of only in the build log.
+    frontend: frontend.reason === null ? { source: frontend.source } : { source: frontend.source, reason: frontend.reason },
     files: (await listFiles(packageDir)).length
   };
   await writeFile2(path5.join(packageDir, "manifest.json"), JSON.stringify(updated, null, 2), "utf8");
@@ -2752,6 +2867,12 @@ async function updateState(dir, patch) {
   await writeState(dir, state);
   return state;
 }
+function unverifiedBuildReason(artifacts, options = {}) {
+  if (options.full === false || options.smoke === false) return null;
+  if (artifacts.some((artifact) => artifact.smoke?.status === "passed")) return null;
+  const detail = artifacts.map((artifact) => `${artifact.target}: ${artifact.smoke?.status ?? "not run"}${artifact.smoke?.reason === void 0 ? "" : ` (${artifact.smoke.reason})`}`).join("; ");
+  return `no target was booted in a browser (${detail}). Install Chrome/Chromium or set DSH_MESH_SMOKE_CHROME, build on a host that can run at least one target, or pass --no-smoke to accept an unverified package explicitly.`;
+}
 async function runJob(dir, options) {
   const repositoryRoot = options.repositoryRoot;
   const recipesPath = options.recipesPath ?? path9.join(repositoryRoot, "build", "recipes.json");
@@ -2945,6 +3066,18 @@ async function runJob(dir, options) {
         currentTarget: target,
         artifacts
       });
+    }
+    const unverified = unverifiedBuildReason(artifacts, { full, smoke: options.smoke });
+    if (unverified !== null) {
+      state = await updateState(dir, {
+        status: "smoke-failed",
+        phase: "smoke",
+        percent: 95,
+        error: unverified,
+        artifacts
+      });
+      log(`smoke verification incomplete: ${unverified}`);
+      return state;
     }
     state = await updateState(dir, { status: "done", phase: "done", percent: 100, currentTarget: null, artifacts });
     log("build complete");
@@ -3925,20 +4058,21 @@ grep -q '^DSH_GATE_PORT=' "$APP/config/gate.env" || printf 'DSH_GATE_PORT=18080\
 grep -q '^DSH_HOME=' "$APP/config/gate.env" || printf 'DSH_HOME=%s\\n' "$TEST_HOME" >> "$APP/config/gate.env"
 BEFORE=$("$NODE" -p "require('$APP/plugins/dsh-mesh/package.json').version" 2>/dev/null || echo unknown)
 say "\u5347\u7EA7\u524D\u7684\u6C99\u7BB1\u7248\u672C\uFF1A$BEFORE\uFF08\u4EE5\u6587\u4EF6\u5185\u5BB9\u5224\u65AD\u662F\u5426\u771F\u7684\u8986\u76D6\uFF09"
-# \u811A\u672C\u6765\u6E90\u4E0E\u751F\u4EA7\u4E00\u81F4\uFF1A\u4F18\u5148\u7528\u5DF2\u5B89\u88C5\u63D2\u4EF6\u91CC\u7684\u90A3\u4EFD\uFF08runner.mjs \u4E5F\u662F\u8FD9\u4E48\u505A\u7684\uFF09\uFF0C
-# \u8001\u7248\u672C\u63D2\u4EF6\u6CA1\u6709 code/deploy \u65F6\u624D\u9000\u56DE\u65B0\u5305\u91CC\u7684\u3002
+# \u811A\u672C\u6765\u6E90\u4E0E\u751F\u4EA7\u4E00\u81F4\uFF1A\u4F18\u5148\u7528\u65B0\u5305\u91CC\u7684\u90A3\u4EFD\uFF08runner.mjs \u4E5F\u662F\u8FD9\u4E48\u505A\u7684\uFF09\uFF0C
+# \u8FD9\u6837\u65B0\u5305\u7684\u5907\u4EFD\u8303\u56F4/\u56DE\u9000\u903B\u8F91\u5728\u5B83\u81EA\u5DF1\u7684\u5347\u7EA7\u91CC\u5C31\u751F\u6548\uFF1B\u53EA\u6709\u8001\u5305\u4E0D\u5E26
+# code/deploy \u65F6\u624D\u9000\u56DE\u5DF2\u5B89\u88C5\u63D2\u4EF6\u91CC\u7684\u90A3\u4EFD\u3002
 PLUGIN_DEPLOY="$CURRENT/plugins/dsh-mesh/code/deploy"
-if [ -f "$PLUGIN_DEPLOY/upgrade-local.sh" ]; then
-  SCRIPT_SRC="$PLUGIN_DEPLOY/upgrade-local.sh"
-  say '\u811A\u672C\u6765\u6E90\uFF1A\u5DF2\u5B89\u88C5\u63D2\u4EF6\uFF08\u4E0E\u300C\u5347\u7EA7\u300D\u540C\u6E90\uFF09'
-  if [ -f "$STAGE/code/deploy/upgrade-local.sh" ]; then
+if [ -f "$STAGE/code/deploy/upgrade-local.sh" ]; then
+  SCRIPT_SRC="$STAGE/code/deploy/upgrade-local.sh"
+  say '\u811A\u672C\u6765\u6E90\uFF1A\u65B0\u5305\uFF08\u4E0E\u300C\u5347\u7EA7\u300D\u540C\u6E90\uFF09'
+  if [ -f "$PLUGIN_DEPLOY/upgrade-local.sh" ]; then
     A=$(sha256sum "$SCRIPT_SRC" | cut -d' ' -f1)
-    B=$(sha256sum "$STAGE/code/deploy/upgrade-local.sh" | cut -d' ' -f1)
-    if [ "$A" != "$B" ]; then say '\u6CE8\u610F\uFF1A\u5DF2\u5B89\u88C5\u63D2\u4EF6\u7684\u811A\u672C\u4E0E\u65B0\u5305\u91CC\u7684\u4E0D\u4E00\u81F4\uFF0C\u6309\u751F\u4EA7\u884C\u4E3A\u4EE5\u5DF2\u5B89\u88C5\u7684\u4E3A\u51C6'; fi
+    B=$(sha256sum "$PLUGIN_DEPLOY/upgrade-local.sh" | cut -d' ' -f1)
+    if [ "$A" != "$B" ]; then say '\u6CE8\u610F\uFF1A\u65B0\u5305\u91CC\u7684\u811A\u672C\u4E0E\u5DF2\u5B89\u88C5\u63D2\u4EF6\u7684\u4E0D\u4E00\u81F4\uFF0C\u6309\u751F\u4EA7\u884C\u4E3A\u4EE5\u65B0\u5305\u4E3A\u51C6'; fi
   fi
 else
-  SCRIPT_SRC="$STAGE/code/deploy/upgrade-local.sh"
-  say '\u811A\u672C\u6765\u6E90\uFF1A\u65B0\u5305\uFF08\u5DF2\u5B89\u88C5\u63D2\u4EF6\u662F\u65E9\u4E8E\u4FEE\u590D\u7684\u7248\u672C\uFF0C\u6CA1\u6709 code/deploy\uFF09'
+  SCRIPT_SRC="$PLUGIN_DEPLOY/upgrade-local.sh"
+  say '\u811A\u672C\u6765\u6E90\uFF1A\u5DF2\u5B89\u88C5\u63D2\u4EF6\uFF08\u65B0\u5305\u662F\u65E9\u4E8E\u4FEE\u590D\u7684\u7248\u672C\uFF0C\u6CA1\u6709 code/deploy\uFF09'
 fi
 [ -f "$SCRIPT_SRC" ] || fail '\u5DF2\u5B89\u88C5\u63D2\u4EF6\u548C\u65B0\u5305\u91CC\u90FD\u6CA1\u6709 code/deploy/upgrade-local.sh\uFF0C\u8FD9\u4E2A\u5305\u505A\u4E0D\u4E86\u5E73\u94FA\u5347\u7EA7'
 cp "$SCRIPT_SRC" "$TEST_ROOT/tools/upgrade-local.sh"

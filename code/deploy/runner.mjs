@@ -207,19 +207,21 @@ async function runInplace(context) {
   meter('解压安装包', { done: entries, total: entries, percent: 100 })
   await mark('prepare', 'succeeded', entries > 0 ? `${String(entries)} 项` : '已解压')
 
-  // Run the script that sits next to this runner, not the one inside the
-  // package: the runner is the upgraded (or hot-fixed) copy, so this keeps the
-  // two in lockstep and lets an operator fix the script without rebuilding and
-  // re-uploading a 300 MiB package. `--stage` still points the script at the
-  // extracted package it must copy from. Packages built before this fix only
-  // carry the script under code/deploy; fall back to it.
-  const source = await stat(path.join(HERE, 'upgrade-local.sh'))
-    .then(() => path.join(HERE, 'upgrade-local.sh'))
+  // Run the script shipped in the package being installed: it is the copy
+  // that knows the new package's layout, including which layers a rollback
+  // has to restore. The installed plugin's copy is the fallback for packages
+  // built before the script travelled with them. (This used to be the other
+  // way round; the 2026-11-16 rollback failed because the old installed script
+  // did not back up app/runtime/web, and the fix could not take effect until
+  // after an upgrade that used it.)
+  const packed = path.join(stage, 'code', 'deploy', 'upgrade-local.sh')
+  const source = await stat(packed)
+    .then(() => packed)
     .catch(async () => {
-      const packed = path.join(stage, 'code', 'deploy', 'upgrade-local.sh')
-      const found = await stat(packed).then(() => true).catch(() => false)
-      if (!found) throw new Error(`upgrade script is missing: neither ${path.join(HERE, 'upgrade-local.sh')} nor ${packed}`)
-      return packed
+      const installed = path.join(HERE, 'upgrade-local.sh')
+      const found = await stat(installed).then(() => true).catch(() => false)
+      if (!found) throw new Error(`upgrade script is missing: neither ${packed} nor ${installed}`)
+      return installed
     })
   // Copy the script (and its profile-wiring helper) out of the install before
   // running it: the copy step below replaces plugins/dsh-mesh, and bash reads

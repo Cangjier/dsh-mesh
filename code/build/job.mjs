@@ -151,6 +151,28 @@ export async function updateState(dir, patch) {
 }
 
 /**
+ * Decide whether a finished set of packages was verified in a browser.
+ *
+ * A full package is only a deliverable when at least one target actually
+ * booted it in headless Chrome. Skipping is legitimate for a web-only package
+ * or an explicit `--no-smoke`, but "no local target could run and no Chrome
+ * was found" must not pass as success: that is exactly how an unbootable shell
+ * shipped on 2026-11-16.
+ * @param {Array<{target: string, smoke?: {status?: string, reason?: string}|null}>} artifacts packaged targets.
+ * @param {{full?: boolean, smoke?: boolean}} options build switches.
+ * @returns {string|null} failure reason, or null when the build is verified.
+ */
+export function unverifiedBuildReason(artifacts, options = {}) {
+  if (options.full === false || options.smoke === false) return null
+  if (artifacts.some(artifact => artifact.smoke?.status === 'passed')) return null
+  const detail = artifacts
+    .map(artifact => `${artifact.target}: ${artifact.smoke?.status ?? 'not run'}${artifact.smoke?.reason === undefined ? '' : ` (${artifact.smoke.reason})`}`)
+    .join('; ')
+  return `no target was booted in a browser (${detail}). Install Chrome/Chromium or set DSH_MESH_SMOKE_CHROME, ` +
+    'build on a host that can run at least one target, or pass --no-smoke to accept an unverified package explicitly.'
+}
+
+/**
  * Run the deterministic build pipeline.
  * @param {string} dir job directory.
  * @param {{repositoryRoot: string, recipesPath?: string, overlayRoot?: string, cacheDir?: string, source?: string, ref?: string, targets?: string[], planOnly?: boolean, reuseWorktree?: boolean, install?: string[]|null, build?: string[], prepare?: string[][]|null, prebuild?: boolean, version?: string, buildStamp?: string, full?: boolean, nodeVersion?: string, proxy?: string|null, env?: NodeJS.ProcessEnv, onLog?: (line: string) => void}} options build input.
@@ -361,6 +383,23 @@ export async function runJob(dir, options) {
         currentTarget: target,
         artifacts,
       })
+    }
+    // A package is a deliverable only after something actually booted it. A
+    // Windows build host cannot run the Linux target, and without Chrome it
+    // cannot run the Windows target either; the old code called that "done"
+    // and the broken package went straight into ~/.dsh/packages. The shell is
+    // shared by every target, so one booted target is enough to verify it.
+    const unverified = unverifiedBuildReason(artifacts, { full, smoke: options.smoke })
+    if (unverified !== null) {
+      state = await updateState(dir, {
+        status: 'smoke-failed',
+        phase: 'smoke',
+        percent: 95,
+        error: unverified,
+        artifacts,
+      })
+      log(`smoke verification incomplete: ${unverified}`)
+      return state
     }
     state = await updateState(dir, { status: 'done', phase: 'done', percent: 100, currentTarget: null, artifacts })
     log('build complete')

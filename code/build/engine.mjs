@@ -1038,6 +1038,184 @@ export async function overlayFrontend(options) {
 }
 
 /**
+ * Read the shape of the static module table the built web shell hands to the
+ * client module loader.
+ *
+ * `apps/web` builds a table of `{id, factory}` descriptors and passes
+ * `Object.values(...)`'s array. Older shells passed a plain `id → value`
+ * record. The app's `@deepseek-ai/dsh-client-modules` has to understand the
+ * same shape, otherwise `require("react")` and every other seed word miss the
+ * table and the page stops at "Failed to load plugins".
+ *
+ * The table builder is a zero-argument function referenced from the shell's
+ * `staticModules:` argument; minification keeps both halves of that link, so
+ * the check follows the name instead of depending on a fixed identifier.
+ * @param {string} distDir built web frontend (`index.html` + `assets/`).
+ * @returns {Promise<{file: string, name: string, shape: 'array'|'record'|'unknown', hasRankByName: boolean}|null>} shell contract, or null when it cannot be found.
+ */
+export async function inspectShellSeedTable(distDir) {
+  const index = path.join(distDir, 'index.html')
+  if (!existsSync(index)) return null
+  const html = await readFile(index, 'utf8')
+  const sources = [...html.matchAll(/<script[^>]+src="\.?\/?([^"]+\.js)"/gu)].map(match => match[1])
+  for (const relative of sources) {
+    const file = path.join(distDir, relative)
+    if (!existsSync(file)) continue
+    const text = await readFile(file, 'utf8')
+    const call = /staticModules:([A-Za-z_$][\w$]*)\(\)/u.exec(text)
+    if (call === null) continue
+    const name = call[1]
+    const array = new RegExp(`function ${name}\\(\\)\\{return Object\\.values\\(`, 'u').test(text)
+    const record = new RegExp(`function ${name}\\(\\)\\{return\\{`, 'u').test(text)
+    return {
+      file,
+      name,
+      shape: array ? 'array' : record ? 'record' : 'unknown',
+      hasRankByName: text.includes('rankByName'),
+    }
+  }
+  return null
+}
+
+/**
+ * Read how the installed client module loader consumes the static module
+ * table. A loader that only builds `new Map(Object.entries(...))` understands
+ * a record and turns a descriptor array into the keys "0", "1", ….
+ * @param {string} appDir installed package `app/`.
+ * @returns {Promise<{file: string, version: string|null, recordOnly: boolean, arrayAware: boolean, providesRankByName: boolean}|null>} loader contract.
+ */
+export async function inspectAppModuleLoader(appDir) {
+  const root = path.join(appDir, 'node_modules', '@deepseek-ai', 'dsh-client-modules')
+  const file = path.join(root, 'lib', 'client.js')
+  if (!existsSync(file)) return null
+  const text = await readFile(file, 'utf8')
+  let version = null
+  try {
+    version = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')).version ?? null
+  } catch {
+    version = null
+  }
+  return {
+    file,
+    version,
+    recordOnly: /new Map\(Object\.entries\(options\.staticModules\)/u.test(text),
+    arrayAware: /Array\.isArray\(options\.staticModules\)/u.test(text) || /options\.staticModules\.map\(/u.test(text),
+    // A recovery patch (data/seed-patch on an affected install) adds the
+    // missing export to the loader itself; the shell then does not need it.
+    providesRankByName: text.includes('rankByName'),
+  }
+}
+
+/**
+ * Find an installed client bundle that uses one named export at runtime.
+ *
+ * The client plugins live in the app, but the copy of a shared module they
+ * import comes from the shell's static table. A shell built from a different
+ * DSH revision can therefore be missing an export the app's plugins call even
+ * when both sides load fine on their own.
+ * @param {string} appDir installed package `app/`.
+ * @param {string} exportName identifier to look for.
+ * @returns {Promise<string|null>} the first package that uses it.
+ */
+async function findClientBundleUsing(appDir, exportName) {
+  const scope = path.join(appDir, 'node_modules', '@deepseek-ai')
+  if (!existsSync(scope)) return null
+  const entries = await readdir(scope, { withFileTypes: true }).catch(() => [])
+  const pattern = new RegExp(`\\.${exportName}\\b`, 'u')
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    // The provider and the loader itself are not consumers of the export.
+    if (entry.name === 'dsh-client-ui-primitives' || entry.name === 'dsh-client-modules') continue
+    const file = path.join(scope, entry.name, 'lib', 'client.js')
+    if (!existsSync(file)) continue
+    const text = await readFile(file, 'utf8').catch(() => '')
+    if (pattern.test(text)) return entry.name
+  }
+  return null
+}
+
+/**
+ * Refuse a package whose source-built shell and npm-installed app come from
+ * different DSH revisions.
+ *
+ * This is the failure that made a 2026-11-16 build install and pass
+ * `/__gate/health` while every browser saw "Failed to load plugins": the shell
+ * came from source `master` (descriptor-array seed table), the app came from
+ * the published npm package (record-only seed table, and client plugins that
+ * already imported `rankByName` the shell's bundled primitives did not have).
+ * The browser smoke test is the definitive check, but it can be skipped on a
+ * build host that cannot run the target; this check needs no browser and fails
+ * the build before the archive is kept.
+ * @param {{appDir: string, dist: string, log?: (line: string) => void}} options contract input.
+ * @returns {Promise<{shell: object, loader: object}>} the inspected contracts.
+ */
+export async function checkFrontendAppContract(options) {
+  const log = options.log ?? (() => {})
+  const shell = await inspectShellSeedTable(options.dist)
+  if (shell === null) {
+    log('frontend/app contract check: the shell static module table was not found; skipped')
+    return { shell: null, loader: null }
+  }
+  const loader = await inspectAppModuleLoader(options.appDir)
+  if (loader === null) {
+    throw new Error('frontend/app contract check: app/node_modules/@deepseek-ai/dsh-client-modules is missing')
+  }
+  const version = loader.version === null ? '' : `@${loader.version}`
+  if (shell.shape === 'array' && loader.recordOnly && !loader.arrayAware) {
+    throw new Error(
+      `the built web shell passes staticModules as a descriptor array, but @deepseek-ai/dsh-client-modules${version} in app/ only accepts a record ` +
+      '(`new Map(Object.entries(options.staticModules))`). The source tree is ahead of the npm DSH app it is packaged with; ' +
+      'every client plugin would fail with "Failed to load plugins". Pin --ref to the release commit of this DSH version ' +
+      '(or build app/ from the same source tree) and rebuild.',
+    )
+  }
+  if (!shell.hasRankByName && !loader.providesRankByName) {
+    const user = await findClientBundleUsing(options.appDir, 'rankByName')
+    if (user !== null) {
+      throw new Error(
+        `the installed client plugin ${user} calls rankByName from @deepseek-ai/dsh-client-ui-primitives, but the built web shell's bundled copy ` +
+        'does not export it. The source tree and the npm DSH app are from different revisions; pin --ref to the release commit ' +
+        'of this DSH version (or build app/ from the same source tree) and rebuild.',
+      )
+    }
+  }
+  log(`frontend/app contract check: seed table ${shell.shape}, loader${version} ${loader.recordOnly && !loader.arrayAware ? 'record-only' : 'array-aware'}`)
+  return { shell, loader }
+}
+
+/**
+ * Pick the frontend a package will actually serve.
+ *
+ * The source-built shell is preferred, but it is only usable when it agrees
+ * with the npm app it is packaged with. When it does not, keep the frontend
+ * that shipped inside the app: that pair is consistent by construction and the
+ * directory-picker/account overlays still reach the package through
+ * `patchInstalledClient`, which patches the app's client bundles, not the
+ * shell. The alternative — shipping a shell the app's loader cannot read — is
+ * the 2026-11-16 failure.
+ *
+ * A published frontend is not accepted blindly: it goes through the same
+ * contract check, so a genuinely broken app still fails the build.
+ * @param {{appDir: string, dist: string, log?: (line: string) => void}} options candidate input.
+ * @returns {Promise<{source: 'built'|'published', dist: string, reason: string|null}>} chosen frontend.
+ */
+export async function chooseFrontend(options) {
+  const log = options.log ?? (() => {})
+  try {
+    await checkFrontendAppContract({ appDir: options.appDir, dist: options.dist, log })
+    return { source: 'built', dist: options.dist, reason: null }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    log(`source-built frontend is incompatible with app/: ${reason}`)
+    const published = path.join(options.appDir, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist')
+    if (!existsSync(path.join(published, 'index.html'))) throw error
+    log('keeping the published frontend from app/ (its client bundles match by construction); the UI overlays still apply through patchInstalledClient')
+    await checkFrontendAppContract({ appDir: options.appDir, dist: published, log })
+    return { source: 'published', dist: published, reason }
+  }
+}
+
+/**
  * Apply the shipped-bundle patches to the client plugin packages inside an
  * installed app.
  *
@@ -1109,7 +1287,22 @@ export async function assembleRuntimePackage(options) {
     log,
   })
   await patchInstalledClient({ appDir, repositoryRoot: options.repositoryRoot, log })
-  await overlayFrontend({ appDir, dist: options.dist, log })
+  // The source-built shell and the npm app must agree on the client module
+  // contract; a mismatch installs, starts, passes health, and then shows
+  // "Failed to load plugins" in every browser. Prefer the built shell when it
+  // agrees, keep the app's own published frontend when it does not, and never
+  // ship a pair that disagrees.
+  const frontend = await chooseFrontend({ appDir, dist: options.dist, log })
+  if (frontend.source === 'built') {
+    await overlayFrontend({ appDir, dist: frontend.dist, log })
+  } else {
+    // `web/` was copied from the source build before the app was installed;
+    // point it at the frontend the app will actually serve so a rollback or a
+    // manual inspection does not find a shell nobody uses.
+    const web = path.join(packageDir, 'web')
+    await rm(web, { recursive: true, force: true })
+    await cp(frontend.dist, web, { recursive: true })
+  }
   await installNodeRuntime({
     version: options.nodeVersion,
     target: options.target,
@@ -1128,6 +1321,10 @@ export async function assembleRuntimePackage(options) {
     kind: 'offline-runtime',
     dshVersion: options.dshVersion,
     nodeVersion: options.nodeVersion,
+    // Which shell this package serves: the freshly built one, or the one that
+    // shipped in the app because the two revisions disagreed. `reason` keeps
+    // the drift visible on the package instead of only in the build log.
+    frontend: frontend.reason === null ? { source: frontend.source } : { source: frontend.source, reason: frontend.reason },
     files: (await listFiles(packageDir)).length,
   }
   await writeFile(path.join(packageDir, 'manifest.json'), JSON.stringify(updated, null, 2), 'utf8')

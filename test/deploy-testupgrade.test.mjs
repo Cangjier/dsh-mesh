@@ -130,7 +130,7 @@ test('the rehearsal upgrades a sandbox built from the member and proves restore 
     const result = await run('bash', ['-c', buildLinuxRehearseScript(plan)], {
       env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
     })
-    assert.match(result.stdout, /脚本来源：已安装插件/u)
+    assert.match(result.stdout, /脚本来源：新包/u)
     assert.match(result.stdout, /抓屏通过/u)
     assert.match(result.stdout, /restore\(\) 已验证/u)
     assert.match(result.stdout, /演练通过/u)
@@ -162,7 +162,7 @@ test('the rehearsal records a missing browser as a skip, not a failed upgrade', 
   }
 })
 
-test('the rehearsal falls back to the packaged script on a member installed before the fix', async () => {
+test('the rehearsal uses the packaged script when the member predates code/deploy', async () => {
   if (process.platform !== 'linux' || process.getuid?.() !== 0) {
     test.skip('rehearsal needs Linux and root')
     return
@@ -175,6 +175,25 @@ test('the rehearsal falls back to the packaged script on a member installed befo
       env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
     })
     assert.match(result.stdout, /脚本来源：新包/u)
+    assert.match(result.stdout, /演练通过/u)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the rehearsal falls back to the installed script when the package carries none', async () => {
+  if (process.platform !== 'linux' || process.getuid?.() !== 0) {
+    test.skip('rehearsal needs Linux and root')
+    return
+  }
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-rehearse-installed-'))
+  try {
+    const { plan } = await memberTree(dir, { packagedDeploy: false })
+    const bin = await stubBin(dir)
+    const result = await run('bash', ['-c', buildLinuxRehearseScript(plan)], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+    })
+    assert.match(result.stdout, /脚本来源：已安装插件/u)
     assert.match(result.stdout, /演练通过/u)
   } finally {
     await rm(dir, { recursive: true, force: true })

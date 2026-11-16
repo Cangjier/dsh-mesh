@@ -79,7 +79,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - **在成员上编译**：`member` 指定编译成员（Linux），网关通过 SSH 在成员的 dsh-mesh 检出里跑同一套 `code/build` 引擎，日志流回面板，产物自动拉回网关的 `~/.dsh/packages`。
 - **外网代理**：`proxyMember` 让指定成员临时启动一个只绑定其组网地址的 HTTP 代理（`code/shared/egress-proxy.mjs`），源码下载、Node 运行时和 npm 都走它；编译结束即关闭。也可以直接给 `proxy: "http://host:port"`。经 WireGuard 转发通常比成员直连慢，成员本身网络好时不必开代理。
 - **前置编译步骤**：干净工作树下 `apps/web` 依赖 workspace 里 `lib/` 产物（`dsh-client-web`、`ui-theme` 的 CSS、webworker 运行时等），`build/recipes.json` 的 `prepare` 会在 `pnpm run build:web` 之前执行这些命令（CLI 用 `--prepare` 覆盖）。
-- **构建后抓屏冒烟**：完整包归档后，在本机目标上真的启动一次（一次性沙箱 + 包内 supervisor/gate + 空闲端口），用 headless Chrome 过密码门、等 DSH 壳、点侧边栏 `Mesh`，确认面板出现并截图到 `<job>/smoke/<target>/`。页面报 `Failed to load plugins`、DSH 起不来、Mesh 面板不出现都会让构建以 `smoke-failed` 结束。跨目标、`--web-only` 或没有 Chrome 时跳过并记录原因；`--no-smoke` 关闭，`--require-smoke` 把“没有 Chrome”变成失败。详见 [Step 010](docs/Step%20010%20从源码构建多平台Web包.md)。
+- **构建后抓屏冒烟**：完整包归档后，在本机目标上真的启动一次（一次性沙箱 + 包内 supervisor/gate + 空闲端口），用 headless Chrome 过密码门、等 DSH 壳、点侧边栏 `Mesh`，确认面板出现并截图到 `<job>/smoke/<target>/`。页面报 `Failed to load plugins`、DSH 起不来、Mesh 面板不出现都会让构建以 `smoke-failed` 结束。单个目标跨平台或没有 Chrome 时该目标记为跳过，但**一个目标都没真正启动过的完整包同样以 `smoke-failed` 结束**，不会留在 `~/.dsh/packages`；只有显式 `--no-smoke` 才接受未验证包，`--require-smoke` 还会把“没有 Chrome”直接判失败。详见 [Step 010](docs/Step%20010%20从源码构建多平台Web包.md)。
+- **前端与 app 同源检查**：源码构建的 `web/` 会覆盖 npm app 里的同版本前端。如果源码 `master` 已经领先于 npm 发布的 DSH（例如 `staticModules` 从 record 变成 descriptor 数组，或 shell 少了 app 客户端要的 `rankByName`），包能装、健康检查也过，但浏览器停在 `Failed to load plugins`。装配时会读两边的实际产物做契约检查；不一致时保留 npm 包自带的前端（与 app 的客户端插件天然同源），并在包的 `manifest.json` 里记下 `frontend.source: "published"` 和原因，不覆盖成读不懂的 shell。
 - **包名与按日构建号**：归档名是 `dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>.tar.gz|zip`，例如 `dsh-mesh-0.2.2-rc.3-20261115A-linux-x64.tar.gz`。`<dshVersion>` 必须与 DSH 版本完全一致（`manifest.version` 也不改写）；`<YYYYMMDD><Letter>` 是网关按本地日期分配的构建号（A、B…Z、AA…），同一天多次编译不会重名。面板用 `<dataDir>/build-stamp.json` 计数并扫描 `~/.dsh/packages` 已有包名，CLI 用 `~/.dsh/mesh/build-stamp.json`，也可 `--build-stamp` 指定。
 - Web 构建成功后按目标打包：
   - **完整包**（默认）：`app/`（`@deepseek-ai/dsh` + 目标原生依赖）、`runtime/node/`、`gate/`、`shared/`、`plugin/`、安装脚本。
@@ -122,7 +123,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - 健康检查失败自动切回 `previous` 并重启；`rollback` 可手动回滚。
 - 成功激活后只保留最近 3 个 release，`current`/`previous` 指向的目录永不删除。
 - **自动升级**：每个成员单独配置，入口在成员行的「更多」菜单 →「自动升级」；默认每天 06:00，可开关和改时间。对每个成员选它对应系统的最新部署包（按构建号，不按文件 mtime），与成员上报的当前部署（`manifest.version` + `buildStamp`）比较；一致或最新包更旧就跳过；需要升级时只启动这个成员的升级 job。
-- 面板的「升级」对本机和每个已安装的成员都开放，收在操作列的纯图标「更多」菜单里（Linux 成员同一菜单另有「测试升级」，先演练平铺路径）；成员表还有一列「版本」，显示每台成员当前运行的部署包；它用同一套引擎换包，升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的 `dsh-web`/网关不会把升级本身打断，也不会带走发起升级的面板。平铺安装（网关这种没有 `current` 的布局）走 `code/deploy/upgrade-local.sh`：备份 → 覆盖文件（保留 config/data/home/workspace）→ 重写 profile 与单元 → 健康检查，失败整体回滚；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。
+- 面板的「升级」对本机和每个已安装的成员都开放，收在操作列的纯图标「更多」菜单里（Linux 成员同一菜单另有「测试升级」，先演练平铺路径）；成员表还有一列「版本」，显示每台成员当前运行的部署包；它用同一套引擎换包，升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的 `dsh-web`/网关不会把升级本身打断，也不会带走发起升级的面板。平铺安装（网关这种没有 `current` 的布局）走 `code/deploy/upgrade-local.sh`：备份（含 `app`/`runtime`/`web` 与工具层）→ 覆盖文件（保留 config/data/home/workspace）→ 重写 profile 与单元 → 健康检查，失败整体回滚；回退同样换回运行时三层，不会把旧脚本搭在新运行时上；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。
 - 详见 [Step 018](docs/Step%20018%20成员升级与独立升级进程.md)。
 
 ### 6. 独立 DSH 交互 HTTP 服务

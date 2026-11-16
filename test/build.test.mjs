@@ -9,6 +9,8 @@ import test from 'node:test'
 import {
   applyRecipes,
   assembleWebPackage,
+  checkFrontendAppContract,
+  chooseFrontend,
   classifySource,
   learnOverlays,
   nodeArchiveName,
@@ -23,7 +25,7 @@ import {
   tarballUrls,
   writeWorkOrder,
 } from '../code/build/engine.mjs'
-import { createJob, learnJob, readState, resumeJob, writeState } from '../code/build/job.mjs'
+import { createJob, learnJob, readState, resumeJob, unverifiedBuildReason, writeState } from '../code/build/job.mjs'
 import { buildWebWorkerPackages } from '../code/build/engine.mjs'
 
 /**
@@ -475,6 +477,180 @@ test('pluginFingerprint changes when a bundled plugin input changes', async () =
     assert.equal(await pluginFingerprint(dir), before)
     await writeFile(path.join(dir, 'code', 'shared', 'x.mjs'), 'export const x = 2\n', 'utf8')
     assert.notEqual(await pluginFingerprint(dir), before)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Write a minimal dist/app pair so the frontend contract check can read them.
+ * @param {string} dir scratch directory.
+ * @param {{shell: string, loader: string, primitives?: string}} fixture contents.
+ * @returns {Promise<{dist: string, app: string}>} paths.
+ */
+async function contractFixture(dir, fixture) {
+  const dist = path.join(dir, 'dist')
+  const app = path.join(dir, 'app')
+  await write(path.join(dist, 'index.html'), '<script type="module" crossorigin src="./assets/index-abc.js"></script>\n')
+  await write(path.join(dist, 'assets', 'index-abc.js'), fixture.shell)
+  await write(
+    path.join(app, 'node_modules', '@deepseek-ai', 'dsh-client-modules', 'lib', 'client.js'),
+    fixture.loader,
+  )
+  await write(
+    path.join(app, 'node_modules', '@deepseek-ai', 'dsh-client-modules', 'package.json'),
+    JSON.stringify({ name: '@deepseek-ai/dsh-client-modules', version: '0.2.2-rc.3' }),
+  )
+  if (fixture.primitives !== undefined) {
+    await write(
+      path.join(app, 'node_modules', '@deepseek-ai', 'dsh-client-ui-model-selection', 'lib', 'client.js'),
+      fixture.primitives,
+    )
+  }
+  return { dist, app }
+}
+
+test('frontend/app contract rejects a descriptor-array shell on a record-only loader', async () => {
+  const dir = await tempDir()
+  try {
+    const { dist, app } = await contractFixture(dir, {
+      shell: 'function mZ(){return Object.values({react:Ti("react",vE)})}const x={staticModules:mZ()}',
+      loader: 'this.seed=new Map(Object.entries(options.staticModules))',
+    })
+    await assert.rejects(
+      checkFrontendAppContract({ appDir: app, dist }),
+      /descriptor array.*record-only|descriptor array/u,
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('frontend/app contract accepts a record shell and an array-aware loader', async () => {
+  const dir = await tempDir()
+  try {
+    const record = await contractFixture(dir, {
+      shell: 'function mZ(){return{react:Ti("react",vE)}}const x={staticModules:mZ()}',
+      loader: 'this.seed=new Map(Object.entries(options.staticModules))',
+    })
+    const recordCheck = await checkFrontendAppContract({ appDir: record.app, dist: record.dist })
+    assert.equal(recordCheck.shell.shape, 'record')
+
+    const dir2 = path.join(dir, 'second')
+    const array = await contractFixture(dir2, {
+      shell: 'function mZ(){return Object.values({react:Ti("react",vE)})}const x={staticModules:mZ()}',
+      loader: 'this.seed=new Map(Array.isArray(options.staticModules)?options.staticModules.map(row=>[row.id,row.factory]):Object.entries(options.staticModules))',
+    })
+    const arrayCheck = await checkFrontendAppContract({ appDir: array.app, dist: array.dist })
+    assert.equal(arrayCheck.shell.shape, 'array')
+    assert.equal(arrayCheck.loader.arrayAware, true)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('frontend/app contract rejects an app plugin that needs an export the shell lacks', async () => {
+  const dir = await tempDir()
+  try {
+    const { dist, app } = await contractFixture(dir, {
+      shell: 'function mZ(){return{react:Ti("react",vE)}}const x={staticModules:mZ()}',
+      loader: 'this.seed=new Map(Object.entries(options.staticModules))',
+      primitives: 'require("@deepseek-ai/dsh-client-ui-primitives").rankByName(list,query)',
+    })
+    await assert.rejects(checkFrontendAppContract({ appDir: app, dist }), /rankByName/u)
+
+    const dir2 = path.join(dir, 'with-export')
+    const good = await contractFixture(dir2, {
+      shell: 'function mZ(){return{react:Ti("react",vE),rankByName:1}}const x={staticModules:mZ()}',
+      loader: 'this.seed=new Map(Object.entries(options.staticModules))',
+      primitives: 'require("@deepseek-ai/dsh-client-ui-primitives").rankByName(list,query)',
+    })
+    const check = await checkFrontendAppContract({ appDir: good.app, dist: good.dist })
+    assert.equal(check.shell.hasRankByName, true)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a build with no browser-verified target is not a deliverable', () => {
+  const skipped = [
+    { target: 'linux-x64', smoke: { status: 'skipped', reason: 'linux-x64 cannot run on win-x64' } },
+    { target: 'win-x64', smoke: { status: 'skipped', reason: 'no Chrome/Chromium found' } },
+  ]
+  const reason = unverifiedBuildReason(skipped, { full: true })
+  assert.match(reason, /no target was booted in a browser/u)
+  assert.match(reason, /linux-x64: skipped/u)
+  assert.match(reason, /--no-smoke/u)
+  assert.equal(unverifiedBuildReason([{ target: 'linux-x64', smoke: { status: 'passed' } }], { full: true }), null)
+  // Explicit opt-outs are honest, not failures.
+  assert.equal(unverifiedBuildReason(skipped, { full: true, smoke: false }), null)
+  assert.equal(unverifiedBuildReason(skipped, { full: false }), null)
+})
+
+test('frontend/app contract accepts a loader that shims the missing export', async () => {
+  const dir = await tempDir()
+  try {
+    const { dist, app } = await contractFixture(dir, {
+      shell: 'function mZ(){return{react:Ti("react",vE)}}const x={staticModules:mZ()}',
+      // The recovery patch used on 2026-11-17 adds rankByName to the loader.
+      loader: 'this.seed=new Map(Object.entries(options.staticModules));const rankByName=()=>[]',
+      primitives: 'require("@deepseek-ai/dsh-client-ui-primitives").rankByName(list,query)',
+    })
+    const check = await checkFrontendAppContract({ appDir: app, dist })
+    assert.equal(check.loader.providesRankByName, true)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a mismatched source shell falls back to the frontend published with the app', async () => {
+  const dir = await tempDir()
+  try {
+    const { dist, app } = await contractFixture(dir, {
+      shell: 'function mZ(){return Object.values({react:Ti("react",vE)})}const x={staticModules:mZ()}',
+      loader: 'this.seed=new Map(Object.entries(options.staticModules))',
+    })
+    // The app also carries the frontend that shipped with it: same loader,
+    // record-shaped shell, so it boots.
+    const published = path.join(app, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist')
+    await write(path.join(published, 'index.html'), '<script type="module" src="./assets/index-npm.js"></script>\n')
+    await write(path.join(published, 'assets', 'index-npm.js'), 'function hZ(){return{react:Li("react",vj)}}const x={staticModules:hZ()}')
+    const chosen = await chooseFrontend({ appDir: app, dist })
+    assert.equal(chosen.source, 'published')
+    assert.equal(chosen.dist, published)
+    assert.match(chosen.reason, /descriptor array/u)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a matching source shell is kept instead of the published frontend', async () => {
+  const dir = await tempDir()
+  try {
+    const { dist, app } = await contractFixture(dir, {
+      shell: 'function mZ(){return{react:Ti("react",vE)}}const x={staticModules:mZ()}',
+      loader: 'this.seed=new Map(Object.entries(options.staticModules))',
+    })
+    const chosen = await chooseFrontend({ appDir: app, dist })
+    assert.equal(chosen.source, 'built')
+    assert.equal(chosen.dist, dist)
+    assert.equal(chosen.reason, null)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a build fails when neither the source shell nor the published frontend matches the app', async () => {
+  const dir = await tempDir()
+  try {
+    const { dist, app } = await contractFixture(dir, {
+      shell: 'function mZ(){return Object.values({react:Ti("react",vE)})}const x={staticModules:mZ()}',
+      loader: 'this.seed=new Map(Object.entries(options.staticModules))',
+    })
+    const published = path.join(app, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist')
+    await write(path.join(published, 'index.html'), '<script type="module" src="./assets/index-npm.js"></script>\n')
+    await write(path.join(published, 'assets', 'index-npm.js'), 'function hZ(){return Object.values({react:Li("react",vj)})}const x={staticModules:hZ()}')
+    await assert.rejects(chooseFrontend({ appDir: app, dist }), /descriptor array/u)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

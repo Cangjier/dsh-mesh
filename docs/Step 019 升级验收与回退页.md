@@ -49,10 +49,14 @@
 
 | 布局 | 回退动作 |
 |---|---|
-| 平铺（`config/gate.env` + `start.sh`） | 从 marker 指定的 `.upgrade-backup/<ts>` 恢复 `config code gate plugins locale docs package.json manifest.json start*.sh install.sh deploy` 和 profile 的 `package.json` / `cordis.patch.yml`，`daemon-reload`，重启 app/gate/control/interop，等 `/__gate/health` |
+| 平铺（`config/gate.env` + `start.sh`） | 从 marker 指定的 `.upgrade-backup/<ts>` 恢复 `app runtime web shared code gate plugins locale docs config deploy`、`VERSION`/`manifest.json`、根脚本和 profile 的 `package.json` / `cordis.patch.yml`，`daemon-reload`，重启 app/gate/control/interop，等 `/__gate/health` |
 | 蓝绿（`current` + `releases`） | 把 `current` 切回 marker 的 `previous`，重启单元，等健康检查 |
 
 回退脚本先把自己复制到 `<data>/rollback-tools/` 再执行：回退会覆盖 `code/`，bash 边读边跑安装目录里的脚本会踩到自己的文件。日志写在 `<data>/upgrade-rollback.log`；成功删除 marker，失败把 `status=failed` 和错误写回 marker，验收页会显示出来。
+
+### 2026-11-16 的教训：备份必须覆盖运行时
+
+那天的平铺升级把 `app/`、`web/`、`runtime/` 换成了新的，但 `.upgrade-backup/` 只备份了 `config code gate plugins docs`。结果“回退”只是把旧脚本盖在新运行时上：`/__gate/health` 仍然 200，浏览器仍然 `Failed to load plugins`，用户看到的是“升级失败、回退也失败”。现在 `upgrade-local.sh` 和 `rollback-local.sh` 共用同一份 `BACKUP_ITEMS`（含 `app runtime web shared` 与全部根脚本），备份失败会直接中止升级而不是留下半份备份；恢复旧备份（缺 `app/runtime/web`）时会在日志里明确警告“运行时仍是新版本”。改动这份清单时两个脚本要一起改。
 
 ## 范围
 

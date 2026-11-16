@@ -215,6 +215,8 @@ dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>/
 
 结果跟着产物一起写进 `state.json` 的 `artifacts[].smoke`。失败时任务状态是 `smoke-failed`，日志会写明是 DSH 没启动、页面报了插件错误，还是 Mesh 面板没出现；截图保留在任务目录。冒烟失败后不会继续下一个目标。面板的编译任务状态列会额外显示「抓屏通过 / 未抓屏 / 抓屏失败」，悬停「抓屏通过」可看截图路径；「未抓屏」一定带原因（跨目标、web-only、关掉冒烟或没有 Chrome）。
 
+**没有目标被真正验证过，构建就不算完成。** 2026-11-16 的 `20261116F` 包是在 Windows 成员上编的：Linux 目标「跨目标跳过」，Windows 目标「没有 Chrome 跳过」，两个都记为 `skipped`，任务却仍是 `done`，坏包直接进了 `~/.dsh/packages`。现在所有目标都 `skipped` 时任务以 `smoke-failed` 结束（产物随失败清理，远程成员上的归档也不会拉回网关），错误里逐目标写明原因，并提示安装 Chrome / 设置 `DSH_MESH_SMOKE_CHROME` / 换到能运行目标的构建机，或显式 `--no-smoke` 接受未验证包。shell 是各目标共用的，所以**至少一个目标真正启动过**就足够代表这份前端。
+
 开关（CLI 与 `runJob` 同名参数）：
 
 | 参数 | 行为 |
@@ -225,6 +227,30 @@ dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>/
 | `--smoke-chrome <path>` | 指定 Chrome/Chromium；也可用 `DSH_MESH_SMOKE_CHROME` |
 | `--smoke-start-timeout <ms>` | DSH 打印启动 URL 的预算（默认 180000） |
 | `--smoke-page-timeout <ms>` | 浏览器等 DSH 壳的预算（默认 180000） |
+
+## 前端与 app 必须同源
+
+完整包里的 `app/` 是 `npm install @deepseek-ai/dsh@<ver>`，而 `web/` 是这次从源码树构建并覆盖进去的。两边必须是同一个 DSH 修订，否则会出现“能装、能启动、健康检查 200、浏览器却 `Failed to load plugins`”：
+
+- `apps/web` 把静态模块表交给 `@deepseek-ai/dsh-client-modules`。源码 `master` 新一些时它传 `{id, factory}` 描述符数组（`Object.values({...})`），而 npm 发布的同版本 loader 只认 record（`new Map(Object.entries(options.staticModules))`）——数组会变成键 `"0"`、`"1"`，`react` 都解析不到。
+- 反过来，npm app 的客户端插件可能已经在用 shell 里旧副本没有的导出（2026-11-16 是 `@deepseek-ai/dsh-client-ui-primitives` 的 `rankByName`），同样会让整页的插件加载失败。
+
+装配 `assembleRuntimePackage` 时、覆盖前端之后会跑 `checkFrontendAppContract`：
+
+1. 从 `dist/index.html` 找到 shell bundle，按 `staticModules:<fn>()` 找到种子表构造函数，读它是 `Object.values({...})`（array）还是 `{...}`（record）；
+2. 从 `app/node_modules/@deepseek-ai/dsh-client-modules/lib/client.js` 读 loader 接受哪种形状；
+3. 如果 app 的客户端插件调用 `rankByName` 而 shell 不含这个导出（loader 自己也没有补丁时），也判失败。
+
+不一致时**不覆盖前端**，而是保留 `app/` 里随 npm 包发布的那份 `dsh-web-frontend/dist`——它和 app 的客户端插件本来就是同一次发布，必然自洽；目录选择器/账号登录覆盖层本来也由 `patchInstalledClient` 打在客户端插件 bundle 上，不依赖重建 shell。选择结果写进包的 `manifest.json`：
+
+```json
+"frontend": {
+  "source": "published",
+  "reason": "the built web shell passes staticModules as a descriptor array, but ..."
+}
+```
+
+`source` 是 `built`（源码 shell 与 app 一致，正常覆盖）或 `published`（回退到 npm 自带前端）。构建日志会完整打印不兼容原因；这不是静默降级，包上能直接看到。保留的 npm 前端同样要过契约检查，所以 app 自身坏了仍然会让构建失败。检查不需要 Chrome，在 Windows 构建机上也能挡住这类包；它是抓屏冒烟的补充，不替代后者。
 
 单独复跑一个包：
 
@@ -298,7 +324,8 @@ created → running(prepare → apply → build → package) → done
 | `npm install @deepseek-ai/dsh` 失败 | 版本不存在 / 目标原生包缺失 | 检查 `dshVersion` 与目标矩阵 |
 | Node 运行时 404 | 该版本没有对应平台包 | 显式 `nodeVersion`，或换目标 |
 | 包能装但页面是旧前端 | 覆盖 `dsh-web-frontend/dist` 失败 | 看 `overlayFrontend` 日志；确认包路径 |
-| 构建完成但页面 `Failed to load plugins` | 包内 client bundle 与 `app/` 的 DSH 版本不匹配 | 构建后抓屏会直接把它判成 `smoke-failed`，看 `smoke/<target>/smoke.log` 与截图 |
+| 构建完成但页面 `Failed to load plugins` | 包内 client bundle 与 `app/` 的 DSH 版本不匹配 | 先看构建日志里的 `frontend/app contract check` 和包 `manifest.json` 的 `frontend.source`；不兼容时应回退到 `published`。若仍是 `built` 而页面失败，看 `smoke/<target>/smoke.log` 与截图 |
+| 所有目标都 `skipped` 却想发布 | 构建机跑不了目标（跨平台）且没有 Chrome | 安装 Chrome / 设 `DSH_MESH_SMOKE_CHROME`，或换到能运行目标的成员编译；否则任务会是 `smoke-failed` |
 | Windows 成员启动失败 | 端口 80 权限 / 防火墙 | 用 8080，`install.ps1` 加防火墙规则 |
 
 ## 测试

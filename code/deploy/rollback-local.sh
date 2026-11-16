@@ -45,6 +45,7 @@ exec >> "$LOG" 2>&1
 echo "[rollback $(date -Is)] layout=$LAYOUT root=$ROOT"
 
 say() { printf '==> %s\n' "$*"; }
+warn() { printf '[warn] %s\n' "$*" >&2; }
 die() { printf '[rollback] %s\n' "$*" >&2; set +e; set_state failed "$*"; exit 1; }
 
 NODE="$ROOT/runtime/node/bin/node"
@@ -129,8 +130,26 @@ if [ "$LAYOUT" = "flat" ]; then
   esac
   [ -d "$BACKUP" ] || die "升级备份不存在：$BACKUP"
   [ -f "$BACKUP/manifest.json" ] || die "备份不完整（缺少 manifest.json）：$BACKUP"
+  # Backups made before 2026-11-17 only carry config/code/gate/plugins/docs.
+  # Restoring those on top of the new runtime is the failure this script now
+  # avoids; say so instead of reporting a healthy rollback that still cannot
+  # boot the page.
+  for layer in app runtime web; do
+    [ -e "$BACKUP/$layer" ] || warn "备份缺少 $layer（修复前的旧备份）：只能恢复工具层，运行时仍是新版本，页面可能仍无法加载"
+  done
+  # The overlay copy replaces every one of these, so rollback has to restore
+  # every one of them. `app`, `runtime` and `web` are the ones that matter most:
+  # restoring old scripts on top of a new runtime cannot boot. Keep in sync with
+  # upgrade-local.sh's BACKUP_ITEMS.
+  BACKUP_ITEMS=(
+    app runtime web shared code gate plugins locale docs config deploy
+    VERSION manifest.json package.json cordis.patch.yml browse-picker.patch.yml
+    install.sh install.ps1 install-interop-service.sh uninstall-interop-service.sh
+    start.sh start.ps1 start-dsh.sh start-interop.sh start.cmd start-stack.ps1
+    stop.sh stop.ps1 stop.cmd status.sh doctor.sh
+  )
   say "恢复文件备份 $BACKUP"
-  for item in config code gate plugins locale docs package.json manifest.json start.sh start-dsh.sh start-interop.sh install.sh deploy; do
+  for item in "${BACKUP_ITEMS[@]}"; do
     if [ -e "$BACKUP/$item" ]; then
       rm -rf "${ROOT:?}/$item"
       cp -a "$BACKUP/$item" "$ROOT/" || die "恢复 $item 失败"

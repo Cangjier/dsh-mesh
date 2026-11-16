@@ -1154,10 +1154,11 @@ echo "activated $RELEASE"
 /**
  * Build the Linux rehearsal script for a test upgrade.
  *
- * A gateway upgrade runs `code/deploy/upgrade-local.sh` from the *installed*
- * plugin (see runner.mjs) because a flat install has no release symlink to
- * switch. Members are blue-green, so testing there would exercise a different
- * code path entirely — the gap that let a flat-only breakage ship. This script
+ * A gateway upgrade runs `code/deploy/upgrade-local.sh` because a flat install
+ * has no release symlink to switch; runner.mjs prefers the copy shipped in the
+ * package being installed and falls back to the installed plugin's copy.
+ * Members are blue-green, so testing there would exercise a different code
+ * path entirely — the gap that let a flat-only breakage ship. This script
  * therefore rebuilds a flat install inside a sandbox on the member: the
  * package is extracted, the member's *current* release files and its real
  * `gate.env` / profile manifest are copied in, and the same script source the
@@ -1227,20 +1228,21 @@ grep -q '^DSH_GATE_PORT=' "$APP/config/gate.env" || printf 'DSH_GATE_PORT=18080\
 grep -q '^DSH_HOME=' "$APP/config/gate.env" || printf 'DSH_HOME=%s\\n' "$TEST_HOME" >> "$APP/config/gate.env"
 BEFORE=$("$NODE" -p "require('$APP/plugins/dsh-mesh/package.json').version" 2>/dev/null || echo unknown)
 say "升级前的沙箱版本：$BEFORE（以文件内容判断是否真的覆盖）"
-# 脚本来源与生产一致：优先用已安装插件里的那份（runner.mjs 也是这么做的），
-# 老版本插件没有 code/deploy 时才退回新包里的。
+# 脚本来源与生产一致：优先用新包里的那份（runner.mjs 也是这么做的），
+# 这样新包的备份范围/回退逻辑在它自己的升级里就生效；只有老包不带
+# code/deploy 时才退回已安装插件里的那份。
 PLUGIN_DEPLOY="$CURRENT/plugins/dsh-mesh/code/deploy"
-if [ -f "$PLUGIN_DEPLOY/upgrade-local.sh" ]; then
-  SCRIPT_SRC="$PLUGIN_DEPLOY/upgrade-local.sh"
-  say '脚本来源：已安装插件（与「升级」同源）'
-  if [ -f "$STAGE/code/deploy/upgrade-local.sh" ]; then
+if [ -f "$STAGE/code/deploy/upgrade-local.sh" ]; then
+  SCRIPT_SRC="$STAGE/code/deploy/upgrade-local.sh"
+  say '脚本来源：新包（与「升级」同源）'
+  if [ -f "$PLUGIN_DEPLOY/upgrade-local.sh" ]; then
     A=$(sha256sum "$SCRIPT_SRC" | cut -d' ' -f1)
-    B=$(sha256sum "$STAGE/code/deploy/upgrade-local.sh" | cut -d' ' -f1)
-    if [ "$A" != "$B" ]; then say '注意：已安装插件的脚本与新包里的不一致，按生产行为以已安装的为准'; fi
+    B=$(sha256sum "$PLUGIN_DEPLOY/upgrade-local.sh" | cut -d' ' -f1)
+    if [ "$A" != "$B" ]; then say '注意：新包里的脚本与已安装插件的不一致，按生产行为以新包为准'; fi
   fi
 else
-  SCRIPT_SRC="$STAGE/code/deploy/upgrade-local.sh"
-  say '脚本来源：新包（已安装插件是早于修复的版本，没有 code/deploy）'
+  SCRIPT_SRC="$PLUGIN_DEPLOY/upgrade-local.sh"
+  say '脚本来源：已安装插件（新包是早于修复的版本，没有 code/deploy）'
 fi
 [ -f "$SCRIPT_SRC" ] || fail '已安装插件和新包里都没有 code/deploy/upgrade-local.sh，这个包做不了平铺升级'
 cp "$SCRIPT_SRC" "$TEST_ROOT/tools/upgrade-local.sh"

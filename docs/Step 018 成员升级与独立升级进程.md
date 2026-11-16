@@ -68,11 +68,12 @@
 
 ### 平铺升级用哪份脚本、哪份包内容
 
-跑升级的脚本**不在包里**，而是当前装着的那份插件里的 `code/deploy/upgrade-local.sh`：
+跑升级的脚本优先取**新包里**的 `code/deploy/upgrade-local.sh`（2026-11-17 起；此前优先用已安装插件里的那份）：
 
+- 新包里的脚本知道自己的文件布局和备份范围。2026-11-16 的回退失败就是因为当时装着的旧脚本没有备份 `app`/`runtime`/`web`；而旧脚本不可能在“它自己执行的这次升级”里被替换，所以必须以新包为准，否则每份修复都要等下一次升级才生效；
+- 新包不带 `code/deploy`（早于修复的包）时才退回已安装插件里的副本，日志会写明来源；
 - runner 先把脚本和 `wire-profile.mjs` 复制到 `<job>/tools/` 再执行，因为接下来的覆盖步骤会重写 `plugins/dsh-mesh`，而 bash 是边读边执行的，直接跑安装目录里的那份等于在解释器脚下改文件；
-- 包内容用 `--stage <解压目录>` 显式指定，脚本默认的「脚本往上两级就是包」只在从解压目录里手跑时成立；
-- 好处是脚本和 runner 永远同版本，修脚本不用重新打 300 MiB 的包（rc.3 就是因为包里没有 `code/deploy` 直接失败）。
+- 包内容用 `--stage <解压目录>` 显式指定，脚本默认的「脚本往上两级就是包」只在从解压目录里手跑时成立。
 
 包里必须带的东西（`assembleWebPackage` / `repack` 都复制）：`code/dsh-service/`（否则装完只有单服务、平铺升级也没法重装单元）、`code/deploy/`（包里自带一份，用于手跑兜底）、`start-dsh.sh`、以及 `plugins/dsh-mesh/code/deploy`。
 
@@ -86,7 +87,7 @@ profile 接线会扫描 `<root>/plugins/*` 找随包插件（现在有 `xl`）�
 
 「测试升级」按钮（成员页，只对**其他** Linux 成员显示）把一个 job 分成两段，并且**演练放在 prepare 之前**，因为 prepare 会改写成员真实的 profile 和 `gate.env`：
 
-1. **平铺流程演练**（`rehearse`）：在目标成员上把包解压到 `<appRoot>/../.dsh-mesh-test/<release>/stage`，用**该成员当前版本**的 `plugins/`、`code/`、`gate/`、`manifest.json`、`start.sh` 加上它真实的 `shared/config/gate.env` 和 `shared/home/profiles/web/{package.json,cordis.patch.yml}` 拼出一份平铺安装；沙箱的 `DSH_HOME` 与端口（18080）都改到沙箱里。然后跑**已安装插件里那份** `code/deploy/upgrade-local.sh`（与 `runner.mjs` 同源，老版本插件没有 `code/deploy` 时才退回包内那份，并在日志里说明），脚本同样先复制到沙箱 `tools/` 再执行，包内容用 `--stage` 指定。
+1. **平铺流程演练**（`rehearse`）：在目标成员上把包解压到 `<appRoot>/../.dsh-mesh-test/<release>/stage`，用**该成员当前版本**的 `plugins/`、`code/`、`gate/`、`manifest.json`、`start.sh` 加上它真实的 `shared/config/gate.env` 和 `shared/home/profiles/web/{package.json,cordis.patch.yml}` 拼出一份平铺安装；沙箱的 `DSH_HOME` 与端口（18080）都改到沙箱里。然后跑**新包里**的 `code/deploy/upgrade-local.sh`（与生产 runner 同源；新包不带 `code/deploy` 时才退回已安装插件那份，并在日志里说明），脚本同样先复制到沙箱 `tools/` 再执行，包内容用 `--stage` 指定。
    - ① 正常升级，核对：备份里是升级前的文件（`plugins/` 与 `code/gate/manifest.json` 都要在）、覆盖后是新包的文件、profile 接的是沙箱 app、随包插件（xl）已接入、manifest 存在。
    - ② **Chrome headless 抓屏**：升级后的沙箱不是只看文件——用沙箱自己的 `runtime/node` 跑新包里的 `plugins/dsh-mesh/code/build/smoke-cli.mjs --install --root <沙箱> --port 18081`，启动包内的 supervisor + gate，过密码门，等 DSH 壳，点侧边栏 `Mesh`，断言面板出现（`.dsh-pw-page`，至少 `.dsh-pw-boot`）并截图到 `<appRoot>/.dsh-mesh-test-<release>/`。这一步同时验证 app/runtime 真能启动、前端 client bundle 与 profile 接线一致；目标成员没有 Chrome 时日志写「抓屏跳过」并继续（构建机上的构建后抓屏仍会执行），只有启动/面板检查失败才让演练失败。
    - ③ 注入一次接线失败（把 `wire-profile.mjs` 换成必定失败的桩，桩会留下标记证明覆盖确实发生过），验证 `upgrade-local.sh` 的 `restore()` 把文件还原。

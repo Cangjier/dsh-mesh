@@ -3611,6 +3611,11 @@ tar -xzf "$PACKAGE" -C "$NEW" --strip-components=1 -v | {
   done
 }
 
+# Drop the archive as soon as it is expanded: it is 300+ MiB, /tmp on a member
+# is often a small tmpfs, and one copy left behind per job eventually fills it
+# so the next upload dies halfway with a bare scp "Failure".
+rm -f "$PACKAGE"
+
 # Shared mutable state stays outside every release. The first deploy copies it
 # from the currently running tree; later deploys inherit it untouched.
 for dir in config data home workspace; do
@@ -4393,7 +4398,13 @@ var SshRunner = class {
       const args = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-P", String(this.plan.port)];
       if (this.plan.identityFile) args.push("-i", this.plan.identityFile);
       args.push(local, `${this.target()}:${remote}`);
-      await this.runProcess("scp", args);
+      try {
+        await this.runProcess("scp", args);
+      } catch (scpError) {
+        await this.runProcess("ssh", [...this.sshOptions(), this.target(), `rm -f -- ${sh(remote)}`]).catch(() => {
+        });
+        throw scpError;
+      }
       onProgress?.({ bytes: totalBytes, totalBytes, percent: 100, speed: 0, indeterminate: false });
     }
   }
@@ -4438,6 +4449,52 @@ var SshRunner = class {
       return Number.isSafeInteger(size) ? size : null;
     } catch {
       return null;
+    }
+  }
+  /**
+   * Free bytes on the filesystem that holds `remote`, or null when it cannot be
+   * measured (Windows targets, or a host without `df`).
+   * @param {string} remote remote path.
+   * @returns {Promise<number|null>} free bytes.
+   */
+  async remoteFreeBytes(remote) {
+    if (this.plan.os !== "linux") return null;
+    try {
+      const dir = path10.posix.dirname(remote);
+      const { stdout } = await this.runProcess("ssh", [...this.sshOptions(), this.target(), `df -Pk -- ${sh(dir)} | awk 'NR==2 {print $4}'`]);
+      const kib = Number.parseInt(String(stdout).trim(), 10);
+      return Number.isSafeInteger(kib) && kib >= 0 ? kib * 1024 : null;
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * Delete the package archives earlier deploys left beside `remote`.
+   *
+   * The archive is 300+ MiB and members commonly mount /tmp as a tmpfs (1.7 GB
+   * on a 4 GB ECS). Leaving one per job behind made the third or fourth upgrade
+   * fail mid-upload with only scp's `write remote ...: Failure` to show for it.
+   * @param {string} remote remote path this job is about to upload to.
+   * @returns {Promise<boolean>} whether the cleanup command ran.
+   */
+  async discardStalePackages(remote) {
+    if (this.plan.os !== "linux") return false;
+    const dir = path10.posix.dirname(remote);
+    const keep = path10.posix.basename(remote);
+    const script = [
+      `cd ${sh(dir)} 2>/dev/null || exit 0`,
+      "for f in dsh-mesh-*.gz dsh-mesh-*.tar.gz dsh-mesh-*.zip; do",
+      '  [ -e "$f" ] || continue',
+      `  [ "$f" = ${sh(keep)} ] && continue`,
+      '  rm -f -- "$f"',
+      "done",
+      "exit 0"
+    ].join("\n");
+    try {
+      await this.runProcess("ssh", [...this.sshOptions(), this.target(), script]);
+      return true;
+    } catch {
+      return false;
     }
   }
   /**
@@ -4875,6 +4932,18 @@ var DeployManager = class {
         meter("\u4E0A\u4F20\u5B89\u88C5\u5305", { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 });
         await mark("upload", "succeeded", `${formatBytes(existingBytes)} \xB7 \u5DF2\u5B58\u5728\uFF0C\u8DF3\u8FC7\u4E0A\u4F20`);
       } else {
+        if (typeof runner.discardStalePackages === "function") {
+          if (await runner.discardStalePackages(plan.remotePackage).catch(() => false)) {
+            await log("pruned package archives left by earlier deploys on the target");
+          }
+        }
+        const freeBytes = typeof runner.remoteFreeBytes === "function" ? await runner.remoteFreeBytes(plan.remotePackage).catch(() => null) : null;
+        if (freeBytes !== null) {
+          await log(`target free space ${formatBytes(freeBytes)}, package ${formatBytes(plan.package.bytes)}`);
+          if (freeBytes < plan.package.bytes + 64 * 1024 * 1024) {
+            throw new Error(`\u76EE\u6807\u5269\u4F59\u7A7A\u95F4\u4E0D\u8DB3\uFF1A${plan.remotePackage} \u6240\u5728\u5206\u533A\u53EA\u5269 ${formatBytes(freeBytes)}\uFF0C\u5B89\u88C5\u5305\u9700\u8981 ${formatBytes(plan.package.bytes)}\uFF1B\u6E05\u7406\u540E\u91CD\u8BD5`);
+          }
+        }
         await runner.upload(plan.package.path, plan.remotePackage, (progress) => {
           const totalBytes = progress.totalBytes ?? plan.package.bytes;
           meter("\u4E0A\u4F20\u5B89\u88C5\u5305", {
@@ -5450,8 +5519,20 @@ function windowsBuildScript(options) {
     // .NET's zip reader keeps UTF-8 names intact.
     '$archive = Join-Path $root "dsh-mesh.zip"',
     `$curl = Join-Path $env:SystemRoot 'System32\\curl.exe'`,
-    `if (Test-Path $curl) { & $curl -fsSL${proxy2 === "" ? "" : ` --proxy ${quotePs(proxy2)}`} -o $archive '${zipUrl}' } else { Invoke-WebRequest -Uri '${zipUrl}' -OutFile $archive -UseBasicParsing${proxyArgument} }`,
-    'if ($LASTEXITCODE -ne 0 -or -not (Test-Path $archive)) { throw "mesh download failed ($LASTEXITCODE)" }',
+    // A single reset on the tunnel used to fail the whole nightly build, so the
+    // archive is fetched a few times with a growing pause in between. A failed
+    // attempt deletes its partial file: a truncated zip must never reach
+    // Expand-Archive, which would otherwise fail with a misleading message.
+    "$attempts = 4",
+    "$downloadCode = 1",
+    "for ($attempt = 1; $attempt -le $attempts; $attempt++) {",
+    "  Remove-Item -Force $archive -ErrorAction SilentlyContinue",
+    `  if (Test-Path $curl) { & $curl -fsSL --connect-timeout 20${proxy2 === "" ? "" : ` --proxy ${quotePs(proxy2)}`} -o $archive '${zipUrl}'; $downloadCode = $LASTEXITCODE } else { try { Invoke-WebRequest -Uri '${zipUrl}' -OutFile $archive -UseBasicParsing${proxyArgument}; $downloadCode = 0 } catch { $downloadCode = 1; Write-Output ('download error: ' + $_.Exception.Message) } }`,
+    "  if ($downloadCode -eq 0 -and (Test-Path $archive)) { break }",
+    `  Write-Output ('download attempt {0}/{1} failed ({2})' -f $attempt, $attempts, $downloadCode)`,
+    "  if ($attempt -lt $attempts) { Start-Sleep -Seconds (3 * $attempt) }",
+    "}",
+    'if ($downloadCode -ne 0 -or -not (Test-Path $archive)) { throw "mesh download failed ($downloadCode)" }',
     '$extract = Join-Path $root "extract"',
     "Remove-Item -Recurse -Force $src, $extract -ErrorAction SilentlyContinue",
     "New-Item -ItemType Directory -Force -Path $extract | Out-Null",

@@ -163,8 +163,20 @@ export function windowsBuildScript(options) {
     // .NET's zip reader keeps UTF-8 names intact.
     '$archive = Join-Path $root "dsh-mesh.zip"',
     `$curl = Join-Path $env:SystemRoot 'System32\\curl.exe'`,
-    `if (Test-Path $curl) { & $curl -fsSL${proxy === '' ? '' : ` --proxy ${quotePs(proxy)}`} -o $archive '${zipUrl}' } else { Invoke-WebRequest -Uri '${zipUrl}' -OutFile $archive -UseBasicParsing${proxyArgument} }`,
-    'if ($LASTEXITCODE -ne 0 -or -not (Test-Path $archive)) { throw "mesh download failed ($LASTEXITCODE)" }',
+    // A single reset on the tunnel used to fail the whole nightly build, so the
+    // archive is fetched a few times with a growing pause in between. A failed
+    // attempt deletes its partial file: a truncated zip must never reach
+    // Expand-Archive, which would otherwise fail with a misleading message.
+    '$attempts = 4',
+    '$downloadCode = 1',
+    'for ($attempt = 1; $attempt -le $attempts; $attempt++) {',
+    '  Remove-Item -Force $archive -ErrorAction SilentlyContinue',
+    `  if (Test-Path $curl) { & $curl -fsSL --connect-timeout 20${proxy === '' ? '' : ` --proxy ${quotePs(proxy)}`} -o $archive '${zipUrl}'; $downloadCode = $LASTEXITCODE } else { try { Invoke-WebRequest -Uri '${zipUrl}' -OutFile $archive -UseBasicParsing${proxyArgument}; $downloadCode = 0 } catch { $downloadCode = 1; Write-Output ('download error: ' + $_.Exception.Message) } }`,
+    '  if ($downloadCode -eq 0 -and (Test-Path $archive)) { break }',
+    `  Write-Output ('download attempt {0}/{1} failed ({2})' -f $attempt, $attempts, $downloadCode)`,
+    '  if ($attempt -lt $attempts) { Start-Sleep -Seconds (3 * $attempt) }',
+    '}',
+    'if ($downloadCode -ne 0 -or -not (Test-Path $archive)) { throw "mesh download failed ($downloadCode)" }',
     '$extract = Join-Path $root "extract"',
     'Remove-Item -Recurse -Force $src, $extract -ErrorAction SilentlyContinue',
     'New-Item -ItemType Directory -Force -Path $extract | Out-Null',

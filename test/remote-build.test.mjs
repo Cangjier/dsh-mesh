@@ -102,6 +102,25 @@ test('windowsBuildScript avoids git and uses the bundled node runtime', () => {
   assert.match(script, /not enough free space on the build host/u)
 })
 
+test('windowsBuildScript retries the checkout download before failing', () => {
+  const script = windowsBuildScript({
+    jobId: 'job-retry',
+    ref: 'main',
+    targets: ['win-x64'],
+    proxyUrl: 'http://10.66.66.2:8888',
+  })
+  // One reset on the tunnel must not fail the whole build: a real observed
+  // failure (curl 56 after 49 ms) only needed a second attempt.
+  assert.match(script, /\$attempts = 4/u)
+  assert.match(script, /for \(\$attempt = 1; \$attempt -le \$attempts; \$attempt\+\+\)/u)
+  assert.match(script, /download attempt \{0\}\/\{1\} failed \(\{2\}\)/u)
+  assert.match(script, /Start-Sleep -Seconds \(3 \* \$attempt\)/u)
+  // Each attempt starts clean, so a truncated archive is never extracted.
+  assert.match(script, /Remove-Item -Force \$archive/u)
+  assert.match(script, /throw "mesh download failed \(\$downloadCode\)"/u)
+  assert.match(script, /--connect-timeout 20/u)
+})
+
 test('windowsBuildScript escapes single quotes and omits an unset proxy', () => {
   const script = windowsBuildScript({ jobId: 'job-4', ref: "ma'in", targets: ['win-x64'], proxyUrl: null })
   assert.match(script, /--ref 'ma''in'/u)

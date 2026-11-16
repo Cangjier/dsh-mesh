@@ -3237,7 +3237,20 @@ PACKAGE=${sh(plan.remotePackage)}
 NEW="$APP_ROOT/releases/$RELEASE"
 SHARED="$APP_ROOT/shared"
 CURRENT="$APP_ROOT/current"
+PREVIOUS="$APP_ROOT/previous"
 mkdir -p "$APP_ROOT/releases" "$SHARED"
+# A failed prepare or activate can leave a whole release tree behind (about
+# 1.3 GB each). Keep only the running release and the rollback target; $NEW
+# does not exist yet unless this is a retry, and that case is refused below.
+CURRENT_REAL=$(readlink -f "$CURRENT" 2>/dev/null || true)
+PREVIOUS_REAL=$(readlink -f "$PREVIOUS" 2>/dev/null || true)
+for old in "$APP_ROOT"/releases/*; do
+  [ -d "$old" ] || continue
+  if [ "$old" = "$CURRENT_REAL" ] || [ "$old" = "$PREVIOUS_REAL" ] || [ "$old" = "$NEW" ]; then
+    continue
+  fi
+  rm -rf "$old" 2>/dev/null || true
+done
 if [ -e "$NEW" ]; then
   echo "release already exists: $NEW" >&2
   exit 1
@@ -3474,6 +3487,13 @@ ${rollbackRestart.split("\n").map((line) => `  ${line} || true`).join("\n")}
     echo "rollback finished: $OLD answers the health check" >&2
   else
     echo "rollback finished but $OLD did not answer the health check; it needs a manual look" >&2
+  fi
+  # A failed release is no longer referenced, but it is a full package tree
+  # (about 1.3 GB); leaving one behind per failed attempt fills the disk. Keep
+  # it when the rollback did not actually move current away from it.
+  if [ -n "$NEW" ] && [ "$(readlink -f "$CURRENT" 2>/dev/null || true)" != "$(readlink -f "$NEW" 2>/dev/null || true)" ]; then
+    rm -rf "$NEW" 2>/dev/null || true
+    echo "removed the failed release $NEW" >&2
   fi
   return 0
 }
@@ -3720,8 +3740,34 @@ $Package = ${ps(plan.remotePackage)}
 $New = Join-Path $AppRoot "releases\\$Release"
 $Shared = Join-Path $AppRoot 'shared'
 $Current = Join-Path $AppRoot 'current'
+$Previous = Join-Path $AppRoot 'previous'
 New-Item -ItemType Directory -Force -Path (Join-Path $AppRoot 'releases') | Out-Null
 New-Item -ItemType Directory -Force -Path $Shared | Out-Null
+# A failed prepare or activate can leave a whole release tree behind (about
+# 1.3 GB each). Keep only the running release and the rollback target; $New is
+# excluded because a retry refuses to overwrite it below anyway.
+$pruneCurrent = $null
+$prunePrevious = $null
+if (Test-Path -LiteralPath $Current) {
+  $pruneCurrent = (Get-Item -LiteralPath $Current -Force).Target
+  if ($pruneCurrent -is [array]) { $pruneCurrent = $pruneCurrent[0] }
+}
+if (Test-Path -LiteralPath $Previous) {
+  $prunePrevious = (Get-Item -LiteralPath $Previous -Force).Target
+  if ($prunePrevious -is [array]) { $prunePrevious = $prunePrevious[0] }
+}
+$pruneTool = Join-Path $Current 'runtime\\node\\node.exe'
+Get-ChildItem -LiteralPath (Join-Path $AppRoot 'releases') -Directory |
+  Where-Object { $_.FullName -ne $pruneCurrent -and $_.FullName -ne $prunePrevious -and $_.FullName -ne $New } |
+  ForEach-Object {
+    if (Test-Path -LiteralPath $pruneTool) {
+      & $pruneTool -e "const fs=require('fs');fs.rmSync(process.argv[1],{recursive:true,force:true,maxRetries:5,retryDelay:200})" $_.FullName 2>$null
+    }
+    if (Test-Path -LiteralPath $_.FullName) {
+      Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $_.FullName) { Write-Host ("could not remove old release " + $_.Name) }
+  }
 ${plan.preExtracted ? 'if (-not (Test-Path $New)) { throw "release directory missing: $New" }' : 'if (Test-Path $New) { throw "release already exists: $New" }'}
 New-Item -ItemType Directory -Force -Path $New | Out-Null
 ${plan.preExtracted ? "" : "Expand-Archive -LiteralPath $Package -DestinationPath $New -Force"}
@@ -3851,6 +3897,29 @@ function Test-Health {
   }
   return $false
 }
+function Remove-Release([string]$Path) {
+  if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return }
+  # Never remove the release current points at: a rollback that failed to
+  # switch must leave the member on something runnable.
+  $active = $null
+  if (Test-Path -LiteralPath $Current) {
+    $active = (Get-Item -LiteralPath $Current -Force).Target
+    if ($active -is [array]) { $active = $active[0] }
+  }
+  if ($active -eq $Path) { return }
+  # Remove-Item cannot delete node_modules paths past MAX_PATH and stops
+  # halfway through. Use the active release's Node runtime, never the tree
+  # being removed (a running exe cannot delete its own directory).
+  $tool = Join-Path $Current 'runtime\\node\\node.exe'
+  if (-not (Test-Path -LiteralPath $tool)) { $tool = Join-Path $AppRoot 'current\\runtime\\node\\node.exe' }
+  if (Test-Path -LiteralPath $tool) {
+    & $tool -e "const fs=require('fs');fs.rmSync(process.argv[1],{recursive:true,force:true,maxRetries:5,retryDelay:200})" $Path 2>$null
+  }
+  if (Test-Path -LiteralPath $Path) {
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  if (Test-Path -LiteralPath $Path) { Write-Host "could not remove $Path" } else { Write-Host "removed $Path" }
+}
 # A restart that throws must not skip the health check and the rollback: with
 # ErrorActionPreference=Stop it used to abort the script right here, after
 # current had already moved.
@@ -3877,6 +3946,9 @@ ${rollbackRestart.split("\n").map((line) => `    ${line}`).join("\n")}
   } catch { Write-Host "rollback restart failed: $($_.Exception.Message)" }
   if (Test-Health) { Write-Host "rollback finished: $old answers the health check" }
   else { Write-Host "rollback finished but $old did not answer the health check; it needs a manual look" }
+  # The failed release is no longer referenced; keeping it would leave a full
+  # package tree (about 1.3 GB) behind after every failed attempt.
+  Remove-Release $New
 }
 if ($restartFailed -or -not (Test-Health)) {
   if (-not $restartFailed) { Write-Host "health check failed on $Release; rolling back" }
@@ -3896,7 +3968,7 @@ Get-ChildItem -LiteralPath (Join-Path $AppRoot 'releases') -Directory |
   Select-Object -Skip $keep |
   ForEach-Object {
     if ($_.FullName -ne $currentTarget -and $_.FullName -ne $previousTarget) {
-      Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-Release $_.FullName
     }
   }
 Write-Output "activated $Release"

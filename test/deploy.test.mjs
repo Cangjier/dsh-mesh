@@ -341,6 +341,15 @@ test('Linux activation restarts services in order, health-checks and rolls back'
     assert.match(script, /ln -sfn "\$OLD" "\$CURRENT"/)
     assert.match(script, /mapfile -t RELEASES/)
     assert.match(script, /rm -rf "\$old"/)
+    // A successful rollback removes the failed release instead of leaving a
+    // full package tree behind on every failed attempt.
+    assert.match(script, /removed the failed release \$NEW/)
+    assert.match(script, /rm -rf "\$NEW"/)
+    // Prepare keeps the release history bounded before it extracts anything.
+    const prepare = buildLinuxPrepareScript(plan)
+    assert.match(prepare, /CURRENT_REAL=\$\(readlink -f "\$CURRENT"/)
+    assert.match(prepare, /for old in "\$APP_ROOT"\/releases\/\*/)
+    assert.match(prepare, /rm -rf "\$old"/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -368,6 +377,14 @@ test('Windows scripts use a junction and sc.exe config without early restarts', 
     assert.ok(activate.indexOf('Restart-Service -Name \'DSH-Web-App\'') < activate.indexOf('Restart-Service -Name \'DSH-Mesh\''))
     assert.match(activate, /__gate\/health/)
     assert.match(activate, /Select-Object -Skip \$keep/)
+    // Both retention and a failed rollback delete through Node: Remove-Item
+    // cannot delete node_modules paths past MAX_PATH.
+    assert.match(activate, /function Remove-Release/)
+    assert.match(activate, /Remove-Release \$New/)
+    assert.match(activate, /Remove-Release \$_\.FullName/)
+    // Prepare prunes old releases too, through Node for long paths.
+    assert.match(prepare, /Get-ChildItem -LiteralPath \(Join-Path \$AppRoot 'releases'\)/)
+    assert.match(prepare, /fs\.rmSync/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

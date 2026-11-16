@@ -3,23 +3,35 @@ import test from 'node:test'
 import { decodeWindowsState, phaseFromLine, powershellCommand, remoteBuildScript, windowsBuildScript } from '../src/lib/remote-build.mjs'
 
 test('phaseFromLine follows the engine markers', () => {
-  assert.deepEqual(phaseFromLine('job created'), { phase: 'prepare', percent: 4 })
-  assert.deepEqual(phaseFromLine('extracting 4f2c.tar.gz to /tmp/x/src'), { phase: 'prepare', percent: 4 })
+  assert.deepEqual(phaseFromLine('job created'), { phase: 'prepare', percent: 2 })
+  assert.deepEqual(phaseFromLine('extracting 4f2c.tar.gz to /tmp/x/src'), { phase: 'prepare', percent: 6 })
   assert.equal(phaseFromLine('applied account-login: packages/client/x.ts')?.phase, 'apply')
   assert.deepEqual(phaseFromLine('needs-fix: 1 overlay(s) no longer match'), {
     phase: 'apply',
-    percent: 15,
+    percent: 14,
     status: 'needs-fix',
   })
   assert.equal(phaseFromLine('$ pnpm install --frozen-lockfile')?.phase, 'build')
-  assert.equal(phaseFromLine('$ pnpm run build:web')?.percent, 45)
+  assert.equal(phaseFromLine('$ pnpm run build:web')?.percent, 50)
   assert.equal(phaseFromLine('packaged linux-x64: /tmp/x/dist/a.tar.gz')?.phase, 'package')
-  assert.deepEqual(phaseFromLine('smoke linux-x64: starting the packaged DSH under headless Chrome'), { phase: 'smoke', percent: 92 })
-  assert.deepEqual(phaseFromLine('smoke linux-x64: passed (/job/smoke/linux-x64/mesh.png)'), { phase: 'smoke', percent: 96 })
-  assert.deepEqual(phaseFromLine('smoke linux-x64: failed (mesh-sidebar: 0)'), { phase: 'smoke', percent: 100, status: 'smoke-failed' })
-  assert.deepEqual(phaseFromLine('build complete'), { phase: 'done', percent: 100 })
-  assert.deepEqual(phaseFromLine('failed: download failed'), { phase: 'failed', percent: 100, status: 'failed' })
+  assert.deepEqual(phaseFromLine('smoke linux-x64: starting the packaged DSH under headless Chrome'), { phase: 'smoke', percent: 82, currentTarget: 'linux-x64' })
+  assert.deepEqual(phaseFromLine('smoke linux-x64: passed (/job/smoke/linux-x64/mesh.png)'), { phase: 'smoke', percent: 95, currentTarget: 'linux-x64' })
+  assert.deepEqual(phaseFromLine('smoke linux-x64: failed (mesh-sidebar: 0)'), { phase: 'smoke', percent: 95, currentTarget: 'linux-x64', status: 'smoke-failed' })
+  assert.deepEqual(phaseFromLine('build complete'), { phase: 'fetch', percent: 96 })
+  assert.deepEqual(phaseFromLine('failed: download failed'), { phase: 'failed', status: 'failed' })
   assert.equal(phaseFromLine('something unrelated'), null)
+})
+
+test('phaseFromLine gives each target its own slice', () => {
+  const targets = ['linux-x64', 'win-x64']
+  // The packaging share (65 → 95) is split in half, so the second target keeps
+  // the bar moving instead of stalling at the first target's smoke percentage.
+  assert.equal(phaseFromLine('packaged linux-x64: /tmp/a.tar.gz', targets)?.percent, 80)
+  assert.equal(phaseFromLine('smoke linux-x64: starting the packaged DSH', targets)?.percent, 73)
+  assert.equal(phaseFromLine('packaged win-x64: /tmp/b.zip', targets)?.percent, 95)
+  assert.equal(phaseFromLine('smoke win-x64: starting the packaged DSH', targets)?.percent, 88)
+  assert.equal(phaseFromLine('smoke win-x64: passed (/tmp/x.png)', targets)?.percent, 95)
+  assert.equal(phaseFromLine('packaged win-x64: /tmp/b.zip', targets)?.currentTarget, 'win-x64')
 })
 
 test('remoteBuildScript pins the ref, targets, and proxy', () => {
@@ -35,6 +47,11 @@ test('remoteBuildScript pins the ref, targets, and proxy', () => {
   assert.match(script, /--ref '4f2c9d3' --targets 'linux-x64,win-x64' --proxy 'http:\/\/10\.66\.66\.2:8888'/u)
   assert.match(script, /NODE_OPTIONS="--max-old-space-size=2048"/u)
   assert.match(script, /npm_config_https_proxy='http:\/\/10\.66\.66\.2:8888'/u)
+  // Old job dirs are removed, then the free-space floor is checked before the
+  // download starts, so a full member disk fails fast with a readable reason.
+  assert.match(script, /find "\$HOME\/\.dsh\/mesh\/build" -mindepth 1 -maxdepth 1 -type d ! -name 'job-1' -exec rm -rf/u)
+  assert.match(script, /free_kb=\$\(df -Pk "\$HOME"/u)
+  assert.match(script, /not enough free space on the build host/u)
 })
 
 test('remote build scripts pass the daily build stamp to the engine', () => {
@@ -79,6 +96,10 @@ test('windowsBuildScript avoids git and uses the bundled node runtime', () => {
   assert.match(script, /--ref 'abc1234' --targets 'linux-x64,win-x64' --proxy 'http:\/\/10\.66\.66\.2:8888'/u)
   assert.match(script, /HTTP_PROXY/u)
   assert.match(script, /--max-old-space-size=4096/u)
+  // Remove-Item cannot delete node_modules paths past MAX_PATH; the cleanup
+  // goes through Node, and the free-space check runs after it.
+  assert.match(script, /fs\.rmSync/u)
+  assert.match(script, /not enough free space on the build host/u)
 })
 
 test('windowsBuildScript escapes single quotes and omits an unset proxy', () => {

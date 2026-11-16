@@ -504,14 +504,16 @@ export async function buildWebWorkerPackages(options) {
 
 /**
  * Run the web build.
- * @param {{dir: string, log?: (line: string) => void, install?: string[]|null, build?: string[], prepare?: string[][]|null, env?: NodeJS.ProcessEnv, prebuild?: boolean}} options build input.
+ * @param {{dir: string, log?: (line: string) => void, install?: string[]|null, build?: string[], prepare?: string[][]|null, env?: NodeJS.ProcessEnv, prebuild?: boolean, onProgress?: (update: {phase: string, percent: number}) => void|Promise<void>}} options build input.
  * @returns {Promise<{ok: boolean, dist: string|null, error?: string}>} outcome.
  */
 export async function runWebBuild(options) {
   const log = options.log ?? (() => {})
+  const progress = async (phase, percent) => { await options.onProgress?.({ phase, percent }) }
   const install = options.install === undefined ? ['pnpm', 'install', '--frozen-lockfile'] : options.install
   const build = options.build ?? ['pnpm', 'run', 'build:web']
   if (install !== null && install.length > 0) {
+    await progress('build', 16)
     log(`$ ${install.join(' ')}`)
     const installed = await runCommand(install[0], install.slice(1), {
       cwd: options.dir,
@@ -523,6 +525,7 @@ export async function runWebBuild(options) {
     if (!installed.ok) {
       return { ok: false, dist: null, error: `dependency installation failed (exit ${String(installed.code)})\n${installed.tail.join('\n')}` }
     }
+    await progress('build', 40)
   }
   // A recipe can name commands that must run before the web build (a clean
   // upstream tree needs its client packages compiled first, for example).
@@ -549,6 +552,7 @@ export async function runWebBuild(options) {
       return { ok: false, dist: null, error: `prepare step failed (exit ${String(prepared.code)}): ${command.join(' ')}\n${prepared.tail.join('\n')}` }
     }
   }
+  await progress('build', 50)
   log(`$ ${build.join(' ')}`)
   const built = await runCommand(build[0], build.slice(1), {
     cwd: options.dir,
@@ -560,6 +564,7 @@ export async function runWebBuild(options) {
   if (!built.ok) {
     return { ok: false, dist: null, error: `web build failed (exit ${String(built.code)})\n${built.tail.join('\n')}` }
   }
+  await progress('build', 62)
   const candidates = [
     path.join(options.dir, 'apps', 'web', 'dist'),
     path.join(options.dir, 'dist'),

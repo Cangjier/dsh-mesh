@@ -179,10 +179,12 @@ test('Windows extraction reports entry progress and skips Expand-Archive', async
   }
 })
 
-test('Linux extraction turns tar checkpoints into entry progress', async () => {
+test('Linux extraction reports absolute entry counts, never past the total', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'mesh-deploy-'))
   const packagePath = path.join(root, 'package.tar.gz')
   await writeFile(packagePath, 'not really a tarball')
+  let release
+  const gate = new Promise(resolve => { release = resolve })
   const manager = managerWith(() => ({
     async upload(_l, _r, onProgress) {
       onProgress?.({ bytes: 10, totalBytes: 10, percent: 100, speed: 5, indeterminate: false })
@@ -192,14 +194,21 @@ test('Linux extraction turns tar checkpoints into entry progress', async () => {
       if (!script.includes('DSH-MESH-EXTRACT-TOTAL')) return
       onLine?.('counting archive entries')
       onLine?.('DSH-MESH-EXTRACT-TOTAL 2500')
-      onLine?.('DSH-MESH-EXTRACT 1')
-      // tar writes checkpoints to stderr, so the line carries its prefix.
-      onLine?.('tar: DSH-MESH-EXTRACT 2')
+      // The prepare script counts extracted entries itself; the number is
+      // already an entry count (tar's %u used to be records, which is why it
+      // was multiplied by 1000 and overshot the total).
+      onLine?.('DSH-MESH-EXTRACT 1200')
+      await gate
     },
   }), path.join(root, 'jobs'))
 
   try {
     const started = await manager.start({ host: '10.66.66.3', os: 'linux', package: packagePath, appRoot: '/tmp/dsh-test' })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const live = await manager.status(started.job.id)
+    const preparing = live.steps.find(step => step.key === 'prepare')
+    assert.deepEqual(preparing.progress, { done: 1200, total: 2500, percent: 48 })
+    release()
     const final = await manager.wait(started.job.id)
     assert.equal(final.status, 'succeeded')
     const prepare = final.steps.find(step => step.key === 'prepare')
@@ -207,6 +216,7 @@ test('Linux extraction turns tar checkpoints into entry progress', async () => {
     assert.equal(final.progress.label, '切换并重启服务')
     assert.equal(final.progress.percent, 100)
   } finally {
+    release?.()
     await rm(root, { recursive: true, force: true })
   }
 })

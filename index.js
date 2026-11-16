@@ -946,9 +946,13 @@ ${result.tail.join("\n")}` };
 async function runWebBuild(options) {
   const log = options.log ?? (() => {
   });
+  const progress = async (phase, percent) => {
+    await options.onProgress?.({ phase, percent });
+  };
   const install = options.install === void 0 ? ["pnpm", "install", "--frozen-lockfile"] : options.install;
   const build = options.build ?? ["pnpm", "run", "build:web"];
   if (install !== null && install.length > 0) {
+    await progress("build", 16);
     log(`$ ${install.join(" ")}`);
     const installed = await runCommand(install[0], install.slice(1), {
       cwd: options.dir,
@@ -961,6 +965,7 @@ async function runWebBuild(options) {
       return { ok: false, dist: null, error: `dependency installation failed (exit ${String(installed.code)})
 ${installed.tail.join("\n")}` };
     }
+    await progress("build", 40);
   }
   const prepareCommands = options.prepare ?? [];
   if (options.prebuild !== false && prepareCommands.length === 0) {
@@ -982,6 +987,7 @@ ${installed.tail.join("\n")}` };
 ${prepared.tail.join("\n")}` };
     }
   }
+  await progress("build", 50);
   log(`$ ${build.join(" ")}`);
   const built = await runCommand(build[0], build.slice(1), {
     cwd: options.dir,
@@ -994,6 +1000,7 @@ ${prepared.tail.join("\n")}` };
     return { ok: false, dist: null, error: `web build failed (exit ${String(built.code)})
 ${built.tail.join("\n")}` };
   }
+  await progress("build", 62);
   const candidates = [
     path4.join(options.dir, "apps", "web", "dist"),
     path4.join(options.dir, "dist")
@@ -2308,6 +2315,60 @@ async function nextBuildStamp(options = {}) {
   return stamp;
 }
 
+// code/build/progress.mjs
+var BUILD_DONE = 65;
+var PACKAGE_END = 95;
+var STAGE_FACTOR = { start: 0, smoke: 0.55, end: 1 };
+function targetRange(targets, target) {
+  const list = Array.isArray(targets) && targets.length > 0 ? targets : ["linux-x64"];
+  const index = Math.max(0, list.indexOf(target));
+  const span = (PACKAGE_END - BUILD_DONE) / list.length;
+  return {
+    start: Math.round(BUILD_DONE + span * index),
+    end: Math.round(BUILD_DONE + span * (index + 1))
+  };
+}
+function targetPercent(targets, target, stage = "start") {
+  const { start, end } = targetRange(targets, target);
+  const factor = STAGE_FACTOR[stage] ?? 0;
+  return Math.round(start + (end - start) * factor);
+}
+function phaseFromLine(line, targets = ["linux-x64"]) {
+  const text = String(line);
+  if (text.includes("job created")) return { phase: "prepare", percent: 2 };
+  if (text.includes("extracting ")) return { phase: "prepare", percent: 6 };
+  if (text.includes("needs-fix")) return { phase: "apply", percent: 14, status: "needs-fix" };
+  if (/^(?:applied|skipped) /u.test(text)) return { phase: "apply", percent: 11 };
+  if (text.includes("$ pnpm install") || text.includes("$ pnpm i")) return { phase: "build", percent: 18 };
+  if (text.includes("$ pnpm run build:web") || text.includes("$ pnpm build")) return { phase: "build", percent: 50 };
+  if (text.includes("frontend installed") || text.includes("patching ")) {
+    const first = Array.isArray(targets) && targets.length > 0 ? targets[0] : "linux-x64";
+    return { phase: "package", percent: targetPercent(targets, first, "start"), currentTarget: first };
+  }
+  const packaged = /^packaged (\S+):/u.exec(text);
+  if (packaged !== null) {
+    return {
+      phase: "package",
+      percent: targetPercent(targets, packaged[1], "end"),
+      currentTarget: packaged[1]
+    };
+  }
+  const smoke = /^smoke (\S+): (starting|passed|skipped|failed)/u.exec(text);
+  if (smoke !== null) {
+    if (smoke[2] === "failed") {
+      return { phase: "smoke", percent: targetPercent(targets, smoke[1], "end"), currentTarget: smoke[1], status: "smoke-failed" };
+    }
+    return {
+      phase: "smoke",
+      percent: targetPercent(targets, smoke[1], smoke[2] === "starting" ? "smoke" : "end"),
+      currentTarget: smoke[1]
+    };
+  }
+  if (text.includes("build complete")) return { phase: "fetch", percent: 96 };
+  if (text.includes("failed:")) return { phase: "failed", status: "failed" };
+  return null;
+}
+
 // code/build/job.mjs
 function defaultJobRoot() {
   return path8.join(os5.homedir(), ".dsh", "mesh", "build");
@@ -2390,7 +2451,7 @@ async function runJob(dir, options) {
     options.onLog?.(line);
   };
   try {
-    state = await updateState(dir, { status: "running", phase: "prepare", error: null });
+    state = await updateState(dir, { status: "running", phase: "prepare", percent: 2, currentTarget: null, error: null });
     const prepared = options.reuseWorktree === true && existsSync6(path8.join(dir, "src")) ? { dir: path8.join(dir, "src"), source: state.source, ref: state.ref, local: false, archiveSha256: state.archiveSha256 ?? null } : await prepareSource({
       source: state.source,
       ref: state.ref,
@@ -2401,6 +2462,7 @@ async function runJob(dir, options) {
     });
     state = await updateState(dir, {
       phase: "apply",
+      percent: 7,
       proxy: outbound.proxy,
       source: prepared.source,
       ref: prepared.ref,
@@ -2422,6 +2484,7 @@ async function runJob(dir, options) {
       state = await updateState(dir, {
         status: "needs-fix",
         phase: "apply",
+        percent: 14,
         workOrder: order,
         mismatches: result.mismatches,
         applied: result.applied,
@@ -2434,6 +2497,7 @@ async function runJob(dir, options) {
       state = await updateState(dir, {
         status: "planned",
         phase: "apply",
+        percent: 100,
         applied: result.applied,
         skipped: result.skipped,
         mismatchCount: 0
@@ -2441,7 +2505,12 @@ async function runJob(dir, options) {
       log("plan complete: every overlay applies");
       return state;
     }
-    state = await updateState(dir, { phase: "build", applied: result.applied, skipped: result.skipped });
+    state = await updateState(dir, {
+      phase: "build",
+      percent: 12,
+      applied: result.applied,
+      skipped: result.skipped
+    });
     const built = await runWebBuild({
       dir: prepared.dir,
       log,
@@ -2449,7 +2518,12 @@ async function runJob(dir, options) {
       build: options.build,
       prepare: options.prepare ?? (Array.isArray(recipes.prepare) ? recipes.prepare : null),
       env: outbound.env,
-      prebuild: options.prebuild
+      prebuild: options.prebuild,
+      // The install and the web build are the two long silent steps; the
+      // panel would otherwise sit at 12% until packaging starts.
+      onProgress: async (update) => {
+        state = await updateState(dir, { phase: update.phase, percent: update.percent });
+      }
     });
     if (!built.ok) {
       state = await updateState(dir, { status: "build-failed", phase: "build", error: built.error ?? "web build failed" });
@@ -2457,10 +2531,16 @@ async function runJob(dir, options) {
       return state;
     }
     const version = options.version ?? await readSourceVersion(prepared.dir);
-    state = await updateState(dir, { phase: "package", version, dist: built.dist });
+    state = await updateState(dir, { phase: "package", percent: 65, version, dist: built.dist });
     const artifacts = [];
     const full = options.full !== false;
-    for (const target of state.targets) {
+    const targets = state.targets;
+    for (const target of targets) {
+      state = await updateState(dir, {
+        phase: "package",
+        percent: targetPercent(targets, target, "start"),
+        currentTarget: target
+      });
       const shared = {
         dist: built.dist,
         target,
@@ -2490,7 +2570,11 @@ async function runJob(dir, options) {
       } else if (!full) {
         smoke = { ok: true, status: "skipped", reason: "web-only package has no app/runtime to start", checks: [], screenshots: [] };
       } else {
-        state = await updateState(dir, { phase: "smoke", percent: 92 });
+        state = await updateState(dir, {
+          phase: "smoke",
+          percent: targetPercent(targets, target, "smoke"),
+          currentTarget: target
+        });
         log(`smoke ${target}: starting the packaged DSH under headless Chrome`);
         smoke = await runPackageSmoke({
           packageRoot: assembled.packageDir,
@@ -2505,7 +2589,6 @@ async function runJob(dir, options) {
         });
         if (smoke.status === "skipped") log(`smoke ${target}: skipped (${smoke.reason})`);
         else log(`smoke ${target}: ${smoke.status}${Array.isArray(smoke.screenshots) && smoke.screenshots.length > 0 ? ` (${smoke.screenshots.join(", ")})` : ""}`);
-        if (smoke.status !== "failed") state = await updateState(dir, { phase: "smoke", percent: 96 });
       }
       const artifact = {
         target,
@@ -2521,15 +2604,21 @@ async function runJob(dir, options) {
         state = await updateState(dir, {
           status: "smoke-failed",
           phase: "smoke",
-          percent: 100,
+          percent: targetPercent(targets, target, "end"),
           error: `${target} smoke test failed: ${smoke.error ?? "see smoke.log"}`,
           artifacts
         });
         log(`smoke ${target}: failed; stopping before the next target`);
         return state;
       }
+      state = await updateState(dir, {
+        phase: "package",
+        percent: targetPercent(targets, target, "end"),
+        currentTarget: target,
+        artifacts
+      });
     }
-    state = await updateState(dir, { status: "done", phase: "done", artifacts });
+    state = await updateState(dir, { status: "done", phase: "done", percent: 100, currentTarget: null, artifacts });
     log("build complete");
     return state;
   } catch (error) {
@@ -3154,12 +3243,24 @@ if [ -e "$NEW" ]; then
   exit 1
 fi
 mkdir -p "$NEW"
-# One marker per 1000 entries: the deploy engine turns these into the panel's
-# extraction progress. Counting first costs a gzip pass but gives an honest
-# denominator; printing every path would flood the job log with 78k lines.
+# One marker per ${String(EXTRACT_CHECKPOINT)} extracted entries: the deploy engine turns
+# these into the panel's extraction progress. Counting first costs a gzip pass
+# but gives an honest denominator; printing every path would flood the job log
+# with 78k lines.
+#
+# Do not use tar's --checkpoint-action here: %u is the number of 10 KiB records
+# read, not entries, so multiplying it by the checkpoint interval produced
+# numbers far larger than the archive's entry count (and a bar stuck at 99%).
 printf 'DSH-MESH-EXTRACT-TOTAL %s
 ' "$(tar -tzf "$PACKAGE" | wc -l | tr -d ' ')"
-tar -xzf "$PACKAGE" -C "$NEW" --strip-components=1 --checkpoint=1000 --checkpoint-action=echo='DSH-MESH-EXTRACT %u'
+tar -xzf "$PACKAGE" -C "$NEW" --strip-components=1 -v | {
+  extracted=0
+  while IFS= read -r _entry; do
+    extracted=$((extracted + 1))
+    if [ $((extracted % ${String(EXTRACT_CHECKPOINT)})) -eq 0 ]; then printf 'DSH-MESH-EXTRACT %s
+' "$extracted"; fi
+  done
+}
 
 # Shared mutable state stays outside every release. The first deploy copies it
 # from the currently running tree; later deploys inherit it untouched.
@@ -3758,7 +3859,7 @@ try {
 ${restart}
 } catch {
   $restartFailed = $true
-  Write-Host "a service failed to restart on $Release: $($_.Exception.Message)"
+  Write-Host ("a service failed to restart on " + $Release + ": " + $_.Exception.Message)
 }
 function Invoke-Rollback {
   # Logging must not throw here: with ErrorActionPreference=Stop a Write-Error
@@ -4419,7 +4520,7 @@ var DeployManager = class {
         meter("\u89E3\u538B\u5B89\u88C5\u5305", { done, total, percent, indeterminate: total === 0 });
       };
       const trackExtract = (line) => {
-        const text = line.trim().replace(/^tar:\s*/u, "");
+        const text = line.trim();
         const head = /^DSH-MESH-EXTRACT-TOTAL (\d+)$/u.exec(text);
         if (head !== null) {
           entries = Number.parseInt(head[1], 10);
@@ -4428,7 +4529,8 @@ var DeployManager = class {
         }
         const tick = /^DSH-MESH-EXTRACT (\d+)$/u.exec(text);
         if (tick !== null) {
-          extractProgress(Number.parseInt(tick[1], 10) * EXTRACT_CHECKPOINT, entries);
+          const done = Number.parseInt(tick[1], 10);
+          extractProgress(entries > 0 ? Math.min(done, entries) : done, entries);
           return true;
         }
         return false;
@@ -4852,28 +4954,12 @@ var REMOTE_SRC = "$HOME/.dsh/mesh/build-src";
 var REMOTE_JOBS = "$HOME/.dsh/mesh/build";
 var REMOTE_BIN = "$HOME/.dsh/mesh/bin";
 var REMOTE_NODE_DIR = "$HOME/.dsh/dsh-mesh/current/runtime/node/bin";
-function phaseFromLine(line) {
-  const text = String(line);
-  if (text.includes("job created") || text.includes("extracting")) return { phase: "prepare", percent: 4 };
-  if (text.includes("applied ") || text.includes("skipped ")) return { phase: "apply", percent: 12 };
-  if (text.includes("needs-fix")) return { phase: "apply", percent: 15, status: "needs-fix" };
-  if (text.includes("$ pnpm install") || text.includes("$ pnpm i")) return { phase: "build", percent: 20 };
-  if (text.includes("installing")) return { phase: "build", percent: 25 };
-  if (text.includes("$ pnpm run build:web") || text.includes("$ pnpm build")) return { phase: "build", percent: 45 };
-  if (text.includes("frontend installed") || text.includes("patching ")) return { phase: "package", percent: 70 };
-  if (/packaged \S+: \//u.test(text)) return { phase: "package", percent: 85 };
-  if (text.includes("smoke ") && text.includes(": starting")) return { phase: "smoke", percent: 92 };
-  if (text.includes("smoke ") && text.includes(": passed")) return { phase: "smoke", percent: 96 };
-  if (text.includes("smoke ") && text.includes(": failed")) return { phase: "smoke", percent: 100, status: "smoke-failed" };
-  if (text.includes("build complete")) return { phase: "done", percent: 100 };
-  if (text.includes("failed:")) return { phase: "failed", percent: 100, status: "failed" };
-  return null;
-}
 function remoteBuildScript(options) {
   const ref = String(options.ref);
   const targets = options.targets.join(",");
   const out = `${REMOTE_JOBS}/${options.jobId}`;
   const heap = Number.isSafeInteger(options.heapMb) && options.heapMb > 0 ? options.heapMb : 2048;
+  const needGiB = 5 + 3 * options.targets.length;
   const lines = [
     "set -u",
     `export PATH="${REMOTE_BIN}:${REMOTE_NODE_DIR}:$PATH"`,
@@ -4882,6 +4968,13 @@ function remoteBuildScript(options) {
     `export NODE_OPTIONS="--max-old-space-size=${String(heap)}"`,
     options.proxyUrl ? `export HTTP_PROXY=${quote(options.proxyUrl)} HTTPS_PROXY=${quote(options.proxyUrl)} npm_config_proxy=${quote(options.proxyUrl)} npm_config_https_proxy=${quote(options.proxyUrl)}` : "",
     `mkdir -p ${REMOTE_BIN} ${out}`,
+    // Finished jobs from earlier builds are what fill a member's disk: a
+    // two-target job keeps its own source tree and both package trees. The
+    // gateway keeps the state and the log, so the member-side directory is
+    // only ever needed while that build runs.
+    `find "${REMOTE_JOBS}" -mindepth 1 -maxdepth 1 -type d ! -name ${quote(String(options.jobId))} -exec rm -rf {} + 2>/dev/null || true`,
+    `free_kb=$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')`,
+    `if [ "\${free_kb:-0}" -lt ${String(needGiB * 1024 * 1024)} ]; then echo "not enough free space on the build host: \${free_kb:-0} KiB free, ${String(needGiB)} GiB needed" >&2; exit 4; fi`,
     `if [ ! -d "${REMOTE_SRC}/.git" ]; then`,
     `  echo "cloning ${options.repoUrl ?? DEFAULT_MESH_REPO}"`,
     `  git clone --depth 1 --branch main ${quote(options.repoUrl ?? DEFAULT_MESH_REPO)} "${REMOTE_SRC}" || { echo "mesh clone failed" >&2; exit 3; }`,
@@ -4904,6 +4997,7 @@ function quote(value) {
 }
 function windowsBuildScript(options) {
   const repo = options.repoUrl ?? DEFAULT_MESH_REPO;
+  const needGiB = 5 + 3 * options.targets.length;
   const codeload = repo.replace(/^git\+/u, "").replace(/\.git$/u, "").replace(/^https:\/\/github\.com\//u, "https://codeload.github.com/").replace(/\/+$/u, "");
   const zipUrl = `${codeload}/zip/refs/heads/main`;
   const heap = Number.isSafeInteger(options.heapMb) && options.heapMb > 0 ? options.heapMb : 4096;
@@ -4928,6 +5022,15 @@ function windowsBuildScript(options) {
     "$nodeDir = $null",
     `foreach ($candidate in @(${candidates.join(", ")})) { if (Test-Path (Join-Path $candidate 'node.exe')) { $nodeDir = $candidate; break } }`,
     "if ($null -eq $nodeDir) { throw 'no node runtime on this member' }",
+    // Remove last run's job directory with Node instead of Remove-Item:
+    // node_modules paths are longer than MAX_PATH and Remove-Item fails on
+    // them halfway through, which is exactly how a member's disk filled up.
+    "$buildRoot = Join-Path $root 'build'",
+    `$rmScript = "const fs=require('fs');const p=process.argv[1];fs.rmSync(p,{recursive:true,force:true,maxRetries:5,retryDelay:200})"`,
+    `Get-ChildItem -LiteralPath $buildRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} } | ForEach-Object { & (Join-Path $nodeDir 'node.exe') -e $rmScript $_.FullName 2>$null; if (Test-Path -LiteralPath $_.FullName) { Write-Output ('could not remove a leftover job dir: ' + $_.Name) } }`,
+    "$driveFree = 0",
+    "try { $driveFree = (Get-PSDrive ((Get-Item $env:USERPROFILE).PSDrive.Name)).Free } catch { $driveFree = (Get-PSDrive C).Free }",
+    `if ($driveFree -lt ${String(needGiB * 1024 ** 3)}) { throw ("not enough free space on the build host: {0:N1} GiB free, ${String(needGiB)} GiB needed" -f ($driveFree / 1GB)) }`,
     '$env:PATH = "$bin;$nodeDir;$env:PATH"',
     "$env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'",
     "$env:CI = '1'",
@@ -5032,41 +5135,54 @@ var RemoteBuilder = class {
     let percent = 1;
     const onLine = (line) => {
       void appendLog(jobDir, line);
-      const update = phaseFromLine(line);
-      if (update === null || update.percent <= percent) return;
-      percent = update.percent;
-      void this.#update(jobDir, { phase: update.phase, percent });
+      const update = phaseFromLine(line, state.targets);
+      if (update === null) return;
+      const patch = { phase: update.phase };
+      if (typeof update.percent === "number" && update.percent > percent) {
+        percent = update.percent;
+        patch.percent = percent;
+      }
+      if (update.currentTarget !== void 0) patch.currentTarget = update.currentTarget;
+      void this.#update(jobDir, patch);
     };
     try {
       await runner.script(script, windows ? "windows" : "linux", onLine);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await appendLog(jobDir, `member build did not finish: ${message}`);
-      return this.#update(jobDir, { status: "failed", phase: "failed", error: message, percent: 100 });
+      const settled = await this.#update(jobDir, { status: "failed", phase: "failed", error: message, percent });
+      await this.#cleanupRemote(runner, jobDir, state.id, windows);
+      return settled;
     }
     const remote = await this.#readRemoteState(runner, state.id, windows);
     if (remote === null) {
       const message = "the member finished without writing a job state; see the log for its output";
       await appendLog(jobDir, message);
-      return this.#update(jobDir, { status: "failed", phase: "failed", error: message, percent: 100 });
+      const settled = await this.#update(jobDir, { status: "failed", phase: "failed", error: message, percent });
+      await this.#cleanupRemote(runner, jobDir, state.id, windows);
+      return settled;
     }
     if (remote.status !== "done") {
       const message = typeof remote.error === "string" && remote.error !== "" ? remote.error : `member build ended with status ${String(remote.status)}`;
       await appendLog(jobDir, `member job ${String(remote.status)}: ${message}`);
       const status = remote.status === "needs-fix" ? "needs-fix" : remote.status === "smoke-failed" ? "smoke-failed" : "failed";
-      return this.#update(jobDir, {
+      const settled = await this.#update(jobDir, {
         status,
         phase: remote.phase ?? "failed",
         error: status === "failed" ? message : null,
-        percent: 100,
+        percent,
         remoteJob: remote.id ?? null,
         remoteWorktree: remote.worktree ?? null,
         workOrder: remote.workOrder ?? null,
         mismatches: remote.mismatches ?? []
       });
+      if (status !== "needs-fix") await this.#cleanupRemote(runner, jobDir, state.id, windows);
+      return settled;
     }
     const directories = Array.isArray(remote.artifacts) ? remote.artifacts : [];
     const artifacts = [];
+    let pulled = 0;
+    if (directories.length > 0) await this.#update(jobDir, { phase: "fetch", percent: 96, currentTarget: null });
     for (const artifact of directories) {
       const archive = typeof artifact.archive === "string" ? artifact.archive : "";
       if (archive === "") continue;
@@ -5084,15 +5200,53 @@ var RemoteBuilder = class {
         smoke: artifact.smoke ?? null
       });
       await appendLog(jobDir, `pulled ${path11.basename(local)} (${String(info.size)} bytes, sha256 ${digest.slice(0, 12)}\u2026)`);
+      pulled += 1;
+      await this.#update(jobDir, { phase: "fetch", percent: 96 + Math.round(3 * pulled / directories.length) });
     }
-    return this.#update(jobDir, {
+    const done = await this.#update(jobDir, {
       status: "done",
       phase: "done",
       percent: 100,
+      currentTarget: null,
       artifacts,
       remoteJob: remote.id ?? null,
       version: remote.version ?? null
     });
+    await this.#cleanupRemote(runner, jobDir, state.id, windows);
+    return done;
+  }
+  /**
+   * Delete the member-side job directory once its outcome is settled.
+   *
+   * The gateway keeps the job state and mirrors the member's output into its
+   * own build log, so the member only needs the directory while the build
+   * runs. Removing it keeps the next full build from starting on a disk that
+   * older jobs filled. Windows deletes through Node's fs.rmSync because
+   * node_modules paths are longer than MAX_PATH and Remove-Item gives up on
+   * them halfway.
+   * @param {SshRunner} runner ssh runner.
+   * @param {string} jobDir local job directory (the cleanup is logged there).
+   * @param {string} jobId build job id (also the remote directory name).
+   * @param {boolean} windows whether the member runs Windows.
+   * @returns {Promise<void>} completion.
+   */
+  async #cleanupRemote(runner, jobDir, jobId, windows) {
+    const localPath = `$HOME/.dsh/mesh/build/${jobId}`;
+    const command = windows ? powershellCommand([
+      "$ProgressPreference = 'SilentlyContinue'",
+      `$out = Join-Path $env:USERPROFILE '.dsh\\mesh\\build\\${jobId}'`,
+      "$node = Join-Path $env:USERPROFILE '.dsh\\dsh-mesh\\current\\runtime\\node\\node.exe'",
+      "if (-not (Test-Path $node)) { $node = Join-Path $env:USERPROFILE '.dsh\\dsh-person-web\\runtime\\node\\node.exe' }",
+      `if ((Test-Path $out) -and (Test-Path $node)) { & $node -e "const fs=require('fs');fs.rmSync(process.argv[1],{recursive:true,force:true,maxRetries:5,retryDelay:200})" $out }`,
+      "if (Test-Path $out) { Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue }"
+    ].join("; ")) : `rm -rf "${localPath}"`;
+    try {
+      await runner.runProcess("ssh", [...runner.sshOptions(), runner.target(), command]);
+      await appendLog(jobDir, `member build dir removed: ${jobId}`);
+      this.log(`remote build dir removed: ${jobId}`);
+    } catch (error) {
+      this.log(`could not remove the remote build dir ${jobId} (the next build retries): ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
   /**
    * Copy one remote archive into the packages directory.
@@ -5758,14 +5912,22 @@ var MeshService = class {
     return { ok: true, tags };
   }
   /**
-   * Remove the files left by earlier builds.
+   * Remove the temporary files a build leaves behind.
    *
-   * Called after a build finishes, with the just-finished job id as `keep`, so
-   * the new `src/`, `work-order/` and `dist/` survive. All older jobs lose
-   * their worktree, work order and (unless `keepDist`) their package.
-   * `state.json` and `build.log` are always kept for postmortem.
-   * @param {{keep?: string, keepDist?: boolean}} [options] job to preserve and whether to retain old packages.
-   * @returns {Promise<string[]>} ids whose outputs were removed.
+   * `state.json` and `build.log` are the postmortem, so they stay; the source
+   * worktree, smoke screenshots, work order and extracted package trees are
+   * only useful while the build runs.
+   *
+   * A successful job keeps its archives under `dist/` — a member build's were
+   * already pulled into the packages directory, while a local build has no
+   * other copy. A failed or planned job keeps nothing but the log and state: a
+   * partial archive is not a deliverable.
+   *
+   * `needs-fix` and `learned` jobs are skipped: their worktree is the input the
+   * repair/resume flow works on. `keepDist` disables the pruning entirely for
+   * callers that want the whole tree (`--keep-dist`).
+   * @param {{keep?: string, keepDist?: boolean}} [options] unused compatibility fields.
+   * @returns {Promise<string[]>} ids whose temporary files were removed.
    */
   async cleanupBuilds(options = {}) {
     if (!existsSync11(this.jobRoot)) return [];
@@ -5780,14 +5942,34 @@ var MeshService = class {
       } catch {
         continue;
       }
-      if (this.running.has(state.id)) continue;
-      if (state.id === options.keep) continue;
+      if (this.running.has(state.id) && state.id !== options.keep) continue;
+      if (state.status === "created" || state.status === "needs-fix" || state.status === "learned") continue;
       await rm8(path13.join(dir, "src"), { recursive: true, force: true });
+      await rm8(path13.join(dir, "smoke"), { recursive: true, force: true });
       await rm8(path13.join(dir, "work-order"), { recursive: true, force: true });
-      if (options.keepDist !== true) await rm8(path13.join(dir, "dist"), { recursive: true, force: true });
+      if (options.keepDist !== true) {
+        if (state.status === "done") await this.#pruneDist(path13.join(dir, "dist"));
+        else await rm8(path13.join(dir, "dist"), { recursive: true, force: true });
+      }
       removed.push(state.id);
     }
     return removed;
+  }
+  /**
+   * Remove the extracted package trees from a `dist/` directory.
+   *
+   * Archives and their `.sha256` sidecars are files and stay untouched; the
+   * per-target package directories (an `app/` + `runtime/` copy each) are the
+   * part that costs a gigabyte per target.
+   * @param {string} distDir job `dist/` directory.
+   * @returns {Promise<void>} completion.
+   */
+  async #pruneDist(distDir) {
+    const entries = await readdir6(distDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      await rm8(path13.join(distDir, entry.name), { recursive: true, force: true });
+    }
   }
   /**
    * Start one build job in the background.
@@ -5920,11 +6102,14 @@ var MeshService = class {
       const message = error instanceof Error ? error.message : String(error);
       await appendLog(job.dir, `build failed to start: ${message}`).catch(() => {
       });
-      await updateState(job.dir, { status: "failed", phase: "failed", error: message, percent: 100 }).catch(() => {
+      await updateState(job.dir, { status: "failed", phase: "failed", error: message, percent: 0 }).catch(() => {
       });
       throw error;
     } finally {
       egress?.close();
+      await this.cleanupBuilds({ keep: job.id }).catch((error) => {
+        this.logLine(`mesh build cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }
   }
   /**
@@ -6094,6 +6279,7 @@ var MeshService = class {
       proxy: state.proxy ?? null,
       proxyMember: state.proxyMember ?? null,
       percent: typeof state.percent === "number" ? state.percent : null,
+      currentTarget: state.currentTarget ?? null,
       version: state.version ?? null,
       error: state.error ?? null
     };
@@ -6923,7 +7109,7 @@ var JobDirectoryWatcher = class {
 // src/lib/job-events.mjs
 import path15 from "node:path";
 var LOG_THROTTLE_MS = 400;
-var LOG_LINES = 200;
+var LOG_LINES = 300;
 var JOB_ID = /^[A-Za-z0-9._-]+$/u;
 function startJobEvents(options) {
   const { service, hub } = options;
@@ -6988,8 +7174,8 @@ function startJobEvents(options) {
   }
   async function sendLog(kind, id) {
     try {
-      const text = kind === "build" ? await service.log(id, LOG_LINES) : await service.deployLogs(id, LOG_LINES);
-      const lines = typeof text === "string" && text.trim() !== "" ? text.trimEnd().split(/\r?\n/u) : [];
+      const tail = kind === "build" ? await service.log(id, LOG_LINES) : await service.deployLogs(id, LOG_LINES);
+      const lines = Array.isArray(tail) ? tail.filter((line) => typeof line === "string") : typeof tail === "string" && tail.trim() !== "" ? tail.trimEnd().split(/\r?\n/u) : [];
       hub.send(`${kind}-log`, { type: `${kind}-log`, id, lines });
     } catch (error) {
       log(`job log for ${kind}:${id} failed: ${error instanceof Error ? error.message : String(error)}`);

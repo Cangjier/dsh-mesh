@@ -510,14 +510,22 @@ export class MeshService {
   }
 
   /**
-   * Remove the files left by earlier builds.
+   * Remove the temporary files a build leaves behind.
    *
-   * Called after a build finishes, with the just-finished job id as `keep`, so
-   * the new `src/`, `work-order/` and `dist/` survive. All older jobs lose
-   * their worktree, work order and (unless `keepDist`) their package.
-   * `state.json` and `build.log` are always kept for postmortem.
-   * @param {{keep?: string, keepDist?: boolean}} [options] job to preserve and whether to retain old packages.
-   * @returns {Promise<string[]>} ids whose outputs were removed.
+   * `state.json` and `build.log` are the postmortem, so they stay; the source
+   * worktree, smoke screenshots, work order and extracted package trees are
+   * only useful while the build runs.
+   *
+   * A successful job keeps its archives under `dist/` — a member build's were
+   * already pulled into the packages directory, while a local build has no
+   * other copy. A failed or planned job keeps nothing but the log and state: a
+   * partial archive is not a deliverable.
+   *
+   * `needs-fix` and `learned` jobs are skipped: their worktree is the input the
+   * repair/resume flow works on. `keepDist` disables the pruning entirely for
+   * callers that want the whole tree (`--keep-dist`).
+   * @param {{keep?: string, keepDist?: boolean}} [options] unused compatibility fields.
+   * @returns {Promise<string[]>} ids whose temporary files were removed.
    */
   async cleanupBuilds(options = {}) {
     if (!existsSync(this.jobRoot)) return []
@@ -532,14 +540,40 @@ export class MeshService {
       } catch {
         continue
       }
-      if (this.running.has(state.id)) continue
-      if (state.id === options.keep) continue
+      // `keep` is exempt from the running check: `#runBuild` cleans up in its
+      // finally block, where the finished job is still registered as running.
+      if (this.running.has(state.id) && state.id !== options.keep) continue
+      // These statuses still own a worktree the repair flow resumes from.
+      if (state.status === 'created' || state.status === 'needs-fix' || state.status === 'learned') continue
       await rm(path.join(dir, 'src'), { recursive: true, force: true })
+      await rm(path.join(dir, 'smoke'), { recursive: true, force: true })
       await rm(path.join(dir, 'work-order'), { recursive: true, force: true })
-      if (options.keepDist !== true) await rm(path.join(dir, 'dist'), { recursive: true, force: true })
+      if (options.keepDist !== true) {
+        // Only a done job has a deliverable to keep; a planned job never had
+        // one and a stopped job's partial output is not worth keeping.
+        if (state.status === 'done') await this.#pruneDist(path.join(dir, 'dist'))
+        else await rm(path.join(dir, 'dist'), { recursive: true, force: true })
+      }
       removed.push(state.id)
     }
     return removed
+  }
+
+  /**
+   * Remove the extracted package trees from a `dist/` directory.
+   *
+   * Archives and their `.sha256` sidecars are files and stay untouched; the
+   * per-target package directories (an `app/` + `runtime/` copy each) are the
+   * part that costs a gigabyte per target.
+   * @param {string} distDir job `dist/` directory.
+   * @returns {Promise<void>} completion.
+   */
+  async #pruneDist(distDir) {
+    const entries = await readdir(distDir, { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      await rm(path.join(distDir, entry.name), { recursive: true, force: true })
+    }
   }
 
   /**
@@ -685,10 +719,16 @@ export class MeshService {
       // never starts and never ends.
       const message = error instanceof Error ? error.message : String(error)
       await appendLog(job.dir, `build failed to start: ${message}`).catch(() => {})
-      await updateState(job.dir, { status: 'failed', phase: 'failed', error: message, percent: 100 }).catch(() => {})
+      await updateState(job.dir, { status: 'failed', phase: 'failed', error: message, percent: 0 }).catch(() => {})
       throw error
     } finally {
       egress?.close()
+      // The panel starts builds through `startBuild` (not `build`), which never
+      // ran the cleanup. Without this, every completed job keeps its source
+      // tree and dist directory forever and the build disk fills up.
+      await this.cleanupBuilds({ keep: job.id }).catch(error => {
+        this.logLine(`mesh build cleanup failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
     }
   }
 
@@ -866,6 +906,7 @@ export class MeshService {
       proxy: state.proxy ?? null,
       proxyMember: state.proxyMember ?? null,
       percent: typeof state.percent === 'number' ? state.percent : null,
+      currentTarget: state.currentTarget ?? null,
       version: state.version ?? null,
       error: state.error ?? null,
     }

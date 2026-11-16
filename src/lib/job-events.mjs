@@ -19,8 +19,8 @@ import { JobDirectoryWatcher } from '../../code/shared/event-stream.mjs'
 
 /** At most one log frame per job in this window; the tail is cumulative. */
 const LOG_THROTTLE_MS = 400
-/** Lines of log tail sent per frame. */
-const LOG_LINES = 200
+/** Lines of log tail sent per frame (the modal reads the same window). */
+const LOG_LINES = 300
 /** Job ids come from our own generators, never from a request. */
 const JOB_ID = /^[A-Za-z0-9._-]+$/u
 
@@ -130,10 +130,18 @@ export function startJobEvents(options) {
    */
   async function sendLog(kind, id) {
     try {
-      const text = kind === 'build'
+      const tail = kind === 'build'
         ? await service.log(id, LOG_LINES)
         : await service.deployLogs(id, LOG_LINES)
-      const lines = typeof text === 'string' && text.trim() !== '' ? text.trimEnd().split(/\r?\n/u) : []
+      // `service.log` already returns an array while `deployLogs` returns a
+      // string. Normalising both matters: treating the build array as text
+      // produced `lines: []` on every frame, and the panel replaced a full log
+      // with that empty tail (it looked like the log vanished into "等待日志").
+      const lines = Array.isArray(tail)
+        ? tail.filter(line => typeof line === 'string')
+        : typeof tail === 'string' && tail.trim() !== ''
+          ? tail.trimEnd().split(/\r?\n/u)
+          : []
       hub.send(`${kind}-log`, { type: `${kind}-log`, id, lines })
     } catch (error) {
       log(`job log for ${kind}:${id} failed: ${error instanceof Error ? error.message : String(error)}`)

@@ -22,6 +22,7 @@ import { createHash } from 'node:crypto'
 import { open, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { appendLog, readState, updateState } from '../../code/build/job.mjs'
+import { phaseFromLine } from '../../code/build/progress.mjs'
 import { SshRunner } from '../../code/deploy/engine.mjs'
 
 /** Repository the member builds from. */
@@ -33,31 +34,9 @@ const REMOTE_JOBS = '$HOME/.dsh/mesh/build'
 const REMOTE_BIN = '$HOME/.dsh/mesh/bin'
 const REMOTE_NODE_DIR = '$HOME/.dsh/dsh-mesh/current/runtime/node/bin'
 
-/**
- * Map one build-log line to a job phase and a rough percentage.
- *
- * The engine prints stable markers (`extracting`, `$ pnpm …`, `packaged …`),
- * so the panel can show movement during an otherwise silent ten-minute step.
- * @param {string} line log line.
- * @returns {{phase: string, percent: number, status?: string}|null} update.
- */
-export function phaseFromLine(line) {
-  const text = String(line)
-  if (text.includes('job created') || text.includes('extracting')) return { phase: 'prepare', percent: 4 }
-  if (text.includes('applied ') || text.includes('skipped ')) return { phase: 'apply', percent: 12 }
-  if (text.includes('needs-fix')) return { phase: 'apply', percent: 15, status: 'needs-fix' }
-  if (text.includes('$ pnpm install') || text.includes('$ pnpm i')) return { phase: 'build', percent: 20 }
-  if (text.includes('installing')) return { phase: 'build', percent: 25 }
-  if (text.includes('$ pnpm run build:web') || text.includes('$ pnpm build')) return { phase: 'build', percent: 45 }
-  if (text.includes('frontend installed') || text.includes('patching ')) return { phase: 'package', percent: 70 }
-  if (/packaged \S+: \//u.test(text)) return { phase: 'package', percent: 85 }
-  if (text.includes('smoke ') && text.includes(': starting')) return { phase: 'smoke', percent: 92 }
-  if (text.includes('smoke ') && text.includes(': passed')) return { phase: 'smoke', percent: 96 }
-  if (text.includes('smoke ') && text.includes(': failed')) return { phase: 'smoke', percent: 100, status: 'smoke-failed' }
-  if (text.includes('build complete')) return { phase: 'done', percent: 100 }
-  if (text.includes('failed:')) return { phase: 'failed', percent: 100, status: 'failed' }
-  return null
-}
+// The line→progress mapping is shared with the local engine so a remote job
+// and a local one show the same target-aware numbers.
+export { phaseFromLine }
 
 /**
  * Build the bash script that runs one job on a member.
@@ -74,6 +53,10 @@ export function remoteBuildScript(options) {
   const targets = options.targets.join(',')
   const out = `${REMOTE_JOBS}/${options.jobId}`
   const heap = Number.isSafeInteger(options.heapMb) && options.heapMb > 0 ? options.heapMb : 2048
+  // One full build (source + node_modules + one package tree + archive) takes
+  // several GiB; a second target adds another package tree. Checking before
+  // the download turns a mid-run ENOSPC into an immediate, readable failure.
+  const needGiB = 5 + 3 * options.targets.length
   const lines = [
     'set -u',
     `export PATH="${REMOTE_BIN}:${REMOTE_NODE_DIR}:$PATH"`,
@@ -82,6 +65,13 @@ export function remoteBuildScript(options) {
     `export NODE_OPTIONS="--max-old-space-size=${String(heap)}"`,
     options.proxyUrl ? `export HTTP_PROXY=${quote(options.proxyUrl)} HTTPS_PROXY=${quote(options.proxyUrl)} npm_config_proxy=${quote(options.proxyUrl)} npm_config_https_proxy=${quote(options.proxyUrl)}` : '',
     `mkdir -p ${REMOTE_BIN} ${out}`,
+    // Finished jobs from earlier builds are what fill a member's disk: a
+    // two-target job keeps its own source tree and both package trees. The
+    // gateway keeps the state and the log, so the member-side directory is
+    // only ever needed while that build runs.
+    `find "${REMOTE_JOBS}" -mindepth 1 -maxdepth 1 -type d ! -name ${quote(String(options.jobId))} -exec rm -rf {} + 2>/dev/null || true`,
+    `free_kb=$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')`,
+    `if [ "\${free_kb:-0}" -lt ${String(needGiB * 1024 * 1024)} ]; then echo "not enough free space on the build host: \${free_kb:-0} KiB free, ${String(needGiB)} GiB needed" >&2; exit 4; fi`,
     `if [ ! -d "${REMOTE_SRC}/.git" ]; then`,
     `  echo "cloning ${options.repoUrl ?? DEFAULT_MESH_REPO}"`,
     `  git clone --depth 1 --branch main ${quote(options.repoUrl ?? DEFAULT_MESH_REPO)} "${REMOTE_SRC}" || { echo "mesh clone failed" >&2; exit 3; }`,
@@ -122,6 +112,9 @@ function quote(value) {
  */
 export function windowsBuildScript(options) {
   const repo = options.repoUrl ?? DEFAULT_MESH_REPO
+  // Same preflight as the Linux path: free last run's job dir and refuse to
+  // start when the drive cannot hold this one (a two-target job is the big one).
+  const needGiB = 5 + 3 * options.targets.length
   const codeload = repo
     .replace(/^git\+/u, '')
     .replace(/\.git$/u, '')
@@ -150,6 +143,15 @@ export function windowsBuildScript(options) {
     '$nodeDir = $null',
     `foreach ($candidate in @(${candidates.join(', ')})) { if (Test-Path (Join-Path $candidate 'node.exe')) { $nodeDir = $candidate; break } }`,
     "if ($null -eq $nodeDir) { throw 'no node runtime on this member' }",
+    // Remove last run's job directory with Node instead of Remove-Item:
+    // node_modules paths are longer than MAX_PATH and Remove-Item fails on
+    // them halfway through, which is exactly how a member's disk filled up.
+    "$buildRoot = Join-Path $root 'build'",
+    "$rmScript = \"const fs=require('fs');const p=process.argv[1];fs.rmSync(p,{recursive:true,force:true,maxRetries:5,retryDelay:200})\"",
+    `Get-ChildItem -LiteralPath $buildRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} } | ForEach-Object { & (Join-Path $nodeDir 'node.exe') -e $rmScript $_.FullName 2>$null; if (Test-Path -LiteralPath $_.FullName) { Write-Output ('could not remove a leftover job dir: ' + $_.Name) } }`,
+    '$driveFree = 0',
+    'try { $driveFree = (Get-PSDrive ((Get-Item $env:USERPROFILE).PSDrive.Name)).Free } catch { $driveFree = (Get-PSDrive C).Free }',
+    `if ($driveFree -lt ${String(needGiB * 1024 ** 3)}) { throw ("not enough free space on the build host: {0:N1} GiB free, ${String(needGiB)} GiB needed" -f ($driveFree / 1GB)) }`,
     '$env:PATH = "$bin;$nodeDir;$env:PATH"',
     "$env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'",
     "$env:CI = '1'",
@@ -299,41 +301,66 @@ export class RemoteBuilder {
     let percent = 1
     const onLine = (line) => {
       void appendLog(jobDir, line)
-      const update = phaseFromLine(line)
-      if (update === null || update.percent <= percent) return
-      percent = update.percent
-      void this.#update(jobDir, { phase: update.phase, percent })
+      const update = phaseFromLine(line, state.targets)
+      if (update === null) return
+      const patch = { phase: update.phase }
+      if (typeof update.percent === 'number' && update.percent > percent) {
+        percent = update.percent
+        patch.percent = percent
+      }
+      if (update.currentTarget !== undefined) patch.currentTarget = update.currentTarget
+      // The phase (and especially the target) changes more often than the
+      // percent; applying only the percent would leave "打包" without saying
+      // which target while the second one is being assembled.
+      void this.#update(jobDir, patch)
     }
     try {
       await runner.script(script, windows ? 'windows' : 'linux', onLine)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await appendLog(jobDir, `member build did not finish: ${message}`)
-      return this.#update(jobDir, { status: 'failed', phase: 'failed', error: message, percent: 100 })
+      // Keep the percent the job actually reached: a failure at 20% must not
+      // look like a finished job with a red bar at 100%. Settle the state
+      // first, then remove the member-side tree; the panel shows the failure
+      // while the cleanup runs.
+      const settled = await this.#update(jobDir, { status: 'failed', phase: 'failed', error: message, percent })
+      await this.#cleanupRemote(runner, jobDir, state.id, windows)
+      return settled
     }
     const remote = await this.#readRemoteState(runner, state.id, windows)
     if (remote === null) {
       const message = 'the member finished without writing a job state; see the log for its output'
       await appendLog(jobDir, message)
-      return this.#update(jobDir, { status: 'failed', phase: 'failed', error: message, percent: 100 })
+      const settled = await this.#update(jobDir, { status: 'failed', phase: 'failed', error: message, percent })
+      await this.#cleanupRemote(runner, jobDir, state.id, windows)
+      return settled
     }
     if (remote.status !== 'done') {
       const message = typeof remote.error === 'string' && remote.error !== '' ? remote.error : `member build ended with status ${String(remote.status)}`
       await appendLog(jobDir, `member job ${String(remote.status)}: ${message}`)
       const status = remote.status === 'needs-fix' ? 'needs-fix' : remote.status === 'smoke-failed' ? 'smoke-failed' : 'failed'
-      return this.#update(jobDir, {
+      const settled = await this.#update(jobDir, {
         status,
         phase: remote.phase ?? 'failed',
         error: status === 'failed' ? message : null,
-        percent: 100,
+        percent,
         remoteJob: remote.id ?? null,
         remoteWorktree: remote.worktree ?? null,
         workOrder: remote.workOrder ?? null,
         mismatches: remote.mismatches ?? [],
       })
+      // A needs-fix job keeps its worktree on the member for the repair flow;
+      // every other outcome is settled and the temporary tree can go.
+      if (status !== 'needs-fix') await this.#cleanupRemote(runner, jobDir, state.id, windows)
+      return settled
     }
     const directories = Array.isArray(remote.artifacts) ? remote.artifacts : []
     const artifacts = []
+    // The member finished building but nothing is on this host yet: pulling the
+    // archives is its own phase, so the bar does not claim "完成" while several
+    // hundred MiB are still moving over the mesh.
+    let pulled = 0
+    if (directories.length > 0) await this.#update(jobDir, { phase: 'fetch', percent: 96, currentTarget: null })
     for (const artifact of directories) {
       const archive = typeof artifact.archive === 'string' ? artifact.archive : ''
       if (archive === '') continue
@@ -351,15 +378,62 @@ export class RemoteBuilder {
         smoke: artifact.smoke ?? null,
       })
       await appendLog(jobDir, `pulled ${path.basename(local)} (${String(info.size)} bytes, sha256 ${digest.slice(0, 12)}…)`)
+      pulled += 1
+      await this.#update(jobDir, { phase: 'fetch', percent: 96 + Math.round((3 * pulled) / directories.length) })
     }
-    return this.#update(jobDir, {
+    // Archives are on the gateway now; the member-side tree (source,
+    // node_modules, both package trees, and the member's copy of the archive)
+    // is only temporary data. Settle the job first so the panel does not wait
+    // for a multi-minute delete.
+    const done = await this.#update(jobDir, {
       status: 'done',
       phase: 'done',
       percent: 100,
+      currentTarget: null,
       artifacts,
       remoteJob: remote.id ?? null,
       version: remote.version ?? null,
     })
+    await this.#cleanupRemote(runner, jobDir, state.id, windows)
+    return done
+  }
+
+  /**
+   * Delete the member-side job directory once its outcome is settled.
+   *
+   * The gateway keeps the job state and mirrors the member's output into its
+   * own build log, so the member only needs the directory while the build
+   * runs. Removing it keeps the next full build from starting on a disk that
+   * older jobs filled. Windows deletes through Node's fs.rmSync because
+   * node_modules paths are longer than MAX_PATH and Remove-Item gives up on
+   * them halfway.
+   * @param {SshRunner} runner ssh runner.
+   * @param {string} jobDir local job directory (the cleanup is logged there).
+   * @param {string} jobId build job id (also the remote directory name).
+   * @param {boolean} windows whether the member runs Windows.
+   * @returns {Promise<void>} completion.
+   */
+  async #cleanupRemote(runner, jobDir, jobId, windows) {
+    const localPath = `$HOME/.dsh/mesh/build/${jobId}`
+    const command = windows
+      ? powershellCommand([
+          "$ProgressPreference = 'SilentlyContinue'",
+          `$out = Join-Path $env:USERPROFILE '.dsh\\mesh\\build\\${jobId}'`,
+          "$node = Join-Path $env:USERPROFILE '.dsh\\dsh-mesh\\current\\runtime\\node\\node.exe'",
+          "if (-not (Test-Path $node)) { $node = Join-Path $env:USERPROFILE '.dsh\\dsh-person-web\\runtime\\node\\node.exe' }",
+          `if ((Test-Path $out) -and (Test-Path $node)) { & $node -e "const fs=require('fs');fs.rmSync(process.argv[1],{recursive:true,force:true,maxRetries:5,retryDelay:200})" $out }`,
+          'if (Test-Path $out) { Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue }',
+        ].join('; '))
+      : `rm -rf "${localPath}"`
+    try {
+      await runner.runProcess('ssh', [...runner.sshOptions(), runner.target(), command])
+      await appendLog(jobDir, `member build dir removed: ${jobId}`)
+      this.log(`remote build dir removed: ${jobId}`)
+    } catch (error) {
+      // Not fatal: the next build's preflight removes leftovers before it
+      // checks the free space.
+      this.log(`could not remove the remote build dir ${jobId} (the next build retries): ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   /**

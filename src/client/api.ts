@@ -159,6 +159,8 @@ export interface BuildJob {
   proxy?: string | null
   proxyMember?: string | null
   percent?: number | null
+  /** Target the package/smoke phases are working on right now. */
+  currentTarget?: string | null
   version?: string | null
   buildStamp?: string | null
   error?: string | null

@@ -160,8 +160,18 @@ async function runInplace(context) {
   }
   await note(`extracting to ${stage}${entries > 0 ? ` (${String(entries)} entries)` : ''}`)
   let extracted = 0
-  const tar = spawn('tar', ['-xzf', packagePath, '-C', stage, '--strip-components=1', '--checkpoint=1000', '--checkpoint-action=echo=DSH-MESH-EXTRACT %u'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
-  tar.stdout.resume()
+  // `-v` prints one line per extracted entry. Counting those newlines gives
+  // the real entry count; tar's --checkpoint-action=`%u` reports records
+  // (10 KiB blocks), not entries, which used to show numbers far larger than
+  // the archive's entry total.
+  const tar = spawn('tar', ['-xzf', packagePath, '-C', stage, '--strip-components=1', '-v'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  let endsWithNewline = true
+  tar.stdout.on('data', chunk => {
+    const text = String(chunk)
+    const lines = text.split('\n')
+    extracted += lines.length - 1
+    endsWithNewline = text.endsWith('\n')
+  })
   const tarDone = new Promise((resolve, reject) => {
     let buffer = ''
     tar.stderr.on('data', chunk => {
@@ -169,23 +179,24 @@ async function runInplace(context) {
       const lines = buffer.split(/\r?\n/u)
       buffer = lines.pop() ?? ''
       for (const line of lines) {
-        const tick = /DSH-MESH-EXTRACT (\d+)$/u.exec(line.trim().replace(/^tar:\s*/u, ''))
-        if (tick !== null) {
-          extracted = Number.parseInt(tick[1], 10) * 1000
-          continue
-        }
         if (line.trim() !== '') note(`tar: ${line.trim()}`).catch(() => {})
       }
     })
     tar.once('error', reject)
-    tar.once('exit', code => {
+    // `close`, not `exit`: it fires after stdout has been drained, so the last
+    // names are counted before the final total is reported.
+    tar.once('close', code => {
+      if (!endsWithNewline) extracted += 1
       if (code === 0) resolve()
       else reject(new Error(`tar exited with ${String(code)}`))
     })
   })
   const ticker = setInterval(() => {
-    const percent = entries > 0 ? Math.min(99, Math.round((extracted / entries) * 100)) : 0
-    meter('解压安装包', { done: extracted, total: entries, percent, indeterminate: entries === 0 })
+    // `-v` can also print the archive's root entry, so the running count may
+    // be one above the listing count; never show more than the total.
+    const done = entries > 0 ? Math.min(extracted, entries) : extracted
+    const percent = entries > 0 ? Math.min(99, Math.round((done / entries) * 100)) : 0
+    meter('解压安装包', { done, total: entries, percent, indeterminate: entries === 0 })
   }, 500)
   ticker.unref()
   try {

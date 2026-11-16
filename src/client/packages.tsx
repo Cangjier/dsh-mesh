@@ -127,9 +127,35 @@ function smokeTag(job: BuildJob): JSX.Element | null {
 
 function jobPercent(job: BuildJob): number {
   if (job.status === 'done') return 100
+  // A stopped job keeps the percentage it actually reached. Forcing 100 made a
+  // failure during packaging look like a finished build with a red bar.
   if (typeof job.percent === 'number') return Math.max(0, Math.min(100, job.percent))
-  if (job.status === 'failed' || job.status === 'build-failed' || job.status === 'smoke-failed' || job.status === 'needs-fix') return 100
   return 0
+}
+
+/** Chinese name for the engine's phase identifiers. */
+function phaseLabel(phase: string | undefined): string {
+  switch (phase) {
+    case 'created': return '已创建'
+    case 'prepare': return '准备源码'
+    case 'apply': return '应用补丁'
+    case 'build': return '构建 Web'
+    case 'package': return '打包'
+    case 'smoke': return '抓屏验证'
+    case 'fetch': return '拉取产物'
+    case 'done': return '完成'
+    case 'failed': return '失败'
+    default: return phase ?? ''
+  }
+}
+
+/** The target being packaged, with its position when the job has several. */
+function targetText(job: BuildJob): string {
+  const target = job.currentTarget ?? ''
+  if (target === '') return ''
+  const targets = job.targets ?? []
+  const index = targets.indexOf(target)
+  return index >= 0 && targets.length > 1 ? `${target}（${String(index + 1)}/${String(targets.length)}）` : target
 }
 
 /**
@@ -235,7 +261,12 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
       return
     }
     if (type === 'build-log' && logJob !== null && event.id === logJob.id) {
-      setLogLines(Array.isArray(event.lines) ? event.lines : [])
+      const lines = Array.isArray(event.lines) ? event.lines.filter(line => typeof line === 'string') : []
+      // A running job's log cannot be cleared (the button is disabled), so an
+      // empty tail is a stale or broken frame and must not wipe the modal.
+      const stillRunning = (jobs.find(job => job.id === logJob.id)?.status ?? logJob.status) === 'running'
+      if (lines.length === 0 && stillRunning && logLines.length > 0) return
+      setLogLines(lines)
     }
   })
 
@@ -389,10 +420,13 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
           <Progress
             percent={jobPercent(job)}
             size="small"
-            status={job.status === 'failed' ? 'exception' : job.status === 'done' ? 'success' : 'active'}
+            status={job.status === 'failed' || job.status === 'build-failed' || job.status === 'smoke-failed' ? 'exception' : job.status === 'done' ? 'success' : 'active'}
             showInfo={false}
           />
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{job.phase ?? ''}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {[phaseLabel(job.phase), targetText(job)].filter(part => part !== '').join(' · ')}
+            {job.status === 'running' || job.status === 'created' ? ` · ${String(jobPercent(job))}%` : ''}
+          </Typography.Text>
         </Space>
       ),
     },
@@ -571,25 +605,6 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
                 编译
               </Button>
             </Space>
-            {buildMember === 'local' ? (
-              <Alert
-                type="info"
-                showIcon
-                message="本机内存较小时容易在 pnpm install 阶段被 OOM 终止；建议选择网络较好的成员编译，产物会自动拉回本机。"
-              />
-            ) : (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                成员运行同一套 code/build 引擎：Linux 成员用 git 检出 main 并 bash 执行，Windows 成员下载 main 的 tar 包、用自带 node + PowerShell 执行；产物拉回后出现在下方部署包列表。目标平台与编译成员无关，Linux 成员同样能打 win-x64 包。
-              </Typography.Text>
-            )}
-            {proxyMode === 'member' ? (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                代理在所选成员上临时启动，只绑定它的组网地址，编译结束即关闭；经 WireGuard 转发通常比成员直连慢。
-              </Typography.Text>
-            ) : null}
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              产物会自动携带 dsh-mesh 与 xl 两个插件：xl 每次编译从 Cangjier/xl 的 main 拉取，来源和归档哈希记在包的 manifest.json 里。
-            </Typography.Text>
             {error !== '' ? <Alert type="error" showIcon message={error} closable onClose={() => setError('')} /> : null}
           </Space>
         </Card>
@@ -684,8 +699,11 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
             <Progress
               percent={jobPercent(activeJob)}
               size="small"
-              status={activeJob.status === 'failed' ? 'exception' : activeJob.status === 'done' ? 'success' : 'active'}
+              status={activeJob.status === 'failed' || activeJob.status === 'build-failed' ? 'exception' : activeJob.status === 'done' ? 'success' : 'active'}
             />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {[phaseLabel(activeJob.phase), targetText(activeJob)].filter(part => part !== '').join(' · ')}
+            </Typography.Text>
             <pre className="dsh-pw-deploy-log" ref={logRef}>
               {visibleLines.length > 0 ? visibleLines.join('\n') : logCleared ? '日志已清空' : logLoading ? '读取日志…' : activeJob.status === 'running' ? '等待日志…' : '这个任务没有日志'}
             </pre>

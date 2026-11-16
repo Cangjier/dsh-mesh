@@ -184,6 +184,49 @@ test('service exposes status, recipes, members, and a plan job', async () => {
   }
 })
 
+test('cleanup keeps only the log and state a postmortem needs', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-cleanup-'))
+  try {
+    const service = new MeshService({ dataDir: path.join(dir, 'mesh'), config: {}, log: () => {} })
+    const jobs = [
+      ['2026-11-16T00-00-00-000Z-done11', 'done'],
+      ['2026-11-16T00-00-00-000Z-fa1l11', 'failed'],
+      ['2026-11-16T00-00-00-000Z-fix111', 'needs-fix'],
+    ]
+    for (const [id, status] of jobs) {
+      const jobDir = path.join(service.jobRoot, id)
+      await mkdir(path.join(jobDir, 'src'), { recursive: true })
+      await mkdir(path.join(jobDir, 'dist', 'dsh-mesh-0.2.2-linux-x64'), { recursive: true })
+      await mkdir(path.join(jobDir, 'smoke', 'linux-x64'), { recursive: true })
+      await writeFile(path.join(jobDir, 'src', 'index.js'), 'x', 'utf8')
+      await writeFile(path.join(jobDir, 'dist', 'dsh-mesh-0.2.2-linux-x64', 'app.js'), 'x', 'utf8')
+      await writeFile(path.join(jobDir, 'dist', 'dsh-mesh-0.2.2-linux-x64.tar.gz'), 'archive', 'utf8')
+      await writeFile(path.join(jobDir, 'build.log'), 'line\n', 'utf8')
+      await writeFile(path.join(jobDir, 'state.json'), JSON.stringify({ id, status }), 'utf8')
+    }
+    await service.cleanupBuilds()
+    const done = path.join(service.jobRoot, jobs[0][0])
+    const failed = path.join(service.jobRoot, jobs[1][0])
+    const needsFix = path.join(service.jobRoot, jobs[2][0])
+    // Done: source, extracted tree and screenshots go; the archive and log stay.
+    assert.equal(existsSync(path.join(done, 'src')), false)
+    assert.equal(existsSync(path.join(done, 'dist', 'dsh-mesh-0.2.2-linux-x64')), false)
+    assert.equal(existsSync(path.join(done, 'dist', 'dsh-mesh-0.2.2-linux-x64.tar.gz')), true)
+    assert.equal(existsSync(path.join(done, 'smoke')), false)
+    assert.equal(existsSync(path.join(done, 'build.log')), true)
+    assert.equal(existsSync(path.join(done, 'state.json')), true)
+    // Failed: no partial package, still the log and state.
+    assert.equal(existsSync(path.join(failed, 'dist')), false)
+    assert.equal(existsSync(path.join(failed, 'build.log')), true)
+    assert.equal(existsSync(path.join(failed, 'state.json')), true)
+    // needs-fix keeps its worktree: the repair flow resumes from it.
+    assert.equal(existsSync(path.join(needsFix, 'src', 'index.js')), true)
+    assert.equal(existsSync(path.join(needsFix, 'build.log')), true)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a second job for the same target is refused while one is running', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-deploy-busy-'))
   const pkg = path.join(dir, 'dsh-mesh-0.2.2-linux-x64.tar.gz')

@@ -26,7 +26,7 @@ import { isIP } from 'node:net'
 import { homedir, hostname, tmpdir } from 'node:os'
 import path from 'node:path'
 
-/** tar emits one progress marker per this many extracted entries. */
+/** The prepare script emits one extraction marker per this many entries. */
 const EXTRACT_CHECKPOINT = 1000
 
 const DEFAULT_APP_ROOT = {
@@ -852,11 +852,22 @@ if [ -e "$NEW" ]; then
   exit 1
 fi
 mkdir -p "$NEW"
-# One marker per 1000 entries: the deploy engine turns these into the panel's
-# extraction progress. Counting first costs a gzip pass but gives an honest
-# denominator; printing every path would flood the job log with 78k lines.
+# One marker per ${String(EXTRACT_CHECKPOINT)} extracted entries: the deploy engine turns
+# these into the panel's extraction progress. Counting first costs a gzip pass
+# but gives an honest denominator; printing every path would flood the job log
+# with 78k lines.
+#
+# Do not use tar's --checkpoint-action here: %u is the number of 10 KiB records
+# read, not entries, so multiplying it by the checkpoint interval produced
+# numbers far larger than the archive's entry count (and a bar stuck at 99%).
 printf 'DSH-MESH-EXTRACT-TOTAL %s\n' "$(tar -tzf "$PACKAGE" | wc -l | tr -d ' ')"
-tar -xzf "$PACKAGE" -C "$NEW" --strip-components=1 --checkpoint=1000 --checkpoint-action=echo='DSH-MESH-EXTRACT %u'
+tar -xzf "$PACKAGE" -C "$NEW" --strip-components=1 -v | {
+  extracted=0
+  while IFS= read -r _entry; do
+    extracted=$((extracted + 1))
+    if [ $((extracted % ${String(EXTRACT_CHECKPOINT)})) -eq 0 ]; then printf 'DSH-MESH-EXTRACT %s\n' "$extracted"; fi
+  done
+}
 
 # Shared mutable state stays outside every release. The first deploy copies it
 # from the currently running tree; later deploys inherit it untouched.
@@ -1514,7 +1525,7 @@ try {
 ${restart}
 } catch {
   $restartFailed = $true
-  Write-Host "a service failed to restart on $Release: $($_.Exception.Message)"
+  Write-Host ("a service failed to restart on " + $Release + ": " + $_.Exception.Message)
 }
 function Invoke-Rollback {
   # Logging must not throw here: with ErrorActionPreference=Stop a Write-Error
@@ -2263,11 +2274,11 @@ export class DeployManager {
         meter('解压安装包', { done, total, percent, indeterminate: total === 0 })
       }
       // Counting every extracted path would push 78k lines through the SSH
-      // stream, so the script lets tar emit one marker per checkpoint instead.
+      // stream, so the prepare script counts on the member and emits one
+      // marker per EXTRACT_CHECKPOINT entries. The marker carries the absolute
+      // entry count, which is the same unit as the total above it.
       const trackExtract = (line) => {
-        // tar writes its checkpoint action to stderr, so the marker arrives as
-        // `tar: DSH-MESH-EXTRACT 12`; the shell's own total comes from stdout.
-        const text = line.trim().replace(/^tar:\s*/u, '')
+        const text = line.trim()
         const head = /^DSH-MESH-EXTRACT-TOTAL (\d+)$/u.exec(text)
         if (head !== null) {
           entries = Number.parseInt(head[1], 10)
@@ -2276,7 +2287,8 @@ export class DeployManager {
         }
         const tick = /^DSH-MESH-EXTRACT (\d+)$/u.exec(text)
         if (tick !== null) {
-          extractProgress(Number.parseInt(tick[1], 10) * EXTRACT_CHECKPOINT, entries)
+          const done = Number.parseInt(tick[1], 10)
+          extractProgress(entries > 0 ? Math.min(done, entries) : done, entries)
           return true
         }
         return false

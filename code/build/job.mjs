@@ -29,6 +29,7 @@ import {
 } from './engine.mjs'
 import { runPackageSmoke } from './smoke.mjs'
 import { buildStampDate, isValidBuildStamp } from './stamp.mjs'
+import { targetPercent } from './progress.mjs'
 
 /**
  * Default job root.
@@ -170,7 +171,7 @@ export async function runJob(dir, options) {
     options.onLog?.(line)
   }
   try {
-    state = await updateState(dir, { status: 'running', phase: 'prepare', error: null })
+    state = await updateState(dir, { status: 'running', phase: 'prepare', percent: 2, currentTarget: null, error: null })
     const prepared = options.reuseWorktree === true && existsSync(path.join(dir, 'src'))
       ? { dir: path.join(dir, 'src'), source: state.source, ref: state.ref, local: false, archiveSha256: state.archiveSha256 ?? null }
       : await prepareSource({
@@ -183,6 +184,7 @@ export async function runJob(dir, options) {
       })
     state = await updateState(dir, {
       phase: 'apply',
+      percent: 7,
       proxy: outbound.proxy,
       source: prepared.source,
       ref: prepared.ref,
@@ -204,6 +206,7 @@ export async function runJob(dir, options) {
       state = await updateState(dir, {
         status: 'needs-fix',
         phase: 'apply',
+        percent: 14,
         workOrder: order,
         mismatches: result.mismatches,
         applied: result.applied,
@@ -216,6 +219,7 @@ export async function runJob(dir, options) {
       state = await updateState(dir, {
         status: 'planned',
         phase: 'apply',
+        percent: 100,
         applied: result.applied,
         skipped: result.skipped,
         mismatchCount: 0,
@@ -223,7 +227,12 @@ export async function runJob(dir, options) {
       log('plan complete: every overlay applies')
       return state
     }
-    state = await updateState(dir, { phase: 'build', applied: result.applied, skipped: result.skipped })
+    state = await updateState(dir, {
+      phase: 'build',
+      percent: 12,
+      applied: result.applied,
+      skipped: result.skipped,
+    })
     const built = await runWebBuild({
       dir: prepared.dir,
       log,
@@ -232,6 +241,11 @@ export async function runJob(dir, options) {
       prepare: options.prepare ?? (Array.isArray(recipes.prepare) ? recipes.prepare : null),
       env: outbound.env,
       prebuild: options.prebuild,
+      // The install and the web build are the two long silent steps; the
+      // panel would otherwise sit at 12% until packaging starts.
+      onProgress: async update => {
+        state = await updateState(dir, { phase: update.phase, percent: update.percent })
+      },
     })
     if (!built.ok) {
       state = await updateState(dir, { status: 'build-failed', phase: 'build', error: built.error ?? 'web build failed' })
@@ -239,10 +253,19 @@ export async function runJob(dir, options) {
       return state
     }
     const version = options.version ?? await readSourceVersion(prepared.dir)
-    state = await updateState(dir, { phase: 'package', version, dist: built.dist })
+    state = await updateState(dir, { phase: 'package', percent: 65, version, dist: built.dist })
     const artifacts = []
     const full = options.full !== false
-    for (const target of state.targets) {
+    const targets = state.targets
+    for (const target of targets) {
+      // Every target owns one equal slice of 65% → 95%; the second target of a
+      // two-target build therefore keeps the bar moving instead of stalling
+      // at the first target's smoke percentage.
+      state = await updateState(dir, {
+        phase: 'package',
+        percent: targetPercent(targets, target, 'start'),
+        currentTarget: target,
+      })
       const shared = {
         dist: built.dist,
         target,
@@ -277,7 +300,11 @@ export async function runJob(dir, options) {
       } else if (!full) {
         smoke = { ok: true, status: 'skipped', reason: 'web-only package has no app/runtime to start', checks: [], screenshots: [] }
       } else {
-        state = await updateState(dir, { phase: 'smoke', percent: 92 })
+        state = await updateState(dir, {
+          phase: 'smoke',
+          percent: targetPercent(targets, target, 'smoke'),
+          currentTarget: target,
+        })
         log(`smoke ${target}: starting the packaged DSH under headless Chrome`)
         smoke = await runPackageSmoke({
           packageRoot: assembled.packageDir,
@@ -292,7 +319,6 @@ export async function runJob(dir, options) {
         })
         if (smoke.status === 'skipped') log(`smoke ${target}: skipped (${smoke.reason})`)
         else log(`smoke ${target}: ${smoke.status}${Array.isArray(smoke.screenshots) && smoke.screenshots.length > 0 ? ` (${smoke.screenshots.join(', ')})` : ''}`)
-        if (smoke.status !== 'failed') state = await updateState(dir, { phase: 'smoke', percent: 96 })
       }
       const artifact = {
         target,
@@ -308,15 +334,21 @@ export async function runJob(dir, options) {
         state = await updateState(dir, {
           status: 'smoke-failed',
           phase: 'smoke',
-          percent: 100,
+          percent: targetPercent(targets, target, 'end'),
           error: `${target} smoke test failed: ${smoke.error ?? 'see smoke.log'}`,
           artifacts,
         })
         log(`smoke ${target}: failed; stopping before the next target`)
         return state
       }
+      state = await updateState(dir, {
+        phase: 'package',
+        percent: targetPercent(targets, target, 'end'),
+        currentTarget: target,
+        artifacts,
+      })
     }
-    state = await updateState(dir, { status: 'done', phase: 'done', artifacts })
+    state = await updateState(dir, { status: 'done', phase: 'done', percent: 100, currentTarget: null, artifacts })
     log('build complete')
     return state
   } catch (error) {

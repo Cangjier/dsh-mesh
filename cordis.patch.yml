@@ -16,6 +16,12 @@
         interopToken: ''
         # Reuse the gateway password when no explicit interopToken exists.
         interopUseGatePassword: true
+        # Country of each member's public WireGuard endpoint. The panel uses it
+        # to preselect a foreign outbound proxy; false disables the lookups.
+        geo:
+          enabled: true
+          # Empty: ipwho.is. Must contain {ip}.
+          provider: ''
         # Build defaults. Empty source means build/recipes.json's fixed upstream.
         build:
           source: ''

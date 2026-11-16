@@ -14,6 +14,7 @@ import { readFile } from 'node:fs/promises'
 import { isIP } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
+import { endpointAddress } from './geo.mjs'
 
 /** Default member gate ports, in probe order. 80 is Linux; 8080 is the Windows default. */
 export const DEFAULT_MEMBER_PORTS = Object.freeze([80, 8080])
@@ -121,19 +122,26 @@ export function wireGuardIdentity(state) {
 
 /**
  * Normalize one peer record from the control-panel response.
+ *
+ * `endpoint` is the peer's current public WireGuard address. It is kept
+ * because the build panel needs it to answer "is this member abroad?"; the
+ * bare address in `publicIp` is what the country lookup consumes.
  * @param {unknown} value raw peer.
- * @returns {{name: string, ip: string, online: boolean, lastHandshakeAt: string|null}|null} peer or null.
+ * @returns {{name: string, ip: string, online: boolean, lastHandshakeAt: string|null, endpoint: string|null, publicIp: string}|null} peer or null.
  */
 export function normalizePeer(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
   const peer = /** @type {Record<string, unknown>} */ (value)
   const ip = normalizeAddress(peer.ip)
   if (ip === '') return null
+  const endpoint = typeof peer.endpoint === 'string' && peer.endpoint.trim() !== '' ? peer.endpoint.trim() : null
   return {
     name: typeof peer.name === 'string' && peer.name.trim() !== '' ? peer.name.trim() : `peer-${ip}`,
     ip,
     online: peer.online !== false,
     lastHandshakeAt: typeof peer.lastHandshakeAt === 'string' ? peer.lastHandshakeAt : null,
+    endpoint,
+    publicIp: endpointAddress(endpoint),
   }
 }
 
@@ -294,7 +302,7 @@ function formatHost(address) {
 /**
  * Build the member list the panel renders: the local DSH plus every WireGuard
  * peer, with its DSH/gate probe result.
- * @param {{state: object|null, stateError?: string|null, self?: object, ports?: number[], timeoutMs?: number, fetchImpl?: typeof fetch}} options discovery input.
+ * @param {{state: object|null, stateError?: string|null, self?: object, ports?: number[], timeoutMs?: number, fetchImpl?: typeof fetch, geoLookup?: {enrich: (members: object[]) => Promise<object[]>}}} options discovery input.
  * @returns {Promise<object>} discovery snapshot.
  */
 export async function discoverMembers(options) {
@@ -330,6 +338,10 @@ export async function discoverMembers(options) {
     ip: peer.ip,
     online: peer.online,
     lastHandshakeAt: peer.lastHandshakeAt,
+    // The peer's public WireGuard endpoint is the only reliable "where is
+    // this machine" signal the gateway has without SSH-ing into it.
+    endpoint: peer.endpoint ?? null,
+    publicIp: peer.publicIp ?? '',
     dsh: probe.ok,
     port: probe.port,
     latencyMs: probe.latencyMs,
@@ -337,6 +349,11 @@ export async function discoverMembers(options) {
     system: probe.info?.system ?? null,
     error: probe.error,
   }))
+  // Country is best effort and cached; a slow/unreachable provider leaves the
+  // field absent rather than failing the whole member snapshot.
+  if (options.geoLookup !== undefined && options.geoLookup !== null) {
+    await options.geoLookup.enrich(members).catch(() => {})
+  }
   const self = {
     id: 'local',
     kind: 'self',
@@ -349,6 +366,8 @@ export async function discoverMembers(options) {
     latencyMs: 0,
     gate: options.self?.gate ?? null,
     system: options.self?.system ?? null,
+    endpoint: options.self?.endpoint ?? null,
+    publicIp: options.self?.publicIp ?? '',
     error: options.self?.error ?? null,
   }
   const warnings = []

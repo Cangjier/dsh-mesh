@@ -40,6 +40,7 @@ import {
   wireGuardIdentity,
 } from '../shared/wireguard.mjs'
 import { quickSystemInfo } from '../shared/system-info.mjs'
+import { GeoLookup, isPrivateAddress } from '../shared/geo.mjs'
 
 /** Path prefix that carries one proxied request to a member gate. */
 export const CLUSTER_PREFIX = '/__gate/cluster'
@@ -110,6 +111,16 @@ export class MemberService {
     this.probeCacheFile = typeof options.probeCacheFile === 'string'
       ? options.probeCacheFile
       : (typeof options.stateFile === 'string' ? path.join(path.dirname(options.stateFile), 'probe-cache.json') : null)
+    // Country lookup for the build panel's "foreign proxy" default. The same
+    // result file is reused across gate restarts; tests can inject a fake.
+    this.geo = options.geoLookup ?? new GeoLookup({
+      enabled: options.geo !== false,
+      cacheFile: typeof options.geoCacheFile === 'string'
+        ? options.geoCacheFile
+        : (typeof options.stateFile === 'string' ? path.join(path.dirname(options.stateFile), 'member-geo.json') : null),
+      fetchImpl: typeof options.geoFetchImpl === 'function' ? options.geoFetchImpl : fetch,
+      log: typeof options.log === 'function' ? line => options.log(`geo: ${line}`) : undefined,
+    })
     this.checkTimeoutMs = Number.isInteger(options.checkTimeoutMs) && options.checkTimeoutMs > 0
       ? options.checkTimeoutMs
       : MEMBER_CHECK_TIMEOUT_MS
@@ -234,6 +245,7 @@ export class MemberService {
       ports: [...this.discoveryPorts, this.memberPort],
       timeoutMs: this.discoveryTimeoutMs,
       fetchImpl: this.fetchImpl,
+      geoLookup: this.geo,
     })
     await this.#loadProbes()
     const now = this.now()
@@ -920,25 +932,10 @@ export function stripClusterPrefix(url) {
 
 /**
  * Whether an address is loopback, RFC1918, CGNAT, or IPv6 ULA/link-local.
- * The WireGuard subnet is RFC1918 in the default configuration, so this covers
- * both the VPN path and a gate probing localhost.
- * @param {string} address normalized address.
- * @returns {boolean} private.
+ * Re-exported from the shared geo module so the gate and the country lookup
+ * share one definition of "public".
  */
-export function isPrivateAddress(address) {
-  if (address === '127.0.0.1' || address === '::1') return true
-  if (address.startsWith('fe80:') || address.startsWith('fc') || address.startsWith('fd')) return true
-  const parts = address.split('.')
-  if (parts.length !== 4) return false
-  const octets = parts.map(part => Number(part))
-  if (octets.some(octet => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false
-  if (octets[0] === 10) return true
-  if (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) return true
-  if (octets[0] === 192 && octets[1] === 168) return true
-  if (octets[0] === 169 && octets[1] === 254) return true
-  if (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) return true
-  return false
-}
+export { isPrivateAddress }
 
 /**
  * Escape text placed into the small unavailable page.

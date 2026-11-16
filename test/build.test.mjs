@@ -13,8 +13,10 @@ import {
   learnOverlays,
   nodeArchiveName,
   overlayFrontend,
+  pluginFingerprint,
   prepareSource,
   readExtraPlugins,
+  remoteRevision,
   runCommand,
   runWebBuild,
   sha256Text,
@@ -440,6 +442,39 @@ test('assembleWebPackage carries the plugins listed in build/plugins.json', asyn
     assert.equal(manifest.extraPlugins[0].name, 'xl')
     assert.equal(manifest.extraPlugins[0].ref, 'main')
     assert.equal(manifest.extraPlugins[0].archiveSha256.length, 64)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+
+test('remoteRevision reads the codeload ETag without downloading', async () => {
+  const seen = []
+  const etag = await remoteRevision('https://github.com/deepseek-ai/deepseek-harness', 'master', {
+    fetchImpl: async (url, options) => {
+      seen.push([String(url), options.method])
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: name => (name === 'etag' ? '"abc123"' : null) },
+      }
+    },
+  })
+  assert.equal(etag, 'abc123')
+  assert.deepEqual(seen, [['https://codeload.github.com/deepseek-ai/deepseek-harness/tar.gz/refs/heads/master', 'HEAD']])
+})
+
+test('pluginFingerprint changes when a bundled plugin input changes', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-fp-'))
+  try {
+    await mkdir(path.join(dir, 'code', 'shared'), { recursive: true })
+    await writeFile(path.join(dir, 'package.json'), JSON.stringify({ version: '1.0.0' }), 'utf8')
+    await writeFile(path.join(dir, 'index.js'), 'export const a = 1\n', 'utf8')
+    await writeFile(path.join(dir, 'code', 'shared', 'x.mjs'), 'export const x = 1\n', 'utf8')
+    const before = await pluginFingerprint(dir)
+    assert.equal(await pluginFingerprint(dir), before)
+    await writeFile(path.join(dir, 'code', 'shared', 'x.mjs'), 'export const x = 2\n', 'utf8')
+    assert.notEqual(await pluginFingerprint(dir), before)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

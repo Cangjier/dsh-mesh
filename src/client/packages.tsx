@@ -36,6 +36,14 @@ import {
 } from '@ant-design/icons'
 import { api, ApiError, type BuildJob, type Member, type PackageInfo } from './api'
 import { useEventStream } from './events'
+import { ScheduleCard } from './schedule'
+import {
+  DEFAULT_BUILD_TARGETS,
+  memberCores,
+  memberMemoryBytes,
+  pickBuildMember,
+  pickProxyMember,
+} from '../lib/build-defaults.mjs'
 
 const TARGET_OPTIONS = [
   { value: 'linux-x64', label: 'Linux x64' },
@@ -158,23 +166,43 @@ function targetText(job: BuildJob): string {
   return index >= 0 && targets.length > 1 ? `${target}（${String(index + 1)}/${String(targets.length)}）` : target
 }
 
+/** Capacity suffix shown for a build member so the default is self-explanatory. */
+function resourceBits(member: Member): string[] {
+  const bits: string[] = []
+  const cores = memberCores(member)
+  if (cores > 0) bits.push(`${String(cores)} 核`)
+  const memory = memberMemoryBytes(member)
+  if (memory > 0) bits.push(formatBytes(memory))
+  return bits
+}
+
 /**
  * Member picker options.
  *
  * Any online Linux or Windows member can build; the proxy member must be Linux
- * because the egress proxy is started with `bash -s`.
+ * because the egress proxy is started with `bash -s`. The local gateway is not
+ * a proxy candidate: a machine cannot proxy its own build.
  */
 function memberOptions(members: Member[], forBuild: boolean): Array<{ value: string, label: string, disabled?: boolean }> {
-  const options = forBuild
-    ? [{ value: 'local', label: '本机（网关）' }]
-    : []
+  const options: Array<{ value: string, label: string, disabled?: boolean }> = []
+  if (forBuild) {
+    const local = members.find(member => member.id === 'local')
+    options.push({
+      value: 'local',
+      label: ['本机（网关）', ...(local === undefined ? [] : resourceBits(local))].join(' · '),
+    })
+  }
   for (const member of members) {
+    // The local row is already offered (or excluded) above.
+    if (member.id === 'local') continue
     const platform = String(member.system?.platform ?? '').toLowerCase()
     const supported = platform === '' || platform.startsWith('linux') || platform.startsWith('win')
     const linux = platform === '' || platform.startsWith('linux')
     const disabled = member.online === false || (forBuild && !supported) || (!forBuild && !linux)
     const bits = [member.name]
     if (member.ip !== '') bits.push(member.ip)
+    if (forBuild) bits.push(...resourceBits(member))
+    else if (typeof member.countryCode === 'string' && member.countryCode !== '') bits.push(member.countryCode.toUpperCase())
     if (platform.startsWith('win')) bits.push('Windows')
     if (member.online === false) bits.push('离线')
     else if (forBuild && !supported) bits.push(String(member.system?.platform ?? '不支持'))
@@ -192,12 +220,15 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
   const [packagesError, setPackagesError] = useState('')
   const [jobs, setJobs] = useState<BuildJob[]>([])
   const [jobsLoading, setJobsLoading] = useState(false)
-  const [buildMember, setBuildMember] = useState('local')
-  const [proxyMode, setProxyMode] = useState<'none' | 'member' | 'url'>('none')
-  const [proxyMember, setProxyMember] = useState<string | undefined>(undefined)
+  // `null` means "follow the member list": the panel preselects the richest
+  // build member and a foreign proxy member as soon as discovery lands, while
+  // a value the operator picked is never overwritten.
+  const [buildMember, setBuildMember] = useState<string | null>(null)
+  const [proxyMode, setProxyMode] = useState<'none' | 'member' | 'url' | null>(null)
+  const [proxyMember, setProxyMember] = useState<string | null>(null)
   const [proxyUrl, setProxyUrl] = useState('')
   const [ref, setRef] = useState('master')
-  const [targets, setTargets] = useState<string[]>(['linux-x64'])
+  const [targets, setTargets] = useState<string[]>([...DEFAULT_BUILD_TARGETS])
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState('')
   const [logJob, setLogJob] = useState<BuildJob | null>(null)
@@ -240,6 +271,14 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
   }, [active, loadPackages, loadJobs])
 
   const running = useMemo(() => jobs.some(job => ACTIVE_STATUSES.has(job.status)), [jobs])
+
+  // Defaults are derived, not copied into state: members arrive after the
+  // panel mounts, so a state initializer would freeze on "本机 / 直连".
+  const defaultBuildMember = useMemo(() => pickBuildMember(members), [members])
+  const defaultProxyMember = useMemo(() => pickProxyMember(members), [members])
+  const selectedBuildMember = buildMember ?? defaultBuildMember
+  const selectedProxyMode = proxyMode ?? (defaultProxyMember === null ? 'none' : 'member')
+  const selectedProxyMember = proxyMember ?? defaultProxyMember ?? undefined
 
   // One SSE connection carries every build change and log tail; there is no
   // timer and no request while nothing happens. `ready` fires on connect and
@@ -300,22 +339,22 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
       setError('至少选择一个目标平台')
       return
     }
-    if (proxyMode === 'member' && (proxyMember === undefined || proxyMember === '')) {
+    if (selectedProxyMode === 'member' && (selectedProxyMember === undefined || selectedProxyMember === '')) {
       setError('请选择代理成员')
       return
     }
-    if (proxyMode === 'url' && proxyUrl.trim() === '') {
+    if (selectedProxyMode === 'url' && proxyUrl.trim() === '') {
       setError('请填写代理地址')
       return
     }
     setStarting(true)
     try {
       const result = await api.startBuild({
-        member: buildMember,
+        member: selectedBuildMember,
         ref: ref.trim() === '' ? undefined : ref.trim(),
         targets,
-        ...(proxyMode === 'member' ? { proxyMember } : {}),
-        ...(proxyMode === 'url' ? { proxy: proxyUrl.trim() } : {}),
+        ...(selectedProxyMode === 'member' ? { proxyMember: selectedProxyMember } : {}),
+        ...(selectedProxyMode === 'url' ? { proxy: proxyUrl.trim() } : {}),
       })
       messageApi.success(`已开始编译 ${result.job.id.slice(0, 16)}…`)
       await loadJobs()
@@ -325,7 +364,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
     } finally {
       setStarting(false)
     }
-  }, [buildMember, messageApi, proxyMember, proxyMode, proxyUrl, ref, targets, loadJobs])
+  }, [messageApi, proxyUrl, ref, selectedBuildMember, selectedProxyMember, selectedProxyMode, targets, loadJobs])
 
   /**
    * Truncate one finished job's log.
@@ -533,8 +572,8 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
                 <Select
                   size="small"
                   style={{ width: 220 }}
-                  value={buildMember}
-                  onChange={setBuildMember}
+                  value={selectedBuildMember}
+                  onChange={value => setBuildMember(value)}
                   options={memberOptions(members, true)}
                 />
               </Space>
@@ -543,7 +582,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
                 <Select
                   size="small"
                   style={{ width: 120 }}
-                  value={proxyMode}
+                  value={selectedProxyMode}
                   onChange={value => setProxyMode(value)}
                   options={[
                     { value: 'none', label: '直连' },
@@ -551,17 +590,17 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
                     { value: 'url', label: '自定义' },
                   ]}
                 />
-                {proxyMode === 'member' ? (
+                {selectedProxyMode === 'member' ? (
                   <Select
                     size="small"
-                    style={{ width: 200 }}
-                    value={proxyMember}
+                    style={{ width: 230 }}
+                    value={selectedProxyMember}
                     placeholder="选择代理成员"
-                    onChange={setProxyMember}
+                    onChange={value => setProxyMember(value)}
                     options={memberOptions(members, false)}
                   />
                 ) : null}
-                {proxyMode === 'url' ? (
+                {selectedProxyMode === 'url' ? (
                   <Input
                     size="small"
                     style={{ width: 220 }}
@@ -608,6 +647,8 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
             {error !== '' ? <Alert type="error" showIcon message={error} closable onClose={() => setError('')} /> : null}
           </Space>
         </Card>
+
+        <ScheduleCard active={active} />
 
         <Card
           size="small"

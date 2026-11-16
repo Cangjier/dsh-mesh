@@ -23,6 +23,7 @@ import {
   assembleWebPackage,
   learnOverlays,
   loadRecipes,
+  pluginFingerprint,
   prepareSource,
   runWebBuild,
   writeWorkOrder,
@@ -190,6 +191,7 @@ export async function runJob(dir, options) {
       ref: prepared.ref,
       worktree: prepared.dir,
       archiveSha256: prepared.archiveSha256 ?? null,
+      archiveEtag: prepared.archiveEtag ?? null,
     })
     const recipes = await loadRecipes(recipesPath)
     const result = await applyRecipes({ dir: prepared.dir, recipes, overlayRoot, log })
@@ -253,7 +255,16 @@ export async function runJob(dir, options) {
       return state
     }
     const version = options.version ?? await readSourceVersion(prepared.dir)
-    state = await updateState(dir, { phase: 'package', percent: 65, version, dist: built.dist })
+    const pluginVersion = await readPluginVersion(repositoryRoot)
+    const fingerprint = await pluginFingerprint(repositoryRoot)
+    state = await updateState(dir, {
+      phase: 'package',
+      percent: 65,
+      version,
+      pluginVersion,
+      pluginFingerprint: fingerprint,
+      dist: built.dist,
+    })
     const artifacts = []
     const full = options.full !== false
     const targets = state.targets
@@ -276,6 +287,9 @@ export async function runJob(dir, options) {
         source: state.source,
         ref: state.ref,
         tree: recipes.tree ?? null,
+        sourceEtag: state.archiveEtag ?? null,
+        pluginVersion,
+        pluginFingerprint: fingerprint,
         fetchImpl: outbound.fetchImpl,
         env: outbound.env,
         cacheDir: options.cacheDir ?? defaultCacheDir(),
@@ -414,6 +428,20 @@ export async function resumeJob(dir, options) {
  */
 export async function removeJob(dir) {
   await rm(dir, { recursive: true, force: true })
+}
+
+/**
+ * Read the dsh-mesh plugin version that goes into the package.
+ * @param {string} repositoryRoot plugin root.
+ * @returns {Promise<string|null>} version.
+ */
+async function readPluginVersion(repositoryRoot) {
+  try {
+    const parsed = JSON.parse(await readFile(path.join(repositoryRoot, 'package.json'), 'utf8'))
+    return typeof parsed?.version === 'string' && parsed.version.trim() !== '' ? parsed.version.trim() : null
+  } catch {
+    return null
+  }
 }
 
 /**

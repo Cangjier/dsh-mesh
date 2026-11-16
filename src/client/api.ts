@@ -39,6 +39,14 @@ export interface Member {
   latencyMs: number
   lastHandshakeAt: string | null
   gate: Record<string, unknown> | null
+  /** Public WireGuard endpoint (`host:port`) reported by the peer registry. */
+  endpoint?: string | null
+  /** Bare address of `endpoint`, when it is a public IP. */
+  publicIp?: string | null
+  /** ISO 3166-1 alpha-2 country of `publicIp`, looked up by the gateway. */
+  countryCode?: string | null
+  /** Human-readable country name that came with `countryCode`. */
+  country?: string | null
   /** Set for the row this panel runs on; peers report it inside `gate`. */
   deployment?: DeploymentInfo | null
   system?: SystemInfo | null
@@ -195,6 +203,33 @@ export interface PackagesResponse {
   ok: boolean
   dir: string
   packages: PackageInfo[]
+}
+
+/** Result of one timed run, as recorded by the scheduler. */
+export interface ScheduleLastRun {
+  at?: string
+  status?: string
+  reason?: string
+  jobId?: string
+  upgraded?: Array<{ member: string, package: string, job: string }>
+  failed?: Array<{ member: string, reason: string }>
+  skipped?: Array<{ member: string, reason: string }>
+}
+
+export interface ScheduleEntry {
+  enabled: boolean
+  /** `HH:MM` local time. */
+  time: string
+  next: string | null
+  last: ScheduleLastRun | null
+  running: boolean
+}
+
+export interface ScheduleState {
+  ok: boolean
+  build?: ScheduleEntry
+  /** Present when the read/update is scoped to one member. */
+  upgrade?: ScheduleEntry
 }
 
 export interface DeployStep {
@@ -368,6 +403,19 @@ export const api = {
       method: 'POST',
       headers: { 'x-dsh-mesh': '1' },
       body: JSON.stringify({ id, tag }),
+    })
+  },
+
+  schedule(member?: string): Promise<{ ok: boolean, schedule: ScheduleState }> {
+    const suffix = member === undefined || member === '' ? '' : `?member=${encodeURIComponent(member)}`
+    return request<{ ok: boolean, schedule: ScheduleState }>(`/api/dsh-mesh/schedule${suffix}`)
+  },
+
+  setSchedule(body: { build?: { enabled?: boolean, time?: string }, member?: string, upgrade?: { enabled?: boolean, time?: string } }): Promise<{ ok: boolean, schedule: ScheduleState }> {
+    return request<{ ok: boolean, schedule: ScheduleState }>('/api/dsh-mesh/schedule', {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: JSON.stringify(body),
     })
   },
 

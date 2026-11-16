@@ -31,7 +31,7 @@ import {
   runJob,
   updateState,
 } from '../../code/build/job.mjs'
-import { DEFAULT_REF, DEFAULT_SOURCE } from '../../code/build/engine.mjs'
+import { DEFAULT_REF, DEFAULT_SOURCE, pluginFingerprint, readExtraPlugins, remoteRevision } from '../../code/build/engine.mjs'
 import { nextBuildStamp } from '../../code/build/stamp.mjs'
 import {
   appendDeployLog,
@@ -49,6 +49,9 @@ import { RemoteBuilder } from './remote-build.mjs'
 import { CLUSTER_HEADER, deriveClusterSecret, signClusterRequest } from '../../code/shared/cluster.mjs'
 import { repackArchive } from '../../code/build/repack.mjs'
 import { quickSystemInfo } from '../../code/shared/system-info.mjs'
+import { GeoLookup } from '../../code/shared/geo.mjs'
+import { buildUpdateReasons, memberDeployment, packageInfo, planUpgrades } from './schedule.mjs'
+import { pickBuildMember, pickProxyMember } from './build-defaults.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -128,7 +131,7 @@ export function assertTestUpgradeTarget(target, options = {}) {
 
 export class MeshService {
   /**
-   * @param {{dataDir: string, config?: object, log?: (line: string) => void, spawnRunner?: Function}} options service input.
+   * @param {{dataDir: string, config?: object, log?: (line: string) => void, spawnRunner?: Function, geoLookup?: object}} options service input.
    */
   constructor(options) {
     this.dataDir = options.dataDir
@@ -144,6 +147,20 @@ export class MeshService {
     this.deployRoot = path.join(this.dataDir, 'deploy')
     this.memberTagsFile = path.join(this.dataDir, 'member-tags.json')
     this.packagesDir = path.join(os.homedir(), '.dsh', 'packages')
+    const geoConfig = this.config.geo === false
+      ? { enabled: false }
+      : (this.config.geo !== null && typeof this.config.geo === 'object' ? this.config.geo : {})
+    // The build panel defaults the outbound proxy to a member whose public
+    // address is abroad; that is a cached country lookup over the WireGuard
+    // endpoint, never a probe that blocks a build.
+    this.geo = options.geoLookup ?? new GeoLookup({
+      enabled: geoConfig.enabled !== false,
+      cacheFile: path.join(this.dataDir, 'geo-cache.json'),
+      provider: typeof geoConfig.provider === 'string' && geoConfig.provider !== '' ? geoConfig.provider : undefined,
+      timeoutMs: typeof geoConfig.timeoutMs === 'number' ? geoConfig.timeoutMs : undefined,
+      fetchImpl: typeof geoConfig.fetchImpl === 'function' ? geoConfig.fetchImpl : undefined,
+      log: line => this.logLine(`geo: ${line}`),
+    })
     this.deploy = new DeployManager({
       repositoryRoot: REPOSITORY_ROOT,
       dataDir: this.deployRoot,
@@ -395,6 +412,7 @@ export class MeshService {
       ports: Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080],
       timeoutMs: PROBE_TIMEOUT_MS,
       fetchImpl: this.fetchImpl,
+      geoLookup: this.geo,
     })
     // Keep the gate and host responses shaped the same: `local` is the row for
     // this machine, `members` are the peers.
@@ -977,6 +995,198 @@ export class MeshService {
     }
     packages.sort((left, right) => right.mtime.localeCompare(left.mtime))
     return { ok: true, dir: this.packagesDir, packages }
+  }
+
+  /**
+   * The newest build that actually finished.
+   *
+   * A failed or needs-fix job must not become the baseline for the update
+   * check, or one bad night would suppress the retry for every following day.
+   * @returns {Promise<object|null>} job state with artifacts, or null.
+   */
+  async #latestDoneBuild() {
+    for (const job of await this.jobs()) {
+      if (job.status !== 'done') continue
+      try {
+        return await readState(this._jobDir(job.id))
+      } catch {
+        // A job directory that vanished mid-scan is not a baseline.
+      }
+    }
+    return null
+  }
+
+  /**
+   * Resolve the remote revisions the next build would use.
+   *
+   * The ETags come from codeload HEAD requests and are recorded in the package
+   * manifest, so the daily check never downloads a tarball just to answer
+   * "is there anything new?".
+   * @param {string} source DSH source.
+   * @param {string} ref DSH ref.
+   * @returns {Promise<object>} current source state.
+   */
+  async #currentBuildSources(source, ref) {
+    const extra = await readExtraPlugins(this.repositoryRoot)
+    const extraPlugins = await Promise.all(extra.map(async plugin => ({
+      name: plugin.name,
+      repo: plugin.repo,
+      ref: plugin.ref,
+      etag: await remoteRevision(plugin.repo, plugin.ref),
+    })))
+    return {
+      source,
+      ref,
+      sourceEtag: await remoteRevision(source, ref),
+      pluginFingerprint: await pluginFingerprint(this.repositoryRoot),
+      extraPlugins,
+    }
+  }
+
+  /**
+   * One scheduled build: build only when DSH, dsh-mesh, or a bundled plugin
+   * changed since the newest finished build.
+   *
+   * Returns immediately after starting the job; the build itself is the same
+   * background job the panel starts.
+   * @returns {Promise<{status: string, reason?: string, jobId?: string}>} outcome.
+   */
+  async scheduledBuild() {
+    if (this.running.size > 0) return { status: 'skipped', reason: '已有编译任务在运行' }
+    const jobs = await this.jobs()
+    if (jobs.some(job => job.status === 'running' || job.status === 'created')) {
+      return { status: 'skipped', reason: '已有编译任务在运行' }
+    }
+    const defaults = await this.status()
+    const source = defaults.build.source || DEFAULT_SOURCE
+    const ref = defaults.build.ref || DEFAULT_REF
+    const targets = defaults.build.targets
+    const latest = await this.#latestDoneBuild()
+    const latestManifest = latest?.artifacts?.[0]?.manifest ?? null
+    const current = await this.#currentBuildSources(source, ref)
+    const reasons = buildUpdateReasons({ latestManifest, current })
+    if (reasons.length === 0) {
+      return { status: 'skipped', reason: 'DSH、dsh-mesh、xl 都没有更新' }
+    }
+    const snapshot = await this.members()
+    const everyone = [snapshot.local, ...snapshot.members].filter(Boolean)
+    const member = pickBuildMember(everyone)
+    const proxyMember = pickProxyMember(everyone)
+    const job = await this.startBuild({
+      source,
+      ref,
+      targets,
+      ...(member !== 'local' ? { member } : {}),
+      ...(proxyMember !== null ? { proxyMember } : {}),
+    })
+    this.logLine(`scheduled build ${job.id} started: ${reasons.join('；')}`)
+    return {
+      status: 'started',
+      jobId: job.id,
+      reason: reasons.join('；'),
+      member: member === 'local' ? 'local' : member,
+      proxyMember: proxyMember ?? null,
+    }
+  }
+
+  /**
+   * Fill in a member's deployment from the newest successful deploy job.
+   *
+   * Old gates do not report their release; this is the same fallback the
+   * member table uses, so a member that never reported a version is still
+   * compared instead of being skipped forever.
+   * @param {object} member member row.
+   * @param {object[]} deployJobs recent deploy jobs.
+   * @returns {void}
+   */
+  #applyInferredDeployment(member, deployJobs) {
+    if (memberDeployment(member) !== null) return
+    const job = deployJobs.find(candidate => candidate.status === 'succeeded'
+      && candidate.package !== undefined
+      && (candidate.member === member.id || candidate.target?.host === member.ip))
+    const parsed = packageInfo(path.basename(job?.package ?? ''))
+    if (parsed === null) return
+    member.deployment = { version: parsed.version, buildStamp: parsed.buildStamp, inferred: true }
+  }
+
+  /**
+   * One member's scheduled auto-upgrade.
+   *
+   * The job is started and left detached; the scheduler records "started"
+   * instead of holding its tick open for an upload that may take minutes.
+   * @param {string} memberId member id.
+   * @returns {Promise<{status: string, member?: string, package?: string, jobId?: string, reason?: string}>} outcome.
+   */
+  async scheduledUpgradeMember(memberId) {
+    if (this.running.size > 0) return { status: 'skipped', reason: '编译任务还在运行', member: memberId }
+    const snapshot = await this.members()
+    const everyone = [snapshot.local, ...snapshot.members].filter(Boolean)
+    const member = everyone.find(candidate => candidate.id === memberId)
+    if (member === undefined) return { status: 'skipped', reason: '成员不在当前列表', member: memberId }
+    if (member.online === false) return { status: 'skipped', reason: '离线', member: member.name }
+    const deployJobs = await this.deployJobs(50)
+    this.#applyInferredDeployment(member, deployJobs)
+    const packages = (await this.packages()).packages
+    const plan = planUpgrades([member], packages)
+    if (plan.upgrades.length === 0) {
+      return { status: 'skipped', member: member.name, reason: plan.skipped[0]?.reason ?? '当前部署已是最新' }
+    }
+    const entry = plan.upgrades[0]
+    try {
+      const result = await this.upgradeMember({ member: entry.member.id, package: entry.package.name })
+      this.logLine(`scheduled upgrade ${entry.member.name} -> ${entry.package.name} (${result.job.id})`)
+      return { status: 'started', member: entry.member.name, package: entry.package.name, jobId: result.job.id }
+    } catch (error) {
+      return { status: 'failed', member: member.name, reason: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /**
+   * One scheduled upgrade: bring every member that is behind to the newest
+   * package for its OS, peers before the local gateway.
+   *
+   * Each member keeps its own detached job; a failure on one member does not
+   * stop the others, and the local install is started last because upgrading
+   * it restarts this process.
+   * @returns {Promise<{status: string, reason?: string, upgraded?: object[], failed?: object[], skipped?: object[]}>} outcome.
+   */
+  async scheduledUpgrade() {
+    if (this.running.size > 0) return { status: 'skipped', reason: '编译任务还在运行' }
+    const snapshot = await this.members()
+    const everyone = [snapshot.local, ...snapshot.members].filter(Boolean)
+    const deployJobs = await this.deployJobs(50)
+    for (const member of everyone) this.#applyInferredDeployment(member, deployJobs)
+    const packages = (await this.packages()).packages
+    const plan = planUpgrades(everyone, packages)
+    const skipped = plan.skipped.map(entry => ({ member: entry.member.name, reason: entry.reason }))
+    if (plan.upgrades.length === 0) {
+      return { status: 'skipped', reason: '所有成员都已经是可用的最新部署', skipped }
+    }
+    const upgraded = []
+    const failed = []
+    for (const entry of plan.upgrades) {
+      try {
+        const result = await this.upgradeMember({ member: entry.member.id, package: entry.package.name })
+        upgraded.push({ member: entry.member.name, package: entry.package.name, job: result.job.id })
+        this.logLine(`scheduled upgrade ${entry.member.name} -> ${entry.package.name} (${result.job.id})`)
+        // The local job restarts this process, so waiting would only be cut
+        // short; the detached runner finishes the upgrade either way.
+        if (entry.member.id === 'local') continue
+        const final = await this.waitDeploy(result.job.id, { timeoutMs: 20 * 60_000 }).catch(() => null)
+        if (final !== null && final.status === 'failed') {
+          failed.push({ member: entry.member.name, reason: final.error ?? '升级失败' })
+        }
+      } catch (error) {
+        failed.push({ member: entry.member.name, reason: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return {
+      status: failed.length === 0 ? 'done' : 'failed',
+      upgraded,
+      failed,
+      skipped,
+      reason: failed.length === 0 ? undefined : `${String(failed.length)} 个成员升级失败`,
+    }
   }
 
   /**

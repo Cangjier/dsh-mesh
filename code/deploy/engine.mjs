@@ -882,6 +882,11 @@ tar -xzf "$PACKAGE" -C "$NEW" --strip-components=1 -v | {
   done
 }
 
+# Drop the archive as soon as it is expanded: it is 300+ MiB, /tmp on a member
+# is often a small tmpfs, and one copy left behind per job eventually fills it
+# so the next upload dies halfway with a bare scp "Failure".
+rm -f "$PACKAGE"
+
 # Shared mutable state stays outside every release. The first deploy copies it
 # from the currently running tree; later deploys inherit it untouched.
 for dir in config data home workspace; do
@@ -1747,7 +1752,14 @@ export class SshRunner {
       const args = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-P', String(this.plan.port)]
       if (this.plan.identityFile) args.push('-i', this.plan.identityFile)
       args.push(local, `${this.target()}:${remote}`)
-      await this.runProcess('scp', args)
+      try {
+        await this.runProcess('scp', args)
+      } catch (scpError) {
+        // A half-written archive is worse than none: it occupies the target's
+        // free space and the next attempt has to fit beside it.
+        await this.runProcess('ssh', [...this.sshOptions(), this.target(), `rm -f -- ${sh(remote)}`]).catch(() => {})
+        throw scpError
+      }
       onProgress?.({ bytes: totalBytes, totalBytes, percent: 100, speed: 0, indeterminate: false })
     }
   }
@@ -1795,6 +1807,54 @@ export class SshRunner {
       return Number.isSafeInteger(size) ? size : null
     } catch {
       return null
+    }
+  }
+
+  /**
+   * Free bytes on the filesystem that holds `remote`, or null when it cannot be
+   * measured (Windows targets, or a host without `df`).
+   * @param {string} remote remote path.
+   * @returns {Promise<number|null>} free bytes.
+   */
+  async remoteFreeBytes(remote) {
+    if (this.plan.os !== 'linux') return null
+    try {
+      const dir = path.posix.dirname(remote)
+      const { stdout } = await this.runProcess('ssh', [...this.sshOptions(), this.target(), `df -Pk -- ${sh(dir)} | awk 'NR==2 {print $4}'`])
+      const kib = Number.parseInt(String(stdout).trim(), 10)
+      return Number.isSafeInteger(kib) && kib >= 0 ? kib * 1024 : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Delete the package archives earlier deploys left beside `remote`.
+   *
+   * The archive is 300+ MiB and members commonly mount /tmp as a tmpfs (1.7 GB
+   * on a 4 GB ECS). Leaving one per job behind made the third or fourth upgrade
+   * fail mid-upload with only scp's `write remote ...: Failure` to show for it.
+   * @param {string} remote remote path this job is about to upload to.
+   * @returns {Promise<boolean>} whether the cleanup command ran.
+   */
+  async discardStalePackages(remote) {
+    if (this.plan.os !== 'linux') return false
+    const dir = path.posix.dirname(remote)
+    const keep = path.posix.basename(remote)
+    const script = [
+      `cd ${sh(dir)} 2>/dev/null || exit 0`,
+      'for f in dsh-mesh-*.gz dsh-mesh-*.tar.gz dsh-mesh-*.zip; do',
+      '  [ -e "$f" ] || continue',
+      `  [ "$f" = ${sh(keep)} ] && continue`,
+      '  rm -f -- "$f"',
+      'done',
+      'exit 0',
+    ].join('\n')
+    try {
+      await this.runProcess('ssh', [...this.sshOptions(), this.target(), script])
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -2280,6 +2340,23 @@ export class DeployManager {
         meter('上传安装包', { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 })
         await mark('upload', 'succeeded', `${formatBytes(existingBytes)} · 已存在，跳过上传`)
       } else {
+        // /tmp on a member is often a small tmpfs and every job leaves its
+        // archive there: clear the leftovers and make sure the upload fits
+        // before spending ten minutes on a transfer that dies at 70%.
+        if (typeof runner.discardStalePackages === 'function') {
+          if (await runner.discardStalePackages(plan.remotePackage).catch(() => false)) {
+            await log('pruned package archives left by earlier deploys on the target')
+          }
+        }
+        const freeBytes = typeof runner.remoteFreeBytes === 'function'
+          ? await runner.remoteFreeBytes(plan.remotePackage).catch(() => null)
+          : null
+        if (freeBytes !== null) {
+          await log(`target free space ${formatBytes(freeBytes)}, package ${formatBytes(plan.package.bytes)}`)
+          if (freeBytes < plan.package.bytes + 64 * 1024 * 1024) {
+            throw new Error(`目标剩余空间不足：${plan.remotePackage} 所在分区只剩 ${formatBytes(freeBytes)}，安装包需要 ${formatBytes(plan.package.bytes)}；清理后重试`)
+          }
+        }
         await runner.upload(plan.package.path, plan.remotePackage, progress => {
           const totalBytes = progress.totalBytes ?? plan.package.bytes
           meter('上传安装包', {

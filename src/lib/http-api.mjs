@@ -57,9 +57,10 @@ async function readJson(request) {
  * Register the local API on the Harness web server.
  * @param {import('@deepseek-ai/cordis').Context} ctx Host context.
  * @param {import('./service.mjs').MeshService} service service.
+ * @param {import('./scheduler.mjs').Scheduler|null} [scheduler] timed build/upgrade scheduler.
  * @returns {void}
  */
-export function registerApi(ctx, service) {
+export function registerApi(ctx, service, scheduler = null) {
   const hub = new EventHub({ log: line => ctx.logger?.info?.(`mesh events: ${line}`) })
   const jobEvents = startJobEvents({ service, hub, log: line => ctx.logger?.warn?.(`mesh events: ${line}`) })
   ctx.effect(() => () => {
@@ -85,6 +86,15 @@ export function registerApi(ctx, service) {
         }
         if (method === 'GET' && path === '/member-tags') {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() })
+          return
+        }
+        if (method === 'GET' && path === '/schedule') {
+          if (scheduler === null) {
+            writeJson(response, 503, { ok: false, error: { code: 'unavailable', message: '定时任务还没有启动。' } })
+            return
+          }
+          const member = url.searchParams.get('member') ?? ''
+          writeJson(response, 200, { ok: true, schedule: scheduler.status(member === '' ? undefined : member) })
           return
         }
         if (method === 'POST' && path === '/packages/delete') {
@@ -214,6 +224,34 @@ export function registerApi(ctx, service) {
           writeJson(response, 202, test
             ? await service.testUpgradeMember(request_)
             : await service.upgradeMember(request_))
+          return
+        }
+        if (path === '/schedule') {
+          if (scheduler === null) {
+            writeJson(response, 503, { ok: false, error: { code: 'unavailable', message: '定时任务还没有启动。' } })
+            return
+          }
+          const body = await readJson(request)
+          const member = typeof body.member === 'string' ? body.member.trim() : ''
+          const patch = member === ''
+            ? {
+                build: body.build !== null && typeof body.build === 'object'
+                  ? {
+                      ...(typeof body.build.enabled === 'boolean' ? { enabled: body.build.enabled } : {}),
+                      ...(typeof body.build.time === 'string' ? { time: body.build.time } : {}),
+                    }
+                  : undefined,
+              }
+            : {
+                member,
+                upgrade: body.upgrade !== null && typeof body.upgrade === 'object'
+                  ? {
+                      ...(typeof body.upgrade.enabled === 'boolean' ? { enabled: body.upgrade.enabled } : {}),
+                      ...(typeof body.upgrade.time === 'string' ? { time: body.upgrade.time } : {}),
+                    }
+                  : undefined,
+              }
+          writeJson(response, 200, { ok: true, schedule: await scheduler.update(patch) })
           return
         }
         if (path === '/build') {

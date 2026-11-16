@@ -6,9 +6,10 @@ import { registerApi } from '../src/lib/http-api.mjs'
 /**
  * Register the panel API over a stub service and expose its handler.
  * @param {object} service stub service.
- * @returns {(method: string, url: string) => Promise<{status: number, body: any}>} caller.
+ * @param {object|null} [scheduler] stub scheduler.
+ * @returns {(method: string, url: string, body?: object) => Promise<{status: number, body: any}>} caller.
  */
-function apiCaller(service) {
+function apiCaller(service, scheduler = null) {
   let handler
   const ctx = {
     effect(fn) {
@@ -22,7 +23,7 @@ function apiCaller(service) {
       },
     },
   }
-  registerApi(ctx, service)
+  registerApi(ctx, service, scheduler)
   return async (method, url, body) => {
     const request = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
     request.method = method
@@ -133,4 +134,43 @@ test('the panel can roll a member back to its previous release', async () => {
   assert.equal(response.status, 202)
   assert.equal(response.body.job.id, 'deploy-rb')
   assert.deepEqual(calls, [{ member: '10.66.66.2' }])
+})
+
+
+test('the schedule routes read the build clock and one member at a time', async () => {
+  const build = { enabled: true, time: '04:00', next: null, last: null, running: false }
+  const upgrade = { enabled: true, time: '06:00', next: null, last: null, running: false, member: '10.66.66.2' }
+  const updates = []
+  const scheduler = {
+    status(memberId) {
+      return memberId === undefined ? { ok: true, build } : { ok: true, build, upgrade }
+    },
+    async update(patch) {
+      updates.push(patch)
+      return patch.member === undefined ? { ok: true, build } : { ok: true, build, upgrade }
+    },
+  }
+  const call = apiCaller({}, scheduler)
+  const read = await call('GET', '/api/dsh-mesh/schedule')
+  assert.equal(read.status, 200)
+  assert.deepEqual(read.body.schedule, { ok: true, build })
+  const memberRead = await call('GET', '/api/dsh-mesh/schedule?member=10.66.66.2')
+  assert.equal(memberRead.status, 200)
+  assert.deepEqual(memberRead.body.schedule, { ok: true, build, upgrade })
+  const written = await call('POST', '/api/dsh-mesh/schedule', { build: { enabled: false, time: '05:15' } })
+  assert.equal(written.status, 200)
+  const memberWritten = await call('POST', '/api/dsh-mesh/schedule', { member: '10.66.66.2', upgrade: { enabled: false, time: '07:30' } })
+  assert.equal(memberWritten.status, 200)
+  assert.deepEqual(updates, [
+    { build: { enabled: false, time: '05:15' } },
+    { member: '10.66.66.2', upgrade: { enabled: false, time: '07:30' } },
+  ])
+})
+
+test('the schedule route reports unavailable when no scheduler exists', async () => {
+  const call = apiCaller({})
+  const read = await call('GET', '/api/dsh-mesh/schedule')
+  assert.equal(read.status, 503)
+  const written = await call('POST', '/api/dsh-mesh/schedule', {})
+  assert.equal(written.status, 503)
 })

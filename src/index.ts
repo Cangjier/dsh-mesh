@@ -4,6 +4,8 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import { MeshService } from './lib/service.mjs'
 import { registerApi } from './lib/http-api.mjs'
+import { Scheduler } from './lib/scheduler.mjs'
+import { scheduleFile } from './lib/schedule.mjs'
 import { registerWireGuardApi } from './lib/wireguard-api.mjs'
 import { registerTools } from './lib/tools.mjs'
 
@@ -33,7 +35,19 @@ export async function apply(ctx: any, config: any = {}) {
   ctx.effect(() => () => {
     void service.dispose()
   }, 'mesh service lifetime')
-  registerApi(ctx, service)
+  const scheduler = new Scheduler({
+    service,
+    file: scheduleFile(dataDirectory()),
+    // Auto-upgrade is configured per member; the scheduler needs the current
+    // ids to apply the default 06:00 entry to members without an override.
+    members: async () => {
+      const snapshot = await service.members()
+      return [snapshot.local?.id, ...snapshot.members.map((member: { id: string }) => member.id)].filter((id): id is string => typeof id === 'string' && id !== '')
+    },
+    log: line => console.log(`mesh schedule: ${line}`),
+  })
+  ctx.effect(() => () => scheduler.dispose(), 'mesh schedule lifetime')
+  registerApi(ctx, service, scheduler)
   registerWireGuardApi(ctx)
   try {
     ctx.inject(['tools'], (toolsCtx: any) => {

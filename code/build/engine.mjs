@@ -128,6 +128,49 @@ export function tarballUrls(repo, ref) {
 }
 
 /**
+ * The ETag of the tarball a branch/tag currently points at.
+ *
+ * A HEAD to codeload is the cheap, authentication-free update check: it uses
+ * the same host and URL candidates as the real download, and the ETag changes
+ * whenever the branch content does. A 40-hex commit is immutable, so its ETag
+ * is only informational.
+ * @param {string} source repository URL or local directory.
+ * @param {string} ref branch, tag, or commit.
+ * @param {{fetchImpl?: typeof fetch, timeoutMs?: number, log?: (line: string) => void}} [options] request options.
+ * @returns {Promise<string|null>} ETag without quotes, or null when unavailable.
+ */
+export async function remoteRevision(source, ref, options = {}) {
+  let classified
+  try {
+    classified = classifySource(source)
+  } catch {
+    return null
+  }
+  if (classified.kind !== 'github') return null
+  const fetchImpl = options.fetchImpl ?? fetch
+  const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 15_000
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    for (const url of tarballUrls(classified, ref)) {
+      try {
+        const response = await fetchImpl(url, { method: 'HEAD', redirect: 'follow', signal: controller.signal })
+        if (response.status === 404) continue
+        if (!response.ok) return null
+        const etag = typeof response.headers?.get === 'function' ? response.headers.get('etag') : null
+        if (typeof etag === 'string' && etag.trim() !== '') return etag.replace(/^W\//u, '').replaceAll('"', '').trim()
+        return null
+      } catch {
+        return null
+      }
+    }
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
  * Download one URL to a file. Returns false for a 404 so a branch fallback can
  * try the next candidate.
  * @param {string} url source.
@@ -258,13 +301,27 @@ export async function prepareSource(options) {
   const cacheDir = options.cacheDir ?? path.join(os.homedir(), '.dsh', 'mesh', 'cache')
   const urls = tarballUrls(classified, ref)
   const archive = path.join(cacheDir, 'sources', `${sha256Text(`${classified.owner}/${classified.repo}@${ref}`).slice(0, 16)}.tar.gz`)
-  // A branch or tag can move. Keep the download for a while, but do not reuse
-  // a months-old `master` forever; an explicit commit is immutable.
+  const etagFile = `${archive}.etag`
   const immutable = /^[0-9a-f]{40}$/iu.test(ref)
+  // A branch or tag can move. Compare the cached tarball's recorded ETag with
+  // the branch's current one, so a scheduled build forced by an update never
+  // reuses yesterday's source. An explicit commit is immutable.
+  const remoteEtag = immutable ? null : await remoteRevision(source, ref, { fetchImpl: options.fetchImpl, log })
+  let cachedEtag = ''
+  if (!immutable && existsSync(etagFile)) {
+    try {
+      cachedEtag = (await readFile(etagFile, 'utf8')).trim()
+    } catch {
+      cachedEtag = ''
+    }
+  }
   if (!immutable && existsSync(archive)) {
     const age = Date.now() - (await stat(archive)).mtimeMs
-    if (age > (options.maxCacheAgeMs ?? 6 * 60 * 60_000)) {
-      log(`refreshing cached tarball for ${ref} (older than the cache window)`)
+    const staleContent = remoteEtag !== null && cachedEtag !== remoteEtag
+    if (staleContent || age > (options.maxCacheAgeMs ?? 6 * 60 * 60_000)) {
+      log(staleContent
+        ? `refreshing cached tarball for ${ref} (remote content changed)`
+        : `refreshing cached tarball for ${ref} (older than the cache window)`)
       await rm(archive, { force: true })
     }
   }
@@ -274,11 +331,18 @@ export async function prepareSource(options) {
     if (downloaded) break
   }
   if (!downloaded) throw new Error(`cannot find ref "${ref}" in ${classified.owner}/${classified.repo}`)
+  if (remoteEtag !== null) {
+    try {
+      await writeFile(etagFile, `${remoteEtag}\n`, 'utf8')
+    } catch {
+      // A cache hint that cannot be written only costs one extra download.
+    }
+  }
   const archiveSha256 = await sha256File(archive)
   const dir = path.join(options.workDir, 'src')
   log(`extracting ${path.basename(archive)} to ${dir}`)
   await extractTarball(archive, dir, { log })
-  return { dir, source, ref, local: false, archive, archiveSha256 }
+  return { dir, source, ref, local: false, archive, archiveSha256, archiveEtag: remoteEtag }
 }
 
 /**
@@ -605,6 +669,43 @@ export async function listFiles(dir) {
   return out
 }
 
+/** Files and directories that make one dsh-mesh build (plugin + package payload). */
+const PLUGIN_FINGERPRINT_FILES = [
+  'package.json', 'index.js', 'client.js', 'cordis.patch.yml', 'icon.svg', 'VERSION',
+  'start-dsh.sh', 'start-interop.sh', 'install-interop-service.sh', 'uninstall-interop-service.sh',
+  'install.sh', 'start.sh', 'stop.sh', 'status.sh', 'doctor.sh',
+  'install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'start-stack.ps1',
+]
+const PLUGIN_FINGERPRINT_DIRS = ['locale', 'build', 'docs', 'code']
+
+/**
+ * Content hash of the dsh-mesh plugin that a build would copy.
+ *
+ * The scheduled build compares this with the fingerprint recorded in the last
+ * successful package; a rebuilt client or a changed build recipe therefore
+ * counts as a dsh-mesh update even when package.json's version did not move.
+ * @param {string} repositoryRoot plugin root.
+ * @returns {Promise<string>} hex digest.
+ */
+export async function pluginFingerprint(repositoryRoot) {
+  const files = []
+  for (const name of PLUGIN_FINGERPRINT_FILES) {
+    if (existsSync(path.join(repositoryRoot, name))) files.push(name)
+  }
+  for (const dir of PLUGIN_FINGERPRINT_DIRS) {
+    for (const rel of await listFiles(path.join(repositoryRoot, dir))) files.push(path.join(dir, rel))
+  }
+  files.sort()
+  const hash = createHash('sha256')
+  for (const rel of files) {
+    hash.update(rel)
+    hash.update('\0')
+    hash.update(await sha256File(path.join(repositoryRoot, rel)))
+    hash.update('\n')
+  }
+  return hash.digest('hex')
+}
+
 /**
  * Read the plugins that every package carries besides dsh-mesh itself.
  *
@@ -675,6 +776,7 @@ export async function copyExtraPlugins(options) {
       repo: plugin.repo,
       ref: plugin.ref,
       archiveSha256: await sha256File(archive),
+      archiveEtag: await remoteRevision(plugin.repo, plugin.ref, { fetchImpl: options.fetchImpl, log }),
     })
     log(`extra plugin ${plugin.name}@${plugin.ref} -> ${plugin.dir}`)
   }
@@ -685,7 +787,7 @@ export async function copyExtraPlugins(options) {
  * Assemble one target package without downloading runtimes yet. This is the
  * deterministic half of packaging; the runtime/app layer is added by
  * `assembleRuntimePackage`.
- * @param {{dist: string, target: string, outputDir: string, version: string, buildStamp?: string|null, repositoryRoot: string, log?: (line: string) => void}} options package input.
+ * @param {{dist: string, target: string, outputDir: string, version: string, buildStamp?: string|null, repositoryRoot: string, source?: string, ref?: string, tree?: string|null, sourceEtag?: string|null, pluginVersion?: string|null, pluginFingerprint?: string|null, fetchImpl?: typeof fetch, log?: (line: string) => void}} options package input.
  * @returns {Promise<{packageDir: string, manifest: object}>} package directory and manifest.
  */
 export async function assembleWebPackage(options) {
@@ -754,6 +856,11 @@ export async function assembleWebPackage(options) {
     source: options.source ?? null,
     ref: options.ref ?? null,
     tree: options.tree ?? null,
+    sourceEtag: options.sourceEtag ?? null,
+    plugin: {
+      version: options.pluginVersion ?? null,
+      fingerprint: options.pluginFingerprint ?? null,
+    },
     files: (await listFiles(packageDir)).length,
     staticAssets,
     extraPlugins,

@@ -32,6 +32,7 @@ import {
   DeleteOutlined,
   CloudDownloadOutlined,
   CloudUploadOutlined,
+  ClockCircleOutlined,
   ExperimentOutlined,
   EditOutlined,
   EllipsisOutlined,
@@ -65,6 +66,7 @@ import {
 } from './api'
 import { WireGuardPanel } from './wireguard'
 import { PackagesPanel } from './packages'
+import { AutoUpgradeModal } from './schedule'
 import { TasksPanel } from './tasks'
 import { EN as WIREGUARD_EN, dictionary as wireguardDictionary } from './wireguard/i18n'
 
@@ -1001,6 +1003,7 @@ function Panel({ ctx }: { ctx: any }) {
   const [tags, setTags] = useState<Record<string, string>>({})
   const [tagTarget, setTagTarget] = useState<Member | null>(null)
   const [detailTarget, setDetailTarget] = useState<Member | null>(null)
+  const [autoUpgradeTarget, setAutoUpgradeTarget] = useState<Member | null>(null)
 
   const [promoting, setPromoting] = useState('')
   const [tagText, setTagText] = useState('')
@@ -1307,7 +1310,10 @@ function Panel({ ctx }: { ctx: any }) {
                 trigger={['click']}
                 menu={{
                   items: isSelf
-                    ? [{ key: 'upgrade', icon: <CloudUploadOutlined />, label: '升级' }]
+                    ? [
+                        { key: 'upgrade', icon: <CloudUploadOutlined />, label: '升级' },
+                        { key: 'auto', icon: <ClockCircleOutlined />, label: '自动升级' },
+                      ]
                     : [
                         { key: 'upgrade', icon: <CloudUploadOutlined />, label: '升级' },
                         // On a Linux member 测试升级 first rehearses the flat
@@ -1315,15 +1321,22 @@ function Panel({ ctx }: { ctx: any }) {
                         // there; a Windows member has no flat install to
                         // rehearse, so its test upgrade is the real upgrade.
                         { key: 'test', icon: <ExperimentOutlined />, label: '测试升级' },
+                        { key: 'auto', icon: <ClockCircleOutlined />, label: '自动升级' },
                       ],
-                  onClick: ({ key }) => { openDeploy(member, key === 'test' ? 'test' : 'upgrade') },
+                  onClick: ({ key }) => {
+                    if (key === 'auto') {
+                      setAutoUpgradeTarget(member)
+                      return
+                    }
+                    openDeploy(member, key === 'test' ? 'test' : 'upgrade')
+                  },
                 }}
               >
                 <Button
                   size="small"
                   icon={<EllipsisOutlined />}
                   aria-label="更多操作"
-                  title={isSelf ? '更多：升级本机' : '更多：升级 / 测试升级'}
+                  title={isSelf ? '更多：升级 / 自动升级' : '更多：升级 / 测试升级 / 自动升级'}
                   loading={busy === member.id}
                 />
               </Dropdown>
@@ -1800,6 +1813,8 @@ function Panel({ ctx }: { ctx: any }) {
           />
         ) : null}
       </Modal>
+
+      <AutoUpgradeModal member={autoUpgradeTarget} onClose={() => setAutoUpgradeTarget(null)} />
 
       <Modal
         open={deployTarget !== null}

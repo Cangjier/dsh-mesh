@@ -1114,15 +1114,14 @@ html body {
   min-width: 720px;
 }
 
-/* Every cell is one line; long fields ellipsize instead of wrapping, so row
-   heights stay equal and the indent column keeps its width. */
+/* Cells start on one line: id, source and the action column stay compact. The
+   define and \u5907\u6CE8 cells override this below, so their rows may grow taller
+   while everything else keeps its height. */
 .dsh-task-tablewrap .ant-table-tbody > tr > td {
   white-space: nowrap;
+  vertical-align: top;
 }
 
-/* Column widths come from the content. The caps keep one long field from
-   pushing everything else off-screen; define gets the widest cap because it is
-   the text people actually read. */
 .dsh-task-id {
   white-space: nowrap;
 }
@@ -1135,27 +1134,28 @@ html body {
   text-decoration: underline;
 }
 
-.dsh-task-cell-source,
-.dsh-task-cell-define,
-.dsh-task-cell-remark {
+/* source is a path, so it stays on one line and ellipsizes when the column is
+   narrow. */
+.dsh-task-cell-source {
   display: inline-block;
-  max-width: 100%;
+  max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: bottom;
 }
 
-.dsh-task-cell-source {
-  max-width: 260px;
-}
-
-.dsh-task-cell-define {
-  max-width: 520px;
-}
-
+/* define and \u5907\u6CE8 are prose: a value that does not fit wraps inside its column
+   instead of ending in an ellipsis, so the whole sentence stays readable and
+   the row simply grows taller. overflow-wrap also breaks one long token (a URL
+   or a path with no spaces) that would otherwise widen the table. */
+.dsh-task-cell-define,
 .dsh-task-cell-remark {
-  max-width: 200px;
+  display: block;
+  max-width: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: top;
 }
 
 .dsh-task-md {

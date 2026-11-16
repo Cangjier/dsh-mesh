@@ -222,8 +222,8 @@ dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>/
 | 参数 | 行为 |
 |---|---|
 | 默认 | 本机目标执行；目标不是本机、`--web-only`、或找不到 Chrome 时跳过并写 `skipped` 原因 |
-| `--no-smoke` | 不启动、不抓屏 |
-| `--require-smoke` | 找不到 Chrome 时让构建失败，而不是跳过 |
+| `--no-smoke` | 不启动、不抓屏，显式接受未验证包 |
+| `--require-smoke` | 找不到 Chrome 时按失败处理（默认已是：一个目标都没验证就失败） |
 | `--smoke-chrome <path>` | 指定 Chrome/Chromium；也可用 `DSH_MESH_SMOKE_CHROME` |
 | `--smoke-start-timeout <ms>` | DSH 打印启动 URL 的预算（默认 180000） |
 | `--smoke-page-timeout <ms>` | 浏览器等 DSH 壳的预算（默认 180000） |
@@ -235,7 +235,7 @@ dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>/
 - `apps/web` 把静态模块表交给 `@deepseek-ai/dsh-client-modules`。源码 `master` 新一些时它传 `{id, factory}` 描述符数组（`Object.values({...})`），而 npm 发布的同版本 loader 只认 record（`new Map(Object.entries(options.staticModules))`）——数组会变成键 `"0"`、`"1"`，`react` 都解析不到。
 - 反过来，npm app 的客户端插件可能已经在用 shell 里旧副本没有的导出（2026-11-16 是 `@deepseek-ai/dsh-client-ui-primitives` 的 `rankByName`），同样会让整页的插件加载失败。
 
-装配 `assembleRuntimePackage` 时、覆盖前端之后会跑 `checkFrontendAppContract`：
+装配 `assembleRuntimePackage` 时先跑 `checkFrontendAppContract`，再决定覆盖还是保留：
 
 1. 从 `dist/index.html` 找到 shell bundle，按 `staticModules:<fn>()` 找到种子表构造函数，读它是 `Object.values({...})`（array）还是 `{...}`（record）；
 2. 从 `app/node_modules/@deepseek-ai/dsh-client-modules/lib/client.js` 读 loader 接受哪种形状；

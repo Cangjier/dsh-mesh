@@ -1896,7 +1896,7 @@ var ChromeSession = class _ChromeSession {
       });
     });
     try {
-      await Promise.race([waitForFile(portFile, 2e4), exitedEarly]);
+      await Promise.race([waitForFile(portFile, 45e3), exitedEarly]);
     } catch (error) {
       session.kill();
       const reason = error instanceof Error ? error.message : String(error);
@@ -2047,17 +2047,39 @@ var VIEWPORT = { width: 1440, height: 900 };
 var DEFAULT_START_TIMEOUT_MS = 18e4;
 var DEFAULT_PAGE_TIMEOUT_MS = 24e4;
 var DEFAULT_PANEL_TIMEOUT_MS = 15e4;
-function chromeCandidates(env = process.env) {
+function pathLookup(env, platform, names) {
+  const key = platform === "win32" ? env.PATH ?? env.Path ?? "" : env.PATH ?? "";
+  const separator = platform === "win32" ? ";" : ":";
+  const dirs = key.split(separator).map((entry) => entry.trim()).filter((entry) => entry !== "");
+  const found = [];
+  for (const dir of dirs) {
+    for (const name of names) found.push(path7.join(dir, name));
+  }
+  return found;
+}
+function chromeCandidates(env = process.env, platform = process.platform) {
   const configured = [env.DSH_MESH_SMOKE_CHROME, env.DSH_GATE_CHROME].filter((value) => typeof value === "string" && value !== "");
-  const common = process.platform === "win32" ? [
+  const edge = platform === "win32" ? [
+    path7.join(env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", "Microsoft", "Edge", "Application", "msedge.exe"),
+    path7.join(env.ProgramFiles ?? "C:\\Program Files", "Microsoft", "Edge", "Application", "msedge.exe"),
+    path7.join(env.LOCALAPPDATA ?? "", "Microsoft", "Edge", "Application", "msedge.exe")
+  ] : platform === "darwin" ? ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"] : [
+    "/usr/bin/microsoft-edge",
+    "/usr/bin/microsoft-edge-stable",
+    "/usr/bin/microsoft-edge-beta",
+    "/usr/bin/microsoft-edge-dev",
+    "/opt/microsoft/msedge/msedge",
+    "/opt/microsoft/msedge-beta/msedge",
+    "/opt/microsoft/msedge-dev/msedge"
+  ];
+  const chrome = platform === "win32" ? [
     path7.join(env.ProgramFiles ?? "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
     path7.join(env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", "Google", "Chrome", "Application", "chrome.exe"),
-    path7.join(env.LOCALAPPDATA ?? "", "Google", "Chrome", "Application", "chrome.exe"),
-    path7.join(env.ProgramFiles ?? "C:\\Program Files", "Microsoft", "Edge", "Application", "msedge.exe")
-  ] : process.platform === "darwin" ? [
+    path7.join(env.LOCALAPPDATA ?? "", "Google", "Chrome", "Application", "chrome.exe")
+  ] : platform === "darwin" ? [
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+    "/Applications/Chrome Canary.app/Contents/MacOS/Google Chrome Canary"
   ] : [
     "/usr/bin/google-chrome",
     "/usr/bin/google-chrome-stable",
@@ -2067,11 +2089,12 @@ function chromeCandidates(env = process.env) {
     "/usr/lib/chromium/chromium",
     "/snap/bin/chromium"
   ];
-  return [...configured, ...common].filter((value) => value !== "");
+  const names = platform === "win32" ? ["chrome.exe", "msedge.exe", "chromium.exe"] : ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "microsoft-edge-stable"];
+  return [...configured, ...chrome, ...edge, ...pathLookup(env, platform, names)].filter((value) => value !== "");
 }
-function findChrome(env = process.env) {
-  const mode = process.platform === "win32" ? constants.F_OK : constants.X_OK;
-  for (const candidate of chromeCandidates(env)) {
+function findChrome(env = process.env, platform = process.platform) {
+  const mode = platform === "win32" ? constants.F_OK : constants.X_OK;
+  for (const candidate of chromeCandidates(env, platform)) {
     try {
       accessSync(candidate, mode);
       return candidate;
@@ -2579,7 +2602,7 @@ async function runPackageSmoke(options) {
   }
   const chrome = options.chrome === void 0 ? findChrome(options.env ?? process.env) : options.chrome;
   if (chrome === null || chrome === "") {
-    const reason = "no Chrome/Chromium found; set DSH_MESH_SMOKE_CHROME or run with --no-smoke";
+    const reason = "no Chrome/Chromium/Edge found; set DSH_MESH_SMOKE_CHROME or run with --no-smoke";
     return options.required === true ? { ...skipped(reason, base), ok: false, status: "failed", error: reason } : skipped(reason, base);
   }
   const ownsWorkDir = options.workDir === void 0;
@@ -2871,7 +2894,7 @@ function unverifiedBuildReason(artifacts, options = {}) {
   if (options.full === false || options.smoke === false) return null;
   if (artifacts.some((artifact) => artifact.smoke?.status === "passed")) return null;
   const detail = artifacts.map((artifact) => `${artifact.target}: ${artifact.smoke?.status ?? "not run"}${artifact.smoke?.reason === void 0 ? "" : ` (${artifact.smoke.reason})`}`).join("; ");
-  return `no target was booted in a browser (${detail}). Install Chrome/Chromium or set DSH_MESH_SMOKE_CHROME, build on a host that can run at least one target, or pass --no-smoke to accept an unverified package explicitly.`;
+  return `no target was booted in a browser (${detail}). Install Chrome/Chromium/Edge or set DSH_MESH_SMOKE_CHROME, build on a host that can run at least one target, or pass --no-smoke to accept an unverified package explicitly.`;
 }
 async function runJob(dir, options) {
   const repositoryRoot = options.repositoryRoot;
@@ -4118,7 +4141,7 @@ if "$NODE" "$SMOKE_SCRIPT" --install --root "$APP" --port 18081 --home "$TEST_HO
 else
   smoke_rc=$?
   if [ "$smoke_rc" = "3" ]; then
-    say '\u6293\u5C4F\u8DF3\u8FC7\uFF1A\u76EE\u6807\u6210\u5458\u6CA1\u6709 Chrome/Chromium\uFF08\u6784\u5EFA\u673A\u4E0A\u7684\u300C\u6784\u5EFA\u540E\u6293\u5C4F\u300D\u4ECD\u4F1A\u6267\u884C\uFF09'
+    say '\u6293\u5C4F\u8DF3\u8FC7\uFF1A\u76EE\u6807\u6210\u5458\u6CA1\u6709 Chrome/Chromium/Edge\uFF08\u6784\u5EFA\u673A\u4E0A\u7684\u300C\u6784\u5EFA\u540E\u6293\u5C4F\u300D\u4ECD\u4F1A\u6267\u884C\uFF09'
   else
     fail "\u5347\u7EA7\u540E\u7684\u6C99\u7BB1\u6CA1\u6709\u901A\u8FC7 Chrome \u6293\u5C4F\u5192\u70DF\uFF08\u9000\u51FA\u7801 $smoke_rc\uFF09\uFF1B\u622A\u56FE\u4E0E\u65E5\u5FD7\u5728 $SMOKE_SHOT"
   fi

@@ -89,7 +89,7 @@ profile 接线会扫描 `<root>/plugins/*` 找随包插件（现在有 `xl`）�
 
 1. **平铺流程演练**（`rehearse`）：在目标成员上把包解压到 `<appRoot>/../.dsh-mesh-test/<release>/stage`，用**该成员当前版本**的 `plugins/`、`code/`、`gate/`、`manifest.json`、`start.sh` 加上它真实的 `shared/config/gate.env` 和 `shared/home/profiles/web/{package.json,cordis.patch.yml}` 拼出一份平铺安装；沙箱的 `DSH_HOME` 与端口（18080）都改到沙箱里。然后跑**新包里**的 `code/deploy/upgrade-local.sh`（与生产 runner 同源；新包不带 `code/deploy` 时才退回已安装插件那份，并在日志里说明），脚本同样先复制到沙箱 `tools/` 再执行，包内容用 `--stage` 指定。
    - ① 正常升级，核对：备份里是升级前的文件（`plugins/` 与 `code/gate/manifest.json` 都要在）、覆盖后是新包的文件、profile 接的是沙箱 app、随包插件（xl）已接入、manifest 存在。
-   - ② **Chrome headless 抓屏**：升级后的沙箱不是只看文件——用沙箱自己的 `runtime/node` 跑新包里的 `plugins/dsh-mesh/code/build/smoke-cli.mjs --install --root <沙箱> --port 18081`，启动包内的 supervisor + gate，过密码门，等 DSH 壳，点侧边栏 `Mesh`，断言面板出现（`.dsh-pw-page`，至少 `.dsh-pw-boot`）并截图到 `<appRoot>/.dsh-mesh-test-<release>/`。这一步同时验证 app/runtime 真能启动、前端 client bundle 与 profile 接线一致；目标成员没有 Chrome 时日志写「抓屏跳过」并继续（构建机上的构建后抓屏仍会执行），只有启动/面板检查失败才让演练失败。
+   - ② **Chrome headless 抓屏**：升级后的沙箱不是只看文件——用沙箱自己的 `runtime/node` 跑新包里的 `plugins/dsh-mesh/code/build/smoke-cli.mjs --install --root <沙箱> --port 18081`，启动包内的 supervisor + gate，过密码门，等 DSH 壳，点侧边栏 `Mesh`，断言面板出现（`.dsh-pw-page`，至少 `.dsh-pw-boot`）并截图到 `<appRoot>/.dsh-mesh-test-<release>/`。这一步同时验证 app/runtime 真能启动、前端 client bundle 与 profile 接线一致；目标成员没有 Chrome/Chromium/Edge 时日志写「抓屏跳过」并继续（构建机上的构建后抓屏仍会执行），只有启动/面板检查失败才让演练失败。
    - ③ 注入一次接线失败（把 `wire-profile.mjs` 换成必定失败的桩，桩会留下标记证明覆盖确实发生过），验证 `upgrade-local.sh` 的 `restore()` 把文件还原。
    - 全程不重启、不安装任何单元，不碰成员真实的端口与服务。
 2. **真实升级**：演练通过后才按目标成员自己的布局（蓝绿）走 prepare → activate（重启服务，gateway 最后）→ 健康检查，失败按 `previous` 回滚。

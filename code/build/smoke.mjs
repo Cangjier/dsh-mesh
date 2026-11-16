@@ -48,25 +48,70 @@ const DEFAULT_PAGE_TIMEOUT_MS = 240_000
 const DEFAULT_PANEL_TIMEOUT_MS = 150_000
 
 /**
- * Candidate Chrome/Chromium binaries for the current platform.
+ * Binaries found on `PATH`, in PATH order.
+ *
+ * Windows uses `;` between entries and its PATH variable may be spelled `Path`;
+ * do not use `path.delimiter` here because the function can be asked about a
+ * platform other than the one running it (tests do that).
  * @param {NodeJS.ProcessEnv} env environment.
+ * @param {NodeJS.Platform|string} platform target platform.
+ * @param {string[]} names executable names to look for.
+ * @returns {string[]} candidate paths.
+ */
+function pathLookup(env, platform, names) {
+  const key = platform === 'win32' ? (env.PATH ?? env.Path ?? '') : (env.PATH ?? '')
+  const separator = platform === 'win32' ? ';' : ':'
+  const dirs = key.split(separator).map(entry => entry.trim()).filter(entry => entry !== '')
+  const found = []
+  for (const dir of dirs) {
+    for (const name of names) found.push(path.join(dir, name))
+  }
+  return found
+}
+
+/**
+ * Candidate Chrome/Chromium/Edge binaries for one platform.
+ *
+ * Edge is a Chromium build and speaks the same CDP, so a Windows build host
+ * that has no Chrome can still boot and inspect a package: Edge is installed
+ * by default on modern Windows. The static locations cover the per-machine
+ * (x64 builds live under Program Files (x86)) and per-user installs;
+ * `DSH_MESH_SMOKE_CHROME` / `DSH_GATE_CHROME` still win over everything.
+ * @param {NodeJS.ProcessEnv} env environment.
+ * @param {NodeJS.Platform|string} platform platform to search, defaults to this host.
  * @returns {string[]} paths, most explicit first.
  */
-export function chromeCandidates(env = process.env) {
+export function chromeCandidates(env = process.env, platform = process.platform) {
   const configured = [env.DSH_MESH_SMOKE_CHROME, env.DSH_GATE_CHROME]
     .filter(value => typeof value === 'string' && value !== '')
-  const common = process.platform === 'win32'
+  const edge = platform === 'win32'
+    ? [
+        path.join(env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        path.join(env.ProgramFiles ?? 'C:\\Program Files', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        path.join(env.LOCALAPPDATA ?? '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      ]
+    : platform === 'darwin'
+      ? ['/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge']
+      : [
+          '/usr/bin/microsoft-edge',
+          '/usr/bin/microsoft-edge-stable',
+          '/usr/bin/microsoft-edge-beta',
+          '/usr/bin/microsoft-edge-dev',
+          '/opt/microsoft/msedge/msedge',
+          '/opt/microsoft/msedge-beta/msedge',
+          '/opt/microsoft/msedge-dev/msedge',
+        ]
+  const chrome = platform === 'win32'
     ? [
         path.join(env.ProgramFiles ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
         path.join(env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
         path.join(env.LOCALAPPDATA ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-        path.join(env.ProgramFiles ?? 'C:\\Program Files', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
       ]
-    : process.platform === 'darwin'
+    : platform === 'darwin'
       ? [
           '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
           '/Applications/Chromium.app/Contents/MacOS/Chromium',
-          '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+          '/Applications/Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
         ]
       : [
           '/usr/bin/google-chrome',
@@ -77,17 +122,21 @@ export function chromeCandidates(env = process.env) {
           '/usr/lib/chromium/chromium',
           '/snap/bin/chromium',
         ]
-  return [...configured, ...common].filter(value => value !== '')
+  const names = platform === 'win32'
+    ? ['chrome.exe', 'msedge.exe', 'chromium.exe']
+    : ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'microsoft-edge', 'microsoft-edge-stable']
+  return [...configured, ...chrome, ...edge, ...pathLookup(env, platform, names)].filter(value => value !== '')
 }
 
 /**
- * First runnable Chrome/Chromium.
+ * First runnable Chrome/Chromium/Edge.
  * @param {NodeJS.ProcessEnv} env environment.
+ * @param {NodeJS.Platform|string} platform platform to search, defaults to this host.
  * @returns {string|null} binary or null.
  */
-export function findChrome(env = process.env) {
-  const mode = process.platform === 'win32' ? constants.F_OK : constants.X_OK
-  for (const candidate of chromeCandidates(env)) {
+export function findChrome(env = process.env, platform = process.platform) {
+  const mode = platform === 'win32' ? constants.F_OK : constants.X_OK
+  for (const candidate of chromeCandidates(env, platform)) {
     try {
       accessSync(candidate, mode)
       return candidate
@@ -791,7 +840,7 @@ export async function runPackageSmoke(options) {
   }
   const chrome = options.chrome === undefined ? findChrome(options.env ?? process.env) : options.chrome
   if (chrome === null || chrome === '') {
-    const reason = 'no Chrome/Chromium found; set DSH_MESH_SMOKE_CHROME or run with --no-smoke'
+    const reason = 'no Chrome/Chromium/Edge found; set DSH_MESH_SMOKE_CHROME or run with --no-smoke'
     return options.required === true
       ? { ...skipped(reason, base), ok: false, status: 'failed', error: reason }
       : skipped(reason, base)
@@ -903,7 +952,7 @@ export async function runInstallSmoke(options) {
   }
   const chrome = options.chrome === undefined ? findChrome(options.env ?? process.env) : options.chrome
   if (chrome === null || chrome === '') {
-    const reason = 'no Chrome/Chromium found; set DSH_MESH_SMOKE_CHROME'
+    const reason = 'no Chrome/Chromium/Edge found; set DSH_MESH_SMOKE_CHROME'
     return options.required === true
       ? { ok: false, status: 'failed', target, root, error: reason, checks: [], screenshots: [], durationMs: 0 }
       : skipped(reason, { target, root })

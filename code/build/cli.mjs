@@ -208,7 +208,7 @@ async function main() {
     '  --build-stamp <stamp>    daily build stamp, default YYYYMMDD + next letter',
     '  --no-smoke               skip the headless-Chrome package smoke test',
     '  --require-smoke           fail when Chrome is missing (no verified target also fails)',
-    '  --smoke-chrome <path>    Chrome/Chromium used by the smoke test',
+    '  --smoke-chrome <path>    Chrome/Chromium/Edge used by the smoke test',
     '  --smoke-start-timeout <ms>  DSH startup budget (default 180000)',
     '  --smoke-page-timeout <ms>   browser boot budget (default 180000)',
     '',

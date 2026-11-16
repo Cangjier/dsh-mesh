@@ -11,7 +11,7 @@
  *        --port 18081 --home /path/to/sandbox-home \
  *        --screenshot-dir /var/tmp/rehearsal-shots
  *
- * Exit codes: 0 passed, 1 failed, 3 skipped (for example no Chrome).
+ * Exit codes: 0 passed, 1 failed, 3 skipped (for example no Chrome/Edge).
  *
  * @module dsh-mesh/build/smoke-cli
  */

@@ -213,9 +213,11 @@ dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>/
 5. 等待 DSH 壳出现，断言：没有 `Failed to load plugins`、侧边栏有 `Mesh`、点击 `Mesh` 后 `.dsh-pw-page`（或至少 `.dsh-pw-boot`）出现；
 6. 截图写到 `<job>/smoke/<target>/dsh-<target>.png` 与 `mesh-<target>.png`，浏览器和进程日志写到同目录的 `smoke.log`。
 
-结果跟着产物一起写进 `state.json` 的 `artifacts[].smoke`。失败时任务状态是 `smoke-failed`，日志会写明是 DSH 没启动、页面报了插件错误，还是 Mesh 面板没出现；截图保留在任务目录。冒烟失败后不会继续下一个目标。面板的编译任务状态列会额外显示「抓屏通过 / 未抓屏 / 抓屏失败」，悬停「抓屏通过」可看截图路径；「未抓屏」一定带原因（跨目标、web-only、关掉冒烟或没有 Chrome）。
+结果跟着产物一起写进 `state.json` 的 `artifacts[].smoke`。失败时任务状态是 `smoke-failed`，日志会写明是 DSH 没启动、页面报了插件错误，还是 Mesh 面板没出现；截图保留在任务目录。冒烟失败后不会继续下一个目标。面板的编译任务状态列会额外显示「抓屏通过 / 未抓屏 / 抓屏失败」，悬停「抓屏通过」可看截图路径；「未抓屏」一定带原因（跨目标、web-only、关掉冒烟或没有 Chrome/Chromium/Edge）。
 
-**没有目标被真正验证过，构建就不算完成。** 2026-11-16 的 `20261116F` 包是在 Windows 成员上编的：Linux 目标「跨目标跳过」，Windows 目标「没有 Chrome 跳过」，两个都记为 `skipped`，任务却仍是 `done`，坏包直接进了 `~/.dsh/packages`。现在所有目标都 `skipped` 时任务以 `smoke-failed` 结束（产物随失败清理，远程成员上的归档也不会拉回网关），错误里逐目标写明原因，并提示安装 Chrome / 设置 `DSH_MESH_SMOKE_CHROME` / 换到能运行目标的构建机，或显式 `--no-smoke` 接受未验证包。shell 是各目标共用的，所以**至少一个目标真正启动过**就足够代表这份前端。
+**没有目标被真正验证过，构建就不算完成。** 2026-11-16 的 `20261116F` 包是在 Windows 成员上编的：Linux 目标「跨目标跳过」，Windows 目标「没有 Chrome 跳过」，两个都记为 `skipped`，任务却仍是 `done`，坏包直接进了 `~/.dsh/packages`。那台机器的 Edge 在 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`，而当时的探测只看了 `Program Files` 下的 `chrome.exe`。现在所有目标都 `skipped` 时任务以 `smoke-failed` 结束（产物随失败清理，远程成员上的归档也不会拉回网关），错误里逐目标写明原因，并提示安装 Chrome、使用已安装的 Edge、设置 `DSH_MESH_SMOKE_CHROME`、换到能运行目标的构建机，或显式 `--no-smoke` 接受未验证包。shell 是各目标共用的，所以**至少一个目标真正启动过**就足够代表这份前端。
+
+构建机上的浏览器按顺序探测：显式 `DSH_MESH_SMOKE_CHROME` / `DSH_GATE_CHROME` → Chrome → **Edge** → Chromium → `PATH`。Windows 上 Edge 的三个标准位置（`Program Files (x86)`、`Program Files`、`LOCALAPPDATA` 下的 `Microsoft\Edge\Application\msedge.exe`）都会查，所以没有 Chrome 的 Windows 成员也能完成抓屏；Edge 是 Chromium 内核，`--headless=new` + CDP 与 Chrome 相同（在本网 Windows 成员上实测 `Edg/157` 可通过 SSH 会话启动并连上 CDP）。冷启动最多等 45 秒。
 
 开关（CLI 与 `runJob` 同名参数）：
 
@@ -224,7 +226,7 @@ dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>/
 | 默认 | 本机目标执行；目标不是本机、`--web-only`、或找不到 Chrome 时跳过并写 `skipped` 原因 |
 | `--no-smoke` | 不启动、不抓屏，显式接受未验证包 |
 | `--require-smoke` | 找不到 Chrome 时按失败处理（默认已是：一个目标都没验证就失败） |
-| `--smoke-chrome <path>` | 指定 Chrome/Chromium；也可用 `DSH_MESH_SMOKE_CHROME` |
+| `--smoke-chrome <path>` | 指定 Chrome/Chromium/Edge；也可用 `DSH_MESH_SMOKE_CHROME` |
 | `--smoke-start-timeout <ms>` | DSH 打印启动 URL 的预算（默认 180000） |
 | `--smoke-page-timeout <ms>` | 浏览器等 DSH 壳的预算（默认 180000） |
 
@@ -259,7 +261,7 @@ node code/build/smoke-cli.mjs --root ~/.dsh/mesh/build/<job>/dist/dsh-mesh-<dshV
   --target linux-x64 --screenshot-dir /tmp/dsh-smoke
 ```
 
-退出码：`0` 通过，`1` 失败，`3` 跳过（没有 Chrome 等）。测试升级的沙箱会调用同一支脚本（见 Step 018）。
+退出码：`0` 通过，`1` 失败，`3` 跳过（没有 Chrome/Edge 等）。测试升级的沙箱会调用同一支脚本（见 Step 018）。
 
 ### 快速旁路：从已安装的 Web shell 出包
 
@@ -325,7 +327,7 @@ created → running(prepare → apply → build → package) → done
 | Node 运行时 404 | 该版本没有对应平台包 | 显式 `nodeVersion`，或换目标 |
 | 包能装但页面是旧前端 | 覆盖 `dsh-web-frontend/dist` 失败 | 看 `overlayFrontend` 日志；确认包路径 |
 | 构建完成但页面 `Failed to load plugins` | 包内 client bundle 与 `app/` 的 DSH 版本不匹配 | 先看构建日志里的 `frontend/app contract check` 和包 `manifest.json` 的 `frontend.source`；不兼容时应回退到 `published`。若仍是 `built` 而页面失败，看 `smoke/<target>/smoke.log` 与截图 |
-| 所有目标都 `skipped` 却想发布 | 构建机跑不了目标（跨平台）且没有 Chrome | 安装 Chrome / 设 `DSH_MESH_SMOKE_CHROME`，或换到能运行目标的成员编译；否则任务会是 `smoke-failed` |
+| 所有目标都 `skipped` 却想发布 | 构建机跑不了目标（跨平台）且没有 Chrome/Edge | 安装 Chrome 或确认 Edge 可用 / 设 `DSH_MESH_SMOKE_CHROME`，或换到能运行目标的成员编译；否则任务会是 `smoke-failed` |
 | Windows 成员启动失败 | 端口 80 权限 / 防火墙 | 用 8080，`install.ps1` 加防火墙规则 |
 
 ## 测试

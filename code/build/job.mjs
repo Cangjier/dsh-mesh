@@ -168,7 +168,7 @@ export function unverifiedBuildReason(artifacts, options = {}) {
   const detail = artifacts
     .map(artifact => `${artifact.target}: ${artifact.smoke?.status ?? 'not run'}${artifact.smoke?.reason === undefined ? '' : ` (${artifact.smoke.reason})`}`)
     .join('; ')
-  return `no target was booted in a browser (${detail}). Install Chrome/Chromium or set DSH_MESH_SMOKE_CHROME, ` +
+  return `no target was booted in a browser (${detail}). Install Chrome/Chromium/Edge or set DSH_MESH_SMOKE_CHROME, ` +
     'build on a host that can run at least one target, or pass --no-smoke to accept an unverified package explicitly.'
 }
 

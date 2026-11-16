@@ -128,7 +128,8 @@ export class ChromeSession {
     const portFile = path.join(session.#profileDir, 'DevToolsActivePort')
     // A browser that exits early (a service-account restriction, a missing
     // runtime DLL, a policy) would otherwise look like a slow start for the
-    // full 20 s and report only "timed out".
+    // full wait and report only "timed out". Edge on a cold profile can take
+    // well over 20 s on a busy host, so the budget is generous.
     const exitedEarly = new Promise((_resolve, reject) => {
       session.#child.once('error', (error) => {
         reject(new Error(`cannot run ${binary}: ${error.message}`))
@@ -139,7 +140,7 @@ export class ChromeSession {
       })
     })
     try {
-      await Promise.race([waitForFile(portFile, 20_000), exitedEarly])
+      await Promise.race([waitForFile(portFile, 45_000), exitedEarly])
     } catch (error) {
       session.kill()
       const reason = error instanceof Error ? error.message : String(error)

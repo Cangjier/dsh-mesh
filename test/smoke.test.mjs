@@ -166,3 +166,41 @@ test('wire-profile replaces the empty patch placeholder instead of appending to 
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('chromeCandidates detects Edge on Windows, including x86 and per-user installs', async () => {
+  const dir = await tempDir()
+  try {
+    const programFiles = path.join(dir, 'PF')
+    const programFilesX86 = path.join(dir, 'PF86')
+    const localAppData = path.join(dir, 'Local')
+    const machineWide = path.join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe')
+    const perUser = path.join(localAppData, 'Microsoft', 'Edge', 'Application', 'msedge.exe')
+    for (const file of [machineWide, perUser]) {
+      await mkdir(path.dirname(file), { recursive: true })
+      await writeFile(file, '', 'utf8')
+    }
+    const env = { ProgramFiles: programFiles, 'ProgramFiles(x86)': programFilesX86, LOCALAPPDATA: localAppData }
+    const candidates = chromeCandidates(env, 'win32')
+    assert.ok(candidates.includes(machineWide))
+    assert.ok(candidates.includes(perUser))
+    // No Chrome in this environment: Edge is the answer, not "no browser".
+    assert.equal(findChrome(env, 'win32'), machineWide)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('chromeCandidates offers Edge on Linux and keeps the explicit override first', () => {
+  const linux = chromeCandidates({}, 'linux')
+  assert.ok(linux.includes('/usr/bin/microsoft-edge'))
+  assert.ok(linux.includes('/usr/bin/microsoft-edge-stable'))
+  const configured = chromeCandidates({ DSH_MESH_SMOKE_CHROME: 'C:\\edge\\msedge.exe' }, 'win32')
+  assert.equal(configured[0], 'C:\\edge\\msedge.exe')
+})
+
+test('chromeCandidates looks on PATH for Chrome and Edge', () => {
+  const env = { PATH: ['C:\\one', 'C:\\two'].join(';') }
+  const candidates = chromeCandidates(env, 'win32')
+  assert.ok(candidates.includes(path.join('C:\\one', 'msedge.exe')))
+  assert.ok(candidates.includes(path.join('C:\\two', 'chrome.exe')))
+})

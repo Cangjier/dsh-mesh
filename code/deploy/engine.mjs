@@ -1289,7 +1289,7 @@ if "$NODE" "$SMOKE_SCRIPT" --install --root "$APP" --port 18081 --home "$TEST_HO
 else
   smoke_rc=$?
   if [ "$smoke_rc" = "3" ]; then
-    say '抓屏跳过：目标成员没有 Chrome/Chromium（构建机上的「构建后抓屏」仍会执行）'
+    say '抓屏跳过：目标成员没有 Chrome/Chromium/Edge（构建机上的「构建后抓屏」仍会执行）'
   else
     fail "升级后的沙箱没有通过 Chrome 抓屏冒烟（退出码 $smoke_rc）；截图与日志在 $SMOKE_SHOT"
   fi

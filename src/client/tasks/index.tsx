@@ -400,7 +400,7 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
     const canUp = position > 0
     const canDown = position < siblings - 1
     return (
-      <Space size={2} wrap>
+      <Space size={2}>
         <Tooltip title="编辑"><Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(row.id)} /></Tooltip>
         {showAddChild ? (
           <Tooltip title="新建子对象"><Button size="small" type="text" icon={<PlusOutlined />} onClick={() => addChild(row.id)} /></Tooltip>
@@ -505,7 +505,7 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
             <Table<TaskRow>
               size="middle"
               rowKey="key"
-              tableLayout="auto"
+              tableLayout="fixed"
               dataSource={flat}
               columns={taskColumns as never}
               pagination={false}
@@ -523,7 +523,7 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
             <Table<TaskRow>
               size="middle"
               rowKey="key"
-              tableLayout="auto"
+              tableLayout="fixed"
               dataSource={tree}
               columns={taskColumns as never}
               pagination={false}

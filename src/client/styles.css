@@ -728,14 +728,16 @@
   min-width: 720px;
 }
 
-/* Cells start on one line: id, source and the action column stay compact. The
-   define and 备注 cells override this below, so their rows may grow taller
-   while everything else keeps its height. */
+/* Every cell is one line; long fields ellipsize instead of wrapping, so row
+   heights stay equal and the indent column keeps its width. */
 .dsh-task-tablewrap .ant-table-tbody > tr > td {
   white-space: nowrap;
-  vertical-align: top;
 }
 
+/* The table uses a fixed layout, so every column keeps the width planned in
+   its column definition. A long source, define or remark is ellipsized inside
+   its own column: the row stays one line tall and no column (least of all the
+   action column) gets squeezed. */
 .dsh-task-id {
   white-space: nowrap;
 }
@@ -748,28 +750,15 @@
   text-decoration: underline;
 }
 
-/* source is a path, so it stays on one line and ellipsizes when the column is
-   narrow. */
-.dsh-task-cell-source {
+.dsh-task-cell-source,
+.dsh-task-cell-define,
+.dsh-task-cell-remark {
   display: inline-block;
-  max-width: 260px;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: bottom;
-}
-
-/* define and 备注 are prose: a value that does not fit wraps inside its column
-   instead of ending in an ellipsis, so the whole sentence stays readable and
-   the row simply grows taller. overflow-wrap also breaks one long token (a URL
-   or a path with no spaces) that would otherwise widen the table. */
-.dsh-task-cell-define,
-.dsh-task-cell-remark {
-  display: block;
-  max-width: none;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  vertical-align: top;
 }
 
 .dsh-task-md {

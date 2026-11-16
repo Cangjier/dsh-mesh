@@ -75,8 +75,12 @@ if [ "$avail_kb" -lt "$need_kb" ]; then
 fi
 say "空间预检通过（可用 $((avail_kb / 1024)) MiB，需要 $((need_kb / 1024)) MiB）"
 
-NODE="$STAGE/runtime/node/bin/node"
-[ -x "$NODE" ] || NODE="$APP_ROOT/runtime/node/bin/node"
+# Prefer the installed runtime. The copy above has already refreshed
+# $APP_ROOT/runtime from the package, while the deploy runner deletes the stage
+# directory as soon as this script returns; recording a node path inside the
+# stage leaves the control service unable to start after the next reboot.
+NODE="$APP_ROOT/runtime/node/bin/node"
+[ -x "$NODE" ] || NODE="$STAGE/runtime/node/bin/node"
 [ -x "$NODE" ] || NODE=$(command -v node || true)
 [ -n "$NODE" ] && [ -x "$NODE" ] || die '找不到可执行的 node'
 

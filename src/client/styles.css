@@ -801,3 +801,21 @@
   align-items: flex-start;
   line-height: 1.25;
 }
+
+/* 包管理: the job and package tables scroll sideways below their minimum width
+   (scroll.x), so each cell keeps the width planned for it. The reference cell
+   stacks a commit hash over its targets; both lines ellipsize because a hash has
+   no space to wrap at, and the full value stays in the cell's title. */
+.dsh-pw-job-ref {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.dsh-pw-job-ref > * {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

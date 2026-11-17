@@ -443,12 +443,18 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
     {
       title: '引用 / 目标',
       dataIndex: 'ref',
-      render: (_value, job) => (
-        <Space direction="vertical" size={0}>
-          <span className="dsh-pw-mono" style={{ fontSize: 12 }}>{job.ref}</span>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{(job.targets ?? []).join(' · ')}{job.buildStamp ? ` · ${job.buildStamp}` : ''}</Typography.Text>
-        </Space>
-      ),
+      render: (_value, job) => {
+        const targetLine = `${(job.targets ?? []).join(' · ')}${job.buildStamp ? ` · ${job.buildStamp}` : ''}`
+        // Both lines stay on one line and ellipsize: a full commit hash has no
+        // space to wrap at, so in a fixed-width column it would otherwise spill
+        // across the 进度 cell. The title keeps the full text available.
+        return (
+          <div className="dsh-pw-job-ref">
+            <span className="dsh-pw-mono" style={{ fontSize: 12 }} title={job.ref}>{job.ref}</span>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }} title={targetLine}>{targetLine}</Typography.Text>
+          </div>
+        )
+      },
     },
     {
       title: '进度',
@@ -675,6 +681,15 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
             loading={jobsLoading && jobs.length === 0}
             dataSource={jobs}
             columns={jobColumns}
+            // On a phone the six columns used to collapse until 开始时间 drew
+            // one character per line and a row stood 280px tall. A number here
+            // makes the table scroll sideways instead: 860 is the summed width
+            // of the declared columns plus 210 for the flexible 引用 / 目标,
+            // and it still fits the 873px a 1280-wide desktop leaves the card.
+            scroll={{ x: 860 }}
+            // Fixed layout keeps those widths; only the flexible column grows
+            // when a desktop has more than the 860px minimum.
+            tableLayout="fixed"
             pagination={jobs.length > 6 ? { pageSize: 6, hideOnSinglePage: true, size: 'small' } : false}
             locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有编译任务" /> }}
           />
@@ -696,6 +711,12 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
             loading={packagesLoading && packages.length === 0}
             dataSource={packages}
             columns={packageColumns}
+            // Same reason as the job table: 760 keeps 部署包 300px (two lines for
+            // a full archive name) and the four fixed columns readable on a
+            // phone, scrolling sideways rather than crushing 时间 into a column
+            // of single characters.
+            scroll={{ x: 760 }}
+            tableLayout="fixed"
             pagination={packages.length > 8 ? { pageSize: 8, hideOnSinglePage: true, size: 'small' } : false}
             locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有部署包" /> }}
           />

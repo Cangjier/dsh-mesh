@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
+import { chromeForTestingPlatform } from '../code/build/chrome-download.mjs'
 import {
   chromeCandidates,
   findChrome,
@@ -203,4 +204,73 @@ test('chromeCandidates looks on PATH for Chrome and Edge', () => {
   const candidates = chromeCandidates(env, 'win32')
   assert.ok(candidates.includes(path.join('C:\\one', 'msedge.exe')))
   assert.ok(candidates.includes(path.join('C:\\two', 'chrome.exe')))
+})
+
+test('runInstallSmoke reports a failed automatic Chrome download as a skip', async () => {
+  const dir = await tempDir()
+  try {
+    const target = `${targetOs()}-${process.arch}`
+    const result = await runInstallSmoke({
+      root: dir,
+      target,
+      chrome: null,
+      downloadChrome: true,
+      chromeCacheDir: path.join(dir, 'cache'),
+      fetchImpl: async () => {
+        throw new Error('offline test host')
+      },
+      workDir: path.join(dir, 'work'),
+    })
+    assert.equal(result.status, 'skipped')
+    assert.match(result.reason, /automatic download failed: offline test host/u)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('runInstallSmoke skips instead of downloading when Chrome is unavailable and download is disabled', async () => {
+  const dir = await tempDir()
+  try {
+    const target = `${targetOs()}-${process.arch}`
+    const result = await runInstallSmoke({
+      root: dir,
+      target,
+      chrome: null,
+      downloadChrome: false,
+      workDir: path.join(dir, 'work'),
+    })
+    assert.equal(result.status, 'skipped')
+    assert.match(result.reason, /no Chrome/u)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('runInstallSmoke skips when a downloaded browser cannot start', async () => {
+  if (process.platform === 'win32') {
+    test.skip('the fake browser is a POSIX shell script')
+    return
+  }
+  const dir = await tempDir()
+  try {
+    const platform = chromeForTestingPlatform()
+    assert.notEqual(platform, null)
+    const cacheDir = path.join(dir, 'cache')
+    const browser = path.join(cacheDir, '1.2.3', platform, 'chrome-headless-shell')
+    await mkdir(path.dirname(browser), { recursive: true })
+    await writeFile(browser, '#!/bin/sh\nexit 1\n', 'utf8')
+    await chmod(browser, 0o755)
+    const result = await runInstallSmoke({
+      root: dir,
+      target: `${targetOs()}-${process.arch}`,
+      chrome: null,
+      downloadChrome: true,
+      chromeCacheDir: cacheDir,
+      workDir: path.join(dir, 'work'),
+    })
+    assert.equal(result.status, 'skipped')
+    assert.match(result.reason, /could not start/u)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

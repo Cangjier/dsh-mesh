@@ -19,7 +19,8 @@
  *
  * `runPackageSmoke` is for a freshly assembled package (used by the build
  * pipeline). `runInstallSmoke` is for an already-upgraded sandbox (used by the
- * test-upgrade rehearsal).
+ * test-upgrade rehearsal); when that member has no browser, it downloads a
+ * Chrome for Testing headless shell instead of skipping the render check.
  *
  * @module dsh-mesh/build/smoke
  */
@@ -31,6 +32,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { ChromeSession } from '../shared/chrome.mjs'
+import { ensureDownloadedChrome } from './chrome-download.mjs'
 
 /** Sidebar label the dsh-mesh client registers. */
 const MESH_LABEL = 'Mesh'
@@ -145,6 +147,85 @@ export function findChrome(env = process.env, platform = process.platform) {
     }
   }
   return null
+}
+
+/**
+ * Resolve the browser for one smoke run.
+ *
+ * Installed Chrome/Chromium/Edge always wins. When there is none and the caller
+ * allows it, Chrome for Testing is downloaded instead; a failed download is
+ * reported rather than thrown, because the test-upgrade rehearsal must not turn
+ * "the member has no browser" into a failed upgrade.
+ * @param {{chrome?: string|null, env?: NodeJS.ProcessEnv, chromeCacheDir?: string, fetchImpl?: typeof fetch}} options smoke options.
+ * @param {boolean} download whether a browser may be downloaded.
+ * @param {(line: string) => void} log log sink.
+ * @returns {Promise<{chrome: string|null, source: 'installed'|'downloaded'|null, version?: string, error: string|null}>} resolved browser.
+ */
+async function resolveSmokeChrome(options, download, log) {
+  const env = options.env ?? process.env
+  const configured = options.chrome === undefined ? findChrome(env) : options.chrome
+  if (typeof configured === 'string' && configured !== '') {
+    return { chrome: configured, source: 'installed', error: null }
+  }
+  if (!download) return { chrome: null, source: null, error: null }
+  try {
+    const downloaded = await ensureDownloadedChrome({
+      env,
+      cacheDir: options.chromeCacheDir,
+      fetchImpl: options.fetchImpl,
+      log,
+    })
+    return { chrome: downloaded.binary, source: 'downloaded', version: downloaded.version, error: null }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    log(`automatic Chrome download failed: ${message}`)
+    return { chrome: null, source: null, error: message }
+  }
+}
+
+/**
+ * A downloaded browser must prove it can start before the package stack is
+ * built; a member missing Chromium's shared libraries should report a skip,
+ * exactly as a member without a browser did before.
+ * @param {string} chrome downloaded executable.
+ * @param {(line: string) => void} log log sink.
+ * @returns {Promise<void>}
+ */
+async function probeDownloadedChrome(chrome, log) {
+  log(`checking the downloaded browser: ${chrome}`)
+  const session = await ChromeSession.launch(chrome, { width: 1024, height: 768 })
+  try {
+    await session.evaluate('1')
+  } finally {
+    session.kill()
+  }
+}
+
+/**
+ * Explain why a browser is unavailable, including a failed automatic download.
+ * @param {boolean} download whether a download was attempted.
+ * @param {string|null} error download error.
+ * @param {string} suffix caller-specific hint.
+ * @returns {string} reason.
+ */
+function missingChromeReason(download, error, suffix) {
+  if (download && error !== null) return `no Chrome/Chromium/Edge found and the automatic download failed: ${error}; ${suffix}`
+  if (download) return `no Chrome/Chromium/Edge found and no downloadable build is available for this host; ${suffix}`
+  return `no Chrome/Chromium/Edge found; ${suffix}`
+}
+
+/**
+ * Turn a browser start failure into a skip reason, naming the most common cause
+ * on a minimal Linux member.
+ * @param {unknown} error launch error.
+ * @returns {string} message with a library hint when it applies.
+ */
+function browserStartReason(error) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/error while loading shared libraries|libnss3|libgbm|libatk/iu.test(message)) {
+    return `${message}; the member is missing Chromium's runtime libraries (libnss3, libgbm, libatk, ...) — install them or set DSH_MESH_SMOKE_CHROME`
+  }
+  return message
 }
 
 /**
@@ -825,7 +906,7 @@ function skipped(reason, base) {
 
 /**
  * Smoke-test a freshly assembled package.
- * @param {{packageRoot: string, target: string, workDir?: string, screenshotDir?: string, chrome?: string|null, env?: NodeJS.ProcessEnv, keep?: boolean, startTimeoutMs?: number, pageTimeoutMs?: number, panelTimeoutMs?: number, required?: boolean, log?: (line: string) => void}} options package input.
+ * @param {{packageRoot: string, target: string, workDir?: string, screenshotDir?: string, chrome?: string|null, downloadChrome?: boolean, chromeCacheDir?: string, fetchImpl?: typeof fetch, env?: NodeJS.ProcessEnv, keep?: boolean, startTimeoutMs?: number, pageTimeoutMs?: number, panelTimeoutMs?: number, required?: boolean, log?: (line: string) => void}} options package input.
  * @returns {Promise<object>} result with `status`, `checks`, and screenshot paths.
  */
 export async function runPackageSmoke(options) {
@@ -838,14 +919,6 @@ export async function runPackageSmoke(options) {
   if (!isNativeTarget(target)) {
     return skipped(`${target} cannot run on ${targetOs()}-${process.arch}`, base)
   }
-  const chrome = options.chrome === undefined ? findChrome(options.env ?? process.env) : options.chrome
-  if (chrome === null || chrome === '') {
-    const reason = 'no Chrome/Chromium/Edge found; set DSH_MESH_SMOKE_CHROME or run with --no-smoke'
-    return options.required === true
-      ? { ...skipped(reason, base), ok: false, status: 'failed', error: reason }
-      : skipped(reason, base)
-  }
-
   const ownsWorkDir = options.workDir === undefined
   const workDir = options.workDir ?? await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-smoke-'))
   await mkdir(workDir, { recursive: true })
@@ -856,10 +929,37 @@ export async function runPackageSmoke(options) {
     options.log?.(text)
   }
   const screenshotDir = options.screenshotDir ?? workDir
+  // A package smoke usually runs on a build host that has a browser (or on a
+  // Windows host with Edge); downloading is opt-in here so a build never pulls
+  // a 128 MiB browser just because the host is bare. The test-upgrade
+  // rehearsal is the caller that needs the fallback by default.
+  const download = options.downloadChrome === true
+  const resolved = await resolveSmokeChrome(options, download, log)
+  if (resolved.chrome === null) {
+    const reason = missingChromeReason(download, resolved.error, 'set DSH_MESH_SMOKE_CHROME or run with --no-smoke')
+    if (ownsWorkDir && options.keep !== true) await rm(workDir, { recursive: true, force: true }).catch(() => {})
+    return options.required === true
+      ? { ...skipped(reason, base), ok: false, status: 'failed', error: reason }
+      : skipped(reason, base)
+  }
+  if (resolved.source === 'downloaded') {
+    try {
+      await probeDownloadedChrome(resolved.chrome, log)
+    } catch (error) {
+      const reason = `downloaded Chrome for Testing ${resolved.version ?? ''} could not start: ${browserStartReason(error)}`
+      log(reason)
+      if (ownsWorkDir && options.keep !== true) await rm(workDir, { recursive: true, force: true }).catch(() => {})
+      return options.required === true
+        ? { ...skipped(reason, base), ok: false, status: 'failed', error: reason }
+        : skipped(reason, base)
+    }
+  }
+  const chrome = resolved.chrome
+  const chromeLabel = `${chrome}${resolved.source === 'downloaded' ? ` (downloaded ${resolved.version ?? ''})` : ''}`
   let root
   let stack
   try {
-    log(`smoke ${target}: package ${options.packageRoot}; chrome ${chrome}`)
+    log(`smoke ${target}: package ${options.packageRoot}; chrome ${chromeLabel}`)
     root = await prepareInstallRoot(options.packageRoot, workDir)
     const home = path.join(root, 'home')
     const worktree = path.join(root, 'workspace')
@@ -906,6 +1006,9 @@ export async function runPackageSmoke(options) {
       status: failed.length === 0 ? 'passed' : 'failed',
       target,
       packageRoot: options.packageRoot,
+      chrome,
+      chromeSource: resolved.source,
+      ...(resolved.version === undefined ? {} : { chromeVersion: resolved.version }),
       checks: inspected.checks,
       screenshots: inspected.screenshots,
       logFile,
@@ -922,6 +1025,9 @@ export async function runPackageSmoke(options) {
       status: 'failed',
       target,
       packageRoot: options.packageRoot,
+      chrome,
+      chromeSource: resolved.source,
+      ...(resolved.version === undefined ? {} : { chromeVersion: resolved.version }),
       checks: Array.isArray(error?.checks) ? error.checks : [],
       screenshots: Array.isArray(error?.screenshots) ? error.screenshots : [],
       logFile,
@@ -937,7 +1043,7 @@ export async function runPackageSmoke(options) {
 
 /**
  * Smoke-test an already-upgraded install (the test-upgrade rehearsal).
- * @param {{root: string, target?: string, home?: string, workdir?: string, port?: number, password?: string, chrome?: string|null, env?: NodeJS.ProcessEnv, workDir?: string, screenshotDir?: string, keep?: boolean, startTimeoutMs?: number, pageTimeoutMs?: number, panelTimeoutMs?: number, required?: boolean, log?: (line: string) => void}} options install input.
+ * @param {{root: string, target?: string, home?: string, workdir?: string, port?: number, password?: string, chrome?: string|null, downloadChrome?: boolean, chromeCacheDir?: string, fetchImpl?: typeof fetch, env?: NodeJS.ProcessEnv, workDir?: string, screenshotDir?: string, keep?: boolean, startTimeoutMs?: number, pageTimeoutMs?: number, panelTimeoutMs?: number, required?: boolean, log?: (line: string) => void}} options install input.
  * @returns {Promise<object>} result.
  */
 export async function runInstallSmoke(options) {
@@ -950,14 +1056,6 @@ export async function runInstallSmoke(options) {
   if (!isNativeTarget(target)) {
     return skipped(`${target} cannot run on ${targetOs()}-${process.arch}`, { target, root })
   }
-  const chrome = options.chrome === undefined ? findChrome(options.env ?? process.env) : options.chrome
-  if (chrome === null || chrome === '') {
-    const reason = 'no Chrome/Chromium/Edge found; set DSH_MESH_SMOKE_CHROME'
-    return options.required === true
-      ? { ok: false, status: 'failed', target, root, error: reason, checks: [], screenshots: [], durationMs: 0 }
-      : skipped(reason, { target, root })
-  }
-
   const ownsWorkDir = options.workDir === undefined
   const workDir = options.workDir ?? await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-smoke-'))
   await mkdir(workDir, { recursive: true })
@@ -968,6 +1066,33 @@ export async function runInstallSmoke(options) {
     options.log?.(text)
   }
   const screenshotDir = options.screenshotDir ?? workDir
+  // The test-upgrade rehearsal is the one caller that has to work on a member
+  // with no browser: download one unless the caller explicitly disabled it or
+  // passed an explicit `chrome` (including `null`).
+  const download = options.downloadChrome === true
+    || (options.downloadChrome === undefined && options.chrome === undefined)
+  const resolved = await resolveSmokeChrome(options, download, log)
+  if (resolved.chrome === null) {
+    const reason = missingChromeReason(download, resolved.error, 'set DSH_MESH_SMOKE_CHROME or pass --no-download-chrome')
+    if (ownsWorkDir && options.keep !== true) await rm(workDir, { recursive: true, force: true }).catch(() => {})
+    return options.required === true
+      ? { ok: false, status: 'failed', target, root, error: reason, checks: [], screenshots: [], durationMs: 0 }
+      : skipped(reason, { target, root })
+  }
+  if (resolved.source === 'downloaded') {
+    try {
+      await probeDownloadedChrome(resolved.chrome, log)
+    } catch (error) {
+      const reason = `downloaded Chrome for Testing ${resolved.version ?? ''} could not start: ${browserStartReason(error)}`
+      log(reason)
+      if (ownsWorkDir && options.keep !== true) await rm(workDir, { recursive: true, force: true }).catch(() => {})
+      return options.required === true
+        ? { ok: false, status: 'failed', target, root, error: reason, checks: [], screenshots: [], durationMs: 0 }
+        : skipped(reason, { target, root })
+    }
+  }
+  const chrome = resolved.chrome
+  const chromeLabel = `${chrome}${resolved.source === 'downloaded' ? ` (downloaded ${resolved.version ?? ''})` : ''}`
   let stack
   try {
     assertInstallRoot(root)
@@ -980,7 +1105,7 @@ export async function runInstallSmoke(options) {
     }
     const port = options.port ?? await freePort()
     const password = options.password ?? env.DSH_GATE_PASSWORD ?? 'dsh-mesh-smoke'
-    log(`smoke ${target}: install ${root}; home ${home}; port ${String(port)}; chrome ${chrome}`)
+    log(`smoke ${target}: install ${root}; home ${home}; port ${String(port)}; chrome ${chromeLabel}`)
     stack = await startStack({
       root,
       node: packageNode(root),
@@ -1014,6 +1139,9 @@ export async function runInstallSmoke(options) {
       status: failed.length === 0 ? 'passed' : 'failed',
       target,
       root,
+      chrome,
+      chromeSource: resolved.source,
+      ...(resolved.version === undefined ? {} : { chromeVersion: resolved.version }),
       checks: inspected.checks,
       screenshots: inspected.screenshots,
       logFile,
@@ -1030,6 +1158,9 @@ export async function runInstallSmoke(options) {
       status: 'failed',
       target,
       root,
+      chrome,
+      chromeSource: resolved.source,
+      ...(resolved.version === undefined ? {} : { chromeVersion: resolved.version }),
       checks: Array.isArray(error?.checks) ? error.checks : [],
       screenshots: Array.isArray(error?.screenshots) ? error.screenshots : [],
       logFile,

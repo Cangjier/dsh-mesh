@@ -89,6 +89,7 @@ async function memberTree(dir, options = {}) {
     await mkdir(smokeDir, { recursive: true })
     await writeFile(path.join(smokeDir, 'smoke-cli.mjs'), [
       "console.log('stub smoke')",
+      "console.log(`smoke args: ${process.argv.slice(2).join(' ')}`)",
       `process.exit(${String(options.smokeExit ?? 0)})`,
       '',
     ].join('\n'), 'utf8')
@@ -132,6 +133,7 @@ test('the rehearsal upgrades a sandbox built from the member and proves restore 
     })
     assert.match(result.stdout, /脚本来源：新包/u)
     assert.match(result.stdout, /抓屏通过/u)
+    assert.match(result.stdout, /smoke args: .*--download-chrome/u)
     assert.match(result.stdout, /restore\(\) 已验证/u)
     assert.match(result.stdout, /演练通过/u)
     assert.equal(existsSync(sandboxParent), false)
@@ -155,7 +157,7 @@ test('the rehearsal records a missing browser as a skip, not a failed upgrade', 
     const result = await run('bash', ['-c', buildLinuxRehearseScript(plan)], {
       env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
     })
-    assert.match(result.stdout, /抓屏跳过：目标成员没有 Chrome/u)
+    assert.match(result.stdout, /抓屏跳过：没有可用的 Chrome/u)
     assert.match(result.stdout, /演练通过/u)
   } finally {
     await rm(dir, { recursive: true, force: true })

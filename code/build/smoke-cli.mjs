@@ -11,7 +11,8 @@
  *        --port 18081 --home /path/to/sandbox-home \
  *        --screenshot-dir /var/tmp/rehearsal-shots
  *
- * Exit codes: 0 passed, 1 failed, 3 skipped (for example no Chrome/Edge).
+ * Exit codes: 0 passed, 1 failed, 3 skipped (no usable Chrome/Edge and, when
+ * `--download-chrome` is given, the automatic download could not provide one).
  *
  * @module dsh-mesh/build/smoke-cli
  */
@@ -66,7 +67,7 @@ async function main() {
   const { values } = parseArgs(process.argv.slice(2))
   const root = text(values, 'root')
   if (root === undefined) {
-    process.stderr.write('usage: smoke-cli.mjs --root <package-or-install> [--install] [--target linux-x64]\n')
+    process.stderr.write('usage: smoke-cli.mjs --root <package-or-install> [--install] [--target linux-x64] [--download-chrome]\n')
     process.exit(2)
   }
   const install = values.get('install') === true
@@ -83,6 +84,10 @@ async function main() {
     root: path.resolve(root),
     target: text(values, 'target'),
     chrome: text(values, 'chrome') ?? (values.get('no-chrome') === true ? null : undefined),
+    downloadChrome: values.get('no-download-chrome') === true
+      ? false
+      : (values.get('download-chrome') === true ? true : undefined),
+    chromeCacheDir: text(values, 'chrome-cache'),
     port: text(values, 'port') === undefined ? undefined : Number(text(values, 'port')),
     home: text(values, 'home') === undefined ? undefined : path.resolve(text(values, 'home')),
     workdir: text(values, 'workdir') === undefined ? undefined : path.resolve(text(values, 'workdir')),

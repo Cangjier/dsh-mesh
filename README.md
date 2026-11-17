@@ -123,7 +123,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - 健康检查失败自动切回 `previous` 并重启；`rollback` 可手动回滚。
 - 成功激活后只保留最近 3 个 release，`current`/`previous` 指向的目录永不删除。
 - **自动升级**：每个成员单独配置，入口在成员行的「更多」菜单 →「自动升级」；默认每天 06:00，可开关和改时间。对每个成员选它对应系统的最新部署包（按构建号，不按文件 mtime），与成员上报的当前部署（`manifest.version` + `buildStamp`）比较；一致或最新包更旧就跳过；需要升级时只启动这个成员的升级 job。
-- 面板的「升级」对本机和每个已安装的成员都开放，收在操作列的纯图标「更多」菜单里（Linux 成员同一菜单另有「测试升级」，先演练平铺路径）；成员表还有一列「版本」，显示每台成员当前运行的部署包；它用同一套引擎换包，升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的 `dsh-web`/网关不会把升级本身打断，也不会带走发起升级的面板。平铺安装（网关这种没有 `current` 的布局）走 `code/deploy/upgrade-local.sh`：备份（含 `app`/`runtime`/`web` 与工具层）→ 覆盖文件（保留 config/data/home/workspace）→ 重写 profile 与单元 → 健康检查，失败整体回滚；回退同样换回运行时三层，不会把旧脚本搭在新运行时上；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。
+- 面板的「升级」对本机和每个已安装的成员都开放，收在操作列的纯图标「更多」菜单里（Linux 成员同一菜单另有「测试升级」，先演练平铺路径）；成员表还有一列「版本」，显示每台成员当前运行的部署包；它用同一套引擎换包，升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的 `dsh-web`/网关不会把升级本身打断，也不会带走发起升级的面板。平铺安装（网关这种没有 `current` 的布局）走 `code/deploy/upgrade-local.sh`：备份（含 `app`/`runtime`/`web` 与工具层）→ 覆盖文件（保留 config/data/home/workspace）→ 重写 profile 与单元 → 健康检查，失败整体回滚；回退同样换回运行时三层，不会把旧脚本搭在新运行时上；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。测试升级的抓屏在目标成员没有 Chrome/Chromium/Edge 时会自动下载 Chrome for Testing 的 `chrome-headless-shell`（缓存在 `~/.cache/dsh-mesh/chrome`）再继续；只有下载或启动也失败才写「抓屏跳过」，不会把「成员没有浏览器」变成升级失败（Step 018）。
 - 详见 [Step 018](docs/Step%20018%20成员升级与独立升级进程.md)。
 
 ### 6. 独立 DSH 交互 HTTP 服务
@@ -340,6 +340,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `code/build/engine.mjs` | 源码准备、覆盖层、构建、打包、Node 运行时 |
 | `code/build/job.mjs` | 构建任务状态、日志、覆盖层固化/工作树复用 |
 | `code/build/smoke.mjs` / `smoke-cli.mjs` | 构建后与测试升级的 headless Chrome 启动/抓屏检查 |
+| `code/build/chrome-download.mjs` / `zip.mjs` | 测试升级缺浏览器时自动下载/解压 Chrome for Testing（零 npm 依赖） |
 | `code/build/stamp.mjs` | 按日构建号：日期 + A/B/C…，并持久化计数 |
 | `code/build/cli.mjs` | 命令行入口 |
 | `build/recipes.json` | 源码覆盖层清单（picker / login） |

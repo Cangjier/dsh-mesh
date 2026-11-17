@@ -261,7 +261,7 @@ node code/build/smoke-cli.mjs --root ~/.dsh/mesh/build/<job>/dist/dsh-mesh-<dshV
   --target linux-x64 --screenshot-dir /tmp/dsh-smoke
 ```
 
-退出码：`0` 通过，`1` 失败，`3` 跳过（没有 Chrome/Edge 等）。测试升级的沙箱会调用同一支脚本（见 Step 018）。
+退出码：`0` 通过，`1` 失败，`3` 跳过（没有 Chrome/Edge 等）。构建流程不会自动下载浏览器；测试升级的沙箱会调用同一支脚本并加 `--download-chrome`，在成员缺少 Chrome/Chromium/Edge 时自动下载 Chrome for Testing 的 headless shell（见 Step 018）。
 
 ### 快速旁路：从已安装的 Web shell 出包
 

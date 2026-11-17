@@ -80,12 +80,26 @@ class CdpSocket {
   }
 }
 
-/** Wait for a file to appear, with a deadline. */
-async function waitForFile(file, timeoutMs) {
+/**
+ * Wait for a file to appear, with a deadline and an optional cancellation.
+ * The browser-exit race aborts this loop so a browser that failed to start
+ * does not leave a 45 s timer holding the process open.
+ * @param {string} file path to watch.
+ * @param {number} timeoutMs deadline.
+ * @param {AbortSignal} [signal] cancellation.
+ * @returns {Promise<void>}
+ */
+async function waitForFile(file, timeoutMs, signal) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (existsSync(file)) return
-    await new Promise(resolve => setTimeout(resolve, 120))
+    if (signal?.aborted === true) throw new Error(`aborted waiting for ${path.basename(file)}`)
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 120)
+      // Do not hold the event loop open for the rest of the 45 s budget after
+      // the browser-exit race has already rejected.
+      timer.unref?.()
+    })
   }
   throw new Error(`timed out waiting for ${path.basename(file)}`)
 }
@@ -139,13 +153,16 @@ export class ChromeSession {
         reject(new Error(`exited before writing a debug port (${signal ?? String(code)})${detail}`))
       })
     })
+    const waiting = new AbortController()
     try {
-      await Promise.race([waitForFile(portFile, 45_000), exitedEarly])
+      await Promise.race([waitForFile(portFile, 45_000, waiting.signal), exitedEarly])
     } catch (error) {
       session.kill()
       const reason = error instanceof Error ? error.message : String(error)
       const hint = process.platform === 'win32' ? '; on Windows a service running as LocalSystem may not be allowed to start Edge — run the gate as a regular user or set DSH_GATE_CHROME' : ''
       throw new Error(`chrome did not start: ${reason}${hint}`)
+    } finally {
+      waiting.abort()
     }
     const [port, wsPath] = (await readFile(portFile, 'utf8')).split('\n')
     if (port === undefined || wsPath === undefined) throw new Error('chrome wrote no debug port')

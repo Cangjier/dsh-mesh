@@ -1283,13 +1283,16 @@ SMOKE_SCRIPT="$APP/plugins/dsh-mesh/code/build/smoke-cli.mjs"
 SMOKE_SHOT="$APP_ROOT/.dsh-mesh-test-$RELEASE"
 rm -rf "$SMOKE_SHOT"
 mkdir -p "$SMOKE_SHOT"
+# 成员没有 Chrome/Chromium/Edge 时，smoke-cli 会下载 Chrome for Testing 的
+# chrome-headless-shell（缓存到运行用户的 ~/.cache/dsh-mesh/chrome）。下载或
+# 启动失败不应让升级演练失败：那只是这台成员暂时没有可用的浏览器。
 if "$NODE" "$SMOKE_SCRIPT" --install --root "$APP" --port 18081 --home "$TEST_HOME" \
-    --workdir "$TEST_ROOT/workspace" --screenshot-dir "$SMOKE_SHOT"; then
+    --workdir "$TEST_ROOT/workspace" --screenshot-dir "$SMOKE_SHOT" --download-chrome; then
   say "抓屏通过：DSH 已启动，Mesh 面板已出现（截图 $SMOKE_SHOT）"
 else
   smoke_rc=$?
   if [ "$smoke_rc" = "3" ]; then
-    say '抓屏跳过：目标成员没有 Chrome/Chromium/Edge（构建机上的「构建后抓屏」仍会执行）'
+    say '抓屏跳过：没有可用的 Chrome/Chromium/Edge，自动下载或启动也失败（详见上面的 [smoke] 日志；构建机上的「构建后抓屏」仍会执行）'
   else
     fail "升级后的沙箱没有通过 Chrome 抓屏冒烟（退出码 $smoke_rc）；截图与日志在 $SMOKE_SHOT"
   fi

@@ -50,7 +50,7 @@ import { CLUSTER_HEADER, deriveClusterSecret, signClusterRequest } from '../../c
 import { repackArchive } from '../../code/build/repack.mjs'
 import { quickSystemInfo } from '../../code/shared/system-info.mjs'
 import { GeoLookup } from '../../code/shared/geo.mjs'
-import { latestManifestSources, latestManifestUrls, loadReleaseConfig, sanitizeReleaseConfig, saveReleaseConfig } from '../../code/shared/release.mjs'
+import { detectReleaseOwner, latestManifestSources, latestManifestUrls, loadReleaseConfig, sanitizeReleaseConfig, saveReleaseConfig } from '../../code/shared/release.mjs'
 import { buildUpdateReasons, memberDeployment, packageInfo, planUpgrades } from './schedule.mjs'
 import { pickBuildMember, pickProxyMember } from './build-defaults.mjs'
 
@@ -1208,7 +1208,7 @@ export class MeshService {
    * @returns {Promise<object>} sanitized config and the manifest URLs.
    */
   async releaseSettings() {
-    const config = await loadReleaseConfig({ file: this.releaseConfigFile })
+    const config = await this.#healReleaseOwners(await loadReleaseConfig({ file: this.releaseConfigFile }))
     const sanitized = sanitizeReleaseConfig(config)
     const urls = latestManifestUrls(config)
     return {
@@ -1224,16 +1224,85 @@ export class MeshService {
    * @param {{config?: object}} request settings.
    * @returns {Promise<object>} sanitized config after the save.
    */
+  /**
+   * Fill a stored config's missing owners from its tokens.
+   *
+   * A token-only setup stores the owner as soon as it is known; a config that
+   * predates that (or a save whose provider was unreachable) still shows the
+   * owner here, so the panel never asks the operator for an account name.
+   * Failures are ignored: publishing retries the lookup through its proxy.
+   * @param {object} config loaded config.
+   * @returns {Promise<object>} config, possibly with owners filled in.
+   */
+  async #healReleaseOwners(config) {
+    const missing = ['github', 'gitee'].filter(provider => config?.[provider]?.enabled === true && String(config[provider].owner ?? '') === '')
+    if (missing.length === 0) return config
+    const owners = {}
+    for (const provider of missing) {
+      try {
+        owners[provider] = await detectReleaseOwner(provider, { token: config[provider].token })
+        this.logLine(`release ${provider} owner detected from token: ${owners[provider]}`)
+      } catch {
+        // Leave it empty; the build resolves it again where a proxy exists.
+      }
+    }
+    if (Object.keys(owners).length === 0) return config
+    return await saveReleaseConfig({
+      file: this.releaseConfigFile,
+      input: {
+        enabled: config.enabled,
+        tag: config.tag,
+        partBytes: config.partBytes,
+        github: { owner: owners.github ?? config.github.owner, repo: config.github.repo },
+        gitee: { owner: owners.gitee ?? config.gitee.owner, repo: config.gitee.repo, branch: config.gitee.branch },
+      },
+    })
+  }
+
   async saveReleaseSettings(request) {
     const input = request?.config !== null && typeof request?.config === 'object' ? request.config : request
-    const config = await saveReleaseConfig({ file: this.releaseConfigFile, input })
+    const resolved = await this.#resolveReleaseOwners(input)
+    const config = await saveReleaseConfig({ file: this.releaseConfigFile, input: resolved.input })
     this.logLine(`release settings saved (tag ${config.tag}, github ${config.github.enabled ? 'on' : 'off'}, gitee ${config.gitee.enabled ? 'on' : 'off'})`)
     return {
       ok: true,
       config: sanitizeReleaseConfig(config),
       manifestUrls: latestManifestUrls(config),
       configured: config.github.enabled || config.gitee.enabled,
+      warnings: resolved.warnings,
     }
+  }
+
+  /**
+   * Fill the owner half of a token-only release config from the provider.
+   *
+   * The panel deliberately asks for nothing but a token; the account name is
+   * whatever the token belongs to. An invalid token fails the save, so the
+   * operator sees it immediately instead of at the end of a build; an
+   * unreachable provider only warns, because publishing retries the lookup
+   * through the build's egress proxy.
+   * @param {object} input raw panel input.
+   * @returns {Promise<{input: object, warnings: string[]}>} input with owners and any warnings.
+   */
+  async #resolveReleaseOwners(input) {
+    const warnings = []
+    const next = { ...input }
+    for (const provider of ['github', 'gitee']) {
+      const entry = input?.[provider]
+      if (entry === null || typeof entry !== 'object') continue
+      const token = typeof entry.token === 'string' ? entry.token.trim() : ''
+      if (token === '' || String(entry.owner ?? '').trim() !== '') continue
+      try {
+        const owner = await detectReleaseOwner(provider, { token })
+        next[provider] = { ...entry, owner }
+        this.logLine(`release ${provider} owner detected from token: ${owner}`)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (/HTTP 401|HTTP 403|无效或缺少/iu.test(message)) throw error
+        warnings.push(`${provider} 账号暂时无法识别（${message}）；发布时会再试一次`)
+      }
+    }
+    return { input: next, warnings }
   }
 
   /**

@@ -50,38 +50,46 @@
 配置文件固定在 `<DSH_HOME>/mesh/release.json`（默认 `~/.dsh/mesh/release.json`），权限 0600。
 面板「包管理 → Release 发布」卡片读写同一份文件，token 只显示「已保存」，不会回传浏览器。
 
+**最少只需要一个 token**：
+
+- `owner` 留空即由 token 自动识别（GitHub/Gitee 的 `/user`）。保存时识别一次并写回配置；
+  识别不了（比如编译网关直连不到 GitHub）只给警告，发布时再经编译机的外网代理识别一次。
+- `repo` 留空默认 `dsh-web-release`。
+- Gitee 的 `branch` 留空默认 `master`（Gitee 新建仓库的默认分支）。
+- 仓库不存在时**发布用该 token 自动创建公开仓库**：`owner` 是 token 自己时建在个人名下，
+  填了组织时建在该组织下（token 需要该组织的写权限）；Gitee 的 `owner` 是别人的个人账号时发布会失败并提示。
+
 ```json
 {
   "enabled": true,
   "tag": "latest",
   "partBytes": 89128960,
   "github": {
-    "owner": "Cangjier",
-    "repo": "dsh-mesh",
+    "owner": "",
+    "repo": "dsh-web-release",
     "token": "github_pat_..."
   },
   "gitee": {
-    "owner": "cangjier",
-    "repo": "dsh-mesh",
-    "branch": "main",
+    "owner": "",
+    "repo": "dsh-web-release",
+    "branch": "master",
     "token": "..."
   }
 }
 ```
 
-- `enabled: false` 关闭发布；升级仍可下载（只要 owner/repo 有值）。
+- `enabled: false` 关闭发布（不会建仓库、不会上传）；升级仍可下载（只要 owner/repo 有值）。
 - 两个 token 也可以用环境变量覆盖：`DSH_MESH_GITHUB_TOKEN`、`DSH_MESH_GITEE_TOKEN`。
 - `partBytes` 单位是字节；面板按 MiB 编辑，超过 95MiB 会被夹到上限。
-- Gitee 的 `branch` 只是创建 `latest` tag 时的 `target_commitish`，必须真实存在（默认 `main`）。
+- Gitee 的 `branch` 只是创建 `latest` tag 时的 `target_commitish`：仓库已存在时用这个分支，
+  不存在时自动回退到仓库报告的默认分支（自动创建的仓库是 `auto_init` 的 `master`），并写日志说明。
 
 首次启用前需要做一次准备：
 
-1. **GitHub**：仓库已存在；生成 token（classic 勾 `repo`，或 fine-grained 只给该仓库
-   `Contents: Read and write` + `Metadata: Read`）。`latest` Release 由 API 自动创建。
-2. **Gitee**：先手工创建与 `owner/repo` 对应的**公开仓库**，并推一个分支（`main` 或配置里的
-   `branch`）；生成私人令牌（勾 `projects`）。Gitee 仓库不存在时发布会返回
-   `Not Found Project`，错误会写进编译任务的「发布失败」标签和日志。
-3. 在面板里填入 owner/repo/token 并保存，或直接写上面的 JSON。
+1. **GitHub**：生成 token（classic 勾 `repo`，或 fine-grained 给 `Contents: Read and write` +
+   `Metadata: Read`；要自动建仓库还需要 `Administration: Read and write` 或 classic 的 `repo`）。
+2. **Gitee**：生成私人令牌（勾 `projects`，自动建仓库需要该权限）。
+3. 面板里只贴 token 保存即可；仓库、owner、分支都会自动补齐。也可以直接写上面的 JSON。
 
 ## 4. 发布流程
 
@@ -89,7 +97,7 @@
 
 1. 计算每个归档的 SHA-256；
 2. 为 Gitee 切分片（临时目录，发布结束删除）；
-3. 确保两个仓库都有 `latest` Release；
+3. 确认两个仓库都存在，不存在就用 token 自动创建（`auto_init`，公开）；再确保有 `latest` Release；
 4. GitHub：经编译机的外网代理上传整包和 `latest.json`，然后删除不属于本次构建的资产；
 5. Gitee：**不走代理**，先删除旧分片（保留旧 `latest.json`），上传新分片，用 API 返回的
    `browser_download_url` 重建 `latest.json`，上传 `latest.json`；
@@ -190,8 +198,10 @@ CLI 用 `--release-config` 读取，任务结束立即删除；token 不出现�
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| 面板「发布失败」 | token 无权限、仓库不存在、Gitee 配额/限流 | 看编译日志里的 `github publish failed` / `gitee publish failed`；补 token 权限或删旧资产 |
-| `Not Found Project` | Gitee 仓库不存在或 token 无 projects 权限 | 创建公开仓库并重新生成 token |
+| 面板「发布失败」 | token 无权限、仓库不存在且建不了、Gitee 配额/限流 | 看编译日志里的 `github publish failed` / `gitee publish failed`；补 token 权限或删旧资产 |
+| `Not Found Project` | Gitee 仓库不存在，且 token 没有 projects 权限（建不了仓库） | 重新生成带 projects 权限的 token，或手动创建公开仓库 |
+| 日志 `gitee branch main is missing; using master` | 配置的 Gitee 分支不存在（新仓库只有默认分支） | 无需处理；发布已自动改用默认分支，也可以把配置里的 branch 改成 `master` |
+| `自动创建失败` / `无法在 X 名下自动创建` | token 没有建仓库权限，或 Gitee 的 owner 不是 token 所属账号 | GitHub 补 `Administration: Read and write`；Gitee 用该账号的 token，owner 留空让它自动识别 |
 | Gitee 上传 403/413 | 单个分片超过 100MB 或仓库总量超 1GB | 调小「Gitee 分片」；确认旧资产已被清理 |
 | 升级日志「release download did not produce a usable package」 | 本次选的包不在 `latest` Release、目标无 Node、代理不可用、校验失败 | 正常回退到网关上传；想强制走 Release 就把该包重新编译/发布 |
 | GitHub 下载卡住 | 代理成员离线或目标到代理的 VPN 路由不通 | 面板改「直连」或换代理成员；失败仍会回退上传 |

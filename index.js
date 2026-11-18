@@ -3597,6 +3597,8 @@ function isSuccess(status) {
 
 // code/shared/release.mjs
 var DEFAULT_RELEASE_TAG = "latest";
+var DEFAULT_RELEASE_REPO = "dsh-web-release";
+var DEFAULT_GITEE_BRANCH = "master";
 var DEFAULT_PART_BYTES = 85 * 1024 * 1024;
 var MAX_PART_BYTES = 95 * 1024 * 1024;
 var LATEST_MANIFEST_NAME = "latest.json";
@@ -3606,11 +3608,39 @@ function defaultReleaseConfigFile() {
   return path11.join(home, "mesh", "release.json");
 }
 function normalizeRepo(value) {
-  if (value === null || typeof value !== "object") return { owner: "", repo: "" };
+  if (value === null || typeof value !== "object") return { owner: "", repo: DEFAULT_RELEASE_REPO };
   const owner = String(value.owner ?? "").trim();
   const repo = String(value.repo ?? "").trim();
   const valid = (part) => /^[A-Za-z0-9_.-]+$/u.test(part);
-  return { owner: valid(owner) ? owner : "", repo: valid(repo) ? repo : "" };
+  return { owner: valid(owner) ? owner : "", repo: repo === "" ? DEFAULT_RELEASE_REPO : valid(repo) ? repo : "" };
+}
+async function detectReleaseOwner(provider, options) {
+  const token = String(options.token ?? "").trim();
+  if (token === "") throw new Error(`${provider} token \u4E3A\u7A7A\uFF0C\u65E0\u6CD5\u8BC6\u522B\u8D26\u53F7`);
+  const fallback = provider === "github" ? "https://api.github.com" : "https://gitee.com/api/v5";
+  const apiBase = String(options.apiBase ?? fallback).replace(/\/$/u, "");
+  const url = new URL(`${apiBase}/user`);
+  const headers = {};
+  if (provider === "gitee") {
+    url.searchParams.set("access_token", token);
+  } else {
+    headers.authorization = `Bearer ${token}`;
+    headers.accept = "application/vnd.github+json";
+    headers["x-github-api-version"] = "2022-11-28";
+  }
+  const response = await requestJson(url.href, {
+    headers,
+    proxy: provider === "gitee" ? null : options.proxy ?? null,
+    timeoutMs: 3e4,
+    idleTimeoutMs: 6e4
+  });
+  if (!isSuccess(response.status) || response.json === null || typeof response.json !== "object") {
+    const hint = response.status === 401 || response.status === 403 ? `${provider} token \u65E0\u6548\u6216\u7F3A\u5C11\u8BFB\u53D6\u8D26\u53F7\u7684\u6743\u9650` : `${provider} \u65E0\u6CD5\u7528 token \u8BC6\u522B\u8D26\u53F7`;
+    throw new Error(`${hint}\uFF1AHTTP ${String(response.status)} ${String(response.text ?? "").slice(0, 200)}`);
+  }
+  const login = String(response.json.login ?? response.json.username ?? "").trim();
+  if (login === "") throw new Error(`${provider} /user \u6CA1\u6709\u8FD4\u56DE\u8D26\u53F7\u540D`);
+  return login;
 }
 async function loadReleaseConfig(options = {}) {
   const file = options.file ?? defaultReleaseConfigFile();
@@ -3639,17 +3669,19 @@ async function loadReleaseConfig(options = {}) {
     enabled,
     tag,
     partBytes,
+    // The owner can stay empty: a token-only setup resolves it from the token
+    // (`detectReleaseOwner`) at save time and again right before publishing.
     github: {
       ...github,
       token: githubToken,
-      enabled: enabled && github.owner !== "" && github.repo !== "" && githubToken !== ""
+      enabled: enabled && github.repo !== "" && githubToken !== ""
     },
     gitee: {
       ...gitee,
       token: giteeToken,
-      enabled: enabled && gitee.owner !== "" && gitee.repo !== "" && giteeToken !== "",
+      enabled: enabled && gitee.repo !== "" && giteeToken !== "",
       // Gitee needs a real commit-ish to point the `latest` tag at.
-      branch: typeof parsed.gitee?.branch === "string" && parsed.gitee.branch.trim() !== "" ? parsed.gitee.branch.trim() : "main"
+      branch: typeof parsed.gitee?.branch === "string" && parsed.gitee.branch.trim() !== "" ? parsed.gitee.branch.trim() : DEFAULT_GITEE_BRANCH
     }
   };
   return result;
@@ -3670,7 +3702,7 @@ function sanitizeReleaseConfig(config) {
     gitee: {
       owner: config.gitee?.owner ?? "",
       repo: config.gitee?.repo ?? "",
-      branch: config.gitee?.branch ?? "main",
+      branch: config.gitee?.branch ?? DEFAULT_GITEE_BRANCH,
       enabled: config.gitee?.enabled === true,
       hasToken: String(config.gitee?.token ?? "") !== ""
     }
@@ -3690,7 +3722,7 @@ async function saveReleaseConfig(options) {
   if (Number.isFinite(requestedPart) && (requestedPart < 1024 * 1024 || requestedPart > MAX_PART_BYTES)) {
     throw new Error(`part size must be between 1 MiB and ${String(MAX_PART_BYTES)} bytes`);
   }
-  const branch = String(input.gitee?.branch ?? existing.gitee?.branch ?? "main").trim();
+  const branch = String(input.gitee?.branch ?? existing.gitee?.branch ?? DEFAULT_GITEE_BRANCH).trim();
   if (!/^[A-Za-z0-9._/-]{1,120}$/u.test(branch)) throw new Error(`Gitee branch is invalid: ${branch}`);
   const stored = {
     enabled: input.enabled === void 0 ? existing.enabled !== false : input.enabled === true,
@@ -3840,7 +3872,7 @@ var GitHubRelease = class {
    * @returns {Promise<{status:number, json:any, text:string, headers:object}>} response.
    */
   async #api(endpoint, options = {}) {
-    const url = endpoint.startsWith("https://") ? endpoint : `${this.apiRoot}${endpoint}`;
+    const url = /^https?:\/\//u.test(endpoint) ? endpoint : `${this.apiRoot}${endpoint}`;
     const response = await withRetry(async () => {
       const result = await requestJson(url, {
         method: options.method ?? (options.json === void 0 ? "GET" : "POST"),
@@ -3888,6 +3920,42 @@ var GitHubRelease = class {
       throw new Error(`GitHub release creation failed: HTTP ${String(created.status)} ${created.text.slice(0, 300)}`);
     }
     return await this.#releaseWithAssets(created.json);
+  }
+  /**
+   * Create the repository when the token can see nothing at that address.
+   *
+   * The panel only takes a token, so the first publish has to be able to make
+   * the repository itself; `ensureRelease` then makes the tag. A repository
+   * that already exists is left alone.
+   * @returns {Promise<{created: boolean}>} whether a repository was created.
+   */
+  async ensureRepo() {
+    const found = await this.#api("");
+    if (found.status === 200) return { created: false };
+    if (found.status !== 404) {
+      throw new Error(`GitHub repository lookup failed for ${this.owner}/${this.repo}: HTTP ${String(found.status)} ${found.text.slice(0, 300)}`);
+    }
+    const me = await this.#api(`${this.apiBase}/user`);
+    const login = me.status === 200 ? String(me.json?.login ?? "").trim() : "";
+    if (login === "") {
+      throw new Error(`GitHub \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E0D\u5B58\u5728\uFF0C\u4E14 token \u65E0\u6CD5\u8BC6\u522B\u8D26\u53F7\uFF0C\u65E0\u6CD5\u81EA\u52A8\u521B\u5EFA`);
+    }
+    const body = {
+      name: this.repo,
+      description: "dsh-mesh deployment packages (created by dsh-mesh)",
+      private: false,
+      auto_init: true
+    };
+    const endpoints = this.owner.toLowerCase() === login.toLowerCase() ? [`${this.apiBase}/user/repos`] : [`${this.apiBase}/orgs/${this.owner}/repos`];
+    let last = null;
+    for (const endpoint of endpoints) {
+      last = await this.#api(endpoint, { json: body });
+      if (isSuccess(last.status)) {
+        this.log(`github repository ${this.owner}/${this.repo} created`);
+        return { created: true };
+      }
+    }
+    throw new Error(`GitHub \u4ED3\u5E93 ${this.owner}/${this.repo} \u81EA\u52A8\u521B\u5EFA\u5931\u8D25\uFF1AHTTP ${String(last?.status)} ${String(last?.text ?? "").slice(0, 300)}`);
   }
   /**
    * Normalize a release object and include its assets.
@@ -3976,7 +4044,7 @@ var GiteeRelease = class {
     this.owner = options.owner;
     this.repo = options.repo;
     this.token = options.token;
-    this.branch = options.branch ?? "main";
+    this.branch = options.branch ?? DEFAULT_GITEE_BRANCH;
     this.proxy = null;
     this.log = shared.log ?? (() => {
     });
@@ -3992,17 +4060,18 @@ var GiteeRelease = class {
     return `${this.webBase}/${this.owner}/${this.repo}/releases/tag/${this.tag ?? DEFAULT_RELEASE_TAG}`;
   }
   /**
-   * One API request. The token travels in the query for GET/DELETE and in the
-   * JSON body for writes.
-   * @param {string} endpoint path below the repo root.
-   * @param {{method?: string, json?: unknown, query?: Record<string,string>}} [options] request.
+   * One API request against an absolute URL. The token travels in the query for
+   * GET/DELETE and in the JSON body for writes; it is never part of a log line.
+   * @param {string} target absolute URL.
+   * @param {{method?: string, json?: unknown, query?: Record<string,string>, label?: string}} [options] request.
    * @returns {Promise<{status:number, json:any, text:string}>} response.
    */
-  async #api(endpoint, options = {}) {
-    const url = new URL(`${this.apiRoot}${endpoint}`);
+  async #raw(target, options = {}) {
+    const url = new URL(target);
     url.searchParams.set("access_token", this.token);
     for (const [name, value] of Object.entries(options.query ?? {})) url.searchParams.set(name, value);
     const method = options.method ?? (options.json === void 0 ? "GET" : "POST");
+    const label = options.label ?? url.pathname;
     const response = await withRetry(async () => {
       const result = await requestJson(url.href, {
         method,
@@ -4012,11 +4081,20 @@ var GiteeRelease = class {
         idleTimeoutMs: 18e4
       });
       if (result.status === 429 || result.status >= 500) {
-        throw retryable(new Error(`Gitee API ${method} ${endpoint} returned HTTP ${String(result.status)}: ${result.text.slice(0, 300)}`));
+        throw retryable(new Error(`Gitee API ${method} ${label} returned HTTP ${String(result.status)}: ${result.text.slice(0, 300)}`));
       }
       return result;
-    }, { log: this.log, label: `gitee ${method} ${endpoint}` });
+    }, { log: this.log, label: `gitee ${method} ${label}` });
     return response;
+  }
+  /**
+   * One API request below the repository root.
+   * @param {string} endpoint path below the repo root.
+   * @param {{method?: string, json?: unknown, query?: Record<string,string>}} [options] request.
+   * @returns {Promise<{status:number, json:any, text:string}>} response.
+   */
+  async #api(endpoint, options = {}) {
+    return await this.#raw(`${this.apiRoot}${endpoint}`, options);
   }
   /**
    * Find the rolling release or create it.
@@ -4033,21 +4111,74 @@ var GiteeRelease = class {
     if (found.status !== 404) {
       throw new Error(`Gitee release lookup failed: HTTP ${String(found.status)} ${found.text.slice(0, 300)}`);
     }
-    const created = await this.#api("/releases", {
+    const create = async (branch) => await this.#api("/releases", {
       json: {
         tag_name: tag,
         name: options.name ?? `latest packages (${tag})`,
         body: options.body ?? "The newest dsh-mesh deployment packages. Older assets are replaced on every build.",
-        target_commitish: this.branch,
+        target_commitish: branch,
         prerelease: false
       }
     });
+    let created = await create(this.branch);
+    if (!isSuccess(created.status) && this.defaultBranch !== null && this.defaultBranch !== this.branch) {
+      const retried = await create(this.defaultBranch);
+      if (isSuccess(retried.status)) {
+        this.log(`gitee branch ${this.branch} is missing; using ${this.defaultBranch}`);
+        this.branch = this.defaultBranch;
+        created = retried;
+      }
+    }
     if (!isSuccess(created.status) || created.json === null) {
       const detail = created.json?.message ?? created.text.slice(0, 300);
-      const hint = /not found|404/iu.test(detail) ? "\uFF08Gitee \u4ED3\u5E93\u4E0D\u5B58\u5728\u6216 token \u65E0\u6743\u9650\uFF1A\u8BF7\u5148\u5728 Gitee \u521B\u5EFA\u516C\u5F00\u4ED3\u5E93\u5E76\u7ED9 token projects \u6743\u9650\uFF09" : "";
+      const hint = /not found|404/iu.test(detail) ? `\uFF08Gitee \u4ED3\u5E93\u6216\u5206\u652F\u4E0D\u5B58\u5728\uFF1A\u8BF7\u786E\u8BA4 branch \u4E3A ${this.defaultBranch ?? this.branch}\uFF0C\u5E76\u7ED9 token projects \u6743\u9650\uFF09` : "";
       throw new Error(`Gitee release creation failed: HTTP ${String(created.status)} ${detail}${hint}`);
     }
     return { id: created.json.id, tag_name: created.json.tag_name, html_url: created.json.html_url };
+  }
+  /**
+   * Create the repository when the token can see nothing at that address.
+   *
+   * A repository is created in the token's own namespace (`/user/repos`) or,
+   * when `owner` names somebody else, as an organisation repository. It is
+   * initialised (`auto_init`) so the `latest` tag has a commit to point at.
+   * @returns {Promise<{created: boolean}>} whether a repository was created.
+   */
+  async ensureRepo() {
+    const found = await this.#api("");
+    if (found.status === 200) {
+      this.defaultBranch = typeof found.json?.default_branch === "string" && found.json.default_branch !== "" ? found.json.default_branch : null;
+      return { created: false };
+    }
+    if (found.status !== 404) {
+      throw new Error(`Gitee repository lookup failed for ${this.owner}/${this.repo}: HTTP ${String(found.status)} ${found.text.slice(0, 300)}`);
+    }
+    const me = await this.#raw(`${this.apiBase}/user`, { label: "/user" });
+    const login = me.status === 200 ? String(me.json?.login ?? me.json?.name ?? "").trim() : "";
+    if (login === "") {
+      throw new Error(`Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E0D\u5B58\u5728\uFF0C\u4E14 token \u65E0\u6CD5\u8BC6\u522B\u8D26\u53F7\uFF0C\u65E0\u6CD5\u81EA\u52A8\u521B\u5EFA`);
+    }
+    const underUser = login.toLowerCase() === this.owner.toLowerCase();
+    const endpoints = underUser ? [`${this.apiBase}/user/repos`] : [`${this.apiBase}/orgs/${this.owner}/repos`];
+    const body = {
+      name: this.repo,
+      description: "dsh-mesh deployment packages (created by dsh-mesh)",
+      private: false,
+      auto_init: true
+    };
+    let created = null;
+    for (const endpoint of endpoints) {
+      created = await this.#raw(endpoint, { json: body, label: `/repos create ${this.owner}/${this.repo}` });
+      if (isSuccess(created.status)) break;
+    }
+    if (created === null || !isSuccess(created.status)) {
+      const detail = created?.json?.message ?? String(created?.text ?? "").slice(0, 300);
+      const hint = `\uFF08token \u5C5E\u4E8E ${login}\uFF1B\u81EA\u52A8\u5EFA\u4ED3\u5E93\u9700\u8981 projects \u6743\u9650\uFF0C\u4E14 ${this.owner} \u5FC5\u987B\u662F token \u81EA\u5DF1\u6216\u5B83\u6709\u5199\u6743\u9650\u7684\u7EC4\u7EC7\uFF09`;
+      throw new Error(`Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E0D\u5B58\u5728\u4E14\u81EA\u52A8\u521B\u5EFA\u5931\u8D25\uFF1AHTTP ${String(created?.status)} ${detail}${hint}`);
+    }
+    this.defaultBranch = typeof created.json?.default_branch === "string" && created.json.default_branch !== "" ? created.json.default_branch : null;
+    this.log(`gitee repository ${this.owner}/${this.repo} created`);
+    return { created: true };
   }
   /**
    * List the release's attachments.
@@ -4226,6 +4357,21 @@ async function publishRelease(options) {
       prepared.push({ ...artifact, archive: file, bytes: info.size, sha256: digest });
       log(`release asset ${path11.basename(file)} (${formatBytes(info.size)}, sha256 ${digest.slice(0, 12)}\u2026)`);
     }
+    if (config.github.enabled && config.github.owner === "") {
+      config.github.owner = await detectReleaseOwner("github", {
+        token: config.github.token,
+        proxy: proxy2,
+        apiBase: config.github.apiBase
+      });
+      log(`github owner detected: ${config.github.owner}`);
+    }
+    if (config.gitee.enabled && config.gitee.owner === "") {
+      config.gitee.owner = await detectReleaseOwner("gitee", {
+        token: config.gitee.token,
+        apiBase: config.gitee.apiBase
+      });
+      log(`gitee owner detected: ${config.gitee.owner}`);
+    }
     const partResults = {};
     if (config.gitee.enabled) {
       let total = 0;
@@ -4254,6 +4400,8 @@ async function publishRelease(options) {
     if (config.github.enabled) {
       try {
         const github = new GitHubRelease(config.github, { proxy: proxy2, log, apiBase: config.github.apiBase, uploadBase: config.github.uploadBase, webBase: config.github.webBase });
+        const repository = await github.ensureRepo();
+        result.github.created = repository.created === true;
         const release = await github.ensureRelease(config.tag, { name: `dsh-mesh ${manifest.version ?? ""} ${manifest.buildStamp ?? ""}`.trim() });
         result.github.releaseUrl = release.html_url ?? github.htmlUrl;
         for (const artifact of prepared) {
@@ -4288,6 +4436,8 @@ async function publishRelease(options) {
     if (config.gitee.enabled) {
       try {
         const gitee = new GiteeRelease(config.gitee, { proxy: proxy2, log, apiBase: config.gitee.apiBase, webBase: config.gitee.webBase });
+        const repository = await gitee.ensureRepo();
+        result.gitee.created = repository.created === true;
         const release = await gitee.ensureRelease(config.tag, { name: `dsh-mesh ${manifest.version ?? ""} ${manifest.buildStamp ?? ""}`.trim() });
         result.gitee.releaseUrl = release.html_url ?? gitee.htmlUrl;
         const newNames = /* @__PURE__ */ new Set([LATEST_MANIFEST_NAME, ...Object.values(partResults).flat().map((part) => part.name)]);
@@ -8811,7 +8961,7 @@ var MeshService = class {
    * @returns {Promise<object>} sanitized config and the manifest URLs.
    */
   async releaseSettings() {
-    const config = await loadReleaseConfig({ file: this.releaseConfigFile });
+    const config = await this.#healReleaseOwners(await loadReleaseConfig({ file: this.releaseConfigFile }));
     const sanitized = sanitizeReleaseConfig(config);
     const urls = latestManifestUrls(config);
     return {
@@ -8826,16 +8976,82 @@ var MeshService = class {
    * @param {{config?: object}} request settings.
    * @returns {Promise<object>} sanitized config after the save.
    */
+  /**
+   * Fill a stored config's missing owners from its tokens.
+   *
+   * A token-only setup stores the owner as soon as it is known; a config that
+   * predates that (or a save whose provider was unreachable) still shows the
+   * owner here, so the panel never asks the operator for an account name.
+   * Failures are ignored: publishing retries the lookup through its proxy.
+   * @param {object} config loaded config.
+   * @returns {Promise<object>} config, possibly with owners filled in.
+   */
+  async #healReleaseOwners(config) {
+    const missing = ["github", "gitee"].filter((provider) => config?.[provider]?.enabled === true && String(config[provider].owner ?? "") === "");
+    if (missing.length === 0) return config;
+    const owners = {};
+    for (const provider of missing) {
+      try {
+        owners[provider] = await detectReleaseOwner(provider, { token: config[provider].token });
+        this.logLine(`release ${provider} owner detected from token: ${owners[provider]}`);
+      } catch {
+      }
+    }
+    if (Object.keys(owners).length === 0) return config;
+    return await saveReleaseConfig({
+      file: this.releaseConfigFile,
+      input: {
+        enabled: config.enabled,
+        tag: config.tag,
+        partBytes: config.partBytes,
+        github: { owner: owners.github ?? config.github.owner, repo: config.github.repo },
+        gitee: { owner: owners.gitee ?? config.gitee.owner, repo: config.gitee.repo, branch: config.gitee.branch }
+      }
+    });
+  }
   async saveReleaseSettings(request) {
     const input = request?.config !== null && typeof request?.config === "object" ? request.config : request;
-    const config = await saveReleaseConfig({ file: this.releaseConfigFile, input });
+    const resolved = await this.#resolveReleaseOwners(input);
+    const config = await saveReleaseConfig({ file: this.releaseConfigFile, input: resolved.input });
     this.logLine(`release settings saved (tag ${config.tag}, github ${config.github.enabled ? "on" : "off"}, gitee ${config.gitee.enabled ? "on" : "off"})`);
     return {
       ok: true,
       config: sanitizeReleaseConfig(config),
       manifestUrls: latestManifestUrls(config),
-      configured: config.github.enabled || config.gitee.enabled
+      configured: config.github.enabled || config.gitee.enabled,
+      warnings: resolved.warnings
     };
+  }
+  /**
+   * Fill the owner half of a token-only release config from the provider.
+   *
+   * The panel deliberately asks for nothing but a token; the account name is
+   * whatever the token belongs to. An invalid token fails the save, so the
+   * operator sees it immediately instead of at the end of a build; an
+   * unreachable provider only warns, because publishing retries the lookup
+   * through the build's egress proxy.
+   * @param {object} input raw panel input.
+   * @returns {Promise<{input: object, warnings: string[]}>} input with owners and any warnings.
+   */
+  async #resolveReleaseOwners(input) {
+    const warnings = [];
+    const next = { ...input };
+    for (const provider of ["github", "gitee"]) {
+      const entry = input?.[provider];
+      if (entry === null || typeof entry !== "object") continue;
+      const token = typeof entry.token === "string" ? entry.token.trim() : "";
+      if (token === "" || String(entry.owner ?? "").trim() !== "") continue;
+      try {
+        const owner = await detectReleaseOwner(provider, { token });
+        next[provider] = { ...entry, owner };
+        this.logLine(`release ${provider} owner detected from token: ${owner}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/HTTP 401|HTTP 403|无效或缺少/iu.test(message)) throw error;
+        warnings.push(`${provider} \u8D26\u53F7\u6682\u65F6\u65E0\u6CD5\u8BC6\u522B\uFF08${message}\uFF09\uFF1B\u53D1\u5E03\u65F6\u4F1A\u518D\u8BD5\u4E00\u6B21`);
+      }
+    }
+    return { input: next, warnings };
   }
   /**
    * Delete one package (and its `.sha256` sidecar) from the packages directory.

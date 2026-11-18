@@ -7,6 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 import {
   buildLatestManifest,
+  detectReleaseOwner,
   latestManifestUrls,
   loadReleaseConfig,
   publishRelease,
@@ -36,6 +37,9 @@ function readBody(request) {
 async function startFakeProviders() {
   const releases = new Map()
   const events = []
+  // Repositories that already exist. The publish path now checks (and, when
+  // missing, creates) the repository before it touches a release.
+  const repos = new Set(['github:o/r', 'gitee:o/r'])
   let nextId = 1
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://local.invalid')
@@ -46,7 +50,27 @@ async function startFakeProviders() {
     }
     const keyOf = (provider, tag) => `${provider}:${tag}`
     // --- GitHub ---
-    let match = /^\/github\/api\/repos\/([^/]+)\/([^/]+)\/releases\/tags\/([^/]+)$/u.exec(url.pathname)
+    let match = /^\/github\/api\/user$/u.exec(url.pathname)
+    if (match !== null && request.method === 'GET') return json(200, { login: 'tester' })
+    match = /^\/github\/api\/repos\/([^/]+)\/([^/]+)$/u.exec(url.pathname)
+    if (match !== null && request.method === 'GET') {
+      return repos.has(`github:${match[1]}/${match[2]}`) ? json(200, { full_name: `${match[1]}/${match[2]}` }) : json(404, { message: 'Not Found' })
+    }
+    match = /^\/github\/api\/user\/repos$/u.exec(url.pathname)
+    if (match !== null && request.method === 'POST') {
+      const input = JSON.parse(body.toString('utf8'))
+      repos.add(`github:tester/${input.name}`)
+      events.push(`github:repo:create:${input.name}`)
+      return json(201, { name: input.name, full_name: `tester/${input.name}` })
+    }
+    match = /^\/github\/api\/orgs\/([^/]+)\/repos$/u.exec(url.pathname)
+    if (match !== null && request.method === 'POST') {
+      const input = JSON.parse(body.toString('utf8'))
+      repos.add(`github:${match[1]}/${input.name}`)
+      events.push(`github:repo:create:${match[1]}/${input.name}`)
+      return json(201, { name: input.name, full_name: `${match[1]}/${input.name}` })
+    }
+    match = /^\/github\/api\/repos\/([^/]+)\/([^/]+)\/releases\/tags\/([^/]+)$/u.exec(url.pathname)
     if (match !== null && request.method === 'GET') {
       const release = releases.get(keyOf('github', match[3]))
       if (release === undefined) return json(404, { message: 'Not Found' })
@@ -91,6 +115,21 @@ async function startFakeProviders() {
       return response.end()
     }
     // --- Gitee ---
+    match = /^\/gitee\/api\/user$/u.exec(url.pathname)
+    if (match !== null && request.method === 'GET') return json(200, { login: 'tester' })
+    match = /^\/gitee\/api\/repos\/([^/]+)\/([^/]+)$/u.exec(url.pathname)
+    if (match !== null && request.method === 'GET') {
+      return repos.has(`gitee:${match[1]}/${match[2]}`)
+        ? json(200, { full_name: `${match[1]}/${match[2]}`, default_branch: 'master' })
+        : json(404, { message: 'Not Found' })
+    }
+    match = /^\/gitee\/api\/user\/repos$/u.exec(url.pathname)
+    if (match !== null && request.method === 'POST') {
+      const input = JSON.parse(body.toString('utf8'))
+      repos.add(`gitee:tester/${input.name}`)
+      events.push(`gitee:repo:create:${input.name}`)
+      return json(201, { full_name: `tester/${input.name}`, default_branch: 'master' })
+    }
     match = /^\/gitee\/api\/repos\/([^/]+)\/([^/]+)\/releases\/tags\/([^/]+)$/u.exec(url.pathname)
     if (match !== null && request.method === 'GET') {
       const release = releases.get(keyOf('gitee', match[3]))
@@ -100,9 +139,11 @@ async function startFakeProviders() {
     match = /^\/gitee\/api\/repos\/([^/]+)\/([^/]+)\/releases$/u.exec(url.pathname)
     if (match !== null && request.method === 'POST') {
       const input = JSON.parse(body.toString('utf8'))
+      // Like Gitee: a tag can only point at a branch that exists.
+      if (input.target_commitish !== 'master') return json(400, { message: `branch ${input.target_commitish} not found` })
       const release = { id: nextId++, tag: input.tag_name, assets: [] }
       releases.set(keyOf('gitee', input.tag_name), release)
-      events.push(`gitee:create:${input.tag_name}`)
+      events.push(`gitee:create:${input.tag_name}@${input.target_commitish}`)
       return json(201, { id: release.id, tag_name: release.tag, html_url: `${base}/gitee/web/tag/${release.tag}` })
     }
     match = /^\/gitee\/api\/repos\/([^/]+)\/([^/]+)\/releases\/(\d+)\/attach_files$/u.exec(url.pathname)
@@ -143,7 +184,7 @@ async function startFakeProviders() {
   let base = ''
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   base = `http://127.0.0.1:${server.address().port}`
-  return { server, releases, events, base }
+  return { server, releases, repos, events, base }
 }
 
 test('splitArchive produces byte ranges that concatenate to the original', async () => {
@@ -349,6 +390,160 @@ test('publishRelease writes the newest assets and removes the previous revision'
     const parts = manifest.assets['linux-x64'].gitee
     const rebuilt = Buffer.concat(parts.parts.map(part => gitee.assets.find(asset => asset.name === part.name).data))
     assert.equal(sha256(rebuilt), sha256(await readFile(first)))
+  } finally {
+    fake.server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a token-only config defaults to repo dsh-web-release and Gitee branch master', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-release-defaults-'))
+  try {
+    const file = path.join(dir, 'release.json')
+    const fresh = await loadReleaseConfig({ file, env: {} })
+    assert.equal(fresh.github.repo, 'dsh-web-release')
+    assert.equal(fresh.gitee.repo, 'dsh-web-release')
+    assert.equal(fresh.gitee.branch, 'master')
+    assert.equal(fresh.github.enabled, false)
+    assert.equal(fresh.gitee.enabled, false)
+
+    const saved = await saveReleaseConfig({ file, input: { github: { token: 'ght' }, gitee: { token: 'gt' } } })
+    assert.equal(saved.github.repo, 'dsh-web-release')
+    assert.equal(saved.gitee.repo, 'dsh-web-release')
+    assert.equal(saved.gitee.branch, 'master')
+    // The owner stays empty until a token can name the account.
+    assert.equal(saved.github.owner, '')
+    assert.equal(saved.github.enabled, true)
+    assert.equal(saved.gitee.enabled, true)
+    assert.equal(saved.gitee.branch, 'master')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('publishing with a token only creates the missing repository and release', async () => {
+  const fake = await startFakeProviders()
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-release-autorepo-'))
+  try {
+    const archive = path.join(dir, 'dsh-mesh-1.0-20261118A-linux-x64.tar.gz')
+    await writeFile(archive, Buffer.alloc(64 * 1024 + 3, 7))
+    const config = {
+      enabled: true,
+      tag: 'latest',
+      partBytes: 1024 * 1024,
+      github: {
+        owner: '', repo: 'dsh-web-release', token: 'gh', enabled: true,
+        apiBase: `${fake.base}/github/api`, uploadBase: `${fake.base}/github/upload`, webBase: `${fake.base}/github/web`,
+      },
+      gitee: {
+        owner: '', repo: 'dsh-web-release', token: 'gt', enabled: true, branch: 'master',
+        apiBase: `${fake.base}/gitee/api`, webBase: `${fake.base}/gitee/web`,
+      },
+    }
+    const artifacts = [{ target: 'linux-x64', archive, manifest: { version: '1.0', buildStamp: '20261118A' } }]
+    const result = await publishRelease({ artifacts, config, log: () => {} })
+    assert.equal(result.status, 'done', JSON.stringify(result))
+    assert.equal(result.github.created, true)
+    assert.equal(result.gitee.created, true)
+    // The owner came from the token, on both providers.
+    assert.equal(config.github.owner, 'tester')
+    assert.equal(config.gitee.owner, 'tester')
+    assert.ok(fake.repos.has('github:tester/dsh-web-release'))
+    assert.ok(fake.repos.has('gitee:tester/dsh-web-release'))
+    // The repository exists before the release that lives in it.
+    assert.ok(fake.events.indexOf('github:repo:create:dsh-web-release') < fake.events.indexOf('github:create:latest'))
+    assert.ok(fake.events.indexOf('gitee:repo:create:dsh-web-release') < fake.events.indexOf('gitee:create:latest@master'))
+    // The stored branch was `master`, so the tag used it directly.
+    assert.equal(fake.events.filter(event => event === 'gitee:create:latest@master').length, 1)
+    const manifest = JSON.parse(fake.releases.get('github:latest').assets.find(asset => asset.name === 'latest.json').data.toString('utf8'))
+    assert.equal(
+      manifest.assets['linux-x64'].github.url,
+      `${fake.base}/github/web/tester/dsh-web-release/releases/download/latest/dsh-mesh-1.0-20261118A-linux-x64.tar.gz`,
+    )
+
+    // A second publish finds the repository and must not create it again.
+    const again = await publishRelease({ artifacts, config, log: () => {} })
+    assert.equal(again.status, 'done', JSON.stringify(again))
+    assert.equal(again.github.created, false)
+    assert.equal(again.gitee.created, false)
+    assert.equal(fake.events.filter(event => event.startsWith('github:repo:create:')).length, 1)
+    assert.equal(fake.events.filter(event => event.startsWith('gitee:repo:create:')).length, 1)
+  } finally {
+    fake.server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a Gitee repository under another account is reported, never created', async () => {
+  const fake = await startFakeProviders()
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-release-gitee-owner-'))
+  try {
+    const archive = path.join(dir, 'dsh-mesh-1.0-20261118A-linux-x64.tar.gz')
+    await writeFile(archive, Buffer.alloc(4096, 3))
+    const config = {
+      enabled: true,
+      tag: 'latest',
+      partBytes: 1024 * 1024,
+      github: { owner: '', repo: 'dsh-web-release', token: '', enabled: false },
+      gitee: {
+        owner: 'somebody', repo: 'dsh-web-release', token: 'gt', enabled: true, branch: 'master',
+        apiBase: `${fake.base}/gitee/api`, webBase: `${fake.base}/gitee/web`,
+      },
+    }
+    const result = await publishRelease({
+      artifacts: [{ target: 'linux-x64', archive, manifest: { version: '1.0', buildStamp: '20261118A' } }],
+      config,
+      log: () => {},
+    })
+    assert.equal(result.status, 'failed')
+    assert.equal(result.gitee.status, 'failed')
+    assert.match(result.gitee.error, /不存在且自动创建失败/u)
+    assert.match(result.gitee.error, /token 属于 tester/u)
+    assert.equal(fake.events.some(event => event.startsWith('gitee:repo:create:')), false)
+  } finally {
+    fake.server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('detectReleaseOwner names the account behind a token', async () => {
+  const fake = await startFakeProviders()
+  try {
+    assert.equal(await detectReleaseOwner('github', { token: 't', apiBase: `${fake.base}/github/api` }), 'tester')
+    assert.equal(await detectReleaseOwner('gitee', { token: 't', apiBase: `${fake.base}/gitee/api` }), 'tester')
+    await assert.rejects(
+      () => detectReleaseOwner('github', { token: 't', apiBase: `${fake.base}/github/missing` }),
+      /无法用 token 识别账号/u,
+    )
+  } finally {
+    fake.server.close()
+  }
+})
+
+test('a stale Gitee branch falls back to the branch the repository reports', async () => {
+  const fake = await startFakeProviders()
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-release-gitee-branch-'))
+  try {
+    const archive = path.join(dir, 'dsh-mesh-1.0-20261118A-linux-x64.tar.gz')
+    await writeFile(archive, Buffer.alloc(4096, 5))
+    const config = {
+      enabled: true,
+      tag: 'latest',
+      partBytes: 1024 * 1024,
+      github: { owner: '', repo: 'dsh-web-release', token: '', enabled: false },
+      gitee: {
+        owner: 'tester', repo: 'dsh-web-release', token: 'gt', enabled: true, branch: 'main',
+        apiBase: `${fake.base}/gitee/api`, webBase: `${fake.base}/gitee/web`,
+      },
+    }
+    const result = await publishRelease({
+      artifacts: [{ target: 'linux-x64', archive, manifest: { version: '1.0', buildStamp: '20261118A' } }],
+      config,
+      log: () => {},
+    })
+    assert.equal(result.status, 'done', JSON.stringify(result))
+    // The tag landed on the branch the repository actually reports.
+    assert.ok(fake.events.includes('gitee:create:latest@master'))
   } finally {
     fake.server.close()
     await rm(dir, { recursive: true, force: true })

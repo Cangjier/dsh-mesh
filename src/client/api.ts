@@ -237,6 +237,8 @@ export interface ReleaseSettingsResponse {
   config: ReleaseSettings
   manifestUrls: string[]
   configured: boolean
+  /** Non-fatal notes from the save, e.g. an owner that could not be detected yet. */
+  warnings?: string[]
 }
 
 export interface PackageInfo {

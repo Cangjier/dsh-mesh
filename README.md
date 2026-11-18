@@ -95,7 +95,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - **编译任务**：保留最近任务的成员、引用、目标、进度和时间；「日志」弹层实时跟随 `build.log`。
 - **包里带什么**：每个产物固定携带 `dsh-mesh` 与 `xl` 两个插件。`dsh-mesh` 是当前仓库；`xl` 来自 `Cangjier/xl` 的 `main`，每次编译现拉，来源与归档哈希记在包的 `manifest.json`（`extraPlugins`）里。清单在 `build/plugins.json`，加插件只要加一条。
 - **部署包**：列出 `~/.dsh/packages` 里的包（平台、大小、时间），可直接删除；成员编译出的产物也会出现在这里，接着就能对成员「部署」。
-- **Release 发布**：编译成功后自动把本次最新包上传到 GitHub / Gitee 的固定 `latest` Release，旧资产随之删除。GitHub 存整包（单文件 2GB 上限，上传走编译机的外网代理）；Gitee 单附件约 100MB、仓库附件总量约 1GB，所以按 85MiB 分片上传（Gitee 直连、不走代理），客户端下载后拼接并校验 SHA-256。配置在 `~/.dsh/mesh/release.json`（0600），面板「Release 发布」卡片可编辑 owner/repo/token/tag/分片大小，token 不会回传浏览器。详见 [Step 022](docs/Step%20022%20Release%20发布与下载升级.md)。
+- **Release 发布**：编译成功后自动把本次最新包上传到 GitHub / Gitee 的固定 `latest` Release，旧资产随之删除。GitHub 存整包（单文件 2GB 上限，上传走编译机的外网代理）；Gitee 单附件约 100MB、仓库附件总量约 1GB，所以按 85MiB 分片上传（Gitee 直连、不走代理），客户端下载后拼接并校验 SHA-256。配置在 `~/.dsh/mesh/release.json`（0600）；面板「Release 发布」卡片**只需要贴 token**：owner 由 token 自动识别，仓库默认 `dsh-web-release`、不存在会自动创建（公开），Gitee 分支默认 `master`。token 不会回传浏览器。详见 [Step 022](docs/Step%20022%20Release%20发布与下载升级.md)。
 - **指针布局（新骨架）**：`~/.dsh` 下只保留一个稳定启动器 `dsh-mesh.mjs` 和指针 `dsh-mesh.json`，每个版本解压到 `releases/<id>` 后就不再覆盖；升级 = 写指针 + 重启，回退 = 指针翻回 + 重启。启动器替换前自动留 `.bak`，会话/配置统一在 `~/.dsh/shared`。升级实现只有 `code/deploy/upgrade-local.mjs` 一份，网关和 Linux 成员共用；`.sh` 只是旧调用方的兼容 shim。详见 [Step 023](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md)。
 - **升级优先从 Release 下载**：成员升级不再必须由网关上传整个包。部署计划只带公开的 `latest.json` URL 和一个有外网成员的代理坐标；目标成员直接下载（GitHub 优先、Gitee 分片兜底），校验 SHA-256 后原地进入 prepare/activate。下载失败、目标没有 Node、Release 里没有所选包时自动回退到原有的网关上传。代理默认按「公网 IP 非 CN 的 Linux 成员」选择，只作用于 GitHub；Gitee 不走代理。升级弹窗里可以改成直连或指定成员。
 
@@ -259,7 +259,7 @@ node code/build/cli.mjs build --no-publish          # 只编译，不上传 Rele
 node code/build/smoke-cli.mjs --root <package> --screenshot-dir /tmp/smoke  # 单独复跑一个包
 ```
 
-构建成功后默认读取 `~/.dsh/mesh/release.json` 并发布到 GitHub/Gitee；没有配置就跳过，不影响产物。
+构建成功后默认读取 `~/.dsh/mesh/release.json` 并发布到 GitHub/Gitee（仓库不存在会用 token 自动创建）；没有配置就跳过，不影响产物。
 
 首次真实构建需要网络、`pnpm`、`npm` 和足够磁盘（完整包每个目标约 0.7–1 GB 依赖 + Node 运行时）。如果上游源码已经变了，第一次会按设计返回 needs-fix 工作单，而不是假装成功。构建会执行源码仓库的 `pnpm install` / build 脚本；只对可信源码使用。
 

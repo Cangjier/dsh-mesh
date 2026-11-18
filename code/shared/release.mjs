@@ -43,6 +43,10 @@ import {
 
 /** One fixed tag keeps every download URL stable across builds. */
 export const DEFAULT_RELEASE_TAG = 'latest'
+/** The repository a token-only setup publishes to, on both providers. */
+export const DEFAULT_RELEASE_REPO = 'dsh-web-release'
+/** Gitee tags point at a commit; a web-created Gitee repo starts on `master`. */
+export const DEFAULT_GITEE_BRANCH = 'master'
 /** Gitee rejects attachments over 100 MB; 85 MiB leaves room for accounting. */
 export const DEFAULT_PART_BYTES = 85 * 1024 * 1024
 /** Hard ceiling regardless of configuration: a part above this cannot land. */
@@ -65,15 +69,60 @@ export function defaultReleaseConfigFile() {
 
 /**
  * Normalize one owner/repo pair.
+ *
+ * An empty repository name falls back to {@link DEFAULT_RELEASE_REPO}: the
+ * panel is meant to work with nothing but a token and a branch name that
+ * already matches the provider's default.
  * @param {unknown} value candidate.
  * @returns {{owner: string, repo: string}} normalized, empty when invalid.
  */
 function normalizeRepo(value) {
-  if (value === null || typeof value !== 'object') return { owner: '', repo: '' }
+  if (value === null || typeof value !== 'object') return { owner: '', repo: DEFAULT_RELEASE_REPO }
   const owner = String(value.owner ?? '').trim()
   const repo = String(value.repo ?? '').trim()
   const valid = (part) => /^[A-Za-z0-9_.-]+$/u.test(part)
-  return { owner: valid(owner) ? owner : '', repo: valid(repo) ? repo : '' }
+  return { owner: valid(owner) ? owner : '', repo: repo === '' ? DEFAULT_RELEASE_REPO : valid(repo) ? repo : '' }
+}
+
+/**
+ * The account login a provider token belongs to.
+ *
+ * The panel asks for nothing but a token, so the owner half of `owner/repo` is
+ * filled in from the provider instead of the operator. GitHub and Gitee both
+ * answer `/user` for the token's account.
+ * @param {'github'|'gitee'} provider provider.
+ * @param {{token: string, proxy?: string|null, apiBase?: string}} options credentials.
+ * @returns {Promise<string>} login name.
+ */
+export async function detectReleaseOwner(provider, options) {
+  const token = String(options.token ?? '').trim()
+  if (token === '') throw new Error(`${provider} token 为空，无法识别账号`)
+  const fallback = provider === 'github' ? 'https://api.github.com' : 'https://gitee.com/api/v5'
+  const apiBase = String(options.apiBase ?? fallback).replace(/\/$/u, '')
+  const url = new URL(`${apiBase}/user`)
+  const headers = {}
+  if (provider === 'gitee') {
+    url.searchParams.set('access_token', token)
+  } else {
+    headers.authorization = `Bearer ${token}`
+    headers.accept = 'application/vnd.github+json'
+    headers['x-github-api-version'] = '2022-11-28'
+  }
+  const response = await requestJson(url.href, {
+    headers,
+    proxy: provider === 'gitee' ? null : options.proxy ?? null,
+    timeoutMs: 30_000,
+    idleTimeoutMs: 60_000,
+  })
+  if (!isSuccess(response.status) || response.json === null || typeof response.json !== 'object') {
+    const hint = response.status === 401 || response.status === 403
+      ? `${provider} token 无效或缺少读取账号的权限`
+      : `${provider} 无法用 token 识别账号`
+    throw new Error(`${hint}：HTTP ${String(response.status)} ${String(response.text ?? '').slice(0, 200)}`)
+  }
+  const login = String(response.json.login ?? response.json.username ?? '').trim()
+  if (login === '') throw new Error(`${provider} /user 没有返回账号名`)
+  return login
 }
 
 /**
@@ -117,19 +166,21 @@ export async function loadReleaseConfig(options = {}) {
     enabled,
     tag,
     partBytes,
+    // The owner can stay empty: a token-only setup resolves it from the token
+    // (`detectReleaseOwner`) at save time and again right before publishing.
     github: {
       ...github,
       token: githubToken,
-      enabled: enabled && github.owner !== '' && github.repo !== '' && githubToken !== '',
+      enabled: enabled && github.repo !== '' && githubToken !== '',
     },
     gitee: {
       ...gitee,
       token: giteeToken,
-      enabled: enabled && gitee.owner !== '' && gitee.repo !== '' && giteeToken !== '',
+      enabled: enabled && gitee.repo !== '' && giteeToken !== '',
       // Gitee needs a real commit-ish to point the `latest` tag at.
       branch: typeof parsed.gitee?.branch === 'string' && parsed.gitee.branch.trim() !== ''
         ? parsed.gitee.branch.trim()
-        : 'main',
+        : DEFAULT_GITEE_BRANCH,
     },
   }
   return result
@@ -156,7 +207,7 @@ export function sanitizeReleaseConfig(config) {
     gitee: {
       owner: config.gitee?.owner ?? '',
       repo: config.gitee?.repo ?? '',
-      branch: config.gitee?.branch ?? 'main',
+      branch: config.gitee?.branch ?? DEFAULT_GITEE_BRANCH,
       enabled: config.gitee?.enabled === true,
       hasToken: String(config.gitee?.token ?? '') !== '',
     },
@@ -190,7 +241,7 @@ export async function saveReleaseConfig(options) {
   if (Number.isFinite(requestedPart) && (requestedPart < 1024 * 1024 || requestedPart > MAX_PART_BYTES)) {
     throw new Error(`part size must be between 1 MiB and ${String(MAX_PART_BYTES)} bytes`)
   }
-  const branch = String(input.gitee?.branch ?? existing.gitee?.branch ?? 'main').trim()
+  const branch = String(input.gitee?.branch ?? existing.gitee?.branch ?? DEFAULT_GITEE_BRANCH).trim()
   if (!/^[A-Za-z0-9._/-]{1,120}$/u.test(branch)) throw new Error(`Gitee branch is invalid: ${branch}`)
   const stored = {
     enabled: input.enabled === undefined ? existing.enabled !== false : input.enabled === true,
@@ -430,7 +481,7 @@ export class GitHubRelease {
    * @returns {Promise<{status:number, json:any, text:string, headers:object}>} response.
    */
   async #api(endpoint, options = {}) {
-    const url = endpoint.startsWith('https://') ? endpoint : `${this.apiRoot}${endpoint}`
+    const url = /^https?:\/\//u.test(endpoint) ? endpoint : `${this.apiRoot}${endpoint}`
     const response = await withRetry(async () => {
       const result = await requestJson(url, {
         method: options.method ?? (options.json === undefined ? 'GET' : 'POST'),
@@ -479,6 +530,45 @@ export class GitHubRelease {
       throw new Error(`GitHub release creation failed: HTTP ${String(created.status)} ${created.text.slice(0, 300)}`)
     }
     return await this.#releaseWithAssets(created.json)
+  }
+
+  /**
+   * Create the repository when the token can see nothing at that address.
+   *
+   * The panel only takes a token, so the first publish has to be able to make
+   * the repository itself; `ensureRelease` then makes the tag. A repository
+   * that already exists is left alone.
+   * @returns {Promise<{created: boolean}>} whether a repository was created.
+   */
+  async ensureRepo() {
+    const found = await this.#api('')
+    if (found.status === 200) return { created: false }
+    if (found.status !== 404) {
+      throw new Error(`GitHub repository lookup failed for ${this.owner}/${this.repo}: HTTP ${String(found.status)} ${found.text.slice(0, 300)}`)
+    }
+    const me = await this.#api(`${this.apiBase}/user`)
+    const login = me.status === 200 ? String(me.json?.login ?? '').trim() : ''
+    if (login === '') {
+      throw new Error(`GitHub 仓库 ${this.owner}/${this.repo} 不存在，且 token 无法识别账号，无法自动创建`)
+    }
+    const body = {
+      name: this.repo,
+      description: 'dsh-mesh deployment packages (created by dsh-mesh)',
+      private: false,
+      auto_init: true,
+    }
+    const endpoints = this.owner.toLowerCase() === login.toLowerCase()
+      ? [`${this.apiBase}/user/repos`]
+      : [`${this.apiBase}/orgs/${this.owner}/repos`]
+    let last = null
+    for (const endpoint of endpoints) {
+      last = await this.#api(endpoint, { json: body })
+      if (isSuccess(last.status)) {
+        this.log(`github repository ${this.owner}/${this.repo} created`)
+        return { created: true }
+      }
+    }
+    throw new Error(`GitHub 仓库 ${this.owner}/${this.repo} 自动创建失败：HTTP ${String(last?.status)} ${String(last?.text ?? '').slice(0, 300)}`)
   }
 
   /**
@@ -581,7 +671,7 @@ export class GiteeRelease {
     this.owner = options.owner
     this.repo = options.repo
     this.token = options.token
-    this.branch = options.branch ?? 'main'
+    this.branch = options.branch ?? DEFAULT_GITEE_BRANCH
     // Gitee is reached directly. The egress proxy exists to get around the
     // GitHub path that is slow or unreachable from mainland China; routing a
     // domestic download through an overseas member would only make it slower.
@@ -602,17 +692,18 @@ export class GiteeRelease {
   }
 
   /**
-   * One API request. The token travels in the query for GET/DELETE and in the
-   * JSON body for writes.
-   * @param {string} endpoint path below the repo root.
-   * @param {{method?: string, json?: unknown, query?: Record<string,string>}} [options] request.
+   * One API request against an absolute URL. The token travels in the query for
+   * GET/DELETE and in the JSON body for writes; it is never part of a log line.
+   * @param {string} target absolute URL.
+   * @param {{method?: string, json?: unknown, query?: Record<string,string>, label?: string}} [options] request.
    * @returns {Promise<{status:number, json:any, text:string}>} response.
    */
-  async #api(endpoint, options = {}) {
-    const url = new URL(`${this.apiRoot}${endpoint}`)
+  async #raw(target, options = {}) {
+    const url = new URL(target)
     url.searchParams.set('access_token', this.token)
     for (const [name, value] of Object.entries(options.query ?? {})) url.searchParams.set(name, value)
     const method = options.method ?? (options.json === undefined ? 'GET' : 'POST')
+    const label = options.label ?? url.pathname
     const response = await withRetry(async () => {
       const result = await requestJson(url.href, {
         method,
@@ -622,11 +713,21 @@ export class GiteeRelease {
         idleTimeoutMs: 180_000,
       })
       if (result.status === 429 || result.status >= 500) {
-        throw retryable(new Error(`Gitee API ${method} ${endpoint} returned HTTP ${String(result.status)}: ${result.text.slice(0, 300)}`))
+        throw retryable(new Error(`Gitee API ${method} ${label} returned HTTP ${String(result.status)}: ${result.text.slice(0, 300)}`))
       }
       return result
-    }, { log: this.log, label: `gitee ${method} ${endpoint}` })
+    }, { log: this.log, label: `gitee ${method} ${label}` })
     return response
+  }
+
+  /**
+   * One API request below the repository root.
+   * @param {string} endpoint path below the repo root.
+   * @param {{method?: string, json?: unknown, query?: Record<string,string>}} [options] request.
+   * @returns {Promise<{status:number, json:any, text:string}>} response.
+   */
+  async #api(endpoint, options = {}) {
+    return await this.#raw(`${this.apiRoot}${endpoint}`, options)
   }
 
   /**
@@ -644,21 +745,84 @@ export class GiteeRelease {
     if (found.status !== 404) {
       throw new Error(`Gitee release lookup failed: HTTP ${String(found.status)} ${found.text.slice(0, 300)}`)
     }
-    const created = await this.#api('/releases', {
+    const create = async (branch) => await this.#api('/releases', {
       json: {
         tag_name: tag,
         name: options.name ?? `latest packages (${tag})`,
         body: options.body ?? 'The newest dsh-mesh deployment packages. Older assets are replaced on every build.',
-        target_commitish: this.branch,
+        target_commitish: branch,
         prerelease: false,
       },
     })
+    let created = await create(this.branch)
+    // A repository that was just created (or one whose branches were renamed)
+    // only has its default branch; a stale configured branch must not stop the
+    // tag, so retry on the branch the repository actually reports.
+    if (!isSuccess(created.status) && this.defaultBranch !== null && this.defaultBranch !== this.branch) {
+      const retried = await create(this.defaultBranch)
+      if (isSuccess(retried.status)) {
+        this.log(`gitee branch ${this.branch} is missing; using ${this.defaultBranch}`)
+        this.branch = this.defaultBranch
+        created = retried
+      }
+    }
     if (!isSuccess(created.status) || created.json === null) {
       const detail = created.json?.message ?? created.text.slice(0, 300)
-      const hint = /not found|404/iu.test(detail) ? '（Gitee 仓库不存在或 token 无权限：请先在 Gitee 创建公开仓库并给 token projects 权限）' : ''
+      const hint = /not found|404/iu.test(detail) ? `（Gitee 仓库或分支不存在：请确认 branch 为 ${this.defaultBranch ?? this.branch}，并给 token projects 权限）` : ''
       throw new Error(`Gitee release creation failed: HTTP ${String(created.status)} ${detail}${hint}`)
     }
     return { id: created.json.id, tag_name: created.json.tag_name, html_url: created.json.html_url }
+  }
+
+  /**
+   * Create the repository when the token can see nothing at that address.
+   *
+   * A repository is created in the token's own namespace (`/user/repos`) or,
+   * when `owner` names somebody else, as an organisation repository. It is
+   * initialised (`auto_init`) so the `latest` tag has a commit to point at.
+   * @returns {Promise<{created: boolean}>} whether a repository was created.
+   */
+  async ensureRepo() {
+    const found = await this.#api('')
+    if (found.status === 200) {
+      this.defaultBranch = typeof found.json?.default_branch === 'string' && found.json.default_branch !== '' ? found.json.default_branch : null
+      return { created: false }
+    }
+    if (found.status !== 404) {
+      throw new Error(`Gitee repository lookup failed for ${this.owner}/${this.repo}: HTTP ${String(found.status)} ${found.text.slice(0, 300)}`)
+    }
+    const me = await this.#raw(`${this.apiBase}/user`, { label: '/user' })
+    const login = me.status === 200 ? String(me.json?.login ?? me.json?.name ?? '').trim() : ''
+    if (login === '') {
+      throw new Error(`Gitee 仓库 ${this.owner}/${this.repo} 不存在，且 token 无法识别账号，无法自动创建`)
+    }
+    // The token's own namespace is created through `/user/repos`; another owner
+    // has to be an organisation this token may write to.
+    const underUser = login.toLowerCase() === this.owner.toLowerCase()
+    const endpoints = underUser
+      ? [`${this.apiBase}/user/repos`]
+      : [`${this.apiBase}/orgs/${this.owner}/repos`]
+    const body = {
+      name: this.repo,
+      description: 'dsh-mesh deployment packages (created by dsh-mesh)',
+      private: false,
+      auto_init: true,
+    }
+    let created = null
+    for (const endpoint of endpoints) {
+      created = await this.#raw(endpoint, { json: body, label: `/repos create ${this.owner}/${this.repo}` })
+      if (isSuccess(created.status)) break
+    }
+    if (created === null || !isSuccess(created.status)) {
+      const detail = created?.json?.message ?? String(created?.text ?? '').slice(0, 300)
+      const hint = `（token 属于 ${login}；自动建仓库需要 projects 权限，且 ${this.owner} 必须是 token 自己或它有写权限的组织）`
+      throw new Error(`Gitee 仓库 ${this.owner}/${this.repo} 不存在且自动创建失败：HTTP ${String(created?.status)} ${detail}${hint}`)
+    }
+    this.defaultBranch = typeof created.json?.default_branch === 'string' && created.json.default_branch !== ''
+      ? created.json.default_branch
+      : null
+    this.log(`gitee repository ${this.owner}/${this.repo} created`)
+    return { created: true }
   }
 
   /**
@@ -870,6 +1034,24 @@ export async function publishRelease(options) {
       log(`release asset ${path.basename(file)} (${formatBytes(info.size)}, sha256 ${digest.slice(0, 12)}…)`)
     }
 
+    // A token-only config has no owner yet. Resolve it before the manifest is
+    // built, because every download URL embeds owner/repo.
+    if (config.github.enabled && config.github.owner === '') {
+      config.github.owner = await detectReleaseOwner('github', {
+        token: config.github.token,
+        proxy,
+        apiBase: config.github.apiBase,
+      })
+      log(`github owner detected: ${config.github.owner}`)
+    }
+    if (config.gitee.enabled && config.gitee.owner === '') {
+      config.gitee.owner = await detectReleaseOwner('gitee', {
+        token: config.gitee.token,
+        apiBase: config.gitee.apiBase,
+      })
+      log(`gitee owner detected: ${config.gitee.owner}`)
+    }
+
     // Gitee cannot hold one archive over ~100 MB; split before any upload so a
     // packaging problem fails before the release is touched.
     const partResults = {}
@@ -901,6 +1083,8 @@ export async function publishRelease(options) {
     if (config.github.enabled) {
       try {
         const github = new GitHubRelease(config.github, { proxy, log, apiBase: config.github.apiBase, uploadBase: config.github.uploadBase, webBase: config.github.webBase })
+        const repository = await github.ensureRepo()
+        result.github.created = repository.created === true
         const release = await github.ensureRelease(config.tag, { name: `dsh-mesh ${manifest.version ?? ''} ${manifest.buildStamp ?? ''}`.trim() })
         result.github.releaseUrl = release.html_url ?? github.htmlUrl
         for (const artifact of prepared) {
@@ -936,6 +1120,8 @@ export async function publishRelease(options) {
     if (config.gitee.enabled) {
       try {
         const gitee = new GiteeRelease(config.gitee, { proxy, log, apiBase: config.gitee.apiBase, webBase: config.gitee.webBase })
+        const repository = await gitee.ensureRepo()
+        result.gitee.created = repository.created === true
         const release = await gitee.ensureRelease(config.tag, { name: `dsh-mesh ${manifest.version ?? ''} ${manifest.buildStamp ?? ''}`.trim() })
         result.gitee.releaseUrl = release.html_url ?? gitee.htmlUrl
         const newNames = new Set([LATEST_MANIFEST_NAME, ...Object.values(partResults).flat().map(part => part.name)])

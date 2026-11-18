@@ -111,6 +111,13 @@ export async function repackDirectory(packageDir, repositoryRoot) {
     await replaceDirectory(path.join(repositoryRoot, name), path.join(packageDir, 'plugins', 'dsh-mesh', name))
   }
   const manifest = JSON.parse(await readFile(manifestFile, 'utf8'))
+  // The plugin in this repository owns :8765 in-process, so a refreshed
+  // package must advertise the capability even when it was cut from a base
+  // archive that predates it. Rollback reads this before starting the
+  // standalone unit.
+  const features = new Set(Array.isArray(manifest.features) ? manifest.features : [])
+  features.add('embedded-interop')
+  manifest.features = [...features]
   const staticAssets = await collectStaticAssets(path.join(packageDir, 'gate'))
   manifest.staticAssets = staticAssets
   manifest.builtAt = new Date().toISOString()

@@ -8,6 +8,7 @@ import { Scheduler } from './lib/scheduler.mjs'
 import { scheduleFile } from './lib/schedule.mjs'
 import { registerWireGuardApi } from './lib/wireguard-api.mjs'
 import { registerTools } from './lib/tools.mjs'
+import { createInteropService, resolveInteropSettings } from './lib/interop-service.mjs'
 
 export const inject = ['webServer']
 
@@ -55,5 +56,44 @@ export async function apply(ctx: any, config: any = {}) {
     })
   } catch (error) {
     console.error(`mesh: tools service is unavailable: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  // Run the member-facing interop HTTP service inside this Web host. The
+  // sessions it creates are the host's own agents, so the Web UI sees a live
+  // conversation instead of cold-reading another process's half-written log.
+  // A profile without the agent registry (a non-Web launch) simply never runs
+  // this block. `interopEmbedded: false` is the emergency fallback to the
+  // standalone `code/interop-service/server.mjs`.
+  if (config.interopEmbedded !== false) {
+    try {
+      ctx.inject(['agents'], (agentsCtx: any) => {
+        let settings: Record<string, any>
+        try {
+          settings = (resolveInteropSettings as unknown as (config: Record<string, unknown>) => Record<string, any>)(config)
+        } catch (error) {
+          console.error(`mesh interop: could not resolve settings: ${error instanceof Error ? error.message : String(error)}`)
+          return
+        }
+        const interop = (createInteropService as unknown as (options: {
+          ctx: any
+          settings: Record<string, any>
+          config: Record<string, any>
+          log: (line: string) => void
+        }) => { start(): Promise<{ port: number }>; dispose(): Promise<void> })({
+          ctx: agentsCtx,
+          settings,
+          config,
+          log: line => console.log(line),
+        })
+        agentsCtx.effect(() => () => {
+          void interop.dispose()
+        }, 'mesh embedded interop lifetime')
+        void interop.start().catch((error: unknown) => {
+          console.error(`mesh interop: listener failed: ${error instanceof Error ? error.message : String(error)}`)
+        })
+      })
+    } catch (error) {
+      console.error(`mesh: agent registry is unavailable: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 }

@@ -216,7 +216,7 @@ test('network tuning can be switched off for a member that tunes itself', async 
   }
 })
 
-test('a Linux deploy installs the interop service on the VPN address', async () => {
+test('a Linux deploy configures the embedded interop on the VPN address', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-test-'))
   try {
     const packagePath = path.join(dir, 'pkg.tar.gz')
@@ -234,7 +234,11 @@ test('a Linux deploy installs the interop service on the VPN address', async () 
     assert.match(prepare, /DSH_INTEROP_USE_GATE_PASSWORD=1/)
     assert.match(prepare, /DSH_INTEROP_PROVIDER=deepseek-account/)
     const activate = buildLinuxActivateScript(plan)
-    assert.match(activate, /systemctl restart dsh-interop\.service 2>\/dev\/null \|\| echo/)
+    // The listener is in DSH Web; the activate must retire the standalone unit
+    // and wait for the new process to answer with the embedded marker.
+    assert.match(activate, /systemctl stop dsh-interop\.service/)
+    assert.match(activate, /dsh-mesh-embedded-interop-v1/)
+    assert.match(activate, /health_loose/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

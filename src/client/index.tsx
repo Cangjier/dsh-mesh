@@ -450,7 +450,10 @@ interface ChatMessage {
   senderIp: string
   /** Inline "@3" / "回复@1" prefix. */
   mention: string
+  /** What the bubble shows (the title for a sent message). */
   text: string
+  /** What 详细 shows; the prompt itself for a sent message, else `text`. */
+  fullText: string
   /** Displayed clock time. */
   time: string
   /** ISO instant, kept apart because the displayed form does not sort. */
@@ -484,6 +487,9 @@ function conversationMessages(
     .join(' · ')
   const sentAt = chatTime(row.createdAt)
   const answeredAt = chatTime(row.updatedAt ?? row.createdAt)
+  // The bubble stays a short title, while 详细 can show what was actually sent.
+  // Without a recorded prompt (older conversations) both are the title.
+  const sentText = (row.prompt ?? '').trim()
   const sent: ChatMessage = {
     key: `${row.id}-out`,
     out: initiatorNumber === selfNumber,
@@ -491,6 +497,7 @@ function conversationMessages(
     senderIp: (row.initiator?.ip ?? '') === '' ? group.ip : String(row.initiator?.ip ?? ''),
     mention: `@${memberNumber}`,
     text: conversationTitle(row),
+    fullText: sentText === '' ? conversationTitle(row) : sentText,
     time: sentAt,
     sortKey: String(row.createdAt ?? ''),
     status,
@@ -499,11 +506,15 @@ function conversationMessages(
   const answer = (row.lastText ?? '').trim()
   const reply = (text: string): ChatMessage => ({
     key: `${row.id}-in`,
-    out: false,
+    // The reply belongs to the member that owns the conversation. On the local
+    // member's own group that is the current member, so it sits on the right
+    // and offers 详细 like every other message sent by this machine.
+    out: memberNumber === selfNumber,
     number: memberNumber,
     senderIp: group.ip,
     mention: `回复@${initiatorNumber}`,
     text,
+    fullText: text,
     time: answeredAt,
     sortKey: String(row.updatedAt ?? row.createdAt ?? ''),
     status,
@@ -525,8 +536,10 @@ function ChatBubble({ message, onDetail, onMember }: {
   onDetail: (message: ChatMessage) => void
   onMember: (ip: string) => void
 }) {
-  const truncatable = chatNeedsDetail(message.text)
-  const pending = message.status === 'running' && message.out === false && message.text === '正在处理…'
+  // The current member's own messages always offer 详情: their bubble is the
+  // conversation title, while the detail holds the prompt that was sent.
+  const truncatable = message.out || chatNeedsDetail(message.text)
+  const pending = message.status === 'running' && message.text === '正在处理…'
   return (
     <div className={`chat-row ${message.out ? 'chat-row-out' : ''}`}>
       <button
@@ -645,7 +658,9 @@ function MemberConversations({ active, members, refreshToken }: {
   refreshToken: number
 }) {
   const [snapshot, setSnapshot] = useState<ConversationSnapshot | null>(null)
-  const [loading, setLoading] = useState(false)
+  // Mounted by the tab on first open, so start in the loading state instead of
+  // painting an empty transcript for one frame before the fetch begins.
+  const [loading, setLoading] = useState(active)
   const [error, setError] = useState('')
   const [detail, setDetail] = useState<ChatMessage | null>(null)
   const [memberIp, setMemberIp] = useState('')
@@ -841,6 +856,19 @@ function MemberConversations({ active, members, refreshToken }: {
     box.style.height = `${Math.min(168, box.scrollHeight)}px`
   }, [draft])
 
+  // The first load has nothing to show yet: one spinner in the middle of the
+  // tab beats an empty transcript with a usable-looking composer. A refresh
+  // after that keeps the current messages, so it deliberately has no spinner.
+  if (loading && snapshot === null) {
+    return (
+      <div className="dsh-pw-tabbody" style={chatColors}>
+        <div className="dsh-pw-tab-loading">
+          <Spin size="large" />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="dsh-pw-tabbody" style={chatColors}>
       <div className="chat-page" style={{ display: detail === null && member === null ? undefined : 'none' }}>
@@ -965,7 +993,7 @@ function MemberConversations({ active, members, refreshToken }: {
             <div className="chat-detail-bar">
               <Button type="text" icon={<ArrowLeftOutlined />} size="small" onClick={closeDetail} aria-label="返回" />
             </div>
-            <div className="chat-detail-text">{renderMarkdown(detail.text)}</div>
+            <div className="chat-detail-text">{renderMarkdown(detail.fullText)}</div>
           </div>
         )}
       </div>
@@ -1666,11 +1694,15 @@ function Panel({ ctx }: { ctx: any }) {
             },
             {
               key: 'tasks',
-              label: '发起任务',
+              label: '任务',
               children: (
                 <div className="dsh-pw-tabbody">
                   <TasksPanel
-                    members={memberRows.map(member => ({ id: member.id, name: member.name, ip: member.ip }))}
+                    // Only other members execute: this machine coordinates and
+                    // accepts, so it must never be the task target.
+                    members={memberRows
+                      .filter(member => member.kind !== 'self' && member.id !== 'local')
+                      .map(member => ({ id: member.id, name: member.name, ip: member.ip }))}
                   />
                 </div>
               ),

@@ -67,7 +67,7 @@ async function fakeMember() {
 }
 
 test('a completed member conversation notifies the originating agent', async () => {
-  const { server, port } = await fakeMember()
+  const { server, port, created } = await fakeMember()
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-task-'))
   const messages = []
   const agent = {
@@ -92,9 +92,13 @@ test('a completed member conversation notifies the originating agent', async () 
     const task = await tasks.start({
       member: '127.0.0.1',
       prompt: 'do the member job',
+      workspace: 'demo',
       agent,
       notify: true,
     })
+    // The workspace name crosses the interop boundary as-is; the member
+    // resolves it below its own ~/.dsh/workspaces.
+    assert.equal(created[0].workspace, 'demo')
     const deadline = Date.now() + 10_000
     while (messages.length === 0 && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 50))

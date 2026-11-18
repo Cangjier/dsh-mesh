@@ -5,6 +5,7 @@ import {
   INTERRUPTED_STATUS,
   normalizeInitiator,
   normalizeTitle,
+  promptText,
   restoredConversation,
   titleFromPrompt,
   TITLE_LIMIT,
@@ -31,6 +32,17 @@ test('the title falls back to the first text block of a prompt', () => {
   assert.equal(titleFromPrompt([{ type: 'image', data: 'x', mediaType: 'image/png' }]), '')
 })
 
+test('the prompt keeps its newlines for the detail view', () => {
+  assert.equal(promptText('# 任务\n\n第一段'), '# 任务\n\n第一段')
+  assert.equal(promptText([
+    { type: 'text', text: '第一段' },
+    { type: 'image', data: 'x', mediaType: 'image/png' },
+    { type: 'text', text: '第二段' },
+  ]), '第一段\n\n第二段')
+  assert.equal(promptText([{ type: 'image', data: 'x', mediaType: 'image/png' }]), '')
+  assert.equal(promptText(null), '')
+})
+
 test('an initiator keeps only the fields that identify a machine', () => {
   assert.deepEqual(normalizeInitiator({ id: 'local', name: ' member-a ', ip: '10.66.66.1', source: 'call_member', extra: 'x' }), {
     id: 'local',
@@ -50,6 +62,8 @@ test('the persisted record drops events, sockets and receipts', () => {
     initiator: { id: 'local' },
     status: 'idle',
     cwd: '/root/ws',
+    workspace: 'demo',
+    prompt: '# 任务\n\n做点事',
     createdAt: '2026-11-12T06:00:00.000Z',
     updatedAt: '2026-11-12T06:01:00.000Z',
     lastText: 'y'.repeat(900),
@@ -59,9 +73,12 @@ test('the persisted record drops events, sockets and receipts', () => {
     lastReceipt: { big: true },
   })
   assert.deepEqual(Object.keys(record).sort(), [
-    'createdAt', 'cwd', 'id', 'initiator', 'lastText', 'sessionId', 'status', 'title', 'turns', 'updatedAt',
+    'createdAt', 'cwd', 'error', 'id', 'initiator', 'lastText', 'prompt', 'sessionId', 'status', 'title', 'turns', 'updatedAt', 'workspace',
   ])
+  assert.equal(record.error, null)
   assert.equal(record.turns, 3)
+  assert.equal(record.workspace, 'demo')
+  assert.equal(record.prompt, '# 任务\n\n做点事')
   assert.ok(record.lastText.length <= 400)
   assert.equal(record.events, undefined)
 })
@@ -86,9 +103,16 @@ test('a conversation whose turn was in flight restores as interrupted', () => {
   assert.equal(restored.turns, 0)
 
   // A finished conversation comes back exactly as it was.
-  const idle = restoredConversation({ ...record, status: 'idle', lastText: 'done', turns: 2 }, '/fallback')
+  const idle = restoredConversation({ ...record, status: 'idle', lastText: 'done', turns: 2, workspace: 'demo', prompt: '# 原文' }, '/fallback')
   assert.equal(idle.status, 'idle')
   assert.equal(idle.error, null)
+  assert.equal(idle.workspace, 'demo')
+  assert.equal(idle.prompt, '# 原文')
+
+  // A failed turn keeps its reason across the restart.
+  const failed = restoredConversation({ ...record, status: 'error', error: 'model refused', turns: 2 }, '/fallback')
+  assert.equal(failed.status, 'error')
+  assert.equal(failed.error, 'model refused')
   assert.equal(idle.lastText, 'done')
 
   // A runtime that exited mid-turn is the same interruption.

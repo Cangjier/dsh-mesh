@@ -18,7 +18,8 @@ namespace DshMesh
     /// itself in session 0, which keeps the gateway and the conversation
     /// delegation alive at the cost of the desktop-only features.
     ///
-    /// The service owns both children in session 0 (gate + interop) and owns
+    /// The service owns the gate child in session 0 (and the optional SSH
+    /// agent); the interop listener runs inside DSH Web, not as a sibling.
     /// nothing in interactive mode: the task owns the same two processes, so
     /// stopping the service stops the task as well.
     /// </summary>
@@ -32,7 +33,6 @@ namespace DshMesh
         private readonly object logLock = new object();
         private readonly object childLock = new object();
         private Process gate;
-        private Process interop;
         private Process sshAgent;
         private Timer restartTimer;
         private Timer watchTimer;
@@ -134,7 +134,7 @@ namespace DshMesh
                 if (mode == "session0") EnsureSession0Children();
                 else EnsureTaskRunning();
                 // The SSH agent always runs in the service (LocalSystem), even
-                // when the gate/interop stack was handed to an interactive task.
+                // when the gate stack was handed to an interactive task.
                 EnsureSshAgent();
             }
             catch (Exception error)
@@ -189,7 +189,9 @@ namespace DshMesh
                     WriteStatus();
                     return;
                 }
-                // Release port 80 (and the interop port) before the task takes them.
+                // Release port 80 before the task takes it. The interop port is
+                // owned by DSH Web now, so the stack script's port sweep frees
+                // any stale :8765 listener after the handover.
                 StopSession0Children();
                 if (!RunTask())
                 {
@@ -380,7 +382,6 @@ namespace DshMesh
         private void EnsureSession0Children()
         {
             EnsureChild(ref gate, () => StartGate());
-            EnsureChild(ref interop, () => StartInterop());
             EnsureSshAgent();
         }
 
@@ -447,18 +448,6 @@ namespace DshMesh
                 });
         }
 
-        private Process StartInterop()
-        {
-            string node = Path.Combine(root, "runtime", "node", "node.exe");
-            string script = Path.Combine(root, "code", "interop-service", "server.mjs");
-            if (!File.Exists(node) || !File.Exists(script)) return null;
-            return Spawn(node, "\"" + script + "\"", "interop", delegate(object sender, EventArgs e)
-            {
-                Log("interop exited");
-                ScheduleRestart();
-            });
-        }
-
         private Process Spawn(string file, string arguments, string tag, EventHandler exited)
         {
             ProcessStartInfo info = new ProcessStartInfo();
@@ -503,7 +492,6 @@ namespace DshMesh
         private void StopSession0Children()
         {
             StopProcess(ref gate);
-            StopProcess(ref interop);
             StopProcess(ref sshAgent);
         }
 

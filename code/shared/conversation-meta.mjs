@@ -18,6 +18,9 @@ export const INITIATOR_LIMIT = 64
 /** Longest stored answer preview. */
 export const PREVIEW_LIMIT = 400
 
+/** Longest first prompt kept for the panel's message detail. */
+export const PROMPT_LIMIT = 8000
+
 /**
  * Collapse whitespace, trim, and fit a value into a fixed budget.
  * @param {unknown} value raw value.
@@ -58,6 +61,33 @@ export function titleFromPrompt(value) {
 }
 
 /**
+ * The text a conversation was started with, kept for the panel.
+ *
+ * The title is capped at 80 characters, which is fine for a list but hides what
+ * was actually sent. The panel's detail page reads this instead, so a long
+ * prompt is still readable after the fact.
+ * @param {unknown} value prompt string or content blocks.
+ * @param {number} [limit] maximum characters.
+ * @returns {string} prompt text, or '' when there is no text block.
+ */
+export function promptText(value, limit = PROMPT_LIMIT) {
+  let text = ''
+  if (typeof value === 'string') {
+    text = value
+  } else if (Array.isArray(value)) {
+    const parts = []
+    for (const block of value) {
+      if (block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string') {
+        parts.push(block.text)
+      }
+    }
+    text = parts.join('\n\n')
+  }
+  if (text === '') return ''
+  return text.length > limit ? text.slice(0, limit) : text
+}
+
+/**
  * Normalise the description of the machine that started a conversation.
  * @param {unknown} value `{ id?, name?, ip?, source? }`.
  * @returns {{id?: string, name?: string, ip?: string, source?: string}|null} initiator or null.
@@ -86,9 +116,17 @@ export function conversationRecord(conversation) {
     initiator: conversation.initiator ?? null,
     status: conversation.status,
     cwd: conversation.cwd,
+    // Kept so the panel can show what was sent and which workspace it named,
+    // even after a restart replaced the in-memory conversation.
+    prompt: typeof conversation.prompt === 'string' ? conversation.prompt : '',
+    workspace: typeof conversation.workspace === 'string' ? conversation.workspace : '',
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     lastText: clip(conversation.lastText, PREVIEW_LIMIT),
+    // The failure a turn ended with must survive the restart that follows it;
+    // otherwise the panel and the waiting member see a completed task with no
+    // result.
+    error: typeof conversation.error === 'string' && conversation.error !== '' ? conversation.error : null,
     turns: Number.isSafeInteger(conversation.turns) ? conversation.turns : 0,
   }
 }
@@ -122,11 +160,15 @@ export function restoredConversation(record, workdir) {
     cwd: typeof record.cwd === 'string' ? record.cwd : workdir,
     status: abandoned ? INTERRUPTED_STATUS : status,
     title: typeof record.title === 'string' ? record.title : '',
+    prompt: typeof record.prompt === 'string' ? record.prompt.slice(0, PROMPT_LIMIT) : '',
+    workspace: typeof record.workspace === 'string' ? record.workspace : '',
     initiator: normalizeInitiator(record.initiator),
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date().toISOString(),
     lastText: typeof record.lastText === 'string' ? record.lastText : '',
-    error: abandoned ? INTERRUPTED_ERROR : null,
+    error: abandoned
+      ? INTERRUPTED_ERROR
+      : typeof record.error === 'string' && record.error !== '' ? record.error : null,
     turns: Number.isSafeInteger(record.turns) ? record.turns : 0,
   }
 }

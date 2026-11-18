@@ -141,6 +141,38 @@ say "备份到 $BACKUP"
 
 RESTORED=0
 FINISHED=0
+# A release with the embedded listener keeps dsh-interop.service stopped; an
+# older release still needs the standalone unit. The release manifest records
+# which is which, so one upgrade/rollback path works for both.
+settle_interop() {
+  local release="$1"
+  if { [ -f "$release/manifest.json" ] && grep -q 'embedded-interop' "$release/manifest.json"; } || grep -q 'dsh-mesh-embedded-interop-v1' "$release/plugins/dsh-mesh/index.js" 2>/dev/null; then
+    systemctl stop dsh-interop.service >/dev/null 2>&1 || true
+    systemctl disable dsh-interop.service >/dev/null 2>&1 || true
+  else
+    systemctl enable --now dsh-interop.service >/dev/null 2>&1 || true
+  fi
+}
+interop_health() {
+  local host="$I_BIND" port="$I_PORT"
+  [ -n "$port" ] || return 0
+  if [ -z "$host" ] || [ "$host" = "0.0.0.0" ]; then host=127.0.0.1; fi
+  for _ in $(seq 1 30); do
+    if curl -fsS "http://$host:$port/healthz" 2>/dev/null | grep -q 'dsh-mesh-embedded-interop-v1'; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+interop_health_loose() {
+  local host="$I_BIND" port="$I_PORT"
+  [ -n "$port" ] || return 0
+  if [ -z "$host" ] || [ "$host" = "0.0.0.0" ]; then host=127.0.0.1; fi
+  for _ in $(seq 1 30); do
+    if curl -fsS "http://$host:$port/healthz" >/dev/null 2>&1; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
 restore() {
   if [ "$RESTORED" = "1" ]; then return 0; fi
   RESTORED=1
@@ -166,13 +198,14 @@ restore() {
   fi
   systemctl daemon-reload 2>/dev/null || true
   systemctl restart dsh-web-app.service dsh-web-gate.service dsh-wireguard-control.service 2>/dev/null || true
-  systemctl restart dsh-interop.service 2>/dev/null || true
+  settle_interop "$APP_ROOT"
   # 回滚后必须自己验一次：只“重启过”不等于“能访问”。
   ok=0
   for _ in $(seq 1 30); do
     if curl -fsS "http://127.0.0.1:$PORT/__gate/health" >/dev/null 2>&1; then ok=1; break; fi
     sleep 2
   done
+  if [ "$ok" = "1" ] && ! interop_health_loose; then ok=0; fi
   if [ "$ok" = "1" ]; then
     warn '回滚完成：网关健康，安装已回到升级前的文件'
   else
@@ -283,15 +316,12 @@ if ! bash "$APP_ROOT/code/wireguard/install-control-service.sh" \
 fi
 systemctl restart dsh-wireguard-control.service || warn 'control service 未能重启'
 
-say '重装 interop 服务'
-INTEROP_ARGS=(--root "$APP_ROOT" --dsh-home "$DSH_HOME" --port "$I_PORT" --bind "$I_BIND"
-  --provider "$I_PROVIDER" --model "$I_MODEL" --node "$NODE")
-if [ "$I_APPROVE" = "1" ]; then INTEROP_ARGS+=(--approve); fi
-if [ "$I_USE_GATE" = "1" ]; then INTEROP_ARGS+=(--use-gate-password); else INTEROP_ARGS+=(--token "$I_TOKEN"); fi
-if ! bash "$APP_ROOT/install-interop-service.sh" "${INTEROP_ARGS[@]}"; then
-  restore
-  die 'install-interop-service.sh 失败'
-fi
+say '停用独立 interop 服务（:8765 已由 DSH Web 插件内嵌）'
+# The new release owns the listener. Stop the old standalone before the Web
+# process restarts; the plugin starts the embedded listener with the same env.
+systemctl stop dsh-interop.service >/dev/null 2>&1 || true
+systemctl disable dsh-interop.service >/dev/null 2>&1 || true
+settle_interop "$APP_ROOT"
 
 # ── 5. 健康检查 ────────────────────────────────────────────────────────────
 say '健康检查'
@@ -304,6 +334,10 @@ if [ "$gate_ok" != "1" ]; then
   journalctl -u dsh-web-gate.service -n 60 --no-pager 2>/dev/null || true
   restore
   die "网关健康检查失败（http://127.0.0.1:$PORT/__gate/health）"
+fi
+if ! interop_health; then
+  restore
+  die "内嵌 interop 健康检查失败（http://$I_BIND:$I_PORT/healthz）"
 fi
 control_ok=0
 for _ in $(seq 1 30); do

@@ -104,11 +104,42 @@ restore_profile() {
 }
 
 health() {
+  local gate_ok=0
   for _ in $(seq 1 45); do
-    if curl -fsS "http://127.0.0.1:$PORT/__gate/health" >/dev/null 2>&1; then return 0; fi
+    if curl -fsS "http://127.0.0.1:$PORT/__gate/health" >/dev/null 2>&1; then gate_ok=1; break; fi
     sleep 2
   done
-  return 1
+  if [ "$gate_ok" != "1" ]; then return 1; fi
+  local env_file="$ROOT/config/interop.env"
+  if [ "$LAYOUT" = "bluegreen" ]; then env_file="$ROOT/shared/config/interop.env"; fi
+  if [ -f "$env_file" ]; then
+    local bind port host
+    bind=$(sed -n 's/^DSH_INTEROP_BIND=//p' "$env_file" | tail -n1)
+    port=$(sed -n 's/^DSH_INTEROP_PORT=//p' "$env_file" | tail -n1)
+    if [ -n "$port" ]; then
+      host=$bind
+      if [ -z "$host" ] || [ "$host" = "0.0.0.0" ]; then host=127.0.0.1; fi
+      for _ in $(seq 1 30); do
+        if curl -fsS "http://$host:$port/healthz" >/dev/null 2>&1; then return 0; fi
+        sleep 2
+      done
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# A release with the embedded listener keeps dsh-interop.service stopped; an
+# older release still needs the standalone unit. The release manifest records
+# which is which.
+settle_interop() {
+  local release="$1"
+  if { [ -f "$release/manifest.json" ] && grep -q 'embedded-interop' "$release/manifest.json"; } || grep -q 'dsh-mesh-embedded-interop-v1' "$release/plugins/dsh-mesh/index.js" 2>/dev/null; then
+    systemctl stop dsh-interop.service >/dev/null 2>&1 || true
+    systemctl disable dsh-interop.service >/dev/null 2>&1 || true
+  else
+    systemctl enable --now dsh-interop.service >/dev/null 2>&1 || true
+  fi
 }
 
 restart_units() {
@@ -120,7 +151,6 @@ restart_units() {
   systemctl restart dsh-web-gate.service 2>/dev/null || true
   systemctl restart dsh-web.service 2>/dev/null || true
   systemctl restart dsh-wireguard-control.service 2>/dev/null || true
-  systemctl restart dsh-interop.service 2>/dev/null || true
 }
 
 if [ "$LAYOUT" = "flat" ]; then
@@ -168,6 +198,7 @@ if [ "$LAYOUT" = "flat" ]; then
   PORT=${PORT:-80}
   say "重启服务（端口 $PORT）"
   restart_units
+  settle_interop "$ROOT"
   if ! health; then
     systemctl --no-pager --full status dsh-web-app.service dsh-web-gate.service 2>/dev/null | head -60 || true
     die "回退后网关健康检查失败：http://127.0.0.1:$PORT/__gate/health"
@@ -191,6 +222,7 @@ else
   PORT=${PORT:-80}
   say "重启服务（端口 $PORT）"
   restart_units
+  settle_interop "$PREVIOUS"
   if ! health; then
     die "回退后网关健康检查失败：http://127.0.0.1:$PORT/__gate/health"
   fi

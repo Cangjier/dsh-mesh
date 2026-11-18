@@ -12,6 +12,7 @@ import {
   removeChildRef,
   removeNode,
   renderTaskMarkdown,
+  renderTaskOutline,
   rootIds,
   summarize,
   taskTree,
@@ -180,6 +181,75 @@ test('the markdown keeps sources, definitions, remarks and the index', () => {
   assert.match(markdown, /读一遍/u);
   assert.match(markdown, /## 对象索引/u);
   assert.match(markdown, /\| 0 \| src\/a\.ts \| #1（先做） \|/u);
+});
+
+test('the outline uses heading levels instead of ids and connectors', () => {
+  const doc: TaskDoc = {
+    nodes: [
+      { id: 0, source: 'src/a.ts', define: '读一遍\n再检查空指针', children: [{ id: 1, remark: '先做' }, { id: 2, remark: '' }] },
+      { id: 1, source: 'src/b.ts', define: '跑测试', children: [{ id: 3, remark: '' }] },
+      { id: 2, source: '', define: '', children: [] },
+      { id: 3, source: 'src/d.ts', define: '', children: [] },
+    ],
+  };
+  assert.equal(renderTaskOutline(doc), [
+    '# src/a.ts',
+    '',
+    '读一遍',
+    '再检查空指针',
+    '',
+    '## src/b.ts',
+    '',
+    '> 备注：先做',
+    '',
+    '跑测试',
+    '',
+    '### src/d.ts',
+    '',
+    '## （未填）',
+  ].join('\n'));
+});
+
+test('the outline repeats shared objects per edge and keeps every root', () => {
+  const doc: TaskDoc = {
+    nodes: [
+      { id: 0, source: 'root-a', define: '', children: [{ id: 2, remark: 'from a' }] },
+      { id: 1, source: 'root-b', define: '', children: [{ id: 2, remark: 'from b' }] },
+      { id: 2, source: 'shared', define: '', children: [{ id: 3, remark: '' }] },
+      { id: 3, source: 'leaf', define: '', children: [] },
+    ],
+  };
+  assert.equal(renderTaskOutline(doc), [
+    '# root-a',
+    '',
+    '## shared',
+    '',
+    '> 备注：from a',
+    '',
+    '### leaf',
+    '',
+    '# root-b',
+    '',
+    '## shared',
+    '',
+    '> 备注：from b',
+    '',
+    '### leaf',
+  ].join('\n'));
+  assert.equal(renderTaskOutline({ nodes: [] }), '');
+});
+
+test('the outline caps the heading level at six', () => {
+  const nodes = Array.from({ length: 8 }, (_, id) => ({
+    id,
+    source: `level-${String(id)}`,
+    define: '',
+    children: id < 7 ? [{ id: id + 1, remark: '' }] : [],
+  }));
+  const outline = renderTaskOutline({ nodes });
+  assert.match(outline, /^###### level-5$/mu);
+  assert.match(outline, /^###### level-7$/mu);
+  assert.doesNotMatch(outline, /^#######/mu);
 });
 
 test('summary counts objects, edges and roots', () => {

@@ -1,16 +1,20 @@
+> **2026-11-17 更新：** 成员上的 `:8765` 默认由 DSH Web 内的 dsh-mesh 插件提供，任务会话就是 Web 自己拥有的会话；下文“通过成员的 DSH SDK（8765 交互服务）开一个真实对话”仍然成立，但不再 spawn 独立 SDK 子进程。见 [Step 020](Step%20020%20内嵌interop服务.md)。
+>
+> **2026-11-17 更新：** 顶层 Tab 已改名「任务」，发起改为**本机协调对话 + 成员执行**，工作目录固定到成员的 `~/.dsh/workspaces/<name>`；历史增加「清空」。以 [Step 021](Step%20021%20协调任务与工作区.md) 为准。
+
 # Step 017 发起任务：对象树、模板、历史与 SDK 对话
 
 `dsh-mesh` 面板多了一个顶层 Tab「发起任务」。它把一件事拆成**对象树**：每个对象指向一个文件、一个 git 仓库或代码里的某个类，写清它要做什么，再以 `children` 把自己下面的对象挂起来。发起时，这棵树会被渲染成一份 markdown，通过成员的 DSH SDK（8765 交互服务）开一个真实对话；历史里存下发起那一刻的完整定义和对话结果。
 
 ## 界面
 
-顶层 Tab：成员 / **发起任务** / 对话 / 包管理 / 组网。Tab 内部三个子 Tab：
+顶层 Tab：成员 / 对话 / **任务** / 包管理 / 组网。Tab 内部三个子 Tab：
 
 | 子 Tab | 做什么 |
 | --- | --- |
-| 任务 | 编辑当前任务：新增、删除、编辑、排序对象；平铺/树形两种视图；另存为模板、更新模板、发起任务 |
+| 任务 | 编辑当前任务：新增、删除、编辑、排序对象；平铺/树形两种视图；复制为多级标题文本；另存为模板、更新模板、发起任务 |
 | 模板 | 模板管理：使用、重命名、删除 |
-| 历史 | 每次发起的快照：标题、状态、成员、对象数、结果；点开看完整定义与发送的 markdown |
+| 历史 | 每次发起的快照：标题、状态、执行成员、对象数、结果；点开看完整定义与发送的 markdown；右上角「清空」删除已结束的记录 |
 
 两个视图：
 
@@ -18,6 +22,35 @@
 - **树形**：只列根对象，逐层展开子对象；`备注` 列是这一条引用的备注。同一个对象被多处引用时，每条引用各渲染一次。
 
 两个视图都不再单列「挂在」「子对象计数」：前者说不清（一个对象可能挂在多个父下），后者是结构信息，交给子行本身表达。
+
+「复制」把当前任务导出为**多级标题文本**，与当前视图和展开状态无关：标题层级表示对象深度（根 `#`、子 `##`、孙 `###`……最多 `######`），标题只写 `source`；该条引用的备注写成 `> 备注：…`，`define` 原样跟在下面。不输出 ID、缩进和连接线：
+
+```markdown
+# src/server.ts
+
+读一遍现有实现
+列出空指针风险
+
+## src/db.ts
+
+> 备注：先做
+
+补齐连接池测试
+
+### src/schema.ts
+
+> 备注：依赖 schema
+
+确认字段类型
+
+#### src/types.ts
+
+> 备注：先补类型
+
+导出共享类型
+
+## （未填）
+```
 
 编辑走**抽屉**，不在单元格里改：`source`、`define`、`children`（逐条引用的备注、上下移、移除，以及「选一个已有对象加为子对象」）。表格只提供入口按钮。
 
@@ -88,14 +121,17 @@ interface TaskDoc { nodes: TaskNode[] }   // 全部对象，平铺存放，顺�
 
 ## 发起
 
-1. 面板弹出「发起任务」：标题、在哪个成员上跑（默认本机）、工作目录（可空）、以及**将发送的 markdown** 预览。
+1. 面板弹出「发起任务」：标题、成员（只列其他成员）、工作目录、以及**将交给成员执行的任务**预览。
+   - 工作目录只能选该成员 `~/.dsh/workspaces` 下已有的目录，或选「新建工作目录」后只输入名称；实际目录固定为成员本机的 `~/.dsh/workspaces/<name>`，名称里的 `/`、`\`、`.`、`..` 会被拒绝。
 2. `POST /api/dsh-wireguard/tasks/launch` → 网关 control-service：
-   - 校验任务非空、目标成员必须是本网关的成员（本机或 peer 的 VPN 地址），不接受任意 URL；
-   - `POST http://<成员 VPN IP>:8765/v1/conversations`，带 `Authorization: Bearer <interop token>`，body 是 `{ prompt: markdown, title, initiator, cwd? }`。
-3. interop token 的解析顺序：`DSH_TASKS_INTEROP_TOKEN` → `DSH_INTEROP_TOKEN` → `DSH_GATE_PASSWORD` → 从 cwd 往上最多 6 层的 `config/interop.env`、`config/gate.env`。部署里这几台机器这两者是同一个值，所以一枚 token 覆盖全网；哪台机器单独换了 token，发起会在那个成员上 401 并原样显示错误。
-4. 发起成功立刻返回并写入历史；状态是 `running`。
+   - 校验任务非空；执行成员必须是本网关的另一个 peer（本机只做协调，`local_member_not_allowed`）；
+   - `POST http://<本机 VPN IP>:8765/v1/conversations`，带 `Authorization: Bearer <interop token>`，在本机建一个**协调对话**，body 是 `{ prompt: 协调指令 + markdown, title, workspace?, initiator }`。
+3. 协调对话的 agent 用 `call_member`（`action=delegate`，`member=<peer IP>`，`workspace=<name>`）把 markdown 交给执行成员，用 `wait_member` 等待，验收后给出结论。本机不执行具体任务，也不自己改文件。
+4. 发起成功立刻返回并写入历史；状态是 `running`，`conversationId` 是本机协调对话的 id。
 
-历史状态由 control-service 追：`GET /v1/conversations/<id>`（`blank`/`running` 还在跑，`idle` 完成，`interrupted`/`unavailable`/带 error 算失败），完成时再取 `/result` 的 `finalText`。对话刚 idle 时最后一轮回复可能还没落盘，所以**空结果会重试**（最多 3 次），真的空才记为完成且无文本。刷新有 5 秒节流，读历史时最多等 2.5 秒，面板在有 `running` 任务时每 8 秒拉一次。
+interop token 的解析顺序：`DSH_TASKS_INTEROP_TOKEN` → `DSH_INTEROP_TOKEN` → `DSH_GATE_PASSWORD` → 从 cwd 往上最多 6 层的 `config/interop.env`、`config/gate.env`。部署里这几台机器这两者是同一个值，所以一枚 token 覆盖全网；哪台机器单独换了 token，请求会在那台机器上 401 并原样显示错误。
+
+历史状态由 control-service 追：`GET http://<本机 IP>:8765/v1/conversations/<协调对话 id>`（`blank`/`running` 还在跑，`idle` 完成，`interrupted`/`unavailable`/带 error 算失败），完成时再取 `/result` 的 `finalText` 作为验收结论。对话刚 idle 时最后一轮回复可能还没落盘，所以**空结果会重试**（最多 3 次），真的空才记为完成且无文本。刷新有 5 秒节流，读历史时最多等 2.5 秒，面板在有 `running` 任务时每 8 秒拉一次。旧历史没有 `manager` 字段，仍按原来的执行成员对话追踪。
 
 历史里的 `doc` 和 `markdown` 是**发起那一刻的快照**：之后改任务或覆盖模板都不会改动历史。
 
@@ -109,8 +145,10 @@ interface TaskDoc { nodes: TaskNode[] }   // 全部对象，平铺存放，顺�
 | POST | `/api/dsh-wireguard/tasks/templates/rename` | `{ id, name }` |
 | POST | `/api/dsh-wireguard/tasks/templates/update` | `{ id, doc }` |
 | POST | `/api/dsh-wireguard/tasks/templates/delete` | `{ id }` |
-| POST | `/api/dsh-wireguard/tasks/launch` | `{ doc, title, member, cwd }` → `{ tasks, run }` |
-| GET | `/api/dsh-wireguard/tasks/runs/<id>` | 完整历史（含 `doc`、`markdown`、`result`） |
+| GET | `/api/dsh-wireguard/tasks/workspaces?member=<id>` | 该成员 `~/.dsh/workspaces` 下的目录：`{ dir, workspaces }` |
+| POST | `/api/dsh-wireguard/tasks/launch` | `{ doc, title, member, workspace }` → `{ tasks, run }`；旧的 `cwd` 仍接受 |
+| POST | `/api/dsh-wireguard/tasks/runs/clear` | 删除已结束的历史，运行中的保留 |
+| GET | `/api/dsh-wireguard/tasks/runs/<id>` | 完整历史（含 `doc`、`markdown`、`result`、`manager`、`workspace`） |
 
 所有写操作返回最新快照，面板直接替换状态，不需要二次读。
 
@@ -147,4 +185,5 @@ curl -s -X POST -H 'content-type: application/json' -H 'x-dsh-wireguard: 1' \
 ## 测试
 
 - `test/wireguard/task-model.test.ts`：id 生成、根对象算法、重复引用、成环拒绝、删除父保留子、归一化、排序、markdown、摘要。
-- `test/wireguard/task-service.test.ts`：草稿持久化、模板增删改重名、发起（markdown 内容、payload、成员校验）、失败状态、空结果重试、成员转发带 token、状态文件不含密钥。
+- `test/wireguard/task-service.test.ts`：草稿持久化、模板增删改重名、发起（本机协调对话、执行成员与 workspace payload、本机目标拒绝）、工作区列表、历史清空、失败状态、空结果重试、成员转发带 token、状态文件不含密钥。
+- `test/interop-service.test.mjs`：workspace 会话创建在 `~/.dsh/workspaces/<name>`、`GET /v1/workspaces`、prompt 持久化与路径穿越拒绝。

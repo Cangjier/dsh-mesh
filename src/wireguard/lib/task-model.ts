@@ -56,7 +56,18 @@ export interface TaskRun {
   id: string;
   title: string;
   status: 'running' | 'completed' | 'failed';
+  /** The member that executes the task. */
   member: { id: string; name: string; ip: string } | null;
+  /**
+   * The local member whose conversation coordinates and accepts the task.
+   *
+   * A launch no longer runs the task on the target directly: the gateway opens
+   * a conversation on itself and that conversation delegates to the member and
+   * reports the acceptance result. Older runs have no manager.
+   */
+  manager?: { id: string; name: string; ip: string } | null;
+  /** Workspace name below the executor's `~/.dsh/workspaces`. */
+  workspace?: string | null;
   cwd: string | null;
   conversationId: string;
   createdAt: string;
@@ -75,6 +86,8 @@ export interface TaskRunSummary {
   title: string;
   status: TaskRun['status'];
   member: TaskRun['member'];
+  manager?: TaskRun['manager'];
+  workspace?: TaskRun['workspace'];
   cwd: string | null;
   conversationId: string;
   createdAt: string;
@@ -492,6 +505,35 @@ export function taskTree(doc: TaskDoc): TaskTreeRow[] {
     if (built !== null) rows.push(built);
   }
   return rows;
+}
+
+/**
+ * Render the task as a Markdown outline.
+ *
+ * Each object becomes a heading whose level follows its depth (`#` for a root,
+ * `##` for a child, and so on, capped at six). Ids and connector lines are left
+ * out so the text can be pasted into a document as-is. A remark belongs to the
+ * edge that reached the object, so it follows the heading as `> 备注：…`;
+ * `define` follows as the body. Objects shared by several parents appear once
+ * per edge, just as in the tree view.
+ * @param doc document.
+ * @returns Markdown outline, empty for an empty task.
+ */
+export function renderTaskOutline(doc: TaskDoc): string {
+  const blocks: string[] = [];
+  const walk = (rows: TaskTreeRow[]): void => {
+    for (const row of rows) {
+      const heading = '#'.repeat(Math.min(row.depth + 1, 6));
+      const source = row.node.source === '' ? '（未填）' : row.node.source.replace(/\n/gu, ' ');
+      const parts = [`${heading} ${source}`];
+      if (row.remark !== '') parts.push(`> 备注：${row.remark.replace(/\n/gu, ' ')}`);
+      if (row.node.define !== '') parts.push(row.node.define);
+      blocks.push(parts.join('\n\n'));
+      walk(row.children);
+    }
+  };
+  walk(taskTree(doc));
+  return blocks.join('\n\n');
 }
 
 /**

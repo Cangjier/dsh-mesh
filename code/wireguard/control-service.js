@@ -200,16 +200,22 @@ function normalizeRun(value) {
   const conversationId = text(item.conversationId, 120);
   if (id === "" || conversationId === "") return null;
   const status = item.status === "completed" || item.status === "failed" ? item.status : "running";
-  const member = item.member !== null && typeof item.member === "object" ? {
-    id: text(item.member.id, 120),
-    name: text(item.member.name, 120),
-    ip: text(item.member.ip, 120)
-  } : null;
+  const memberOf = (value2) => {
+    if (value2 === null || typeof value2 !== "object") return null;
+    const entry = value2;
+    return {
+      id: text(entry.id, 120),
+      name: text(entry.name, 120),
+      ip: text(entry.ip, 120)
+    };
+  };
   return {
     id,
     title: text(item.title, MAX_TITLE_CHARS) || "\u4EFB\u52A1",
     status,
-    member,
+    member: memberOf(item.member),
+    manager: memberOf(item.manager),
+    workspace: text(item.workspace, 120) || null,
     cwd: text(item.cwd, 400) || null,
     conversationId,
     createdAt: text(item.createdAt, 40) || (/* @__PURE__ */ new Date()).toISOString(),
@@ -333,6 +339,8 @@ function runSummary(run2) {
     title: run2.title,
     status: run2.status,
     member: run2.member,
+    manager: run2.manager ?? null,
+    workspace: run2.workspace ?? null,
     cwd: run2.cwd,
     conversationId: run2.conversationId,
     createdAt: run2.createdAt,
@@ -341,6 +349,52 @@ function runSummary(run2) {
     resultPreview: preview.length > 160 ? `${preview.slice(0, 160)}\u2026` : preview,
     error: run2.error
   };
+}
+function cleanWorkspace(value) {
+  const name = cleanText(value, 120);
+  if (name === "") return null;
+  if (name === "." || name === ".." || /[\\/"]/u.test(name) || /[\u0000-\u001f]/u.test(name)) {
+    throw new WireGuardError("workspace_invalid", "\u5DE5\u4F5C\u76EE\u5F55\u540D\u79F0\u4E0D\u80FD\u5305\u542B\u8DEF\u5F84\u5206\u9694\u7B26\u6216\u5F15\u53F7\u3002", { status: 400 });
+  }
+  return name;
+}
+function normalizeWorkspaces(value, dir) {
+  const list = Array.isArray(value) ? value : [];
+  const workspaces = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const item of list) {
+    const name = item !== null && typeof item === "object" ? cleanText(item.name, 120) : "";
+    if (name === "" || seen.has(name)) continue;
+    seen.add(name);
+    workspaces.push({ name });
+  }
+  return { dir: cleanText(dir, 400), workspaces };
+}
+function coordinatorPrompt(input) {
+  const { title, markdown, target, workspace } = input;
+  const delegateArgs = [
+    'action="delegate"',
+    `member="${target.ip}"`,
+    ...workspace === null ? [] : [`workspace="${workspace}"`]
+  ].join("\uFF0C");
+  return [
+    `# \u534F\u8C03\u4EFB\u52A1\uFF1A${title}`,
+    "",
+    "\u4F60\u662F\u8FD9\u6B21\u4EFB\u52A1\u7684\u7BA1\u7406\u8005\u3001\u534F\u8C03\u8005\u548C\u9A8C\u6536\u8005\uFF0C**\u4E0D\u8D1F\u8D23\u5177\u4F53\u6267\u884C**\uFF1A\u4E0D\u8981\u81EA\u5DF1\u4FEE\u6539\u6587\u4EF6\u6216\u6267\u884C\u4EFB\u52A1\u91CC\u7684\u547D\u4EE4\u3002",
+    "",
+    `- \u6267\u884C\u6210\u5458\uFF1A${target.name}\uFF08${target.ip}\uFF09`,
+    ...workspace === null ? [] : [`- \u5DE5\u4F5C\u76EE\u5F55\uFF1A~/.dsh/workspaces/${workspace}\uFF08\u6267\u884C\u6210\u5458\u672C\u673A\u7684\u5B9E\u9645\u76EE\u5F55\uFF09`],
+    "",
+    "## \u6267\u884C\u65B9\u5F0F",
+    `1. \u7528 \`call_member\`\uFF08${delegateArgs}\uFF09\u628A\u300C## \u4EFB\u52A1\u300D\u4E0B\u7684 markdown \u539F\u6837\u4F5C\u4E3A prompt \u4EA4\u7ED9\u6267\u884C\u6210\u5458\uFF0C\u5E76\u5199\u6E05\u9A8C\u6536\u8981\u6C42\u3002`,
+    "2. \u7528 `wait_member` \u7B49\u5F85\uFF1Astate=progress \u8868\u793A\u8FD8\u5728\u8FDB\u884C\uFF0C\u7EE7\u7EED\u7528\u540C\u4E00\u4E2A taskId \u7B49\u5F85\uFF1Bstate=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002",
+    '3. \u9A8C\u6536\uFF1A\u5BF9\u7167\u4EFB\u52A1\u5B9A\u4E49\u68C0\u67E5\u7ED3\u679C\uFF1B\u4E0D\u901A\u8FC7\u65F6\u7528 `call_member`\uFF08action="send"\uFF09\u8BA9\u6267\u884C\u6210\u5458\u8865\u505A\uFF0C\u518D\u7EE7\u7EED\u7B49\u5F85\u3002',
+    "4. \u6700\u540E\u7ED9\u51FA\uFF1A\u9A8C\u6536\u7ED3\u8BBA\uFF08\u901A\u8FC7 / \u4E0D\u901A\u8FC7\uFF09\u3001\u6539\u52A8\u6E05\u5355\u3001\u9A8C\u8BC1\u65B9\u5F0F\u3001\u9057\u7559\u95EE\u9898\u3002",
+    "",
+    "## \u4EFB\u52A1",
+    "",
+    markdown
+  ].join("\n");
 }
 var TaskService = class {
   store;
@@ -465,8 +519,14 @@ var TaskService = class {
     return this.#view();
   }
   /**
-   * Render the task and launch it as a conversation on one member.
-   * @param input document, title, member, working directory.
+   * Render the task and launch it through a local coordinator conversation.
+   *
+   * The gateway never executes the task itself. It opens a conversation on the
+   * local member whose agent delegates to the target with `call_member`, waits
+   * with `wait_member`, and returns the acceptance result. The target member is
+   * the only machine that executes anything, which also means the coordinator's
+   * conversation is what 对话 lists and what the run status follows.
+   * @param input document, title, member, workspace, cwd.
    * @returns the new run.
    */
   async launch(input) {
@@ -478,28 +538,35 @@ var TaskService = class {
     if (doc.nodes.length === 0) throw new WireGuardError("task_empty", "\u4EFB\u52A1\u91CC\u8FD8\u6CA1\u6709\u5BF9\u8C61\uFF0C\u5148\u6DFB\u52A0\u4E00\u4E2A\u518D\u53D1\u8D77\u3002", { status: 400 });
     const members = this.options.members?.() ?? [];
     if (members.length === 0) throw new WireGuardError("no_member", "\u6CA1\u6709\u53EF\u7528\u7684\u6210\u5458\u3002", { status: 503 });
-    const wanted = String(input.member ?? "").trim();
-    const target = wanted === "" ? members[0] : members.find((member) => member.id === wanted || member.ip === wanted || member.name === wanted);
-    if (target === void 0) throw new WireGuardError("member_not_found", `\u627E\u4E0D\u5230\u6210\u5458 ${wanted}\u3002`, { status: 404 });
-    if (target.ip.trim() === "") throw new WireGuardError("member_without_ip", `\u6210\u5458 ${target.name} \u6CA1\u6709 VPN \u5730\u5740\u3002`, { status: 409 });
+    const local = members.find((member) => member.id === "local");
+    const target = this.#target(input.member, members);
     const title = cleanText(input.title, MAX_TITLE_CHARS) || `\u4EFB\u52A1 ${new Date(this.now()).toLocaleString("zh-CN", { hour12: false })}`;
-    const cwd = cleanText(input.cwd, 400) || null;
+    const workspace = cleanWorkspace(input.workspace);
+    const legacyCwd = cleanText(input.cwd, 400) || null;
+    const cwd = workspace === null ? legacyCwd : `~/.dsh/workspaces/${workspace}`;
     const markdown = renderTaskMarkdown(doc, title);
-    const created = await this.#interop(target.ip, "POST", "/v1/conversations", {
-      prompt: markdown,
-      title,
-      initiator: { id: "gateway", name: this.options.selfName ?? os.hostname(), ip: "", source: "panel-task" },
-      ...cwd === null ? {} : { cwd }
+    const localIp = (local?.ip ?? "").trim();
+    const managerIp = localIp === "" ? "127.0.0.1" : localIp;
+    const prompt = coordinatorPrompt({ title, markdown, target, workspace });
+    const created = await this.#interop(managerIp, "POST", "/v1/conversations", {
+      prompt,
+      // The executor's conversation carries the task title; the coordinator's
+      // is marked so 对话 shows which local conversation is doing the managing.
+      title: `${title} \xB7 \u534F\u8C03`,
+      initiator: { id: "gateway", name: this.options.selfName ?? os.hostname(), ip: managerIp, source: "panel-task" },
+      ...workspace === null ? {} : { workspace }
     });
     const conversation = created.conversation;
     const conversationId = typeof conversation?.id === "string" ? conversation.id : "";
-    if (conversationId === "") throw new WireGuardError("interop_refused", "\u6210\u5458\u7684 SDK \u6CA1\u6709\u8FD4\u56DE\u5BF9\u8BDD id\u3002", { status: 502 });
+    if (conversationId === "") throw new WireGuardError("interop_refused", "\u672C\u673A\u7684\u534F\u8C03\u5BF9\u8BDD\u6CA1\u6709\u8FD4\u56DE id\u3002", { status: 502 });
     const stamp = new Date(this.now()).toISOString();
     const run2 = {
       id: `run-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`,
       title,
       status: "running",
       member: { id: target.id, name: target.name, ip: target.ip },
+      manager: { id: local?.id ?? "local", name: local?.name ?? (this.options.selfName ?? os.hostname()), ip: managerIp },
+      workspace,
       cwd,
       conversationId,
       createdAt: stamp,
@@ -511,8 +578,36 @@ var TaskService = class {
     };
     this.store.data.runs = pruneRuns([run2, ...this.store.data.runs]);
     await this.store.save();
-    this.logger(`launched ${run2.id} on ${target.name} (${target.ip}): ${conversationId}`);
+    this.logger(`launched ${run2.id}: local coordinator (${managerIp}) -> ${target.name} (${target.ip}): ${conversationId}`);
     return { run: run2, tasks: this.#view() };
+  }
+  /**
+   * Workspaces a member exposes below `~/.dsh/workspaces`.
+   * @param member member id, name, or VPN address.
+   * @returns the member's workspace listing.
+   */
+  async workspaces(member) {
+    if (this.delegated) {
+      const answer2 = await this.#remote("GET", `/workspaces?member=${encodeURIComponent(String(member ?? ""))}`);
+      return normalizeWorkspaces(answer2.workspaces, answer2.dir);
+    }
+    const members = this.options.members?.() ?? [];
+    if (members.length === 0) throw new WireGuardError("no_member", "\u6CA1\u6709\u53EF\u7528\u7684\u6210\u5458\u3002", { status: 503 });
+    const target = this.#target(member, members);
+    const answer = await this.#interop(target.ip, "GET", "/v1/workspaces");
+    const payload = answer;
+    return normalizeWorkspaces(payload.workspaces, payload.dir);
+  }
+  /**
+   * Remove the finished launches from 历史, leaving running ones alone.
+   * @returns the new snapshot.
+   */
+  async clearRuns() {
+    if (this.delegated) return (await this.#remote("POST", "/runs/clear")).tasks;
+    const before = this.store.data.runs.length;
+    this.store.data.runs = this.store.data.runs.filter((run2) => run2.status === "running");
+    if (this.store.data.runs.length !== before) await this.store.save();
+    return this.#view();
   }
   /**
    * One full historical run, refreshing it first when still in flight.
@@ -571,7 +666,7 @@ var TaskService = class {
    * @returns when the run is updated.
    */
   async #refreshRun(run2) {
-    const ip = run2.member?.ip ?? "";
+    const ip = (run2.manager?.ip ?? "").trim() !== "" ? String(run2.manager?.ip) : run2.member?.ip ?? "";
     if (ip === "") return;
     let conversation = null;
     try {
@@ -581,7 +676,7 @@ var TaskService = class {
       const status2 = error.status;
       if (status2 === 404) {
         run2.status = "failed";
-        run2.error = "\u6210\u5458\u4E0A\u5DF2\u7ECF\u6CA1\u6709\u8FD9\u4E2A\u5BF9\u8BDD\u4E86\u3002";
+        run2.error = run2.manager === null || run2.manager === void 0 ? "\u6210\u5458\u4E0A\u5DF2\u7ECF\u6CA1\u6709\u8FD9\u4E2A\u5BF9\u8BDD\u4E86\u3002" : "\u672C\u673A\u4E0A\u5DF2\u7ECF\u6CA1\u6709\u8FD9\u4E2A\u534F\u8C03\u5BF9\u8BDD\u4E86\u3002";
         run2.updatedAt = new Date(this.now()).toISOString();
         return;
       }
@@ -706,7 +801,37 @@ var TaskService = class {
       const message = typeof parsed?.error?.message === "string" ? parsed.error.message : `HTTP ${String(response.status)}`;
       throw new WireGuardError(parsed?.error?.code ?? "gateway_failed", message, { status: response.status >= 400 ? response.status : 502 });
     }
-    return { tasks: parsed.tasks, run: parsed.run };
+    return {
+      tasks: parsed.tasks,
+      run: parsed.run,
+      workspaces: parsed.workspaces,
+      dir: parsed.dir
+    };
+  }
+  /**
+   * Resolve the member that executes a task.
+   *
+   * The local member is never an execution target: it owns the coordinator
+   * conversation. Callers send an id, a name, or a VPN address.
+   * @param value raw identifier; empty picks the first peer.
+   * @param members current members, local included.
+   * @returns the target.
+   */
+  #target(value, members) {
+    const wanted = String(value ?? "").trim();
+    const target = wanted === "" ? members.find((member) => member.id !== "local") : members.find((member) => member.id === wanted || member.ip === wanted || member.name === wanted);
+    if (target === void 0) {
+      throw new WireGuardError(
+        wanted === "" ? "no_member" : "member_not_found",
+        wanted === "" ? "\u6CA1\u6709\u53EF\u6267\u884C\u7684\u6210\u5458\uFF1B\u672C\u673A\u53EA\u8D1F\u8D23\u7BA1\u7406\u548C\u9A8C\u6536\u3002" : `\u627E\u4E0D\u5230\u6210\u5458 ${wanted}\u3002`,
+        { status: wanted === "" ? 503 : 404 }
+      );
+    }
+    if (target.id === "local") {
+      throw new WireGuardError("local_member_not_allowed", "\u672C\u673A\u53EA\u8D1F\u8D23\u7BA1\u7406\u548C\u9A8C\u6536\uFF0C\u8BF7\u9009\u62E9\u5176\u4ED6\u6210\u5458\u6267\u884C\u3002", { status: 400 });
+    }
+    if (target.ip.trim() === "") throw new WireGuardError("member_without_ip", `\u6210\u5458 ${target.name} \u6CA1\u6709 VPN \u5730\u5740\u3002`, { status: 409 });
+    return target;
   }
   /**
    * Name a template, refusing empty ones.
@@ -796,13 +921,19 @@ function createHttpApiHandler(service2) {
         writeJson(response, 200, { ok: true, service: "dsh-wireguard" });
         return;
       }
-      if (method === "GET" && (path11 === `${API_PREFIX}/tasks` || path11.startsWith(`${API_PREFIX}/tasks/runs/`))) {
+      if (method === "GET" && (path11 === `${API_PREFIX}/tasks` || path11 === `${API_PREFIX}/tasks/workspaces` || path11.startsWith(`${API_PREFIX}/tasks/runs/`))) {
         if (!tasksAuthorized(service2, request)) {
           writeJson(response, 401, { ok: false, error: { code: "peer_token_invalid", message: "The member agent token is missing or invalid." } });
           return;
         }
         if (!service2.tasks) {
           writeJson(response, 501, { ok: false, error: { code: "not_supported", message: "This control service does not host the task list." } });
+          return;
+        }
+        if (path11 === `${API_PREFIX}/tasks/workspaces`) {
+          const member = url.searchParams.get("member") ?? "";
+          const listing = await service2.tasks.workspaces(member);
+          writeJson(response, 200, { ok: true, dir: listing.dir, workspaces: listing.workspaces });
           return;
         }
         const runId = path11 === `${API_PREFIX}/tasks` ? null : decodeURIComponent(path11.slice(`${API_PREFIX}/tasks/runs/`.length));
@@ -852,6 +983,10 @@ function createHttpApiHandler(service2) {
         if (path11 === `${API_PREFIX}/tasks/launch`) {
           const launched = await tasks2.launch(body);
           writeJson(response, 200, { ok: true, tasks: launched.tasks, run: runSummary(launched.run) });
+          return;
+        }
+        if (path11 === `${API_PREFIX}/tasks/runs/clear`) {
+          writeJson(response, 200, { ok: true, tasks: await tasks2.clearRuns() });
           return;
         }
         writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown task endpoint." } });

@@ -1,3 +1,5 @@
+> **2026-11-17 更新：默认实现已改为内嵌。** 运行中的 DSH 现在由 `@local/dsh-mesh` host 插件在 DSH Web 进程内提供 `:8765`，会话通过 `ctx.agents` 创建，Web UI 直接拥有 live 会话。本文保留独立进程/SDK stdio 的原始设计，`code/interop-service/server.mjs` 作为回退（`interopEmbedded: false`）。新设计见 [Step 020](Step%20020%20内嵌interop服务.md)。
+
 # Step 013 独立 DSH 交互 HTTP 服务
 
 `dsh-mesh` 里新增一个完全独立的 HTTP 服务，用 DSH 原生 SDK（`dsh --profile sdk` 的 stdio JSON-RPC）在成员 B 上创建、驱动和观察对话。它不依赖 DSH Web、网关或 WireGuard 控制面板；任何一个重启都不影响它。

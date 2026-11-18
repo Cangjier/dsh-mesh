@@ -205,9 +205,14 @@ test('wait aborts with the caller signal', async () => {
   try {
     const task = await tasks.start({ member: '127.0.0.1', prompt: 'hello', agent: AGENT, notify: false })
     const controller = new AbortController()
+    const started = Date.now()
     const pending = tasks.wait(task.id, { timeoutMs: 5000, signal: controller.signal })
     setTimeout(() => controller.abort(), 100)
-    await assert.rejects(pending, /tool call aborted/)
+    // The abort reason itself must surface: DSH compares it to the signal
+    // reason to report the call as cancelled rather than as a tool failure.
+    await assert.rejects(pending, error => error?.name === 'AbortError')
+    const elapsed = Date.now() - started
+    assert.ok(elapsed < 1000, `abort ended the wait after ${String(elapsed)}ms`)
   } finally {
     await tasks.dispose()
     await member.close()

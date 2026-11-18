@@ -6,8 +6,9 @@
  * request to the gateway over the WireGuard tunnel, authorized by its own
  * per-peer agent token, so all members edit the same templates and read the
  * same history. Launching renders the task as markdown and creates a
- * conversation through a member's DSH interop service (the SDK runtime); the
- * gateway then tracks that conversation to completion.
+ * **coordinator conversation on the gateway itself**; that conversation
+ * delegates the work to the chosen member, accepts the result, and is what the
+ * run tracks to completion.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -35,6 +36,13 @@ export interface TaskMember {
   id: string;
   name: string;
   ip: string;
+}
+
+/** Task workspaces a member exposes below `~/.dsh/workspaces`. */
+export interface TaskWorkspaces {
+  /** Absolute workspace root on that member. */
+  dir: string;
+  workspaces: Array<{ name: string }>;
 }
 
 /** Options the control service passes in. */
@@ -132,6 +140,8 @@ export function runSummary(run: TaskRun): TaskRunSummary {
     title: run.title,
     status: run.status,
     member: run.member,
+    manager: run.manager ?? null,
+    workspace: run.workspace ?? null,
     cwd: run.cwd,
     conversationId: run.conversationId,
     createdAt: run.createdAt,
@@ -140,6 +150,86 @@ export function runSummary(run: TaskRun): TaskRunSummary {
     resultPreview: preview.length > 160 ? `${preview.slice(0, 160)}…` : preview,
     error: run.error,
   };
+}
+
+/**
+ * Validate one task workspace name.
+ *
+ * The name addresses exactly one directory below `~/.dsh/workspaces`, so path
+ * separators and `.` / `..` are refused instead of being silently normalized.
+ * @param value raw name.
+ * @returns name, or null when the caller sent nothing.
+ */
+function cleanWorkspace(value: unknown): string | null {
+  const name = cleanText(value, 120);
+  if (name === '') return null;
+  if (name === '.' || name === '..' || /[\\/"]/u.test(name) || /[\u0000-\u001f]/u.test(name)) {
+    throw new WireGuardError('workspace_invalid', '工作目录名称不能包含路径分隔符或引号。', { status: 400 });
+  }
+  return name;
+}
+
+/**
+ * Keep only usable workspace names from a member's answer.
+ * @param value raw list.
+ * @param dir raw root path.
+ * @returns normalized listing.
+ */
+function normalizeWorkspaces(value: unknown, dir: unknown): TaskWorkspaces {
+  const list = Array.isArray(value) ? value : [];
+  const workspaces: Array<{ name: string }> = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    const name = item !== null && typeof item === 'object'
+      ? cleanText((item as Record<string, unknown>).name, 120)
+      : '';
+    if (name === '' || seen.has(name)) continue;
+    seen.add(name);
+    workspaces.push({ name });
+  }
+  return { dir: cleanText(dir, 400), workspaces };
+}
+
+/**
+ * The prompt that turns the local conversation into the task coordinator.
+ *
+ * The target executes; the coordinator delegates, waits, and accepts. Being
+ * explicit about the tool arguments matters: `call_member` supports a
+ * `workspace` name, and the target resolves it under its own home instead of
+ * receiving the gateway's absolute path.
+ * @param input run details.
+ * @returns markdown prompt.
+ */
+function coordinatorPrompt(input: {
+  title: string;
+  markdown: string;
+  target: TaskMember;
+  workspace: string | null;
+}): string {
+  const { title, markdown, target, workspace } = input;
+  const delegateArgs = [
+    'action="delegate"',
+    `member="${target.ip}"`,
+    ...(workspace === null ? [] : [`workspace="${workspace}"`]),
+  ].join('，');
+  return [
+    `# 协调任务：${title}`,
+    '',
+    '你是这次任务的管理者、协调者和验收者，**不负责具体执行**：不要自己修改文件或执行任务里的命令。',
+    '',
+    `- 执行成员：${target.name}（${target.ip}）`,
+    ...(workspace === null ? [] : [`- 工作目录：~/.dsh/workspaces/${workspace}（执行成员本机的实际目录）`]),
+    '',
+    '## 执行方式',
+    `1. 用 \`call_member\`（${delegateArgs}）把「## 任务」下的 markdown 原样作为 prompt 交给执行成员，并写清验收要求。`,
+    '2. 用 `wait_member` 等待：state=progress 表示还在进行，继续用同一个 taskId 等待；state=done 才是最终结果。',
+    '3. 验收：对照任务定义检查结果；不通过时用 `call_member`（action="send"）让执行成员补做，再继续等待。',
+    '4. 最后给出：验收结论（通过 / 不通过）、改动清单、验证方式、遗留问题。',
+    '',
+    '## 任务',
+    '',
+    markdown,
+  ].join('\n');
 }
 
 /**
@@ -280,11 +370,17 @@ export class TaskService {
   }
 
   /**
-   * Render the task and launch it as a conversation on one member.
-   * @param input document, title, member, working directory.
+   * Render the task and launch it through a local coordinator conversation.
+   *
+   * The gateway never executes the task itself. It opens a conversation on the
+   * local member whose agent delegates to the target with `call_member`, waits
+   * with `wait_member`, and returns the acceptance result. The target member is
+   * the only machine that executes anything, which also means the coordinator's
+   * conversation is what 对话 lists and what the run status follows.
+   * @param input document, title, member, workspace, cwd.
    * @returns the new run.
    */
-  async launch(input: { doc?: unknown; title?: unknown; member?: unknown; cwd?: unknown }): Promise<{ run: TaskRun; tasks: TaskSnapshot }> {
+  async launch(input: { doc?: unknown; title?: unknown; member?: unknown; workspace?: unknown; cwd?: unknown }): Promise<{ run: TaskRun; tasks: TaskSnapshot }> {
     if (this.delegated) {
       const answer = await this.#remote('POST', '/launch', input);
       return { run: answer.run as TaskRun, tasks: answer.tasks };
@@ -293,30 +389,35 @@ export class TaskService {
     if (doc.nodes.length === 0) throw new WireGuardError('task_empty', '任务里还没有对象，先添加一个再发起。', { status: 400 });
     const members = this.options.members?.() ?? [];
     if (members.length === 0) throw new WireGuardError('no_member', '没有可用的成员。', { status: 503 });
-    const wanted = String(input.member ?? '').trim();
-    const target = wanted === ''
-      ? members[0]
-      : members.find((member) => member.id === wanted || member.ip === wanted || member.name === wanted);
-    if (target === undefined) throw new WireGuardError('member_not_found', `找不到成员 ${wanted}。`, { status: 404 });
-    if (target.ip.trim() === '') throw new WireGuardError('member_without_ip', `成员 ${target.name} 没有 VPN 地址。`, { status: 409 });
+    const local = members.find((member) => member.id === 'local');
+    const target = this.#target(input.member, members);
     const title = cleanText(input.title, MAX_TITLE_CHARS) || `任务 ${new Date(this.now()).toLocaleString('zh-CN', { hour12: false })}`;
-    const cwd = cleanText(input.cwd, 400) || null;
+    const workspace = cleanWorkspace(input.workspace);
+    const legacyCwd = cleanText(input.cwd, 400) || null;
+    const cwd = workspace === null ? legacyCwd : `~/.dsh/workspaces/${workspace}`;
     const markdown = renderTaskMarkdown(doc, title);
-    const created = await this.#interop(target.ip, 'POST', '/v1/conversations', {
-      prompt: markdown,
-      title,
-      initiator: { id: 'gateway', name: this.options.selfName ?? os.hostname(), ip: '', source: 'panel-task' },
-      ...(cwd === null ? {} : { cwd }),
+    const localIp = (local?.ip ?? '').trim();
+    const managerIp = localIp === '' ? '127.0.0.1' : localIp;
+    const prompt = coordinatorPrompt({ title, markdown, target, workspace });
+    const created = await this.#interop(managerIp, 'POST', '/v1/conversations', {
+      prompt,
+      // The executor's conversation carries the task title; the coordinator's
+      // is marked so 对话 shows which local conversation is doing the managing.
+      title: `${title} · 协调`,
+      initiator: { id: 'gateway', name: this.options.selfName ?? os.hostname(), ip: managerIp, source: 'panel-task' },
+      ...(workspace === null ? {} : { workspace }),
     });
     const conversation = (created as Record<string, unknown>).conversation as Record<string, unknown> | undefined;
     const conversationId = typeof conversation?.id === 'string' ? conversation.id : '';
-    if (conversationId === '') throw new WireGuardError('interop_refused', '成员的 SDK 没有返回对话 id。', { status: 502 });
+    if (conversationId === '') throw new WireGuardError('interop_refused', '本机的协调对话没有返回 id。', { status: 502 });
     const stamp = new Date(this.now()).toISOString();
     const run: TaskRun = {
       id: `run-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`,
       title,
       status: 'running',
       member: { id: target.id, name: target.name, ip: target.ip },
+      manager: { id: local?.id ?? 'local', name: local?.name ?? (this.options.selfName ?? os.hostname()), ip: managerIp },
+      workspace,
       cwd,
       conversationId,
       createdAt: stamp,
@@ -328,8 +429,38 @@ export class TaskService {
     };
     this.store.data.runs = pruneRuns([run, ...this.store.data.runs]);
     await this.store.save();
-    this.logger(`launched ${run.id} on ${target.name} (${target.ip}): ${conversationId}`);
+    this.logger(`launched ${run.id}: local coordinator (${managerIp}) -> ${target.name} (${target.ip}): ${conversationId}`);
     return { run, tasks: this.#view() };
+  }
+
+  /**
+   * Workspaces a member exposes below `~/.dsh/workspaces`.
+   * @param member member id, name, or VPN address.
+   * @returns the member's workspace listing.
+   */
+  async workspaces(member: unknown): Promise<TaskWorkspaces> {
+    if (this.delegated) {
+      const answer = await this.#remote('GET', `/workspaces?member=${encodeURIComponent(String(member ?? ''))}`);
+      return normalizeWorkspaces(answer.workspaces, answer.dir);
+    }
+    const members = this.options.members?.() ?? [];
+    if (members.length === 0) throw new WireGuardError('no_member', '没有可用的成员。', { status: 503 });
+    const target = this.#target(member, members);
+    const answer = await this.#interop(target.ip, 'GET', '/v1/workspaces');
+    const payload = answer as Record<string, unknown>;
+    return normalizeWorkspaces(payload.workspaces, payload.dir);
+  }
+
+  /**
+   * Remove the finished launches from 历史, leaving running ones alone.
+   * @returns the new snapshot.
+   */
+  async clearRuns(): Promise<TaskSnapshot> {
+    if (this.delegated) return (await this.#remote('POST', '/runs/clear')).tasks;
+    const before = this.store.data.runs.length;
+    this.store.data.runs = this.store.data.runs.filter((run) => run.status === 'running');
+    if (this.store.data.runs.length !== before) await this.store.save();
+    return this.#view();
   }
 
   /**
@@ -396,7 +527,9 @@ export class TaskService {
    * @returns when the run is updated.
    */
   async #refreshRun(run: TaskRun): Promise<void> {
-    const ip = run.member?.ip ?? '';
+    // A run created after the coordinator change follows the local manager
+    // conversation. Older runs tracked the target conversation directly.
+    const ip = (run.manager?.ip ?? '').trim() !== '' ? String(run.manager?.ip) : run.member?.ip ?? '';
     if (ip === '') return;
     let conversation: Record<string, unknown> | null = null;
     try {
@@ -406,7 +539,9 @@ export class TaskService {
       const status = (error as WireGuardError).status;
       if (status === 404) {
         run.status = 'failed';
-        run.error = '成员上已经没有这个对话了。';
+        run.error = run.manager === null || run.manager === undefined
+          ? '成员上已经没有这个对话了。'
+          : '本机上已经没有这个协调对话了。';
         run.updatedAt = new Date(this.now()).toISOString();
         return;
       }
@@ -503,7 +638,12 @@ export class TaskService {
    * @param body JSON body.
    * @returns parsed payload.
    */
-  async #remote(method: string, suffix: string, body?: unknown): Promise<{ tasks: TaskSnapshot; run?: TaskRun }> {
+  async #remote(method: string, suffix: string, body?: unknown): Promise<{
+    tasks: TaskSnapshot;
+    run?: TaskRun;
+    workspaces?: unknown;
+    dir?: unknown;
+  }> {
     const target = this.options.remote?.() ?? null;
     if (target === null) throw new WireGuardError('not_delegated', 'This machine owns the task store.', { status: 500 });
     const base = target.baseUrl.replace(/\/+$/u, '');
@@ -538,7 +678,40 @@ export class TaskService {
       const message = typeof parsed?.error?.message === 'string' ? parsed.error.message : `HTTP ${String(response.status)}`;
       throw new WireGuardError(parsed?.error?.code ?? 'gateway_failed', message, { status: response.status >= 400 ? response.status : 502 });
     }
-    return { tasks: parsed.tasks as TaskSnapshot, run: parsed.run as TaskRun | undefined };
+    return {
+      tasks: parsed.tasks as TaskSnapshot,
+      run: parsed.run as TaskRun | undefined,
+      workspaces: parsed.workspaces,
+      dir: parsed.dir,
+    };
+  }
+
+  /**
+   * Resolve the member that executes a task.
+   *
+   * The local member is never an execution target: it owns the coordinator
+   * conversation. Callers send an id, a name, or a VPN address.
+   * @param value raw identifier; empty picks the first peer.
+   * @param members current members, local included.
+   * @returns the target.
+   */
+  #target(value: unknown, members: TaskMember[]): TaskMember {
+    const wanted = String(value ?? '').trim();
+    const target = wanted === ''
+      ? members.find((member) => member.id !== 'local')
+      : members.find((member) => member.id === wanted || member.ip === wanted || member.name === wanted);
+    if (target === undefined) {
+      throw new WireGuardError(
+        wanted === '' ? 'no_member' : 'member_not_found',
+        wanted === '' ? '没有可执行的成员；本机只负责管理和验收。' : `找不到成员 ${wanted}。`,
+        { status: wanted === '' ? 503 : 404 },
+      );
+    }
+    if (target.id === 'local') {
+      throw new WireGuardError('local_member_not_allowed', '本机只负责管理和验收，请选择其他成员执行。', { status: 400 });
+    }
+    if (target.ip.trim() === '') throw new WireGuardError('member_without_ip', `成员 ${target.name} 没有 VPN 地址。`, { status: 409 });
+    return target;
   }
 
   /**

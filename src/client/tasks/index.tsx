@@ -1,6 +1,7 @@
 /**
- * 发起任务: edit one task as an object tree, keep templates, launch it through
- * a member's DSH SDK, and read back what each launch did.
+ * 任务: edit one task as an object tree, keep templates, launch it through a
+ * local coordinator conversation that delegates to a member, and read back what
+ * each launch did.
  *
  * The panel keeps the document in local state and saves it with a short debounce,
  * so structural edits (add, delete, reorder, re-parent) never wait on the
@@ -36,6 +37,7 @@ import {
   ArrowDownOutlined,
   ArrowUpOutlined,
   BranchesOutlined,
+  ClearOutlined,
   CopyOutlined,
   DeleteOutlined,
   EditOutlined,
@@ -55,6 +57,7 @@ import {
   moveNode,
   removeNode,
   renderTaskMarkdown,
+  renderTaskOutline,
   rootIds,
   setNode,
   summarize,
@@ -67,7 +70,8 @@ import {
   type TaskTemplate,
   type TaskTreeRow,
 } from '../../wireguard/lib/task-model'
-import { TaskApiError, taskApi } from './api'
+import { TaskApiError, taskApi, type WorkspaceListing } from './api'
+import { copyToClipboard } from '../clipboard'
 
 const { Text, Paragraph } = Typography
 
@@ -239,7 +243,7 @@ function RunStatus({ status }: { status: TaskRunSummary['status'] }) {
 }
 
 /**
- * The 发起任务 tab.
+ * The 任务 tab.
  * @param props members available as launch targets.
  */
 export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
@@ -258,6 +262,7 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
   const [saveTemplateOpen, setSaveTemplateOpen] = useState(false)
   const [updateTemplateOpen, setUpdateTemplateOpen] = useState(false)
   const [detail, setDetail] = useState<TaskRun | null>(null)
+  const [clearingHistory, setClearingHistory] = useState(false)
   // null means "everything expanded"; a list is the user's own choice.
   const [flatExpanded, setFlatExpanded] = useState<string[] | null>(null)
   const [treeExpanded, setTreeExpanded] = useState<string[] | null>(null)
@@ -359,9 +364,26 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
     msg.success(`已套用模板「${template.name}」`)
   }
 
+  /**
+   * Copy the whole task as a Markdown outline whose heading level follows the
+   * tree depth, independent of which rows happen to be expanded in the view.
+   */
+  const copyTask = async () => {
+    const text = renderTaskOutline(doc)
+    if (text === '') {
+      msg.warning(doc.nodes.length === 0 ? '任务还是空的，没有可复制的对象。' : '没有根对象可复制，请先删掉一条形成环的引用。')
+      return
+    }
+    if (await copyToClipboard(text)) msg.success('已复制任务大纲')
+    else msg.error('复制失败，请检查浏览器是否允许访问剪贴板。')
+  }
+
   const toolbar = (
     <Flex className="dsh-task-toolbar" gap={8} wrap align="center">
       <Button icon={<PlusOutlined />} onClick={addRoot}>新建对象</Button>
+      <Tooltip title="复制为多级标题文本（# / ## / ###）">
+        <Button icon={<CopyOutlined />} onClick={() => { void copyTask() }} disabled={doc.nodes.length === 0}>复制</Button>
+      </Tooltip>
       <Segmented
         value={view}
         onChange={(value) => setView(value as 'flat' | 'tree')}
@@ -384,7 +406,7 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
           更新模板
         </Button>
         <Button type="primary" icon={<SendOutlined />} onClick={() => setLaunchOpen(true)} disabled={doc.nodes.length === 0}>
-          发起任务
+          发起
         </Button>
         <Tooltip title="重新从网关读取">
           <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load()} />
@@ -609,8 +631,40 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
     }
   }
 
+  /**
+   * Drop every finished launch from 历史. Running launches stay: the panel
+   * still needs their id to keep the result in sync.
+   */
+  const clearHistory = async () => {
+    const before = runs.length
+    setClearingHistory(true)
+    try {
+      const snapshot = await taskApi.clearRuns()
+      setRuns(snapshot.runs)
+      const cleared = before - snapshot.runs.length
+      msg.success(cleared > 0 ? `已清空 ${String(cleared)} 条历史` : '没有已结束的历史可清理')
+    } catch (failure) {
+      msg.error(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setClearingHistory(false)
+    }
+  }
+
   const historyBody = (
     <div className="dsh-task-tabbody">
+      <Flex justify="space-between" align="center" gap={8} wrap style={{ marginBottom: 12 }}>
+        <Text type="secondary">{runs.length === 0 ? '还没有记录' : `共 ${String(runs.length)} 条`}</Text>
+        <Popconfirm
+          title="清空历史？"
+          description="只删除已结束的记录；运行中的任务会保留，仍在继续。"
+          okText="清空"
+          cancelText="取消"
+          okButtonProps={{ danger: true }}
+          onConfirm={() => { void clearHistory() }}
+        >
+          <Button icon={<ClearOutlined />} danger loading={clearingHistory} disabled={runs.length === 0}>清空</Button>
+        </Popconfirm>
+      </Flex>
       {runs.length === 0 ? (
         <Empty description="还没有发起过任务。" />
       ) : (
@@ -622,7 +676,7 @@ export function TasksPanel({ members }: { members: TaskMemberOption[] }) {
           columns={[
             { title: '标题', dataIndex: 'title', ellipsis: true },
             { title: '状态', dataIndex: 'status', width: 100, render: (status: TaskRunSummary['status']) => <RunStatus status={status} /> },
-            { title: '成员', width: 160, render: (_: unknown, run) => run.member?.name ?? '—' },
+            { title: '执行成员', width: 160, render: (_: unknown, run) => run.member?.name ?? '—' },
             { title: '对象', dataIndex: 'nodeCount', width: 80 },
             { title: '发起时间', dataIndex: 'createdAt', width: 180, render: (value: string) => when(value) },
             { title: '结果', dataIndex: 'resultPreview', ellipsis: true, render: (value: string) => value === '' ? '—' : value },
@@ -921,8 +975,16 @@ function SaveTemplateModal({ open, doc, onClose, onSaved }: {
   )
 }
 
+/** Select value that opens the "new workspace" name field. */
+const NEW_WORKSPACE = '__new__'
+
 /**
- * Launch the current task on one member.
+ * Launch the current task through a local coordinator conversation.
+ *
+ * The panel only picks an executor and a workspace: the gateway opens the
+ * coordinating conversation on itself, and that conversation delegates to the
+ * member and accepts the result. The working directory is a name below the
+ * member's `~/.dsh/workspaces`, never a free-form path.
  * @param props open state, document, members and callbacks.
  */
 function LaunchModal({ open, doc, members, onClose, onLaunched }: {
@@ -933,8 +995,13 @@ function LaunchModal({ open, doc, members, onClose, onLaunched }: {
   onLaunched: (run: TaskRunSummary) => void
 }) {
   const [title, setTitle] = useState('')
-  const [member, setMember] = useState('local')
-  const [cwd, setCwd] = useState('')
+  const [member, setMember] = useState('')
+  const [workspace, setWorkspace] = useState('')
+  const [newWorkspace, setNewWorkspace] = useState('')
+  const [workspaces, setWorkspaces] = useState<WorkspaceListing['workspaces']>([])
+  const [workspacesDir, setWorkspacesDir] = useState('')
+  const [workspacesLoading, setWorkspacesLoading] = useState(false)
+  const [workspacesError, setWorkspacesError] = useState('')
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
 
@@ -946,20 +1013,72 @@ function LaunchModal({ open, doc, members, onClose, onLaunched }: {
     // The member list belongs to this panel, so the value must be an address the
     // gateway understands: its own peer table is keyed by VPN address.
     const first = members[0]
-    setMember(first === undefined || first.ip === '' ? 'local' : first.ip)
-    setCwd('')
+    setMember(first === undefined ? '' : targetValue(first))
+    setWorkspace('')
+    setNewWorkspace('')
     setFailure(null)
     // Only on open: the member list is rebuilt by the parent on every render,
     // and depending on it would wipe a title the user is typing.
   }, [open])
 
+  // Discovery can land after the dialog opened; only fill an empty selection.
+  useEffect(() => {
+    if (!open || member !== '') return
+    const first = members[0]
+    if (first !== undefined) setMember(targetValue(first))
+  }, [open, member, members])
+
+  // The workspace list lives on the selected member, so it is reloaded whenever
+  // the target changes. A failed listing still leaves the "new workspace"
+  // option usable.
+  useEffect(() => {
+    if (!open || member === '') {
+      setWorkspaces([])
+      setWorkspacesDir('')
+      return
+    }
+    let alive = true
+    setWorkspacesLoading(true)
+    setWorkspacesError('')
+    taskApi.workspaces(member).then((result) => {
+      if (!alive) return
+      setWorkspaces(result.workspaces)
+      setWorkspacesDir(result.dir)
+      setWorkspace((current) => {
+        if (current === NEW_WORKSPACE || result.workspaces.some((item) => item.name === current)) return current
+        return result.workspaces[0]?.name ?? NEW_WORKSPACE
+      })
+    }).catch((error: unknown) => {
+      if (!alive) return
+      setWorkspaces([])
+      setWorkspace(NEW_WORKSPACE)
+      setWorkspacesError(error instanceof Error ? error.message : String(error))
+    }).finally(() => {
+      if (alive) setWorkspacesLoading(false)
+    })
+    return () => { alive = false }
+  }, [open, member])
+
   const markdown = useMemo(() => renderTaskMarkdown(doc, title), [doc, title])
 
   const submit = async () => {
-    setBusy(true)
     setFailure(null)
+    if (member === '') {
+      setFailure('没有可执行的成员；本机只负责管理和验收。')
+      return
+    }
+    const name = (workspace === NEW_WORKSPACE ? newWorkspace : workspace).trim()
+    if (name === '') {
+      setFailure('请选择已有工作目录，或输入新目录名称。')
+      return
+    }
+    if (name === '.' || name === '..' || /[\\/"]/u.test(name)) {
+      setFailure('工作目录名称不能包含路径分隔符或引号。')
+      return
+    }
+    setBusy(true)
     try {
-      const result = await taskApi.launch({ doc, title: title.trim(), member, cwd: cwd.trim() })
+      const result = await taskApi.launch({ doc, title: title.trim(), member, workspace: name })
       onLaunched(result.run)
     } catch (error) {
       setFailure(error instanceof TaskApiError ? error.message : error instanceof Error ? error.message : String(error))
@@ -967,6 +1086,9 @@ function LaunchModal({ open, doc, members, onClose, onLaunched }: {
       setBusy(false)
     }
   }
+
+  const newName = newWorkspace.trim()
+  const missingMember = members.length === 0
 
   return (
     <Modal
@@ -976,41 +1098,82 @@ function LaunchModal({ open, doc, members, onClose, onLaunched }: {
       cancelText="取消"
       width={760}
       confirmLoading={busy}
+      okButtonProps={{ disabled: missingMember }}
       onOk={() => { void submit() }}
       onCancel={onClose}
       destroyOnHidden
     >
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         {failure === null ? null : <Alert type="error" showIcon message="发起失败" description={failure} />}
+        {missingMember ? (
+          <Alert type="warning" showIcon message="没有可执行的成员" description="任务由其他成员执行；本机只负责管理、协调和验收。" />
+        ) : null}
         <div>
           <Text strong>标题</Text>
           <Input value={title} onChange={(event) => setTitle(event.target.value)} style={{ marginTop: 4 }} />
         </div>
         <div>
-          <Text strong>在哪个成员上跑</Text>
+          <Text strong>成员</Text>
           <Select
             style={{ width: '100%', marginTop: 4 }}
-            value={member}
-            onChange={(value) => setMember(value)}
+            value={member === '' ? undefined : member}
+            placeholder={missingMember ? '没有其他成员' : '选择执行成员'}
+            onChange={(value) => {
+              setMember(value)
+              setWorkspace('')
+              setNewWorkspace('')
+              // Do not leave the previous member's options selectable while the
+              // new list is loading.
+              setWorkspaces([])
+              setWorkspacesDir('')
+            }}
             options={members.map((item) => ({
               value: targetValue(item),
-              label: `${item.name}${item.id === 'local' ? '（本机）' : ''} · ${item.ip}`,
+              label: `${item.name} · ${item.ip}`,
             }))}
           />
         </div>
         <div>
-          <Text strong>工作目录（可空）</Text>
-          <Input value={cwd} onChange={(event) => setCwd(event.target.value)} placeholder="留空则用该成员的默认工作区" style={{ marginTop: 4 }} />
+          <Text strong>工作目录</Text>
+          <Select
+            style={{ width: '100%', marginTop: 4 }}
+            value={workspace === '' ? undefined : workspace}
+            loading={workspacesLoading}
+            disabled={member === ''}
+            placeholder={workspacesLoading ? '读取工作目录…' : '选择工作目录'}
+            onChange={(value) => { setWorkspace(value) }}
+            options={[
+              ...workspaces.map((item) => ({ value: item.name, label: item.name })),
+              { value: NEW_WORKSPACE, label: '＋ 新建工作目录' },
+            ]}
+          />
+          {workspace === NEW_WORKSPACE ? (
+            <div style={{ marginTop: 8 }}>
+              <Input
+                value={newWorkspace}
+                maxLength={120}
+                placeholder="新目录名称，例如 demo"
+                onChange={(event) => setNewWorkspace(event.target.value)}
+              />
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                实际目录：<span className="dsh-pw-mono">{`~/.dsh/workspaces/${newName === '' ? '<名称>' : newName}`}</span>
+                {workspacesDir === '' ? '' : `（成员上：${workspacesDir}）`}
+              </Text>
+            </div>
+          ) : null}
+          {workspacesError === '' ? null : (
+            <Alert type="warning" showIcon message="读取成员的工作目录失败，仍可新建" description={workspacesError} style={{ marginTop: 8 }} />
+          )}
         </div>
         <div>
           <Flex justify="space-between" align="center">
-            <Text strong>将发送的 markdown</Text>
+            <Text strong>将交给成员执行的任务</Text>
             <Tooltip title="复制">
               <Button
                 size="small"
                 type="text"
                 icon={<CopyOutlined />}
-                onClick={() => { void navigator.clipboard?.writeText(markdown) }}
+                onClick={() => { void copyToClipboard(markdown) }}
               />
             </Tooltip>
           </Flex>
@@ -1040,9 +1203,10 @@ function RunDetailDrawer({ run, onClose }: { run: TaskRun | null; onClose: () =>
         <Space direction="vertical" size={14} style={{ width: '100%' }}>
           <Descriptions size="small" column={1} bordered>
             <Descriptions.Item label="状态"><RunStatus status={run.status} /></Descriptions.Item>
-            <Descriptions.Item label="成员">{run.member === null ? '—' : `${run.member.name} · ${run.member.ip}`}</Descriptions.Item>
+            <Descriptions.Item label="执行成员">{run.member === null ? '—' : `${run.member.name} · ${run.member.ip}`}</Descriptions.Item>
+            <Descriptions.Item label="协调者">{run.manager === null || run.manager === undefined ? '本机（旧记录）' : `${run.manager.name}（本机）`}</Descriptions.Item>
             <Descriptions.Item label="工作目录">{run.cwd ?? '—'}</Descriptions.Item>
-            <Descriptions.Item label="对话">{run.conversationId}</Descriptions.Item>
+            <Descriptions.Item label="协调对话">{run.conversationId}</Descriptions.Item>
             <Descriptions.Item label="发起时间">{when(run.createdAt)}</Descriptions.Item>
             <Descriptions.Item label="对象">{run.doc.nodes.length} 个</Descriptions.Item>
             {run.error === null ? null : <Descriptions.Item label="错误"><Text type="danger">{run.error}</Text></Descriptions.Item>}

@@ -86,13 +86,23 @@ export function createHttpApiHandler(service) {
         writeJson(response, 200, { ok: true, service: 'dsh-wireguard' });
         return;
       }
-      if (method === 'GET' && (path === `${API_PREFIX}/tasks` || path.startsWith(`${API_PREFIX}/tasks/runs/`))) {
+      if (method === 'GET' && (
+        path === `${API_PREFIX}/tasks`
+        || path === `${API_PREFIX}/tasks/workspaces`
+        || path.startsWith(`${API_PREFIX}/tasks/runs/`)
+      )) {
         if (!tasksAuthorized(service, request)) {
           writeJson(response, 401, { ok: false, error: { code: 'peer_token_invalid', message: 'The member agent token is missing or invalid.' } });
           return;
         }
         if (!service.tasks) {
           writeJson(response, 501, { ok: false, error: { code: 'not_supported', message: 'This control service does not host the task list.' } });
+          return;
+        }
+        if (path === `${API_PREFIX}/tasks/workspaces`) {
+          const member = url.searchParams.get('member') ?? '';
+          const listing = await service.tasks.workspaces(member);
+          writeJson(response, 200, { ok: true, dir: listing.dir, workspaces: listing.workspaces });
           return;
         }
         const runId = path === `${API_PREFIX}/tasks` ? null : decodeURIComponent(path.slice(`${API_PREFIX}/tasks/runs/`.length));
@@ -142,6 +152,10 @@ export function createHttpApiHandler(service) {
         if (path === `${API_PREFIX}/tasks/launch`) {
           const launched = await tasks.launch(body);
           writeJson(response, 200, { ok: true, tasks: launched.tasks, run: runSummary(launched.run) });
+          return;
+        }
+        if (path === `${API_PREFIX}/tasks/runs/clear`) {
+          writeJson(response, 200, { ok: true, tasks: await tasks.clearRuns() });
           return;
         }
         writeJson(response, 404, { ok: false, error: { code: 'not_found', message: 'Unknown task endpoint.' } });

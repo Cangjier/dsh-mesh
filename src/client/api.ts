@@ -84,6 +84,10 @@ export interface MemberConversation {
   turns?: number
   eventCount?: number
   cwd?: string
+  /** Workspace name the conversation was created in, when it had one. */
+  workspace?: string
+  /** First prompt, uncapped; the title is only its first 80 characters. */
+  prompt?: string
   error?: string | null
 }
 

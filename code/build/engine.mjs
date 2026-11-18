@@ -847,6 +847,10 @@ export async function assembleWebPackage(options) {
   const manifest = {
     format: 1,
     name: 'dsh-mesh',
+    // Capabilities a rollback can inspect without executing the package. The
+    // embedded interop moved the :8765 listener into DSH Web; a rollback to a
+    // release without this feature has to start the standalone unit again.
+    features: ['embedded-interop'],
     // `version` is the DSH version, unchanged. `buildStamp` is the daily
     // build revision that appears after it in the archive name.
     version: options.version,

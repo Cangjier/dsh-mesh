@@ -16,7 +16,7 @@
 
 import { spawn } from 'node:child_process'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
@@ -33,7 +33,7 @@ async function sharedModule(name) {
   throw new Error(`missing the shared module ${name}`)
 }
 const { collectSystemInfo } = await sharedModule('system-info.mjs')
-const { conversationRecord, normalizeInitiator, normalizeTitle, restoredConversation, titleFromPrompt } = await sharedModule('conversation-meta.mjs')
+const { conversationRecord, normalizeInitiator, normalizeTitle, promptText, restoredConversation, titleFromPrompt } = await sharedModule('conversation-meta.mjs')
 const { applySessionEvent, repliesSince, summarizeReplies } = await sharedModule('conversation-replies.mjs')
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -69,6 +69,7 @@ const HOST = setting('DSH_INTEROP_BIND', '127.0.0.1')
 const PORT = Number.parseInt(setting('DSH_INTEROP_PORT', '8765'), 10)
 const DSH_HOME = setting('DSH_HOME', path.join(DATA, 'home'))
 const WORKDIR = setting('DSH_WORKDIR', path.join(ROOT, 'workspace'))
+const WORKSPACES_ROOT = path.resolve(setting('DSH_WORKSPACES_DIR', path.join(os.homedir(), '.dsh', 'workspaces')))
 const PROVIDER = setting('DSH_INTEROP_PROVIDER', 'deepseek-official')
 const MODEL = setting('DSH_INTEROP_MODEL', 'deepseek-flash')
 const APPROVE = setting('DSH_INTEROP_APPROVE', '0') === '1'
@@ -219,6 +220,10 @@ function publicConversation(conversation) {
     error: conversation.error,
     eventCount: conversation.events.length,
     cwd: conversation.cwd,
+    workspace: conversation.workspace ?? '',
+    // The title is capped at 80 characters for the list; the panel's detail
+    // view reads the real first prompt from here.
+    prompt: conversation.prompt ?? '',
     // What the mesh panel lists: what this conversation is about and who
     // started it (another member, or this machine when started by hand).
     title: conversation.title ?? '',
@@ -516,14 +521,55 @@ function scheduleRestart() {
   }, restartDelayMs)
 }
 
+/**
+ * Validate one workspace name.
+ * @param {unknown} value raw name.
+ * @returns {string} cleaned name, or '' when empty.
+ */
+function normalizeWorkspaceName(value) {
+  const name = typeof value === 'string' ? value.trim() : ''
+  if (name === '') return ''
+  if (name.length > 120) throw Object.assign(new Error('workspace name is too long'), { status: 400, code: 'workspace_invalid' })
+  if (name === '.' || name === '..' || /[\\/"]/u.test(name) || /[\u0000-\u001f]/u.test(name)) {
+    throw Object.assign(new Error('workspace name cannot contain a path separator or a quote'), { status: 400, code: 'workspace_invalid' })
+  }
+  return name
+}
+
+/**
+ * Every directory directly below the workspace root.
+ * @returns {{dir: string, workspaces: Array<{name: string, path: string}>}} listing.
+ */
+function listWorkspaces() {
+  try {
+    mkdirSync(WORKSPACES_ROOT, { recursive: true })
+  } catch { }
+  const workspaces = []
+  try {
+    for (const entry of readdirSync(WORKSPACES_ROOT, { withFileTypes: true })) {
+      if (entry.isDirectory()) workspaces.push({ name: entry.name, path: path.join(WORKSPACES_ROOT, entry.name) })
+    }
+  } catch { }
+  workspaces.sort((left, right) => left.name.localeCompare(right.name))
+  return { dir: WORKSPACES_ROOT, workspaces }
+}
+
 async function createConversation(request) {
   const id = randomUUID()
   const sessionId = id
-  const cwd = typeof request.cwd === 'string' && request.cwd !== '' ? path.resolve(request.cwd) : WORKDIR
+  const workspace = normalizeWorkspaceName(request.workspace)
+  const cwd = workspace !== ''
+    ? path.join(WORKSPACES_ROOT, workspace)
+    : typeof request.cwd === 'string' && request.cwd !== '' ? path.resolve(request.cwd) : WORKDIR
+  try {
+    mkdirSync(cwd, { recursive: true })
+  } catch { }
   const conversation = {
     id,
     sessionId,
     cwd,
+    workspace,
+    prompt: promptText(request.prompt),
     title: normalizeTitle(request.title) || titleFromPrompt(request.prompt),
     initiator: normalizeInitiator(request.initiator),
     status: 'blank',
@@ -856,6 +902,11 @@ const server = http.createServer(async (request, response) => {
     }
     if (!authorized(request)) {
       fail(response, 401, 'unauthorized', 'A bearer token is required.')
+      return
+    }
+    if (request.method === 'GET' && url.pathname === '/v1/workspaces') {
+      const listing = listWorkspaces()
+      json(response, 200, { ok: true, dir: listing.dir, workspaces: listing.workspaces })
       return
     }
     if (request.method === 'GET' && (url.pathname === '/v1/system' || url.pathname.startsWith('/v1/system/'))) {

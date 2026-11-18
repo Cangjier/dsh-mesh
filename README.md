@@ -126,14 +126,15 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - 面板的「升级」对本机和每个已安装的成员都开放，收在操作列的纯图标「更多」菜单里（Linux 成员同一菜单另有「测试升级」，先演练平铺路径）；成员表还有一列「版本」，显示每台成员当前运行的部署包；它用同一套引擎换包，升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的 `dsh-web`/网关不会把升级本身打断，也不会带走发起升级的面板。平铺安装（网关这种没有 `current` 的布局）走 `code/deploy/upgrade-local.sh`：备份（含 `app`/`runtime`/`web` 与工具层）→ 覆盖文件（保留 config/data/home/workspace）→ 重写 profile 与单元 → 健康检查，失败整体回滚；回退同样换回运行时三层，不会把旧脚本搭在新运行时上；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。测试升级的抓屏在目标成员没有 Chrome/Chromium/Edge 时会自动下载 Chrome for Testing 的 `chrome-headless-shell`（缓存在 `~/.cache/dsh-mesh/chrome`）再继续；只有下载或启动也失败才写「抓屏跳过」，不会把「成员没有浏览器」变成升级失败（Step 018）。
 - 详见 [Step 018](docs/Step%20018%20成员升级与独立升级进程.md)。
 
-### 6. 独立 DSH 交互 HTTP 服务
+### 6. 内嵌 DSH 交互 HTTP 服务
 
-- `code/interop-service/server.mjs`：独立进程，默认 `127.0.0.1:8765`。
+- 默认由 `@local/dsh-mesh` host 插件在 **DSH Web 进程内**监听 `:8765`，会话直接走 `ctx.agents.create/resume`，所以 Web 侧边栏看到的是同一进程拥有的 live 会话，不会把运行中的任务冷读成「已停止」。
+- `code/interop-service/server.mjs` 保留为独立进程/回退（`interopEmbedded: false`），默认部署不再启动它。
 - 内部拉起 `dsh --profile sdk`，通过原生 stdio JSON-RPC 创建/驱动/等待对话。
 - 提供 `POST /v1/conversations`、`/messages`、`/notify`、`/wait`、`GET /events`、`/result`、`/healthz`；`/wait` 带 `since` 时按轮返回（`state: progress` / `done`）。
 - 提供 `GET /v1/system`（CPU/内存/磁盘/网络/进程）以及 `/v1/system/cpu|memory|disk|network|process` 分区接口。
-- Bearer token；Windows 服务 `DSH-Interop` / Linux `dsh-interop.service`，和网关、DSH、51821 控制面板互不依赖。
-- 详见 [Step 013](docs/Step%20013%20独立DSH交互HTTP服务.md)。
+- Bearer token；成员部署会把旧的 Windows `DSH-Interop` / Linux `dsh-interop.service` 停用，`8765` 由 DSH Web 持有。
+- 详见 [Step 020](docs/Step%20020%20内嵌interop服务.md)；旧独立结构见 [Step 013](docs/Step%20013%20独立DSH交互HTTP服务.md)。
 
 ### 7. 成员任务：A 操作 B 的对话并回调主对话
 
@@ -142,14 +143,17 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - B 完成后，A 的插件用 `agent.followup()` 把结果写回 **A 的同一个会话**；A 正忙就排到下一轮，空闲就唤醒一个 turn，类似子代理完成通知。
 - 不需要 B 主动访问 A；A 长轮询（阻塞式等待）B 的 `/wait`，避免回调端口/NAT 问题。
 
-### 8. 发起任务：对象树 → markdown → SDK 对话
+### 8. 任务：对象树 → 本机协调对话 → 成员执行
 
-- 面板顶层 Tab「发起任务」：把一件事拆成对象树，每个对象有 `source`（文件 / git 仓库 / 类名）、`define`（要做的事）和 `children`（只存 `{ id, remark }` 引用）。
+- 面板顶层 Tab「任务」：把一件事拆成对象树，每个对象有 `source`（文件 / git 仓库 / 类名）、`define`（要做的事）和 `children`（只存 `{ id, remark }` 引用）。
 - 平铺视图把全部对象各列一行，直接子对象作为表格子行挂在下面（只一层，带该条引用的备注）；树形视图只列根对象逐层展开。根对象按「没有被任何对象引用」算出来，因此同一对象可以挂多处。
+- 「复制」把当前任务导出成多级标题文本：根对象 `#`、子对象 `##`、孙对象 `###`……最多到 `######`；标题只写 `source`，引用备注写成 `> 备注：…`，`define` 原样跟在下面。不输出 ID、缩进和连接线，与当前展开的视图无关。
 - 编辑走抽屉；表格只给入口；窄屏沿用同一张表，横向滚动。
-- 发起时整棵树渲染成 markdown，`POST` 到目标成员 8765 交互服务的 `/v1/conversations`，开一个真实 SDK 对话；历史保存发起那一刻的定义、对话 id、状态与结果。
-- 任务、模板、历史都存在网关的 control-service（`$DSH_HOME/wireguard/tasks/tasks.json`），成员带着入网时的 agent token 读写同一份。
-- 详见 [Step 017](docs/Step%20017%20发起任务.md)。
+- 发起时整棵树渲染成 markdown，网关先在**本机**的 DSH（8765 交互服务）建一个协调对话：它用 `call_member` 把任务交给所选成员、用 `wait_member` 等待，最后负责验收。本机不执行具体任务。
+- 面板的「成员」下拉只列出其他成员；工作目录只能从该成员的 `~/.dsh/workspaces` 里选择，或只输入名称新建（实际目录固定为 `~/.dsh/workspaces/<name>`，由成员的 interop 解析并创建）。
+- 历史保存发起那一刻的定义、协调对话 id、执行成员、工作目录、状态与验收结果；「清空」只删除已结束的记录。任务、模板、历史都存在网关的 control-service（`$DSH_HOME/wireguard/tasks/tasks.json`），成员带着入网时的 agent token 读写同一份。
+- 对话 Tab 里，本机消息（协调对话的 prompt）也有「详细」，不再只显示 80 字标题。
+- 详见 [Step 017](docs/Step%20017%20发起任务.md) 与 [Step 021](docs/Step%20021%20协调任务与工作区.md)。
 
 ## 快速开始
 
@@ -195,7 +199,7 @@ powershell -ExecutionPolicy Bypass -File .\code\windows-service\install-service.
 powershell -ExecutionPolicy Bypass -File .\code\windows-service\uninstall-service.ps1
 ```
 
-`dsh-mesh-service.exe` 是**守护服务**：它只负责生命周期和会话选择，不亲自跑业务进程。无人登录、或登录的不是管理员时，它在 session 0 里直接拉起 `gate` 和 `dsh-interop`（截图是黑的、浏览器也起不来，但成员在线）；有管理员登录时，它用 `schtasks /RU <用户> /IT /RL HIGHEST` 建一个 `DSH-Mesh-Stack` 任务，由该任务执行 `start-stack.ps1` 在交互会话里跑同一套 gate + interop，成员界面「提升到交互会话」按钮就是触发这次重新判定。当前模式与原因写在 `data\session-status.json`，日志在 `data\service.log`。提升失败会退回 session 0 并冷却 5 分钟，不会反复拆栈。它和桌面版 DSH 是两个独立进程树，桌面 DSH 退出不会影响这个服务。
+`dsh-mesh-service.exe` 是**守护服务**：它只负责生命周期和会话选择，不亲自跑业务进程。无人登录、或登录的不是管理员时，它在 session 0 里直接拉起 `gate`（interop 现在在 DSH Web 内，不单独起进程）；有管理员登录时，它用 `schtasks /RU <用户> /IT /RL HIGHEST` 建一个 `DSH-Mesh-Stack` 任务，由该任务执行 `start-stack.ps1` 在交互会话里跑同一套 gate + Web，成员界面「提升到交互会话」按钮就是触发这次重新判定。当前模式与原因写在 `data\session-status.json`，日志在 `data\service.log`。提升失败会退回 session 0 并冷却 5 分钟，不会反复拆栈。它和桌面版 DSH 是两个独立进程树，桌面 DSH 退出不会影响这个服务。
 
 `-InstallService` 现在会继续调用 `install-split-services.ps1`，把 DSH 也拆成独立的 `DSH-Web-App` 服务；网关进入 external-DSH 模式，只监听 `data/dsh-web.json`，不再 spawn DSH。网关、DSH、WireGuard 控制面板三者互不依赖，详见 [Step 012](docs/Step%20012%20独立服务与WireGuard控制面板.md)。
 
@@ -268,7 +272,7 @@ deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-lin
 
 `deploy` 只有 `host` 和 `package` 两个输入。`host` 命中成员时自动解析成员 IP、SSH 用户/私钥、OS 和安装目录；不是成员时按普通 SSH 主机处理，OS 由包名决定。部署同步等待结束并返回 `data.logFile`；健康检查失败会自动切回 `previous`。目标必须已经安装过一次（`shared/config/gate.env` 存在），SSH 使用密钥和 `BatchMode=yes`。详见 [Step 011](docs/Step%20011%20通过%20SSH%20蓝绿部署.md)。
 
-### 安装独立 DSH 交互 HTTP 服务
+### 安装独立 DSH 交互 HTTP 服务（仅回退/旧结构需要）
 
 Windows：
 
@@ -282,7 +286,7 @@ Linux：
 sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0.0.1
 ```
 
-默认只绑 `127.0.0.1`；跨成员调用时设 `-Bind 0.0.0.0` 或 VPN IP，并放行防火墙。`config/interop.env` 和 `data/interop-token` 保存 Bearer token；真实任务需要设置 `DSH_INTEROP_APPROVE=1` 或处理审批。若希望直接复用网关密码，安装时加 `-UseGatePassword` / `--use-gate-password`，或在配置里设 `DSH_INTEROP_USE_GATE_PASSWORD=1`；这等于任何知道网关密码的人都能调用 8765 并执行 DSH 工具，只建议在 loopback/VPN 下使用。详见 [Step 013](docs/Step%20013%20独立DSH交互HTTP服务.md)。
+默认部署已把 `8765` 内嵌进 DSH Web，只有设置 `interopEmbedded: false` 或回滚到旧 release 时才需要这一节。默认只绑 `127.0.0.1`；跨成员调用时设 `-Bind 0.0.0.0` 或 VPN IP，并放行防火墙。`config/interop.env` 和 `data/interop-token` 保存 Bearer token；真实任务需要设置 `DSH_INTEROP_APPROVE=1` 或处理审批。若希望直接复用网关密码，安装时加 `-UseGatePassword` / `--use-gate-password`，或在配置里设 `DSH_INTEROP_USE_GATE_PASSWORD=1`；这等于任何知道网关密码的人都能调用 8765 并执行 DSH 工具，只建议在 loopback/VPN 下使用。详见 [Step 013](docs/Step%20013%20独立DSH交互HTTP服务.md)。
 
 ## 文档
 
@@ -304,9 +308,11 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 014 成员任务插件与主对话回调](docs/Step%20014%20成员任务插件与主对话回调.md) | `call_member`、成员发现、后台等待、agent.followup 通知 |
 | [Step 015 面板事件推送](docs/Step%20015%20面板事件推送.md) | SSE 通道、`fs.watch` 任务目录、面板零轮询 |
 | [Step 016 入网即双向 SSH](docs/Step%20016%20入网即双向SSH.md) | 成员自带密钥、`from=` 限制、`/ssh/authorize`、托管 config 块、撤销 |
-| [Step 017 发起任务](docs/Step%20017%20发起任务.md) | 对象树（source/define/children）、平铺与树形视图、模板、经 SDK 发起对话、历史快照 |
+| [Step 017 发起任务](docs/Step%20017%20发起任务.md) | 对象树（source/define/children）、平铺与树形视图、模板、历史快照 |
+| [Step 021 协调任务与工作区](docs/Step%20021%20协调任务与工作区.md) | 本机协调对话、只选其他成员、`~/.dsh/workspaces/<name>`、历史清空、消息详情 |
 | [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、蓝绿/平铺两条路径、清空编译日志 |
 | [Step 019 升级验收与回退页](docs/Step%20019%20升级验收与回退页.md) | 升级后先看后验收、查看/验收/回退三个按钮、marker、独立进程回退 |
+| [Step 020 内嵌 interop 服务](docs/Step%20020%20内嵌interop服务.md) | 会话由 DSH Web 拥有、嵌入式 :8765、部署/回滚、冷读「已停止」根因 |
 
 ## 代码位置
 
@@ -320,15 +326,16 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `code/deploy/upgrade-local.sh` | 平铺安装的就地升级：备份、覆盖、接线、重装单元、健康检查、回滚 |
 | `code/deploy/wire-profile.mjs` | 就地升级后的 `gate.env` 与 profile 接线 |
 | `code/deploy/rollback-local.sh` | 验收页「回退」：平铺恢复备份 / 蓝绿切回 previous |
-| `code/interop-service/server.mjs` | 独立 HTTP 服务：SDK stdio、创建/等待/通知/事件/回调 |
+| `src/lib/interop-service.mjs` | 内嵌 HTTP 服务：`ctx.agents` 创建/恢复、等待/通知/事件/回调 |
+| `code/interop-service/server.mjs` | 旧独立 HTTP 服务（回退用，默认不启动） |
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
 | `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` 工具 |
-| `src/wireguard/lib/task-model.ts` | 对象树模型：归一化、根对象、增删改排序、树布局、markdown 渲染 |
+| `src/wireguard/lib/task-model.ts` | 对象树模型：归一化、根对象、增删改排序、树布局、markdown 渲染、复制用多级标题大纲 |
 | `src/wireguard/lib/task-store.ts` | 任务文件：原子写、模板与历史归一化、历史上限 |
-| `src/wireguard/lib/task-service.ts` | 草稿/模板/历史、经成员 interop 发起、状态追踪、成员→网关转发 |
-| `src/client/tasks/index.tsx` | 「发起任务」Tab：任务/模板/历史、平铺与树形、抽屉编辑、发起预览 |
+| `src/wireguard/lib/task-service.ts` | 草稿/模板/历史、在本机建协调对话、工作区列表、状态追踪、成员→网关转发 |
+| `src/client/tasks/index.tsx` | 「任务」Tab：任务/模板/历史、平铺与树形、复制多级标题大纲、抽屉编辑、发起预览、历史清空 |
 | `src/client/index.tsx` | 侧边栏「DSH 成员」面板 |
 | `code/gate/server.mjs` | 网关：密码门、目标路由、反向代理、WebSocket |
 | `code/gate/members.mjs` | 成员发现、`/__gate/select`、cluster 代理、cookie 隔离 |

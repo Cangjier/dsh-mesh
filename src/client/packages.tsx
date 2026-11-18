@@ -233,7 +233,6 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
   const [error, setError] = useState('')
   const [logJob, setLogJob] = useState<BuildJob | null>(null)
   const [logLines, setLogLines] = useState<string[]>([])
-  const [logCleared, setLogCleared] = useState(false)
   const [logLoading, setLogLoading] = useState(false)
   const logRef = useRef<HTMLPreElement | null>(null)
 
@@ -367,26 +366,6 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
   }, [messageApi, proxyUrl, ref, selectedBuildMember, selectedProxyMember, selectedProxyMode, targets, loadJobs])
 
   /**
-   * Truncate one finished job's log.
-   *
-   * The log is where a failed build explains itself, so a running job keeps
-   * its log; the button stays enabled for a finished job even when the log is
-   * already empty, so a click always answers instead of silently doing nothing.
-   */
-  const clearLog = useCallback(async () => {
-    if (logJob === null) return
-    const hadLines = logLines.some(line => line.trim() !== '')
-    try {
-      await api.clearBuildLog(logJob.id)
-      setLogLines([])
-      setLogCleared(true)
-      messageApi.success(hadLines ? '日志已清空' : '日志本来就是空的')
-    } catch (failure) {
-      messageApi.error(errorText(failure))
-    }
-  }, [logJob, logLines, messageApi])
-
-  /**
    * Remove every finished job in one go (the card's toolbar button).
    *
    * The server deletes the job directory, so the table really empties: a
@@ -398,7 +377,6 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
       const result = await api.clearBuildLogs()
       if (logJob !== null && result.cleared.includes(logJob.id)) {
         setLogLines([])
-        setLogCleared(false)
         setLogJob(null)
       }
       messageApi.success(result.cleared.length === 0 ? '没有已结束的任务可清理' : `已清理 ${String(result.cleared.length)} 个任务`)
@@ -495,7 +473,6 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
           size="small"
           onClick={() => {
             setLogLines([])
-            setLogCleared(false)
             setLogJob(job)
           }}
         >
@@ -670,7 +647,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
                 okButtonProps={{ danger: true }}
                 onConfirm={() => { void clearAllLogs() }}
               >
-                <Button size="small" type="text" danger icon={<ClearOutlined />}>清空日志</Button>
+                <Button size="small" type="text" danger icon={<ClearOutlined />}>清理</Button>
               </Popconfirm>
             </Space>
           )}
@@ -727,22 +704,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
         open={logJob !== null}
         title={`编译日志 · ${logJob?.id.slice(0, 24) ?? ''}`}
         width={820}
-        footer={(
-          <Space>
-            <Popconfirm
-              title="清空这个任务的日志？"
-              description={activeJob?.status === 'running' ? '编译还在运行，结束后才能清空。' : '只清空日志文件，任务记录保留；要连同记录一起清掉用卡片右上角的清空日志。'}
-              okText="清空"
-              cancelText="取消"
-              okButtonProps={{ danger: true }}
-              disabled={activeJob === null || activeJob.status === 'running'}
-              onConfirm={() => { void clearLog() }}
-            >
-              <Button danger disabled={activeJob === null || activeJob.status === 'running'}>清空日志</Button>
-            </Popconfirm>
-            <Button onClick={() => setLogJob(null)}>关闭</Button>
-          </Space>
-        )}
+        footer={<Button onClick={() => setLogJob(null)}>关闭</Button>}
         onCancel={() => setLogJob(null)}
         destroyOnHidden
       >
@@ -767,7 +729,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
               {[phaseLabel(activeJob.phase), targetText(activeJob)].filter(part => part !== '').join(' · ')}
             </Typography.Text>
             <pre className="dsh-pw-deploy-log" ref={logRef}>
-              {visibleLines.length > 0 ? visibleLines.join('\n') : logCleared ? '日志已清空' : logLoading ? '读取日志…' : activeJob.status === 'running' ? '等待日志…' : '这个任务没有日志'}
+              {visibleLines.length > 0 ? visibleLines.join('\n') : logLoading ? '读取日志…' : activeJob.status === 'running' ? '等待日志…' : '这个任务没有日志'}
             </pre>
           </Space>
         )}

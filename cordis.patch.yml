@@ -10,7 +10,11 @@
         memberPorts:
           - 80
           - 8080
-        # Member-to-member DSH interop HTTP service.
+        # Member-to-member DSH interop HTTP service. The listener runs inside
+        # this DSH Web process (the host plugin owns :8765) so task sessions are
+        # owned by the same process the Web UI lists. Set false only to fall
+        # back to the standalone code/interop-service.
+        interopEmbedded: true
         interopPort: 8765
         # Empty: use DSH_INTEROP_TOKEN, DSH_GATE_PASSWORD, or config/gate.env.
         interopToken: ''

@@ -49,7 +49,10 @@ async function serviceOf(options: Partial<ConstructorParameters<typeof TaskServi
   const service = new TaskService({
     dir,
     log: () => {},
-    members: () => [{ id: 'local', name: 'gateway', ip: '10.66.66.1' }],
+    members: () => [
+      { id: 'local', name: 'gateway', ip: '10.66.66.1' },
+      { id: '10.66.66.2', name: 'build-1', ip: '10.66.66.2' },
+    ],
     interopToken: () => 'secret',
     selfName: 'gateway',
     ...options,
@@ -114,33 +117,97 @@ test('templates create, rename, overwrite and delete', async () => {
   }
 });
 
-test('launching renders markdown, creates a conversation and records the run', async () => {
+test('launching opens a local coordinator that delegates to the executor', async () => {
   const { fetch, calls } = fakeFetch((call) => {
     if (call.method === 'POST' && call.url.endsWith('/v1/conversations')) return { status: 201, body: { ok: true, conversation: { id: 'c-1' } } };
     if (call.method === 'GET' && call.url.endsWith('/v1/conversations/c-1')) return { status: 200, body: { ok: true, conversation: { id: 'c-1', status: 'idle' } } };
-    if (call.method === 'GET' && call.url.endsWith('/v1/conversations/c-1/result')) return { status: 200, body: { ok: true, finalText: '做完了' } };
+    if (call.method === 'GET' && call.url.endsWith('/v1/conversations/c-1/result')) return { status: 200, body: { ok: true, finalText: '验收通过' } };
     return { status: 404, body: { ok: false, error: { message: 'nope' } } };
   });
   const { service, dir } = await serviceOf({ fetchImpl: fetch });
   try {
-    const launched = await service.launch({ doc: sampleDoc(), title: '重建面板', cwd: '/srv/app' });
+    const launched = await service.launch({ doc: sampleDoc(), title: '重建面板', workspace: 'demo' });
     assert.equal(launched.run.status, 'running');
+    // The conversation is the local coordinator's, not the member's.
     assert.equal(launched.run.conversationId, 'c-1');
+    assert.equal(launched.run.member?.ip, '10.66.66.2');
+    assert.equal(launched.run.manager?.ip, '10.66.66.1');
+    assert.equal(launched.run.workspace, 'demo');
+    assert.equal(launched.run.cwd, '~/.dsh/workspaces/demo');
     assert.equal(launched.tasks.runs.length, 1);
 
     const created = calls[0];
     assert.equal(created.url, 'http://10.66.66.1:8765/v1/conversations');
     assert.equal(created.headers.authorization, 'Bearer secret');
     const payload = created.body as Record<string, unknown>;
-    assert.equal(payload.title, '重建面板');
-    assert.equal(payload.cwd, '/srv/app');
-    assert.match(String(payload.prompt), /### #0 · src\/a\.ts/u);
+    assert.equal(payload.title, '重建面板 · 协调');
+    assert.equal(payload.workspace, 'demo');
+    assert.equal(payload.cwd, undefined);
+    const prompt = String(payload.prompt);
+    assert.match(prompt, /管理者、协调者和验收者/u);
+    assert.match(prompt, /build-1（10\.66\.66\.2）/u);
+    assert.match(prompt, /workspace="demo"/u);
+    assert.match(prompt, /~\/\.dsh\/workspaces\/demo/u);
+    assert.match(prompt, /### #0 · src\/a\.ts/u);
 
     // The stored snapshot is what the panel shows in 历史.
     const run = await service.run(launched.run.id);
     assert.equal(run.status, 'completed');
-    assert.equal(run.result, '做完了');
+    assert.equal(run.result, '验收通过');
     assert.equal(run.doc.nodes.length, 2);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the local member cannot be the executor', async () => {
+  const { fetch, calls } = fakeFetch(() => ({ status: 500, body: {} }));
+  const { service, dir } = await serviceOf({ fetchImpl: fetch });
+  try {
+    await assert.rejects(() => service.launch({ doc: sampleDoc(), member: 'local' }), (error: unknown) => (
+      error instanceof WireGuardError && error.code === 'local_member_not_allowed'
+    ));
+    assert.equal(calls.length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('workspaces are read from the selected member', async () => {
+  const { fetch, calls } = fakeFetch((call) => {
+    if (call.method === 'GET' && call.url.endsWith('/v1/workspaces')) {
+      return { status: 200, body: { ok: true, dir: '/home/dsh/.dsh/workspaces', workspaces: [{ name: 'demo', path: '/home/dsh/.dsh/workspaces/demo' }, { name: 'web', path: '/home/dsh/.dsh/workspaces/web' }] } };
+    }
+    return { status: 404, body: {} };
+  });
+  const { service, dir } = await serviceOf({ fetchImpl: fetch });
+  try {
+    const listing = await service.workspaces('10.66.66.2');
+    assert.equal(calls[0].url, 'http://10.66.66.2:8765/v1/workspaces');
+    assert.equal(calls[0].headers.authorization, 'Bearer secret');
+    assert.equal(listing.dir, '/home/dsh/.dsh/workspaces');
+    assert.deepEqual(listing.workspaces.map((item) => item.name), ['demo', 'web']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('clearing 历史 keeps running launches', async () => {
+  const { fetch } = fakeFetch((call) => {
+    if (call.method === 'POST' && call.url.endsWith('/v1/conversations')) return { status: 201, body: { ok: true, conversation: { id: `c-${String(Date.now())}` } } };
+    if (call.method === 'GET' && call.url.includes('/v1/conversations/')) return { status: 200, body: { ok: true, conversation: { id: 'c', status: 'running' } } };
+    return { status: 404, body: {} };
+  });
+  const { service, dir } = await serviceOf({ fetchImpl: fetch });
+  try {
+    await service.launch({ doc: sampleDoc(), workspace: 'demo' });
+    await service.launch({ doc: sampleDoc(), workspace: 'demo' });
+    // One run finished; the other is still in flight.
+    service.store.data.runs[0].status = 'completed';
+    const snapshot = await service.clearRuns();
+    assert.equal(snapshot.runs.length, 1);
+    assert.equal(snapshot.runs[0].status, 'running');
+    assert.equal(snapshot.runs[0].workspace, 'demo');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -232,6 +299,33 @@ test('a member forwards everything to the gateway with its agent token', async (
     assert.equal(calls[1].url, 'http://10.66.66.1:51821/api/dsh-wireguard/tasks/draft');
     // The member never writes its own copy while delegated.
     await assert.rejects(() => readFile(path.join(dir, 'tasks.json'), 'utf8'), /ENOENT/u);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a member forwards workspace listing and 历史 clearing to the gateway', async () => {
+  const { fetch, calls } = fakeFetch((call) => {
+    if (call.url.includes('/tasks/workspaces')) {
+      return { status: 200, body: { ok: true, dir: '/home/dsh/.dsh/workspaces', workspaces: [{ name: 'demo' }] } };
+    }
+    if (call.url.endsWith('/tasks/runs/clear')) {
+      return { status: 200, body: { ok: true, tasks: { draft: { nodes: [] }, templates: [], runs: [] } } };
+    }
+    return { status: 200, body: { ok: true, tasks: { draft: { nodes: [] }, templates: [], runs: [] } } };
+  });
+  const { service, dir } = await serviceOf({
+    fetchImpl: fetch,
+    remote: () => ({ baseUrl: 'http://10.66.66.1:51821/', token: 'peer-token' }),
+  });
+  try {
+    const listing = await service.workspaces('10.66.66.2');
+    assert.equal(calls[0].url, 'http://10.66.66.1:51821/api/dsh-wireguard/tasks/workspaces?member=10.66.66.2');
+    assert.equal(calls[0].headers['x-dsh-peer-token'], 'peer-token');
+    assert.deepEqual(listing.workspaces, [{ name: 'demo' }]);
+    const snapshot = await service.clearRuns();
+    assert.equal(calls[1].url, 'http://10.66.66.1:51821/api/dsh-wireguard/tasks/runs/clear');
+    assert.deepEqual(snapshot.runs, []);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

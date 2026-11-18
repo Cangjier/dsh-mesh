@@ -235,20 +235,32 @@ export class MemberTaskService {
   async #waitForRuntime(attempt, budgetMs = 90_000, signal) {
     const deadline = Date.now() + budgetMs
     for (;;) {
-      if (signal?.aborted) throw new Error('tool call aborted')
+      signal?.throwIfAborted()
       try {
         return await attempt()
       } catch (error) {
-        if (signal?.aborted) throw new Error('tool call aborted')
+        signal?.throwIfAborted()
         const message = error instanceof Error ? error.message : String(error)
         const starting = /SDK runtime is not ready|sdk_unavailable|SDK runtime is still starting/iu.test(message)
         if (!starting || Date.now() >= deadline) throw error
-        await new Promise(resolve => setTimeout(resolve, 2_000))
+        await new Promise((resolve) => {
+          const timer = setTimeout(done, 2_000)
+          timer.unref?.()
+          function done() {
+            clearTimeout(timer)
+            signal?.removeEventListener('abort', done)
+            resolve()
+          }
+          if (signal !== undefined) {
+            if (signal.aborted) done()
+            else signal.addEventListener('abort', done, { once: true })
+          }
+        })
       }
     }
   }
 
-  async start({ member, prompt, cwd, agent, notify = true, signal }) {
+  async start({ member, prompt, cwd, workspace, agent, notify = true, signal }) {
     await this.#ensureLoaded()
     if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('prompt is required')
     if (agent === undefined || agent === null) throw new Error('delegation must be called from a DSH conversation')
@@ -258,6 +270,7 @@ export class MemberTaskService {
       // The member's panel lists these; without a title it would show a UUID.
       title: truncate(prompt, 80),
       initiator: { ...(this.identity ?? { id: 'local' }), source: 'call_member' },
+      ...(typeof workspace === 'string' && workspace.trim() !== '' ? { workspace: workspace.trim() } : {}),
       ...(typeof cwd === 'string' && cwd !== '' ? { cwd } : {}),
     }
     const created = await this.#waitForRuntime(
@@ -312,6 +325,11 @@ export class MemberTaskService {
    * task reaching a terminal state. The monitor keeps running in the background,
    * so a timeout only ends this caller's wait; the same taskId can be waited
    * again, and replies that arrived meanwhile are not lost.
+   *
+   * `signal` is the tool call's own cancellation. It ends the park at once
+   * rather than at the next wake, so stopping the conversation does not leave
+   * the call hanging until its deadline; the thrown reason is the signal's own
+   * reason, which is what makes DSH report the call as cancelled.
    * @param {string} taskId task id returned by call_member.
    * @param {{timeoutMs?: number, signal?: AbortSignal}} [options] wait options.
    * @returns {Promise<{done: boolean, timedOut: boolean, task: object, replies: object[], state: string}>} outcome.
@@ -324,7 +342,7 @@ export class MemberTaskService {
     const signal = options.signal
     const deadline = Date.now() + timeoutMs
     for (;;) {
-      if (signal?.aborted) throw new Error('tool call aborted')
+      signal?.throwIfAborted()
       const task = this.tasks.get(id)
       if (task === undefined) throw new Error(`member task not found: ${id}`)
       const replies = this.#pendingReplies(task)
@@ -345,7 +363,7 @@ export class MemberTaskService {
       }
       const left = deadline - Date.now()
       if (left <= 0) return { done: false, timedOut: true, task, replies: [], state: 'running' }
-      await this.#waitForWake(task, left)
+      await this.#waitForWake(task, left, signal)
     }
   }
 
@@ -357,32 +375,38 @@ export class MemberTaskService {
   }
 
   /**
-   * Park until this task changes or the budget runs out.
+   * Park until this task changes, the budget runs out, or the call is cancelled.
    *
    * A promise per waiter (rather than a poll loop) is what makes a finished
-   * turn reach the model immediately, without a half-second of latency.
+   * turn reach the model immediately, without a half-second of latency. The
+   * abort listener is the same waiter, so a cancelled tool call stops parking
+   * right away instead of waiting for a reply or the deadline.
    * @param {object} task member task.
    * @param {number} ms maximum wait.
-   * @returns {Promise<void>} resolves on a wake or on the deadline.
+   * @param {AbortSignal} [signal] cancellation of the waiting tool call.
+   * @returns {Promise<void>} resolves on a wake, on the deadline, or on abort.
    */
-  #waitForWake(task, ms) {
+  #waitForWake(task, ms, signal) {
     return new Promise((resolve) => {
       let timer
-      const waiter = () => {
+      const wake = () => {
         clearTimeout(timer)
+        signal?.removeEventListener('abort', wake)
+        this.waiters.get(task.id)?.delete(wake)
         resolve()
       }
-      timer = setTimeout(() => {
-        this.waiters.get(task.id)?.delete(waiter)
-        resolve()
-      }, Math.max(0, ms))
+      timer = setTimeout(wake, Math.max(0, ms))
       timer.unref?.()
       let parked = this.waiters.get(task.id)
       if (parked === undefined) {
         parked = new Set()
         this.waiters.set(task.id, parked)
       }
-      parked.add(waiter)
+      parked.add(wake)
+      if (signal !== undefined) {
+        if (signal.aborted) wake()
+        else signal.addEventListener('abort', wake, { once: true })
+      }
     })
   }
 

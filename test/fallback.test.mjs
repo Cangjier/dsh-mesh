@@ -116,7 +116,16 @@ async function stubBin(dir) {
     await chmod(file, 0o755)
   }
   const curl = path.join(bin, 'curl')
-  await writeFile(curl, '#!/bin/sh\nexit 0\n', 'utf8')
+  // The gate health only needs exit 0; the embedded interop probe also matches
+  // the capability marker. The fake member has no real DSH Web on :8765.
+  await writeFile(curl, [
+    '#!/bin/sh',
+    'case "$*" in',
+    '  *8765/healthz*) printf \'%s\\n\' \'{"ok":true,"engine":"dsh-mesh-embedded-interop-v1"}\' ;;',
+    'esac',
+    'exit 0',
+    '',
+  ].join('\n'), 'utf8')
   await chmod(curl, 0o755)
   return bin
 }
@@ -363,6 +372,9 @@ test('a successful blue-green activation arms the acceptance page for the new re
 
     const plan = await buildDeployPlan({
       host: 'example', os: 'linux', skipPackage: true, release: 'rollback', appRoot: root,
+      // The fake member has no interop listener; this test exercises the
+      // acceptance page and rollback marker, not the :8765 health probe.
+      interop: false,
       services: [
         { name: 'dsh-web-app.service', role: 'dsh' },
         { name: 'dsh-web-gate.service', role: 'gate' },

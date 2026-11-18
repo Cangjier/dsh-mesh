@@ -18,9 +18,9 @@ $env:DSH_PACKAGE_ROOT = $Root
 # DshMeshService.cs and the "-InstallTask" branch of install.ps1.
 
 # The stack reads its settings from config\gate.env (gate) and config\interop.env
-# (the interop service). Both live on the shared volume, so a release switch does
-# not lose them. The platform profile loads them in this order, later files
-# winning, and the interop file is written after the gate one.
+# (the interop listener embedded in DSH Web). Both live on the shared volume, so
+# a release switch does not lose them. The platform profile loads them in this
+# order, later files winning, and the interop file is written after the gate one.
 $envFiles = @((Join-Path $Root 'config\gate.env'), (Join-Path $Root 'config\interop.env'))
 if (-not (Test-Path $envFiles[0])) { throw "Missing $($envFiles[0]). Deploy or install this member first." }
 foreach ($envFile in $envFiles) {
@@ -82,12 +82,11 @@ for ($i = 0; $i -lt 30; $i++) {
   Start-Sleep -Milliseconds 500
 }
 
-$interop = $null
-$interopScript = Join-Path $Root 'code\interop-service\server.mjs'
-if (Test-Path $interopScript) {
-  $interop = Start-Process -FilePath $node -ArgumentList @($interopScript) -WorkingDirectory $Root -WindowStyle Hidden -PassThru
-}
-$pids = @{ stack = $PID; interop = $(if ($interop) { $interop.Id } else { $null }) }
+# DSH Web hosts the interop listener in-process (the dsh-mesh plugin binds
+# :8765). Do not start the standalone service here: it would race the plugin
+# for the port. The stale-process reaping above still kills an old release's
+# interop before this stack starts.
+$pids = @{ stack = $PID }
 try { [System.IO.File]::WriteAllText($PidFile, ($pids | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false)) } catch { }
 $gateLog = Join-Path $Root 'data\gate.out'
 try {
@@ -95,8 +94,5 @@ try {
   # $ErrorActionPreference = 'Stop' PowerShell would turn that into a crash.
   & cmd.exe /c "`"$node`" `"$(Join-Path $Root 'gate\server.mjs')`" >> `"$gateLog`" 2>&1"
 } finally {
-  if ($interop -and -not $interop.HasExited) {
-    Stop-Process -Id $interop.Id -Force -ErrorAction SilentlyContinue
-  }
   Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
 }

@@ -1,4 +1,4 @@
-/** Browser API for the 发起任务 tab: one shared task list behind the panel. */
+/** Browser API for the 任务 tab: one shared task list behind the panel. */
 
 import type {
   TaskDoc,
@@ -11,6 +11,12 @@ import type {
 export type { TaskChildRef, TaskDoc, TaskNode, TaskRun, TaskRunSummary, TaskSnapshot, TaskTemplate } from '../../wireguard/lib/task-model';
 
 const PREFIX = '/api/dsh-wireguard/tasks';
+
+/** Workspaces a member exposes below `~/.dsh/workspaces`. */
+export interface WorkspaceListing {
+  dir: string;
+  workspaces: Array<{ name: string }>;
+}
 
 /** A failure the panel can show as-is. */
 export class TaskApiError extends Error {
@@ -104,9 +110,20 @@ export const taskApi = {
     return (await request<{ tasks: TaskSnapshot }>('/templates/delete', { method: 'POST', body: JSON.stringify({ id }) })).tasks;
   },
 
+  /** Workspaces below the target member's `~/.dsh/workspaces`. */
+  async workspaces(member: string): Promise<WorkspaceListing> {
+    const query = new URLSearchParams({ member }).toString();
+    return request<WorkspaceListing>(`/workspaces?${query}`);
+  },
+
   /** Render the task on the gateway and launch it. */
-  async launch(input: { doc: TaskDoc; title: string; member: string; cwd: string }): Promise<{ run: TaskRunSummary; tasks: TaskSnapshot }> {
+  async launch(input: { doc: TaskDoc; title: string; member: string; workspace: string }): Promise<{ run: TaskRunSummary; tasks: TaskSnapshot }> {
     return request<{ run: TaskRunSummary; tasks: TaskSnapshot }>('/launch', { method: 'POST', body: JSON.stringify(input) });
+  },
+
+  /** Remove the finished launches from 历史. */
+  async clearRuns(): Promise<TaskSnapshot> {
+    return (await request<{ tasks: TaskSnapshot }>('/runs/clear', { method: 'POST', body: JSON.stringify({}) })).tasks;
   },
 
   /** One historical run with its full snapshot. */

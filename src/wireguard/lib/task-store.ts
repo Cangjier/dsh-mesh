@@ -85,18 +85,22 @@ function normalizeRun(value: unknown): TaskRun | null {
   const conversationId = text(item.conversationId, 120);
   if (id === '' || conversationId === '') return null;
   const status = item.status === 'completed' || item.status === 'failed' ? item.status : 'running';
-  const member = item.member !== null && typeof item.member === 'object'
-    ? {
-      id: text((item.member as Record<string, unknown>).id, 120),
-      name: text((item.member as Record<string, unknown>).name, 120),
-      ip: text((item.member as Record<string, unknown>).ip, 120),
-    }
-    : null;
+  const memberOf = (value: unknown): { id: string; name: string; ip: string } | null => {
+    if (value === null || typeof value !== 'object') return null;
+    const entry = value as Record<string, unknown>;
+    return {
+      id: text(entry.id, 120),
+      name: text(entry.name, 120),
+      ip: text(entry.ip, 120),
+    };
+  };
   return {
     id,
     title: text(item.title, MAX_TITLE_CHARS) || '任务',
     status,
-    member,
+    member: memberOf(item.member),
+    manager: memberOf(item.manager),
+    workspace: text(item.workspace, 120) || null,
     cwd: text(item.cwd, 400) || null,
     conversationId,
     createdAt: text(item.createdAt, 40) || new Date().toISOString(),

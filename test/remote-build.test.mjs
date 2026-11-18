@@ -162,3 +162,27 @@ test('decodeWindowsState survives noise and non-ASCII state', () => {
   assert.equal(decoded.id, 'job-9')
   assert.equal(decoded.mismatches[0].doc, 'docs/Step 005 账号登录前端补丁.md')
 })
+
+test('remote build scripts pass the published release config, or disable publishing', () => {
+  const linux = remoteBuildScript({
+    jobId: 'job-release',
+    ref: 'main',
+    targets: ['linux-x64'],
+    releaseConfigRemote: '/tmp/dsh-mesh-release-job-release.json',
+    publish: true,
+  })
+  assert.match(linux, /--release-config '\/tmp\/dsh-mesh-release-job-release\.json'/u)
+  const windows = windowsBuildScript({
+    jobId: 'job-release',
+    ref: 'main',
+    targets: ['win-x64'],
+    releaseConfigRemote: 'C:\\Users\\Admin\\AppData\\Local\\Temp\\dsh-mesh-release-job-release.json',
+    publish: true,
+  })
+  assert.match(windows, /--release-config 'C:\\Users\\Admin\\AppData\\Local\\Temp\\dsh-mesh-release-job-release\.json'/u)
+  const disabled = remoteBuildScript({ jobId: 'job-release', ref: 'main', targets: ['linux-x64'], publish: false })
+  assert.match(disabled, /--no-publish/u)
+  // No config path means the member must not fall back to a stale local file.
+  const noPath = remoteBuildScript({ jobId: 'job-release', ref: 'main', targets: ['linux-x64'] })
+  assert.match(noPath, /--no-publish/u)
+})

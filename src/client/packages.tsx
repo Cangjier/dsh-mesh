@@ -37,6 +37,7 @@ import {
 import { api, ApiError, type BuildJob, type Member, type PackageInfo } from './api'
 import { useEventStream } from './events'
 import { ScheduleCard } from './schedule'
+import { ReleaseCard } from './release'
 import {
   DEFAULT_BUILD_TARGETS,
   memberCores,
@@ -110,6 +111,35 @@ function jobStatusTag(job: BuildJob): JSX.Element {
 }
 
 /**
+ * Release publishing outcome for one build.
+ *
+ * A build that finished locally but failed to upload still matters: the panel
+ * must not hide the failure behind a green "完成". The tag states which
+ * provider accepted the assets, and the tooltip carries the error.
+ * @param job build job.
+ * @returns status tag or null when the build had no publish step.
+ */
+function publishTag(job: BuildJob): JSX.Element | null {
+  const publish = job.publish
+  if (publish === null || publish === undefined) return null
+  const parts = [publish.github, publish.gitee]
+  const done = parts.filter(part => part?.status === 'done').length
+  const failed = parts.filter(part => part?.status === 'failed').length
+  if (publish.status === 'done') {
+    return <Tag color="green">已发布 {done} 个平台</Tag>
+  }
+  if (publish.status === 'partial') {
+    return <Tag color="orange">部分发布</Tag>
+  }
+  if (publish.status === 'failed') {
+    const detail = publish.error ?? [publish.github?.error, publish.gitee?.error].filter((value): value is string => typeof value === 'string' && value !== '').join('；')
+    return <Tooltip title={detail === '' ? '发布失败' : detail}><Tag color="error">发布失败{failed > 0 ? `（${String(failed)}）` : ''}</Tag></Tooltip>
+  }
+  if (publish.status === 'skipped') return <Tag color="default">未发布</Tag>
+  return <Tag>{publish.status}</Tag>
+}
+
+/**
  * The browser check that ran after packaging, if the job carries one.
  *
  * A done job with a passed smoke test is the only combination that says the
@@ -151,6 +181,7 @@ function phaseLabel(phase: string | undefined): string {
     case 'package': return '打包'
     case 'smoke': return '抓屏验证'
     case 'fetch': return '拉取产物'
+    case 'publish': return '发布 Release'
     case 'done': return '完成'
     case 'failed': return '失败'
     default: return phase ?? ''
@@ -405,6 +436,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
         <Space size={4} wrap>
           {jobStatusTag(job)}
           {job.status === 'done' ? smokeTag(job) : null}
+          {job.status === 'done' ? publishTag(job) : null}
         </Space>
       ),
     },
@@ -632,6 +664,8 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
         </Card>
 
         <ScheduleCard active={active} />
+
+        <ReleaseCard active={active} />
 
         <Card
           size="small"

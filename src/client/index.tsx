@@ -315,7 +315,7 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
   // unit. `label` comes from the deploy engine, which is the only place that
   // knows which phase is running.
   const meters = progress?.total ?? 0
-  const meterLabel = progress?.label ?? '上传安装包'
+  const meterLabel = progress?.label ?? '获取安装包'
   const meterText = total > 0
     ? (indeterminate
       ? `已上传 ${formatBytes(bytes)} / ${formatBytes(total)}（服务器不支持流式上传，无法显示百分比）`
@@ -1018,6 +1018,9 @@ function Panel({ ctx }: { ctx: any }) {
   const [packagesLoading, setPackagesLoading] = useState(false)
   const [packagesError, setPackagesError] = useState('')
   const [selectedPackage, setSelectedPackage] = useState<string | undefined>(undefined)
+  // Upgrade downloads prefer the release; `auto` lets the server pick the
+  // external-network member, `none` uses the target's own network.
+  const [downloadProxy, setDownloadProxy] = useState<string>('auto')
   const [deployJobs, setDeployJobs] = useState<DeployJob[]>([])
   const [progressJob, setProgressJob] = useState<DeployJob | null>(null)
   const [progressLog, setProgressLog] = useState<string[]>([])
@@ -1275,6 +1278,7 @@ function Panel({ ctx }: { ctx: any }) {
     setPackagesDir('')
     setPackagesError('')
     setSelectedPackage(undefined)
+    setDownloadProxy('auto')
     void loadPackages(preferredTarget(member))
   }, [loadPackages])
 
@@ -1282,10 +1286,15 @@ function Panel({ ctx }: { ctx: any }) {
     if (deployTarget === null || selectedPackage === undefined) return
     setBusy(deployTarget.id)
     try {
+      const downloadOptions = downloadProxy === 'none'
+        ? { direct: true }
+        : downloadProxy === 'auto'
+          ? {}
+          : { proxyMember: downloadProxy }
       const result = deployIntent === 'upgrade'
-        ? await api.upgrade(deployTarget.id, selectedPackage)
+        ? await api.upgrade(deployTarget.id, selectedPackage, downloadOptions)
         : deployIntent === 'test'
-          ? await api.testUpgrade(deployTarget.id, selectedPackage)
+          ? await api.testUpgrade(deployTarget.id, selectedPackage, downloadOptions)
           : await api.deploy(deployTarget.id, selectedPackage)
       setDeployTarget(null)
       setError(null)
@@ -1300,7 +1309,7 @@ function Panel({ ctx }: { ctx: any }) {
     } finally {
       setBusy('')
     }
-  }, [deployIntent, deployTarget, selectedPackage, messageApi, openProgress])
+  }, [deployIntent, deployTarget, selectedPackage, downloadProxy, messageApi, openProgress])
 
   const columns: ColumnsType<Member> = useMemo(() => {
     const actionColumn: ColumnsType<Member>[number] = {
@@ -1906,6 +1915,35 @@ function Panel({ ctx }: { ctx: any }) {
                   : '升级进程独立运行，本页面不受影响；成员切到新版本后会重启自己的 dsh / gate，健康检查失败时自动切回上一版。')
               : '部署包从本机上传到成员，安装完成后成员上的 dsh / gate / 控制服务会重启一次；进度在任务对话框里查看。'}
           />
+          {deployIntent !== 'install' && deployTarget?.kind !== 'self' ? (
+            <Space direction="vertical" size={4} style={{ width: '100%' }}>
+              <Space size={6}>
+                <Typography.Text type="secondary">下载代理</Typography.Text>
+                <Select
+                  size="small"
+                  style={{ width: 260 }}
+                  value={downloadProxy}
+                  onChange={value => setDownloadProxy(value)}
+                  options={[
+                    { value: 'auto', label: '自动（有外网成员）' },
+                    { value: 'none', label: '直连（成员自己联网）' },
+                    ...(snapshot === null
+                      ? []
+                      : [snapshot.local, ...snapshot.members]
+                        .filter(member => member.id !== 'local' && member.kind !== 'self' && member.online !== false
+                          && String(member.system?.platform ?? '').toLowerCase().startsWith('linux'))
+                        .map(member => ({
+                          value: member.id,
+                          label: [member.name, member.ip, member.tag ?? ''].filter(part => part !== '').join(' · '),
+                        }))),
+                  ]}
+                />
+              </Space>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                升级包优先从 GitHub / Gitee Release 下载（默认经有外网成员代理）；下载失败自动回退到本机上传。
+              </Typography.Text>
+            </Space>
+          ) : null}
           {deployTarget !== null ? (() => {
             const job = latestJobOf(deployTarget)
             if (job === undefined) return null

@@ -21,6 +21,7 @@ import {
   runJob,
 } from './job.mjs'
 import { defaultStampFile, isValidBuildStamp, nextBuildStamp } from './stamp.mjs'
+import { defaultReleaseConfigFile, loadReleaseConfig } from '../shared/release.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPOSITORY_ROOT = path.resolve(HERE, '..', '..')
@@ -97,6 +98,22 @@ function numberArg(values, name) {
   return Number(value)
 }
 
+/**
+ * Load the release config for this build.
+ *
+ * A build always carries a publish decision: `--no-publish` turns it off, and
+ * otherwise the file (or the environment tokens) decides whether there is
+ * anything to publish. Publishing never blocks a build from finishing.
+ * @param {Map<string, string|true>} values parsed arguments.
+ * @returns {Promise<object|false>} publish config or false.
+ */
+async function publishOptions(values) {
+  if (values.get('no-publish') === true) return false
+  const file = typeof values.get('release-config') === 'string' ? values.get('release-config') : defaultReleaseConfigFile()
+  const config = await loadReleaseConfig({ file })
+  return { config, proxy: typeof values.get('proxy') === 'string' ? values.get('proxy') : null }
+}
+
 async function main() {
   const { command, values } = parseArgs(process.argv.slice(2))
   const defaults = await recipeDefaults()
@@ -126,6 +143,7 @@ async function main() {
     const state = await resumeJob(dir, {
       repositoryRoot: REPOSITORY_ROOT,
       proxy: typeof values.get('proxy') === 'string' ? values.get('proxy') : undefined,
+      publish: await publishOptions(values),
       version: typeof values.get('version') === 'string' ? values.get('version') : undefined,
       smoke: values.get('no-smoke') === true ? false : undefined,
       smokeRequired: values.get('require-smoke') === true,
@@ -163,6 +181,7 @@ async function main() {
     const state = await runJob(job.dir, {
       repositoryRoot: REPOSITORY_ROOT,
       proxy: typeof values.get('proxy') === 'string' ? values.get('proxy') : undefined,
+      publish: await publishOptions(values),
       planOnly: command === 'plan',
       full: values.get('web-only') === true ? false : undefined,
       prebuild: values.get('no-prebuild') === true ? false : undefined,
@@ -198,6 +217,8 @@ async function main() {
     '  --targets <list>         default: linux-x64,win-x64',
     '  --out <dir>              job root (default: ~/.dsh/mesh/build)',
     '  --proxy <url>            send downloads and npm through an HTTP proxy',
+    '  --release-config <file>  release tokens/config (default: ~/.dsh/mesh/release.json)',
+    '  --no-publish             build only; do not upload to GitHub/Gitee releases',
     '  --web-only               package the web payload without app/node/runtime',
     '  --no-install             skip pnpm install',
     '  --no-prebuild            skip the workspace tsdown prebuild',

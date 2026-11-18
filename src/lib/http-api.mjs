@@ -130,6 +130,10 @@ export function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, await service.packages())
           return
         }
+        if (method === 'GET' && path === '/release') {
+          writeJson(response, 200, await service.releaseSettings())
+          return
+        }
         if (method === 'GET' && path === '/deploy/jobs') {
           writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) })
           return
@@ -172,6 +176,11 @@ export function registerApi(ctx, service, scheduler = null) {
         }
         if (request.headers[AGENT_HEADER] !== '1') {
           writeJson(response, 403, { ok: false, error: { code: 'forbidden', message: `Missing the ${AGENT_HEADER} header.` } })
+          return
+        }
+        if (method === 'POST' && path === '/release') {
+          const body = await readJson(request)
+          writeJson(response, 200, await service.saveReleaseSettings(body))
           return
         }
         if (path === '/deploy') {
@@ -217,6 +226,10 @@ export function registerApi(ctx, service, scheduler = null) {
           const request_ = {
             member: typeof body.member === 'string' ? body.member : undefined,
             package: typeof body.package === 'string' ? body.package : undefined,
+            // Upgrade downloads default to the external proxy; the panel can
+            // pick a different member or ask for a direct download.
+            ...(typeof body.proxyMember === 'string' && body.proxyMember.trim() !== '' ? { proxyMember: body.proxyMember.trim() } : {}),
+            ...(body.direct === true ? { direct: true } : {}),
           }
           // `/test-upgrade` runs the same upgrade on another member, plus a
           // rehearsal of the flat (local) path in a sandbox there.

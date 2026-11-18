@@ -41,7 +41,7 @@
 
 ### 蓝绿布局（成员 / 普通 SSH 主机）
 
-`<root>/current` 是指向 `releases/<release>` 的软链接。流程未变（Step 011）：上传 → prepare 到新 release → 切 `current` → `control → dsh → gate` 顺序重启 → 健康检查，失败自动切回 `previous`。
+`<root>/current` 是指向 `releases/<release>` 的软链接。流程未变（Step 011）：获取安装包（升级时优先让成员从 GitHub/Gitee Release 下载，失败回退网关上传，见 [Step 022](Step%20022%20Release%20发布与下载升级.md)）→ prepare 到新 release → 切 `current` → `control → dsh → gate` 顺序重启 → 健康检查，失败自动切回 `previous`。
 
 对**本机**的蓝绿安装，runner 用 `LocalRunner` 代替 SSH：同一个 plan、同一批脚本，但上传变成 `copyFile`、`script()` 变成 `bash -s`。网关升级自己时 sshd 也可能在重启，依赖自己 SSH 回环是自找麻烦。
 

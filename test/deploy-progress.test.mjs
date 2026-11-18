@@ -139,7 +139,7 @@ test('an already uploaded package is reused instead of transferred again', async
     assert.equal(final.status, 'succeeded')
     assert.equal(uploads, 0, 'the package transfer must be skipped')
     assert.equal(final.progress.percent, 100)
-    assert.match(final.steps[0].detail, /跳过上传/u)
+    assert.match(final.steps[0].detail, /跳过下载\/上传/u)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

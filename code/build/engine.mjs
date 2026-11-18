@@ -803,6 +803,11 @@ export async function assembleWebPackage(options) {
   await cp(options.dist, path.join(packageDir, 'web'), { recursive: true })
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'gate'), path.join(packageDir, 'gate'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'shared'), path.join(packageDir, 'shared'))
+  // The runtime scripts under `code/` (deploy engine, target downloader) import
+  // siblings from `code/shared`; the flat installer already lays the tree out
+  // that way, and the blue-green package must too or the deploy runner fails at
+  // import time on a member.
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'shared'), path.join(packageDir, 'code', 'shared'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'config'), path.join(packageDir, 'config'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'windows-service'), path.join(packageDir, 'code', 'windows-service'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'interop-service'), path.join(packageDir, 'code', 'interop-service'))

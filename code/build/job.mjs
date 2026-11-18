@@ -31,6 +31,7 @@ import {
 import { runPackageSmoke } from './smoke.mjs'
 import { buildStampDate, isValidBuildStamp } from './stamp.mjs'
 import { targetPercent } from './progress.mjs'
+import { publishRelease } from '../shared/release.mjs'
 
 /**
  * Default job root.
@@ -401,8 +402,52 @@ export async function runJob(dir, options) {
       log(`smoke verification incomplete: ${unverified}`)
       return state
     }
-    state = await updateState(dir, { status: 'done', phase: 'done', percent: 100, currentTarget: null, artifacts })
-    log('build complete')
+    // Publishing is part of a successful build, not a separate manual step:
+    // the compile host is the only place the archives exist, and other members
+    // are expected to download the newest package from a release instead of
+    // pulling it through the gateway. A publish failure does not fail the
+    // build (the archive is still deployable from here); it is recorded in
+    // `state.publish`, which the panel shows next to the build result.
+    state = await updateState(dir, { status: 'done', phase: 'publish', percent: 98, currentTarget: null, artifacts })
+    if (options.publish === false || options.publish === null || options.publish === undefined) {
+      log('release publish skipped (disabled)')
+      state = await updateState(dir, {
+        phase: 'done',
+        percent: 100,
+        publish: { status: 'skipped', reason: 'release publishing is disabled for this build' },
+      })
+      log('build complete')
+      return state
+    }
+    if (full === false) {
+      log('release publish skipped (web-only package has no app/runtime)')
+      state = await updateState(dir, {
+        phase: 'done',
+        percent: 100,
+        publish: { status: 'skipped', reason: 'web-only packages are not published as deployment packages' },
+      })
+      log('build complete')
+      return state
+    }
+    try {
+      const publish = await publishRelease({
+        artifacts,
+        config: options.publish.config,
+        proxy: typeof options.publish.proxy === 'string' ? options.publish.proxy : null,
+        log,
+      })
+      state = await updateState(dir, { phase: 'done', percent: 100, publish })
+      log(`build complete (release publish ${publish.status})`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      state = await updateState(dir, {
+        phase: 'done',
+        percent: 100,
+        publish: { status: 'failed', error: message },
+      })
+      log(`release publish failed: ${message}`)
+      log('build complete')
+    }
     return state
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

@@ -24,11 +24,11 @@ function apiCaller(service, scheduler = null) {
     },
   }
   registerApi(ctx, service, scheduler)
-  return async (method, url, body) => {
+  return async (method, url, body, headers = { 'x-dsh-mesh': '1' }) => {
     const request = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
     request.method = method
     request.url = url
-    request.headers = { 'x-dsh-mesh': '1' }
+    request.headers = headers
     let settled
     const response = {
       statusCode: 0,
@@ -173,4 +173,49 @@ test('the schedule route reports unavailable when no scheduler exists', async ()
   assert.equal(read.status, 503)
   const written = await call('POST', '/api/dsh-mesh/schedule', {})
   assert.equal(written.status, 503)
+})
+
+
+test('release settings routes mask tokens and require the CSRF header', async () => {
+  const saved = []
+  const call = apiCaller({
+    async releaseSettings() {
+      return { ok: true, config: { github: { hasToken: true }, gitee: { hasToken: false } }, manifestUrls: [], configured: true }
+    },
+    async saveReleaseSettings(body) {
+      saved.push(body)
+      return { ok: true, config: body.config, manifestUrls: [], configured: true }
+    },
+  })
+  const read = await call('GET', '/api/dsh-mesh/release')
+  assert.equal(read.status, 200)
+  assert.equal(read.body.config.github.hasToken, true)
+
+  const written = await call('POST', '/api/dsh-mesh/release', { config: { enabled: true, tag: 'latest' } })
+  assert.equal(written.status, 200)
+  assert.equal(saved.length, 1)
+
+  const forbidden = await call('POST', '/api/dsh-mesh/release', { config: { enabled: false } }, {})
+  assert.equal(forbidden.status, 403)
+  assert.equal(saved.length, 1)
+})
+
+test('upgrade routes forward the download proxy choice', async () => {
+  const seen = []
+  const call = apiCaller({
+    async upgradeMember(request) {
+      seen.push({ kind: 'upgrade', request })
+      return { ok: true, job: { id: 'deploy-up', mode: 'upgrade' } }
+    },
+    async testUpgradeMember(request) {
+      seen.push({ kind: 'test', request })
+      return { ok: true, job: { id: 'deploy-test', mode: 'test' } }
+    },
+  })
+  const upgraded = await call('POST', '/api/dsh-mesh/upgrade', { member: 'b', package: 'p.tar.gz', proxyMember: 'c' })
+  assert.equal(upgraded.status, 202)
+  assert.deepEqual(seen[0], { kind: 'upgrade', request: { member: 'b', package: 'p.tar.gz', proxyMember: 'c' } })
+  const direct = await call('POST', '/api/dsh-mesh/test-upgrade', { member: 'b', package: 'p.tar.gz', direct: true })
+  assert.equal(direct.status, 202)
+  assert.deepEqual(seen[1], { kind: 'test', request: { member: 'b', package: 'p.tar.gz', direct: true } })
 })

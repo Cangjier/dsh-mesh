@@ -33,7 +33,9 @@ const PLUGIN_FILES = ['index.js', 'client.js', 'cordis.patch.yml', 'package.json
 /** Plugin directories copied from the repository root. */
 const PLUGIN_DIRS = ['locale', 'build', 'code/build', 'code/shared', 'code/deploy']
 /** Directories copied from `code/` into the package's `code/`. */
-const CODE_DIRS = ['windows-service', 'interop-service', 'wireguard', 'dsh-service', 'deploy']
+// `shared` appears twice on purpose: `shared/` is the runtime copy the gate
+// and scripts use, and `code/shared/` is what the `code/` modules import.
+const CODE_DIRS = ['windows-service', 'interop-service', 'wireguard', 'dsh-service', 'deploy', 'shared']
 
 /**
  * Remove a path if it exists.

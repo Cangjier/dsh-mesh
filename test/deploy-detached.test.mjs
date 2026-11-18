@@ -378,7 +378,7 @@ test('the detached runner drives an in-place upgrade and settles the job', async
       phase: 'starting',
       error: null,
       steps: [
-        { key: 'upload', label: '上传安装包', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null },
+        { key: 'upload', label: '获取安装包', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null },
         { key: 'prepare', label: '解压并准备新版本', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null },
         { key: 'activate', label: '切换并重启服务', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null },
       ],

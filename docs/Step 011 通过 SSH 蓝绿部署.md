@@ -131,7 +131,7 @@ dsh_mesh_deploy action="rollback" host="10.66.66.3" user="root" os="linux" \
 
 | label | 单位 | 来源 |
 | --- | --- | --- |
-| 上传安装包 | 字节 | `bytes / totalBytes`，带速率与 ETA |
+| 获取安装包 | 字节 | `bytes / totalBytes`，带速率与 ETA；优先从 Release 下载，失败回退上传 |
 | 解压安装包 | 归档条目 | Linux 由 `tar --checkpoint=1000` 每 1000 项打一条 `DSH-MESH-EXTRACT <n>`，脚本先用 `tar -tzf \| wc -l` 取总数；Windows 用 `tar -xf -v` 逐条计数 |
 | 切换并重启服务 | — | 不确定进度，横条跑动 |
 

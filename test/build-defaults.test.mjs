@@ -82,6 +82,10 @@ test('country lookup failure falls back to an explicit tag; otherwise no proxy',
   assert.equal(pickProxyMember([tagged]), 'tagged')
   assert.equal(pickProxyMember([plain]), null)
   assert.equal(pickProxyMember([]), null)
+  // 「可访问外网」 is the operator's explicit hint when geolocation is missing.
+  const external = member('external', { countryCode: '', tag: '可访问外网' })
+  assert.equal(isForeignMember(external), true)
+  assert.equal(pickProxyMember([external]), 'external')
 })
 
 test('a country code is authoritative over a tag', () => {

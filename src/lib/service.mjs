@@ -50,6 +50,7 @@ import { CLUSTER_HEADER, deriveClusterSecret, signClusterRequest } from '../../c
 import { repackArchive } from '../../code/build/repack.mjs'
 import { quickSystemInfo } from '../../code/shared/system-info.mjs'
 import { GeoLookup } from '../../code/shared/geo.mjs'
+import { latestManifestUrls, loadReleaseConfig, sanitizeReleaseConfig, saveReleaseConfig } from '../../code/shared/release.mjs'
 import { buildUpdateReasons, memberDeployment, packageInfo, planUpgrades } from './schedule.mjs'
 import { pickBuildMember, pickProxyMember } from './build-defaults.mjs'
 
@@ -147,6 +148,7 @@ export class MeshService {
     this.deployRoot = path.join(this.dataDir, 'deploy')
     this.memberTagsFile = path.join(this.dataDir, 'member-tags.json')
     this.packagesDir = path.join(os.homedir(), '.dsh', 'packages')
+    this.releaseConfigFile = path.join(this.dataDir, 'release.json')
     const geoConfig = this.config.geo === false
       ? { enabled: false }
       : (this.config.geo !== null && typeof this.config.geo === 'object' ? this.config.geo : {})
@@ -699,6 +701,13 @@ export class MeshService {
   async #runBuild(job, options) {
     let egress = null
     let proxyUrl = options.proxyUrl !== '' ? options.proxyUrl : null
+    const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile })
+    const publishConfigured = releaseConfig.enabled === true && (releaseConfig.github.enabled === true || releaseConfig.gitee.enabled === true)
+    if (publishConfigured) {
+      await appendLog(job.dir, `release publish target: ${[releaseConfig.github.enabled ? `GitHub ${releaseConfig.github.owner}/${releaseConfig.github.repo}` : '', releaseConfig.gitee.enabled ? `Gitee ${releaseConfig.gitee.owner}/${releaseConfig.gitee.repo}` : ''].filter(Boolean).join(' + ')} (tag ${releaseConfig.tag})`)
+    } else {
+      await appendLog(job.dir, 'release publish is not configured; the build will not upload to GitHub/Gitee')
+    }
     try {
       if (options.proxyMember !== null && (options.member === null || options.member.id !== options.proxyMember.id)) {
         egress = await this.egress.start({ plan: await this.#memberSshPlan(options.proxyMember), member: options.proxyMember.name })
@@ -716,6 +725,7 @@ export class MeshService {
           version: options.version,
           buildStamp: options.buildStamp,
           proxy: proxyUrl,
+          publish: { config: releaseConfig, proxy: proxyUrl },
           full: this.config.build?.full !== false,
           nodeVersion: typeof this.config.build?.nodeVersion === 'string' && this.config.build.nodeVersion !== '' ? this.config.build.nodeVersion : undefined,
           smoke: this.config.build?.smoke === false ? false : undefined,
@@ -730,6 +740,7 @@ export class MeshService {
         proxyUrl,
         buildStamp: options.buildStamp,
         heapMb: typeof this.config.build?.memberHeapMb === 'number' ? this.config.build.memberHeapMb : undefined,
+        releaseConfig: publishConfigured ? releaseConfig : null,
       })
     } catch (error) {
       // A failure before the engine starts (an unreachable proxy member, a
@@ -825,8 +836,10 @@ export class MeshService {
     if (this.running.has(id)) throw new Error('this job is already running')
     const state = await readState(dir)
     this.logLine(`mesh build job ${id} resumed`)
+    const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile })
     const promise = runJob(dir, {
       repositoryRoot: this.repositoryRoot,
+      publish: { config: releaseConfig, proxy: null },
       recipesPath: this.recipesPath,
       overlayRoot: this.overlayRoot,
       cacheDir: this.cacheDir,
@@ -927,6 +940,7 @@ export class MeshService {
       currentTarget: state.currentTarget ?? null,
       version: state.version ?? null,
       error: state.error ?? null,
+      publish: state.publish ?? null,
     }
   }
 
@@ -1190,6 +1204,39 @@ export class MeshService {
   }
 
   /**
+   * The release publishing settings the panel may see (tokens masked).
+   * @returns {Promise<object>} sanitized config and the manifest URLs.
+   */
+  async releaseSettings() {
+    const config = await loadReleaseConfig({ file: this.releaseConfigFile })
+    const sanitized = sanitizeReleaseConfig(config)
+    const urls = latestManifestUrls(config)
+    return {
+      ok: true,
+      config: sanitized,
+      manifestUrls: urls,
+      configured: sanitized.github.enabled || sanitized.gitee.enabled,
+    }
+  }
+
+  /**
+   * Save the release publishing settings.
+   * @param {{config?: object}} request settings.
+   * @returns {Promise<object>} sanitized config after the save.
+   */
+  async saveReleaseSettings(request) {
+    const input = request?.config !== null && typeof request?.config === 'object' ? request.config : request
+    const config = await saveReleaseConfig({ file: this.releaseConfigFile, input })
+    this.logLine(`release settings saved (tag ${config.tag}, github ${config.github.enabled ? 'on' : 'off'}, gitee ${config.gitee.enabled ? 'on' : 'off'})`)
+    return {
+      ok: true,
+      config: sanitizeReleaseConfig(config),
+      manifestUrls: latestManifestUrls(config),
+      configured: config.github.enabled || config.gitee.enabled,
+    }
+  }
+
+  /**
    * Delete one package (and its `.sha256` sidecar) from the packages directory.
    * @param {{name: string}} request package file name.
    * @returns {Promise<{ok: boolean, removed: string[]}>} removed files.
@@ -1282,8 +1329,14 @@ export class MeshService {
         return this.#startLocalJob({ member, packagePath, os, mode, identity })
       }
       const deployRequest = await this.#memberDeployRequest(member, packagePath, os)
+      // Upgrades prefer the published release: the member downloads the
+      // package itself through an external-network member. The plan carries
+      // only public URLs and the proxy's SSH coordinates; the gateway keeps
+      // the release tokens. An install has no Node runtime to run the
+      // downloader, so it keeps the direct gateway upload.
+      const download = mode === 'install' ? null : await this.#deployDownload(request, member, all)
       const job = await this.#startEngineJob({
-        request: { ...deployRequest, member: member.id, test },
+        request: { ...deployRequest, member: member.id, test, download },
         member: member.id,
         mode,
       })
@@ -1293,7 +1346,8 @@ export class MeshService {
     if (test) throw new Error('测试升级需要一个成员（要在成员的安装上演练），不能直接给裸 SSH 主机')
     const os = /win(?:dows)?/iu.test(path.basename(packagePath)) ? 'windows' : 'linux'
     const appRoot = os === 'windows' ? 'C:\\dsh-mesh' : '/opt/dsh-mesh'
-    const job = await this.#startEngineJob({ request: { host, package: packagePath, os, appRoot }, member: null, mode })
+    const download = mode === 'install' ? null : await this.#deployDownload(request, null, all)
+    const job = await this.#startEngineJob({ request: { host, package: packagePath, os, appRoot, download }, member: null, mode })
     return { ok: true, job, member: null, packagePath, layout: 'bluegreen' }
   }
 
@@ -1324,7 +1378,13 @@ export class MeshService {
    * @returns {Promise<object>} queued job.
    */
   async upgradeMember(request) {
-    const result = await this.startDeploy({ member: request.member, package: request.package, mode: 'upgrade' })
+    const result = await this.startDeploy({
+      member: request.member,
+      package: request.package,
+      mode: 'upgrade',
+      ...(typeof request.proxyMember === 'string' ? { proxyMember: request.proxyMember } : {}),
+      ...(request.direct === true ? { direct: true } : {}),
+    })
     return {
       ok: true,
       job: result.job,
@@ -1346,7 +1406,14 @@ export class MeshService {
    * @returns {Promise<object>} queued job.
    */
   async testUpgradeMember(request) {
-    const result = await this.startDeploy({ member: request.member, package: request.package, mode: 'test', test: true })
+    const result = await this.startDeploy({
+      member: request.member,
+      package: request.package,
+      mode: 'test',
+      test: true,
+      ...(typeof request.proxyMember === 'string' ? { proxyMember: request.proxyMember } : {}),
+      ...(request.direct === true ? { direct: true } : {}),
+    })
     return {
       ok: true,
       job: result.job,
@@ -1619,6 +1686,53 @@ export class MeshService {
       cleared.push(state.id)
     }
     return { ok: true, cleared }
+  }
+
+  /**
+   * Decide how an upgrade should obtain its package from a release.
+   *
+   * The default is the same policy the build panel uses: a foreign Linux
+   * member with external access hosts the HTTP proxy, so the target's download
+   * leaves through that network instead of the gateway's. A caller can pick a
+   * different member with `proxyMember`, or skip the proxy with `direct: true`
+   * (the member's own network is then used).
+   * @param {{proxyMember?: string, direct?: boolean}} request deploy request.
+   * @param {object|null} target the member being upgraded, when it is one.
+   * @param {object[]} everyone local + peer rows.
+   * @returns {Promise<object|null>} download spec for the deploy plan.
+   */
+  async #deployDownload(request, target, everyone) {
+    const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile })
+    const manifestUrls = latestManifestUrls(releaseConfig)
+    if (manifestUrls.length === 0) return null
+    if (request.direct === true || request.proxyMember === 'none') return { manifestUrls, proxy: null }
+    const wanted = typeof request.proxyMember === 'string' ? request.proxyMember.trim() : ''
+    let proxyMember = null
+    if (wanted !== '' && wanted !== 'auto') {
+      proxyMember = everyone.find(candidate => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted) ?? null
+      if (proxyMember === null) throw new Error(`download proxy member not found: ${wanted}`)
+      if (proxyMember.id === 'local' || proxyMember.kind === 'self') throw new Error('the gateway cannot proxy a member download; pick another member')
+      const platform = String(proxyMember.system?.platform ?? '').toLowerCase()
+      if (platform !== '' && !platform.startsWith('linux')) throw new Error(`download proxy member must be Linux; ${proxyMember.name} runs ${String(proxyMember.system?.platform)}`)
+    } else {
+      const picked = pickProxyMember(everyone)
+      proxyMember = picked === null ? null : everyone.find(candidate => candidate.id === picked) ?? null
+    }
+    // A target proxying for itself is allowed (the listener binds its VPN
+    // address), but there is no gain; keep it so an explicit choice is honoured.
+    if (proxyMember === null) return { manifestUrls, proxy: null }
+    const plan = await this.#memberSshPlan(proxyMember)
+    return {
+      manifestUrls,
+      proxy: {
+        host: plan.host,
+        user: plan.user,
+        port: plan.port,
+        identityFile: plan.identityFile,
+        appRoot: plan.appRoot,
+        name: proxyMember.name,
+      },
+    }
   }
 
   /**

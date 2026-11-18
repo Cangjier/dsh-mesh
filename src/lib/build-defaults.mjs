@@ -88,7 +88,9 @@ export function isForeignMember(member) {
   const code = typeof member?.countryCode === 'string' ? member.countryCode.trim().toUpperCase() : ''
   if (/^[A-Z]{2}$/u.test(code)) return code !== 'CN'
   const tag = typeof member?.tag === 'string' ? member.tag : ''
-  return /(?:国外|境外|海外|foreign|overseas)/iu.test(tag)
+  // 「可访问外网」 is an explicit operator hint that this member has usable
+  // external access even when the country lookup is unavailable.
+  return /(?:国外|境外|海外|foreign|overseas|可访问外网|外网)/iu.test(tag)
 }
 
 /**

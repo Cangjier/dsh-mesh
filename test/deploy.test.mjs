@@ -567,3 +567,66 @@ test('Linux activation rolls back when the new release fails its health check', 
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a deploy plan carries the release download spec unchanged', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-plan-download-'))
+  const pkg = path.join(dir, 'dsh-mesh-1.0-linux-x64.tar.gz')
+  try {
+    await writeFile(pkg, 'archive-bytes', 'utf8')
+    const download = {
+      manifestUrls: ['https://github.com/o/r/releases/download/latest/latest.json'],
+      proxy: { host: '10.66.66.2', user: 'root', port: 22, name: 'C', appRoot: '/opt/c' },
+    }
+    const plan = await buildDeployPlan({ host: '10.66.66.3', package: pkg, os: 'linux', download })
+    assert.deepEqual(plan.download, download)
+    const noDownload = await buildDeployPlan({ host: '10.66.66.3', package: pkg, os: 'linux' })
+    assert.equal(noDownload.download, null)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the first deploy step is "获取安装包", covering download and upload', async () => {
+  const { initialDeploySteps } = await import('../code/deploy/engine.mjs')
+  assert.deepEqual(initialDeploySteps().map(step => step.key), ['upload', 'prepare', 'activate'])
+  assert.equal(initialDeploySteps()[0].label, '获取安装包')
+})
+
+test('release download scripts pass the manifest, digest, output and proxy', async () => {
+  const { linuxNodeProbeScript, releaseDownloadScript, windowsNodeProbeScript } = await import('../code/deploy/engine.mjs')
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-download-script-'))
+  const pkg = path.join(dir, 'dsh-mesh-1.0-linux-x64.tar.gz')
+  try {
+    await writeFile(pkg, 'archive-bytes', 'utf8')
+    const plan = await buildDeployPlan({ host: '10.66.66.3', package: pkg, os: 'linux', appRoot: '/opt/member' })
+    const linux = releaseDownloadScript(plan, {
+      node: '/opt/member/current/runtime/node/bin/node',
+      remoteDir: '/tmp/dsh-mesh-release-deadbeef',
+      manifests: ['https://github.com/o/r/releases/download/latest/latest.json', 'https://gitee.com/o/r/releases/download/latest/latest.json'],
+      proxyUrl: 'http://10.66.66.2:41234',
+    })
+    assert.match(linux, /release-download\.mjs/u)
+    assert.match(linux, /--manifest 'https:\/\/github\.com/u)
+    assert.match(linux, /--manifest 'https:\/\/gitee\.com/u)
+    assert.match(linux, /--archive 'dsh-mesh-1\.0-linux-x64\.tar\.gz'/u)
+    assert.match(linux, /--output '\/tmp\/dsh-mesh-/u)
+    assert.match(linux, /--proxy 'http:\/\/10\.66\.66\.2:41234'/u)
+    assert.match(linux, /exit \$\?/u)
+
+    const windowsPlan = await buildDeployPlan({ host: '10.66.66.4', package: pkg, os: 'windows', appRoot: 'C:\\dsh-mesh' })
+    const windows = releaseDownloadScript(windowsPlan, {
+      node: 'C:\\dsh-mesh\\current\\runtime\\node\\node.exe',
+      remoteDir: 'C:\\Windows\\Temp\\dsh-mesh-release-deadbeef',
+      manifests: ['https://github.com/o/r/releases/download/latest/latest.json'],
+      proxyUrl: null,
+    })
+    assert.match(windows, /release-download\.mjs/u)
+    assert.match(windows, /\$LASTEXITCODE/u)
+    assert.doesNotMatch(windows, /--proxy/u)
+
+    assert.match(linuxNodeProbeScript('/opt/member'), /\/opt\/member\/current\/runtime\/node\/bin\/node/u)
+    assert.ok(windowsNodeProbeScript('C:\\dsh-mesh').includes("'C:\\dsh-mesh\\current\\runtime\\node\\node.exe'"))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

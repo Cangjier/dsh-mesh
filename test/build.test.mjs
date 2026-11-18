@@ -655,3 +655,40 @@ test('a build fails when neither the source shell nor the published frontend mat
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a package carries code/shared for the modules under code/', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-package-layout-'))
+  try {
+    const repositoryRoot = path.join(dir, 'repo')
+    await mkdir(path.join(repositoryRoot, 'code', 'shared'), { recursive: true })
+    await mkdir(path.join(repositoryRoot, 'code', 'deploy'), { recursive: true })
+    await mkdir(path.join(repositoryRoot, 'build'), { recursive: true })
+    await mkdir(path.join(repositoryRoot, 'locale'), { recursive: true })
+    await writeFile(path.join(repositoryRoot, 'code', 'shared', 'http-client.mjs'), 'export const x = 1\n')
+    await writeFile(path.join(repositoryRoot, 'code', 'deploy', 'engine.mjs'), "import '../shared/http-client.mjs'\n")
+    await writeFile(path.join(repositoryRoot, 'build', 'plugins.json'), JSON.stringify({ plugins: [] }))
+    await writeFile(path.join(repositoryRoot, 'index.js'), '')
+    await writeFile(path.join(repositoryRoot, 'client.js'), '')
+    await writeFile(path.join(repositoryRoot, 'cordis.patch.yml'), '')
+    await writeFile(path.join(repositoryRoot, 'package.json'), '{"name":"@local/dsh-mesh"}')
+    const dist = path.join(dir, 'dist')
+    await mkdir(dist, { recursive: true })
+    await writeFile(path.join(dist, 'index.html'), '<html></html>')
+    const result = await assembleWebPackage({
+      dist,
+      target: 'linux-x64',
+      outputDir: path.join(dir, 'out'),
+      version: '0.0.0-test',
+      buildStamp: '20261118A',
+      repositoryRoot,
+      log: () => {},
+    })
+    // The blue-green package has `shared/` for the gate, and `code/shared/`
+    // for the engine and target downloader that import `../shared/...`.
+    assert.equal((await readFile(path.join(result.packageDir, 'shared', 'http-client.mjs'), 'utf8')).length > 0, true)
+    assert.equal((await readFile(path.join(result.packageDir, 'code', 'shared', 'http-client.mjs'), 'utf8')).length > 0, true)
+    assert.match(await readFile(path.join(result.packageDir, 'code', 'deploy', 'engine.mjs'), 'utf8'), /\.\.\/shared\/http-client\.mjs/u)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

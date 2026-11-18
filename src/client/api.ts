@@ -182,6 +182,8 @@ export interface BuildJob {
   logTail?: string[]
   running?: boolean
   learnedAt?: string | null
+  /** Release publishing outcome, when the build carried a publish step. */
+  publish?: PublishResult | null
   artifacts?: Array<{
     target: string
     archive: string
@@ -193,6 +195,48 @@ export interface BuildJob {
       screenshots?: string[]
     }
   }>
+}
+
+export interface PublishRepoResult {
+  enabled?: boolean
+  status?: string
+  releaseUrl?: string
+  assets?: Array<{ name: string, bytes?: number, url?: string }>
+  removed?: string[]
+  error?: string
+  warning?: string
+}
+
+/** What one build's upload to GitHub/Gitee did. */
+export interface PublishResult {
+  status: 'skipped' | 'done' | 'partial' | 'failed' | string
+  reason?: string
+  error?: string
+  tag?: string
+  version?: string | null
+  buildStamp?: string | null
+  startedAt?: string
+  finishedAt?: string
+  github?: PublishRepoResult
+  gitee?: PublishRepoResult
+}
+
+/** Release publishing settings, tokens always masked. */
+export interface ReleaseSettings {
+  file: string
+  fileError: string | null
+  enabled: boolean
+  tag: string
+  partBytes: number
+  github: { owner: string, repo: string, enabled: boolean, hasToken: boolean }
+  gitee: { owner: string, repo: string, branch: string, enabled: boolean, hasToken: boolean }
+}
+
+export interface ReleaseSettingsResponse {
+  ok: boolean
+  config: ReleaseSettings
+  manifestUrls: string[]
+  configured: boolean
 }
 
 export interface PackageInfo {
@@ -435,6 +479,24 @@ export const api = {
     })
   },
 
+  releaseSettings(): Promise<ReleaseSettingsResponse> {
+    return request<ReleaseSettingsResponse>('/api/dsh-mesh/release')
+  },
+
+  saveReleaseSettings(config: {
+    enabled?: boolean
+    tag?: string
+    partBytes?: number
+    github?: { owner?: string, repo?: string, token?: string }
+    gitee?: { owner?: string, repo?: string, token?: string, branch?: string }
+  }): Promise<ReleaseSettingsResponse> {
+    return request<ReleaseSettingsResponse>('/api/dsh-mesh/release', {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: JSON.stringify({ config }),
+    })
+  },
+
   deploy(member: string, packageName: string): Promise<DeployResponse> {
     return request<DeployResponse>('/api/dsh-mesh/deploy', {
       method: 'POST',
@@ -443,11 +505,11 @@ export const api = {
     })
   },
 
-  upgrade(member: string, packageName: string): Promise<DeployResponse> {
+  upgrade(member: string, packageName: string, options: { proxyMember?: string, direct?: boolean } = {}): Promise<DeployResponse> {
     return request<DeployResponse>('/api/dsh-mesh/upgrade', {
       method: 'POST',
       headers: { 'x-dsh-mesh': '1' },
-      body: JSON.stringify({ member, package: packageName }),
+      body: JSON.stringify({ member, package: packageName, ...options }),
     })
   },
 
@@ -458,11 +520,11 @@ export const api = {
    * @param {string} packageName package file name.
    * @returns {Promise<DeployResponse>} queued job.
    */
-  testUpgrade(member: string, packageName: string): Promise<DeployResponse> {
+  testUpgrade(member: string, packageName: string, options: { proxyMember?: string, direct?: boolean } = {}): Promise<DeployResponse> {
     return request<DeployResponse>('/api/dsh-mesh/test-upgrade', {
       method: 'POST',
       headers: { 'x-dsh-mesh': '1' },
-      body: JSON.stringify({ member, package: packageName }),
+      body: JSON.stringify({ member, package: packageName, ...options }),
     })
   },
 

@@ -19,7 +19,8 @@
  */
 
 import { createHash } from 'node:crypto'
-import { open, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, open, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { appendLog, readState, updateState } from '../../code/build/job.mjs'
 import { phaseFromLine } from '../../code/build/progress.mjs'
@@ -39,13 +40,31 @@ const REMOTE_NODE_DIR = '$HOME/.dsh/dsh-mesh/current/runtime/node/bin'
 export { phaseFromLine }
 
 /**
+ * The publish switch for a remote build.
+ *
+ * The gateway uploads its own release config into the remote job directory, so
+ * the member publishes with the same tokens and repository settings the panel
+ * shows. Without a config the build must not silently pick up a stale file on
+ * the member: `--no-publish` is explicit.
+ * @param {{releaseConfigRemote?: string|null, publish?: boolean}} options script input.
+ * @returns {string} CLI arguments.
+ */
+function publishArgument(options) {
+  if (options.publish === false) return ' --no-publish'
+  if (typeof options.releaseConfigRemote === 'string' && options.releaseConfigRemote !== '') {
+    return ` --release-config ${quote(options.releaseConfigRemote)}`
+  }
+  return ' --no-publish'
+}
+
+/**
  * Build the bash script that runs one job on a member.
  *
  * The member's checkout is kept up to date by hard resetting to `origin/main`:
  * a build must reflect what is on main, not whatever a previous run left in
  * the tree. A local checkout that is behind main would otherwise silently
  * build old overlays.
- * @param {{jobId: string, ref: string, targets: string[], buildStamp?: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number}} options script input.
+ * @param {{jobId: string, ref: string, targets: string[], buildStamp?: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number, releaseConfigRemote?: string|null, publish?: boolean}} options script input.
  * @returns {string} bash script.
  */
 export function remoteBuildScript(options) {
@@ -81,7 +100,7 @@ export function remoteBuildScript(options) {
     'corepack enable --install-directory "$HOME/.dsh/mesh/bin" >/dev/null 2>&1 || true',
     `cd "${REMOTE_SRC}" || { echo "mesh checkout is missing" >&2; exit 3; }`,
     'echo "mesh head $(git rev-parse --short HEAD)"',
-    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --stream --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.buildStamp ? ` --build-stamp ${quote(options.buildStamp)}` : ''}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ''}`,
+    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --stream --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.buildStamp ? ` --build-stamp ${quote(options.buildStamp)}` : ''}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ''}${publishArgument(options)}`,
     'code=$?',
     `ls -1d "${out}"/* 2>/dev/null | head -n 5`,
     'exit $code',
@@ -107,7 +126,7 @@ function quote(value) {
  * PowerShell. So the checkout is a codeload tarball extracted with tar, and the
  * engine runs exactly as it does on Linux — it is cross-platform and can emit a
  * linux-x64 archive from a Windows host.
- * @param {{jobId: string, ref: string, targets: string[], buildStamp?: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number, appRoot?: string}} options script input.
+ * @param {{jobId: string, ref: string, targets: string[], buildStamp?: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number, appRoot?: string, releaseConfigRemote?: string|null, publish?: boolean}} options script input.
  * @returns {string} PowerShell script.
  */
 export function windowsBuildScript(options) {
@@ -189,12 +208,39 @@ export function windowsBuildScript(options) {
     'if (-not (Test-Path (Join-Path $src "code\\build\\cli.mjs"))) { throw "mesh checkout is incomplete" }',
     `& (Join-Path $nodeDir 'corepack.cmd') enable --install-directory $bin | Out-Null`,
     'Set-Location $src',
-    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --stream --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(','))}${options.buildStamp ? ` --build-stamp ${quotePs(options.buildStamp)}` : ''}${proxy === '' ? '' : ` --proxy ${quotePs(proxy)}`}`,
+    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --stream --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(','))}${options.buildStamp ? ` --build-stamp ${quotePs(options.buildStamp)}` : ''}${proxy === '' ? '' : ` --proxy ${quotePs(proxy)}`}${windowsPublishArgument(options)}`,
     '$code = $LASTEXITCODE',
     'Get-ChildItem -Directory $out -ErrorAction SilentlyContinue | Select-Object -First 5 -ExpandProperty FullName',
     'exit $code',
     '',
   ].filter(line => line !== '').join('\r\n')
+}
+
+/**
+ * A per-user temp directory on a Windows member.
+ *
+ * `C:\Windows\Temp` is often readable by every local account; the release
+ * config carries two access tokens, so use the SSH user's own temp when the
+ * install root reveals the profile directory.
+ * @param {string|undefined} appRoot the member's install root.
+ * @returns {string} absolute directory.
+ */
+function windowsTempDir(appRoot) {
+  const match = /^([A-Za-z]:\\Users\\[^\\]+)/u.exec(String(appRoot ?? ''))
+  return match === null ? 'C:\\Windows\\Temp' : `${match[1]}\\AppData\\Local\\Temp`
+}
+
+/**
+ * The publish switch for a Windows remote build.
+ * @param {{releaseConfigRemote?: string|null, publish?: boolean}} options script input.
+ * @returns {string} CLI arguments.
+ */
+function windowsPublishArgument(options) {
+  if (options.publish === false) return ' --no-publish'
+  if (typeof options.releaseConfigRemote === 'string' && options.releaseConfigRemote !== '') {
+    return ` --release-config ${quotePs(options.releaseConfigRemote)}`
+  }
+  return ' --no-publish'
 }
 
 /**
@@ -282,7 +328,7 @@ export class RemoteBuilder {
   /**
    * Run one job on a member and settle the local job state.
    * @param {string} jobDir local job directory.
-   * @param {{plan: {os?: string, appRoot?: string}, memberName: string, proxyUrl?: string|null, repoUrl?: string, buildStamp?: string, heapMb?: number}} options run options.
+   * @param {{plan: {os?: string, appRoot?: string}, memberName: string, proxyUrl?: string|null, repoUrl?: string, buildStamp?: string, heapMb?: number, releaseConfig?: object|null}} options run options.
    * @returns {Promise<object>} final local state.
    */
   async run(jobDir, options) {
@@ -290,6 +336,25 @@ export class RemoteBuilder {
     await this.#update(jobDir, { status: 'running', phase: 'prepare', percent: 1, error: null })
     const runner = new SshRunner({ port: 22, ...options.plan }, { log: line => this.log(`remote ${state.member ?? ''}: ${line}`) })
     const windows = options.plan.os === 'windows'
+    // The build machine publishes with the gateway's release config. Ship it
+    // as a 0600 file in the member's temp directory, never in the script text
+    // (which is visible in the process list) and never in the log.
+    let releaseConfigRemote = options.releaseConfig === null || options.releaseConfig === undefined
+      ? null
+      : windows
+        ? `${windowsTempDir(options.plan.appRoot)}\\dsh-mesh-release-${state.id}.json`
+        : `/tmp/dsh-mesh-release-${state.id}.json`
+    if (releaseConfigRemote !== null) {
+      try {
+        await this.#uploadReleaseConfig(runner, options.releaseConfig, releaseConfigRemote, windows)
+        await appendLog(jobDir, `release config shipped to ${releaseConfigRemote}`)
+      } catch (error) {
+        // Publishing is not worth failing a build over.
+        const message = error instanceof Error ? error.message : String(error)
+        await appendLog(jobDir, `could not ship the release config; this build will not publish: ${message}`)
+        releaseConfigRemote = null
+      }
+    }
     const script = windows
       ? windowsBuildScript({
         jobId: state.id,
@@ -300,6 +365,8 @@ export class RemoteBuilder {
         buildStamp: options.buildStamp,
         heapMb: options.heapMb,
         appRoot: options.plan.appRoot,
+        releaseConfigRemote,
+        publish: releaseConfigRemote !== null,
       })
       : remoteBuildScript({
         jobId: state.id,
@@ -309,6 +376,8 @@ export class RemoteBuilder {
         repoUrl: options.repoUrl,
         buildStamp: options.buildStamp,
         heapMb: options.heapMb,
+        releaseConfigRemote,
+        publish: releaseConfigRemote !== null,
       })
     let percent = 1
     const onLine = (line) => {
@@ -336,6 +405,7 @@ export class RemoteBuilder {
       // first, then remove the member-side tree; the panel shows the failure
       // while the cleanup runs.
       const settled = await this.#update(jobDir, { status: 'failed', phase: 'failed', error: message, percent })
+      await this.#cleanupReleaseConfig(runner, releaseConfigRemote, windows)
       await this.#cleanupRemote(runner, jobDir, state.id, windows)
       return settled
     }
@@ -344,6 +414,7 @@ export class RemoteBuilder {
       const message = 'the member finished without writing a job state; see the log for its output'
       await appendLog(jobDir, message)
       const settled = await this.#update(jobDir, { status: 'failed', phase: 'failed', error: message, percent })
+      await this.#cleanupReleaseConfig(runner, releaseConfigRemote, windows)
       await this.#cleanupRemote(runner, jobDir, state.id, windows)
       return settled
     }
@@ -363,6 +434,9 @@ export class RemoteBuilder {
       })
       // A needs-fix job keeps its worktree on the member for the repair flow;
       // every other outcome is settled and the temporary tree can go.
+      // The token file goes away even when the worktree stays for a repair:
+      // no later build needs it, and it must not sit on the member.
+      await this.#cleanupReleaseConfig(runner, releaseConfigRemote, windows)
       if (status !== 'needs-fix') await this.#cleanupRemote(runner, jobDir, state.id, windows)
       return settled
     }
@@ -405,9 +479,59 @@ export class RemoteBuilder {
       artifacts,
       remoteJob: remote.id ?? null,
       version: remote.version ?? null,
+      publish: remote.publish ?? null,
     })
+    await this.#cleanupReleaseConfig(runner, releaseConfigRemote, windows)
     await this.#cleanupRemote(runner, jobDir, state.id, windows)
     return done
+  }
+
+  /**
+   * Ship the release config to the build machine with the narrowest mode.
+   *
+   * `cat > file` would otherwise create a world-readable file under the
+   * default umask. The file is created first with `umask 077`, then its mode
+   * is forced again after the upload; the token never appears in the script or
+   * in the log.
+   * @param {SshRunner} runner ssh runner.
+   * @param {object} config release config.
+   * @param {string} remote remote path.
+   * @param {boolean} windows whether the member runs Windows.
+   * @returns {Promise<void>} completion.
+   */
+  async #uploadReleaseConfig(runner, config, remote, windows) {
+    const dir = await mkdtemp(path.join(tmpdir(), 'dsh-mesh-release-config-'))
+    const local = path.join(dir, 'release.json')
+    await writeFile(local, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+    try {
+      if (windows) {
+        const dir = path.win32.dirname(remote)
+        await runner.runProcess('ssh', [...runner.sshOptions(), runner.target(), `cmd /c if not exist "${dir}" mkdir "${dir}"`])
+      } else {
+        await runner.runProcess('ssh', [...runner.sshOptions(), runner.target(), `umask 077; : > '${remote.replace(/'/gu, `'\\''`)}'`])
+      }
+      await runner.upload(local, remote)
+      if (!windows) {
+        await runner.runProcess('ssh', [...runner.sshOptions(), runner.target(), `chmod 600 '${remote.replace(/'/gu, `'\\''`)}'`])
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+
+  /**
+   * Remove the release config from the build machine.
+   * @param {SshRunner} runner ssh runner.
+   * @param {string|null} remote remote path, or null.
+   * @param {boolean} windows whether the member runs Windows.
+   * @returns {Promise<void>} completion.
+   */
+  async #cleanupReleaseConfig(runner, remote, windows) {
+    if (remote === null) return
+    const command = windows ? `cmd /c del /f /q "${remote}"` : `rm -f '${remote.replace(/'/gu, `'\\''`)}'`
+    await runner.runProcess('ssh', [...runner.sshOptions(), runner.target(), command]).catch(error => {
+      this.log(`could not remove the remote release config (${error instanceof Error ? error.message : String(error)})`)
+    })
   }
 
   /**

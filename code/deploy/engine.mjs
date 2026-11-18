@@ -25,6 +25,7 @@ import { copyFile, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, wr
 import { isIP } from 'node:net'
 import { homedir, hostname, tmpdir } from 'node:os'
 import path from 'node:path'
+import { EgressProxy } from '../shared/egress.mjs'
 
 /** The prepare script emits one extraction marker per this many entries. */
 const EXTRACT_CHECKPOINT = 1000
@@ -318,7 +319,7 @@ SSH 主机密钥与 known_hosts 中的记录不一致：目标机可能重装过
 /** Deployment steps reported by the panel while a job runs. */
 export function initialDeploySteps(options = {}) {
   const steps = [
-    { key: 'upload', label: '上传安装包', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null },
+    { key: 'upload', label: '获取安装包', status: 'pending', startedAt: null, finishedAt: null, detail: '', progress: null },
   ]
   // The rehearsal is a bash script for a flat Linux install; a Windows member
   // has no flat layout to rehearse, so its test upgrade is the normal upgrade.
@@ -694,6 +695,11 @@ export async function buildDeployPlan(options) {
     remoteCredentials: os === 'linux'
       ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}.account`
       : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}.account`,
+    // When the gateway has a release configured, an upgrade may fetch the
+    // archive on the member instead of receiving it through the gateway. The
+    // plan carries only URLs and the proxy's SSH coordinates; tokens never
+    // leave the gateway.
+    download: options.download === null || options.download === undefined ? null : options.download,
   }
 }
 
@@ -1803,7 +1809,7 @@ export function describePlan(plan) {
     services: plan.services,
     scope: plan.scope,
     steps: [
-      `upload ${path.basename(plan.package.path)} to ${plan.remotePackage}`,
+      `obtain ${path.basename(plan.package.path)}: download from the release when configured, else upload to ${plan.remotePackage}`,
       `extract and prepare ${plan.releases}/${plan.release} (no service switch)`,
       `update shared config and service definitions for ${plan.appRoot}/current`,
       `switch ${plan.current} to ${plan.release}`,
@@ -2271,6 +2277,121 @@ export class LocalRunner {
   }
 }
 
+
+/**
+ * Bash snippet that finds a Node runtime on a Linux member.
+ * @param {string} appRoot install root reported by the member.
+ * @returns {string} script.
+ */
+export function linuxNodeProbeScript(appRoot) {
+  const root = String(appRoot ?? '').replace(/[\\/]+$/u, '')
+  const candidates = [
+    ...(root === '' ? [] : [`${root}/current/runtime/node/bin/node`, `${root}/current/runtime/node/node`, `${root}/runtime/node/bin/node`, `${root}/runtime/node/node`]),
+    '$HOME/.dsh/dsh-mesh/current/runtime/node/bin/node',
+    '$HOME/.dsh/dsh-mesh/current/runtime/node/node',
+    '$HOME/.dsh/dsh-person-web/current/runtime/node/bin/node',
+  ]
+  return [
+    'for candidate in \\',
+    ...candidates.map(value => `  "${value}" \\`),
+    '  ; do',
+    '  if [ -x "$candidate" ]; then echo "DSH-MESH-NODE=$candidate"; exit 0; fi',
+    'done',
+    'found=$(command -v node 2>/dev/null || true)',
+    'if [ -n "$found" ]; then echo "DSH-MESH-NODE=$found"; fi',
+    '',
+  ].join('\n')
+}
+
+/**
+ * PowerShell snippet that finds a Node runtime on a Windows member.
+ * @param {string} appRoot install root reported by the member.
+ * @returns {string} script.
+ */
+export function windowsNodeProbeScript(appRoot) {
+  const root = String(appRoot ?? '').replace(/[\\/]+$/u, '')
+  const quoted = root === '' ? [] : [ps(`${root}\\current\\runtime\\node\\node.exe`), ps(`${root}\\runtime\\node\\node.exe`)]
+  const candidates = [
+    ...quoted,
+    "(Join-Path $env:USERPROFILE '.dsh\\dsh-mesh\\current\\runtime\\node\\node.exe')",
+    "(Join-Path $env:USERPROFILE '.dsh\\dsh-person-web\\current\\runtime\\node\\node.exe')",
+  ]
+  return `$ErrorActionPreference = 'Stop'
+$candidates = @(
+${candidates.map(value => `  ${value}`).join(',\n')}
+)
+foreach ($candidate in $candidates) {
+  if ($candidate -and (Test-Path -LiteralPath $candidate)) { Write-Output ("DSH-MESH-NODE=" + $candidate); exit 0 }
+}
+$cmd = Get-Command node.exe -ErrorAction SilentlyContinue
+if ($cmd) { Write-Output ("DSH-MESH-NODE=" + $cmd.Source) }
+`
+}
+
+/**
+ * The command that runs the target-side downloader.
+ * @param {object} plan deployment plan.
+ * @param {{node: string, remoteDir: string, manifests: string[], proxyUrl: string|null}} options options.
+ * @returns {string} bash or PowerShell script.
+ */
+export function releaseDownloadScript(plan, options) {
+  const archive = path.basename(plan.package.path)
+  const manifestArgs = options.manifests.map(url => `--manifest ${plan.os === 'windows' ? ps(url) : sh(url)}`).join(' ')
+  if (plan.os === 'windows') {
+    const script = `${options.remoteDir}\\deploy\\release-download.mjs`
+    const args = [
+      manifestArgs,
+      `--archive ${ps(archive)}`,
+      `--sha256 ${ps(plan.package.sha256)}`,
+      `--output ${ps(plan.remotePackage)}`,
+      options.proxyUrl === null ? '' : `--proxy ${ps(options.proxyUrl)}`,
+      `--workdir ${ps(`${options.remoteDir}\\parts`)}`,
+    ].filter(Boolean).join(' ')
+    return `$ErrorActionPreference = 'Stop'
+& ${ps(options.node)} ${ps(script)} ${args}
+exit $LASTEXITCODE
+`
+  }
+  const script = `${options.remoteDir}/deploy/release-download.mjs`
+  const args = [
+    manifestArgs,
+    `--archive ${sh(archive)}`,
+    `--sha256 ${sh(plan.package.sha256)}`,
+    `--output ${sh(plan.remotePackage)}`,
+    options.proxyUrl === null ? '' : `--proxy ${sh(options.proxyUrl)}`,
+    `--workdir ${sh(`${options.remoteDir}/parts`)}`,
+  ].filter(Boolean).join(' ')
+  return `set -u
+${sh(options.node)} ${sh(script)} ${args}
+exit $?
+`
+}
+
+/**
+ * Create the downloader's remote directory tree.
+ * @param {object} plan deployment plan.
+ * @param {string} remoteDir remote root.
+ * @returns {string} script.
+ */
+export function ensureDownloadDirScript(plan, remoteDir) {
+  if (plan.os === 'windows') {
+    return `New-Item -ItemType Directory -Force -Path ${ps(`${remoteDir}\\deploy`)},${ps(`${remoteDir}\\shared`)} | Out-Null
+`
+  }
+  return `mkdir -p ${sh(`${remoteDir}/deploy`)} ${sh(`${remoteDir}/shared`)}
+`
+}
+
+/**
+ * Remove the downloader's remote directory tree.
+ * @param {object} plan deployment plan.
+ * @param {string} remoteDir remote root.
+ * @returns {string} shell command (SSH) for the member.
+ */
+export function removeDownloadDirCommand(plan, remoteDir) {
+  return plan.os === 'windows' ? `cmd /c rmdir /s /q "${remoteDir}"` : `rm -rf ${sh(remoteDir)}`
+}
+
 /**
  * One deployment job store and runner.
  */
@@ -2442,19 +2563,18 @@ export class DeployManager {
       const runner = this.runnerFactory(plan)
       await log(`target ${plan.host} (${plan.os}), release ${plan.release}`)
       await log(`package ${plan.package.path} (${plan.package.sha256.slice(0, 12)}…)`)
-      await log(`uploading to ${plan.remotePackage}`)
       await mark('upload', 'running')
       const uploadStarted = Date.now()
       const existingBytes = typeof runner.remoteSize === 'function'
         ? await runner.remoteSize(plan.remotePackage).catch(() => null)
         : null
       if (existingBytes === plan.package.bytes) {
-        await log(`package already present on the target (${formatBytes(existingBytes)}), skipping upload`)
-        meter('上传安装包', { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 })
-        await mark('upload', 'succeeded', `${formatBytes(existingBytes)} · 已存在，跳过上传`)
+        await log(`package already present on the target (${formatBytes(existingBytes)}), skipping download and upload`)
+        meter('获取安装包', { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 })
+        await mark('upload', 'succeeded', `${formatBytes(existingBytes)} · 已存在，跳过下载/上传`)
       } else {
         // /tmp on a member is often a small tmpfs and every job leaves its
-        // archive there: clear the leftovers and make sure the upload fits
+        // archive there: clear the leftovers and make sure the package fits
         // before spending ten minutes on a transfer that dies at 70%.
         if (typeof runner.discardStalePackages === 'function') {
           if (await runner.discardStalePackages(plan.remotePackage).catch(() => false)) {
@@ -2465,29 +2585,42 @@ export class DeployManager {
           ? await runner.remoteFreeBytes(plan.remotePackage).catch(() => null)
           : null
         if (freeBytes !== null) {
-          await log(`target free space ${formatBytes(freeBytes)}, package ${formatBytes(plan.package.bytes)}`)
-          if (freeBytes < plan.package.bytes + 64 * 1024 * 1024) {
-            throw new Error(`目标剩余空间不足：${plan.remotePackage} 所在分区只剩 ${formatBytes(freeBytes)}，安装包需要 ${formatBytes(plan.package.bytes)}；清理后重试`)
+          // A release download may assemble Gitee parts beside the output; the
+          // downloader deletes parts as it goes, so one part of headroom is
+          // enough. The plain upload path needs only the archive itself.
+          const headroom = plan.download === null ? 64 * 1024 * 1024 : 96 * 1024 * 1024 + 64 * 1024 * 1024
+          const needed = plan.package.bytes + headroom
+          await log(`target free space ${formatBytes(freeBytes)}, package ${formatBytes(plan.package.bytes)}, needed ${formatBytes(needed)}`)
+          if (freeBytes < needed) {
+            throw new Error(`目标剩余空间不足：${plan.remotePackage} 所在分区只剩 ${formatBytes(freeBytes)}，本次需要 ${formatBytes(needed)}；清理后重试`)
           }
         }
-        await runner.upload(plan.package.path, plan.remotePackage, progress => {
-          const totalBytes = progress.totalBytes ?? plan.package.bytes
-          meter('上传安装包', {
-            bytes: progress.bytes ?? 0,
-            totalBytes,
-            percent: progress.percent ?? (totalBytes > 0 ? Math.min(100, Math.round(((progress.bytes ?? 0) / totalBytes) * 100)) : 0),
-            speed: progress.speed ?? 0,
-            indeterminate: progress.indeterminate === true,
+        // An upgrade prefers the release: the member downloads the package
+        // itself (through a member with good internet), so hundreds of
+        // megabytes never cross the gateway. Any failure falls back to the
+        // existing gateway upload instead of failing the upgrade.
+        const downloaded = await this.#downloadFromRelease(plan, runner, { log, meter, mark })
+        if (!downloaded) {
+          await log(`uploading to ${plan.remotePackage}`)
+          await runner.upload(plan.package.path, plan.remotePackage, progress => {
+            const totalBytes = progress.totalBytes ?? plan.package.bytes
+            meter('上传安装包', {
+              bytes: progress.bytes ?? 0,
+              totalBytes,
+              percent: progress.percent ?? (totalBytes > 0 ? Math.min(100, Math.round(((progress.bytes ?? 0) / totalBytes) * 100)) : 0),
+              speed: progress.speed ?? 0,
+              indeterminate: progress.indeterminate === true,
+            })
           })
-        })
-        const uploadSeconds = Math.max(0.1, (Date.now() - uploadStarted) / 1000)
-        meter('上传安装包', {
-          bytes: plan.package.bytes,
-          totalBytes: plan.package.bytes,
-          percent: 100,
-          speed: plan.package.bytes / uploadSeconds,
-        })
-        await mark('upload', 'succeeded', `${formatBytes(plan.package.bytes)} · ${uploadSeconds.toFixed(1)}s · ${formatBytes(plan.package.bytes / uploadSeconds)}/s`)
+          const uploadSeconds = Math.max(0.1, (Date.now() - uploadStarted) / 1000)
+          meter('上传安装包', {
+            bytes: plan.package.bytes,
+            totalBytes: plan.package.bytes,
+            percent: 100,
+            speed: plan.package.bytes / uploadSeconds,
+          })
+          await mark('upload', 'succeeded', `${formatBytes(plan.package.bytes)} · ${uploadSeconds.toFixed(1)}s · ${formatBytes(plan.package.bytes / uploadSeconds)}/s`)
+        }
       }
       // Sign the member in with the deployer's account: the account grants in
       // `.credentials.yaml` are all a member needs, so no QR scan is required.
@@ -2605,6 +2738,151 @@ export class DeployManager {
     } finally {
       this.running.delete(state.id)
     }
+  }
+
+  /**
+   * Try to fetch the package on the member from the configured release.
+   *
+   * Nothing here is fatal: a missing runtime, an unreachable release, a bad
+   * proxy, or a checksum mismatch all return false and the caller falls back
+   * to the gateway upload. That keeps a release outage from blocking an
+   * upgrade while still making the release the default path.
+   * @param {object} plan deployment plan.
+   * @param {object} runner SSH runner.
+   * @param {{log: Function, meter: Function, mark: Function}} hooks progress sinks.
+   * @returns {Promise<boolean>} whether the verified package is on the target.
+   */
+  async #downloadFromRelease(plan, runner, hooks) {
+    const { log, meter, mark } = hooks
+    const download = plan.download
+    if (download === null || typeof download !== 'object') return false
+    const manifests = Array.isArray(download.manifestUrls)
+      ? download.manifestUrls.filter(url => typeof url === 'string' && url !== '')
+      : []
+    if (manifests.length === 0) return false
+    const suffix = plan.package.sha256.slice(0, 12)
+    const remoteDir = plan.os === 'windows'
+      ? `C:\\Windows\\Temp\\dsh-mesh-release-${suffix}`
+      : `/tmp/dsh-mesh-release-${suffix}`
+    let egress = null
+    let proxyUrl = null
+    try {
+      const node = await this.#findTargetNode(plan, runner)
+      if (node === '') {
+        await log('release download skipped: the target has no Node runtime to run the downloader')
+        return false
+      }
+      const localDownloader = path.join(this.repositoryRoot, 'code', 'deploy', 'release-download.mjs')
+      const localClient = path.join(this.repositoryRoot, 'code', 'shared', 'http-client.mjs')
+      if (!existsSync(localDownloader) || !existsSync(localClient)) {
+        await log('release download skipped: the downloader files are missing from this plugin installation')
+        return false
+      }
+      if (plan.os === 'windows') {
+        await runner.script(ensureDownloadDirScript(plan, remoteDir), 'windows')
+      } else {
+        await runner.runProcess('ssh', [...runner.sshOptions(), runner.target(), ensureDownloadDirScript(plan, remoteDir)])
+      }
+      const join = (name) => plan.os === 'windows' ? `${remoteDir}\\${name.replace(/\//gu, '\\')}` : `${remoteDir}/${name}`
+      await runner.upload(localDownloader, join('deploy/release-download.mjs'))
+      await runner.upload(localClient, join('shared/http-client.mjs'))
+      if (download.proxy !== null && typeof download.proxy === 'object') {
+        try {
+          egress = new EgressProxy({ log: line => { void log(`download proxy: ${line}`) } })
+          const started = await egress.start({ plan: download.proxy, member: download.proxy.name ?? download.proxy.host })
+          proxyUrl = started.url
+          await log(`release download through ${download.proxy.name ?? download.proxy.host} proxy (${proxyUrl})`)
+        } catch (error) {
+          egress?.closeAll()
+          egress = null
+          proxyUrl = null
+          await log(`download proxy unavailable (${error instanceof Error ? error.message : String(error)}); trying a direct release download`)
+        }
+      } else {
+        await log('release download has no proxy configured; downloading directly from the member')
+      }
+      meter('从 Release 下载安装包', { percent: 0, indeterminate: true })
+      const script = releaseDownloadScript(plan, { node, remoteDir, manifests, proxyUrl })
+      let total = plan.package.bytes
+      let bytes = 0
+      let source = ''
+      let speed = 0
+      let lastAt = Date.now()
+      let lastBytes = 0
+      const startedAt = Date.now()
+      let failure = null
+      try {
+        await runner.script(script, plan.os, (line) => {
+          const planMatch = /^DSH-MESH-DOWNLOAD-PLAN (\d+)$/u.exec(line)
+          if (planMatch !== null) {
+            total = Number.parseInt(planMatch[1], 10) || total
+            return
+          }
+          const manifestMatch = /^DSH-MESH-DOWNLOAD-MANIFEST (\S+)$/u.exec(line)
+          if (manifestMatch !== null) {
+            source = manifestMatch[1].includes('gitee.com') ? 'Gitee Release' : 'GitHub Release'
+            return
+          }
+          const progressMatch = /^DSH-MESH-DOWNLOAD (\d+) (\d+)$/u.exec(line)
+          if (progressMatch !== null) {
+            bytes = Number.parseInt(progressMatch[1], 10)
+            total = Number.parseInt(progressMatch[2], 10) || total
+            const now = Date.now()
+            const seconds = Math.max(0.001, (now - lastAt) / 1000)
+            speed = bytes >= lastBytes ? (bytes - lastBytes) / seconds : 0
+            lastAt = now
+            lastBytes = bytes
+            meter('从 Release 下载安装包', {
+              bytes,
+              totalBytes: total,
+              percent: total > 0 ? Math.min(100, Math.round((bytes / total) * 100)) : 0,
+              speed,
+            })
+            return
+          }
+          if (/^DSH-MESH-DOWNLOAD-(?:OK|PART|DONE|PROGRESS) /u.test(line)) return
+          void log(line)
+        })
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error)
+      }
+      // The exit code is only half the truth: check what actually landed.
+      const landed = typeof runner.remoteSize === 'function'
+        ? await runner.remoteSize(plan.remotePackage).catch(() => null)
+        : null
+      if (failure === null && landed === plan.package.bytes) {
+        const seconds = Math.max(0.1, (Date.now() - startedAt) / 1000)
+        const via = proxyUrl === null ? '直连' : `经 ${download.proxy?.name ?? download.proxy?.host ?? '外网主机'} 代理`
+        meter('从 Release 下载安装包', { bytes: landed, totalBytes: landed, percent: 100, speed: landed / seconds })
+        await mark('upload', 'succeeded', `${formatBytes(landed)} · ${source === '' ? 'Release' : source} 下载（${via}）${seconds.toFixed(1)}s · ${formatBytes(landed / seconds)}/s`)
+        await log(`downloaded the package from ${source === '' ? 'the release' : source} (${via})`)
+        return true
+      }
+      await log(`release download did not produce a usable package (${failure ?? `size ${String(landed)} instead of ${String(plan.package.bytes)}`}); falling back to a gateway upload`)
+      return false
+    } catch (error) {
+      await log(`release download failed (${error instanceof Error ? error.message : String(error)}); falling back to a gateway upload`)
+      return false
+    } finally {
+      egress?.closeAll()
+      await runner.runProcess('ssh', [...runner.sshOptions(), runner.target(), removeDownloadDirCommand(plan, remoteDir)]).catch(() => {})
+    }
+  }
+
+  /**
+   * Locate a Node runtime on the target without assuming the service user's home.
+   * @param {object} plan deployment plan.
+   * @param {object} runner SSH runner.
+   * @returns {Promise<string>} absolute path or ''.
+   */
+  async #findTargetNode(plan, runner) {
+    let node = ''
+    const script = plan.os === 'windows' ? windowsNodeProbeScript(plan.appRoot) : linuxNodeProbeScript(plan.appRoot)
+    await runner.script(script, plan.os, (line) => {
+      const match = /^DSH-MESH-NODE=(.+)$/u.exec(line.trim())
+      if (match !== null && node === '') node = match[1].trim()
+    }).catch(() => {})
+    return node
   }
 
   /**

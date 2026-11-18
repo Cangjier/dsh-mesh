@@ -345,3 +345,81 @@ test('a timed out probe keeps the last known install state, across a restart', a
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('release settings are saved 0600 and tokens are masked', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-release-settings-'))
+  try {
+    const service = new MeshService({ dataDir: path.join(dir, 'mesh'), config: {}, log: () => {} })
+    const saved = await service.saveReleaseSettings({
+      config: {
+        enabled: true,
+        tag: 'latest',
+        partBytes: 80 * 1024 * 1024,
+        github: { owner: 'Cangjier', repo: 'dsh-mesh', token: 'gh-secret' },
+        gitee: { owner: 'cangjier', repo: 'dsh-mesh', token: 'gitee-secret', branch: 'main' },
+      },
+    })
+    assert.equal(saved.config.github.hasToken, true)
+    assert.equal(JSON.stringify(saved.config).includes('gh-secret'), false)
+    assert.equal(saved.configured, true)
+    assert.deepEqual(saved.manifestUrls, [
+      'https://github.com/Cangjier/dsh-mesh/releases/download/latest/latest.json',
+      'https://gitee.com/cangjier/dsh-mesh/releases/download/latest/latest.json',
+    ])
+    const settings = await service.releaseSettings()
+    assert.equal(settings.config.gitee.branch, 'main')
+    assert.equal(settings.config.enabled, true)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an upgrade plan carries the release download and the external proxy member', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-release-plan-'))
+  const pkg = path.join(dir, 'dsh-mesh-0.2.2-linux-x64.tar.gz')
+  const readRequest = async job => JSON.parse(await readFile(path.join(dir, 'mesh', 'deploy', job.id, 'request.json'), 'utf8'))
+  try {
+    await writeFile(pkg, 'package-bytes', 'utf8')
+    const service = new MeshService({
+      dataDir: path.join(dir, 'mesh'),
+      config: {},
+      log: () => {},
+      spawnRunner: async () => ({ mode: 'test', unit: null }),
+    })
+    await mkdir(path.join(dir, 'mesh'), { recursive: true })
+    await writeFile(path.join(dir, 'mesh', 'release.json'), JSON.stringify({
+      enabled: true,
+      tag: 'latest',
+      github: { owner: 'Cangjier', repo: 'dsh-mesh' },
+      gitee: { owner: 'cangjier', repo: 'dsh-mesh' },
+    }), 'utf8')
+    service.members = async () => ({
+      local: { id: 'local', name: 'a', ip: '10.66.66.1', kind: 'self', system: { appRoot: '/opt/a', user: 'root', platform: 'linux' } },
+      members: [
+        { id: 'target', name: 'B', ip: '10.66.66.3', dsh: true, online: true, kind: 'peer', system: { appRoot: '/opt/b', user: 'deploy', platform: 'linux' } },
+        { id: 'proxy', name: 'C', ip: '10.66.66.2', dsh: true, online: true, kind: 'peer', countryCode: 'JP', latencyMs: 20, system: { appRoot: '/opt/c', user: 'root', platform: 'linux' } },
+      ],
+    })
+    service.deploy.list = async () => []
+    service.waitDeploy = async id => ({ id, status: 'succeeded' })
+
+    const result = await service.startDeploy({ member: 'target', package: pkg, mode: 'upgrade' })
+    const request = await readRequest(result.job)
+    assert.deepEqual(request.plan.download.manifestUrls, [
+      'https://github.com/Cangjier/dsh-mesh/releases/download/latest/latest.json',
+      'https://gitee.com/cangjier/dsh-mesh/releases/download/latest/latest.json',
+    ])
+    assert.equal(request.plan.download.proxy.host, '10.66.66.2')
+    assert.equal(request.plan.download.proxy.name, 'C')
+
+    const direct = await service.startDeploy({ member: 'target', package: pkg, mode: 'upgrade', direct: true })
+    const directRequest = await readRequest(direct.job)
+    assert.equal(directRequest.plan.download.proxy, null)
+
+    const install = await service.startDeploy({ member: 'target', package: pkg, mode: 'install' })
+    const installRequest = await readRequest(install.job)
+    assert.equal(installRequest.plan.download, null)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

@@ -90,6 +90,13 @@ export function phaseFromLine(line, targets = ['linux-x64']) {
       currentTarget: smoke[1],
     }
   }
+  // The build host is uploading the release assets; this can take minutes and
+  // must be visible instead of leaving the bar at the last packaged target.
+  if (text.includes('release asset ')
+    || text.includes('release publish ')
+    || /^(?:github|gitee) (?:upload|remove|create)/u.test(text)) {
+    return { phase: 'publish', percent: 97 }
+  }
   // The member has finished packaging, but the gateway still has to pull the
   // archives (hundreds of MiB over the mesh) and clean the member up. Calling
   // that "done" while the job is still running made the panel show "编译中"

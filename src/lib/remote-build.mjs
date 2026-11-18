@@ -9,8 +9,14 @@
  *   2. runs the same `code/build/cli.mjs build` a human would run, streaming
  *      its output into the gateway's job log,
  *   3. reads the member-side `state.json` for the real outcome, and
- *   4. copies the finished archives into `~/.dsh/packages` on the gateway,
- *      which is what the deploy panel already lists.
+ *   4. either copies the finished archives into `~/.dsh/packages` on the
+ *      gateway (`pullBack: true`) or leaves them on the build host
+ *      (`pullBack: false`, the default), where the automatic upgrade uses the
+ *      archive that was just built.
+ *
+ * When the build host itself is about to be upgraded, the matching archive is
+ * copied to a stable directory before the temporary job tree is deleted; the
+ * upgrade then reads it locally and never re-downloads or re-uploads it.
  *
  * Nothing is decided by parsing the log: the log is only there to show
  * progress. The member's state file is the source of truth.
@@ -32,6 +38,7 @@ export const DEFAULT_MESH_REPO = 'https://github.com/Cangjier/dsh-mesh.git'
 /** Where the member keeps its checkout and its build jobs. */
 const REMOTE_SRC = '$HOME/.dsh/mesh/build-src'
 const REMOTE_JOBS = '$HOME/.dsh/mesh/build'
+const REMOTE_STAGE = '$HOME/.dsh/mesh/upgrade'
 const REMOTE_BIN = '$HOME/.dsh/mesh/bin'
 const REMOTE_NODE_DIR = '$HOME/.dsh/dsh-mesh/current/runtime/node/bin'
 
@@ -64,7 +71,7 @@ function publishArgument(options) {
  * a build must reflect what is on main, not whatever a previous run left in
  * the tree. A local checkout that is behind main would otherwise silently
  * build old overlays.
- * @param {{jobId: string, ref: string, targets: string[], buildStamp?: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number, releaseConfigRemote?: string|null, publish?: boolean}} options script input.
+ * @param {{jobId: string, ref: string, targets: string[], buildStamp?: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number, releaseConfigRemote?: string|null, publish?: boolean, full?: boolean}} options script input.
  * @returns {string} bash script.
  */
 export function remoteBuildScript(options) {
@@ -89,6 +96,9 @@ export function remoteBuildScript(options) {
     // gateway keeps the state and the log, so the member-side directory is
     // only ever needed while that build runs.
     `find "${REMOTE_JOBS}" -mindepth 1 -maxdepth 1 -type d ! -name ${quote(String(options.jobId))} -exec rm -rf {} + 2>/dev/null || true`,
+    // Archives staged for a previous build's automatic upgrade are one copy
+    // per build; the upgrade has long finished by the time another build runs.
+    `find "${REMOTE_STAGE}" -mindepth 1 -maxdepth 1 -type d ! -name ${quote(String(options.jobId))} -exec rm -rf {} + 2>/dev/null || true`,
     `free_kb=$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')`,
     `if [ "\${free_kb:-0}" -lt ${String(needGiB * 1024 * 1024)} ]; then echo "not enough free space on the build host: \${free_kb:-0} KiB free, ${String(needGiB)} GiB needed" >&2; exit 4; fi`,
     `if [ ! -d "${REMOTE_SRC}/.git" ]; then`,
@@ -100,7 +110,7 @@ export function remoteBuildScript(options) {
     'corepack enable --install-directory "$HOME/.dsh/mesh/bin" >/dev/null 2>&1 || true',
     `cd "${REMOTE_SRC}" || { echo "mesh checkout is missing" >&2; exit 3; }`,
     'echo "mesh head $(git rev-parse --short HEAD)"',
-    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --stream --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.buildStamp ? ` --build-stamp ${quote(options.buildStamp)}` : ''}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ''}${publishArgument(options)}`,
+    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --stream --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.buildStamp ? ` --build-stamp ${quote(options.buildStamp)}` : ''}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ''}${options.full === false ? ' --web-only' : ''}${publishArgument(options)}`,
     'code=$?',
     `ls -1d "${out}"/* 2>/dev/null | head -n 5`,
     'exit $code',
@@ -126,7 +136,7 @@ function quote(value) {
  * PowerShell. So the checkout is a codeload tarball extracted with tar, and the
  * engine runs exactly as it does on Linux — it is cross-platform and can emit a
  * linux-x64 archive from a Windows host.
- * @param {{jobId: string, ref: string, targets: string[], buildStamp?: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number, appRoot?: string, releaseConfigRemote?: string|null, publish?: boolean}} options script input.
+ * @param {{jobId: string, ref: string, targets: string[], buildStamp?: string, proxyUrl?: string|null, repoUrl?: string, heapMb?: number, appRoot?: string, releaseConfigRemote?: string|null, publish?: boolean, full?: boolean}} options script input.
  * @returns {string} PowerShell script.
  */
 export function windowsBuildScript(options) {
@@ -168,6 +178,7 @@ export function windowsBuildScript(options) {
     "$buildRoot = Join-Path $root 'build'",
     "$rmScript = \"const fs=require('fs');const p=process.argv[1];fs.rmSync(p,{recursive:true,force:true,maxRetries:5,retryDelay:200})\"",
     `Get-ChildItem -LiteralPath $buildRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} } | ForEach-Object { & (Join-Path $nodeDir 'node.exe') -e $rmScript $_.FullName 2>$null; if (Test-Path -LiteralPath $_.FullName) { Write-Output ('could not remove a leftover job dir: ' + $_.Name) } }`,
+    `Get-ChildItem -LiteralPath (Join-Path $root 'upgrade') -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue`,
     '$driveFree = 0',
     'try { $driveFree = (Get-PSDrive ((Get-Item $env:USERPROFILE).PSDrive.Name)).Free } catch { $driveFree = (Get-PSDrive C).Free }',
     `if ($driveFree -lt ${String(needGiB * 1024 ** 3)}) { throw ("not enough free space on the build host: {0:N1} GiB free, ${String(needGiB)} GiB needed" -f ($driveFree / 1GB)) }`,
@@ -208,7 +219,7 @@ export function windowsBuildScript(options) {
     'if (-not (Test-Path (Join-Path $src "code\\build\\cli.mjs"))) { throw "mesh checkout is incomplete" }',
     `& (Join-Path $nodeDir 'corepack.cmd') enable --install-directory $bin | Out-Null`,
     'Set-Location $src',
-    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --stream --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(','))}${options.buildStamp ? ` --build-stamp ${quotePs(options.buildStamp)}` : ''}${proxy === '' ? '' : ` --proxy ${quotePs(proxy)}`}${windowsPublishArgument(options)}`,
+    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --stream --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(','))}${options.buildStamp ? ` --build-stamp ${quotePs(options.buildStamp)}` : ''}${proxy === '' ? '' : ` --proxy ${quotePs(proxy)}`}${options.full === false ? ' --web-only' : ''}${windowsPublishArgument(options)}`,
     '$code = $LASTEXITCODE',
     'Get-ChildItem -Directory $out -ErrorAction SilentlyContinue | Select-Object -First 5 -ExpandProperty FullName',
     'exit $code',
@@ -328,7 +339,7 @@ export class RemoteBuilder {
   /**
    * Run one job on a member and settle the local job state.
    * @param {string} jobDir local job directory.
-   * @param {{plan: {os?: string, appRoot?: string}, memberName: string, proxyUrl?: string|null, repoUrl?: string, buildStamp?: string, heapMb?: number, releaseConfig?: object|null}} options run options.
+   * @param {{plan: {os?: string, appRoot?: string}, memberName: string, proxyUrl?: string|null, repoUrl?: string, buildStamp?: string, heapMb?: number, releaseConfig?: object|null, pullBack?: boolean, stageTarget?: string|null, full?: boolean}} options run options.
    * @returns {Promise<object>} final local state.
    */
   async run(jobDir, options) {
@@ -367,6 +378,7 @@ export class RemoteBuilder {
         appRoot: options.plan.appRoot,
         releaseConfigRemote,
         publish: releaseConfigRemote !== null,
+        full: options.full,
       })
       : remoteBuildScript({
         jobId: state.id,
@@ -378,6 +390,7 @@ export class RemoteBuilder {
         heapMb: options.heapMb,
         releaseConfigRemote,
         publish: releaseConfigRemote !== null,
+        full: options.full,
       })
     let percent = 1
     const onLine = (line) => {
@@ -442,47 +455,120 @@ export class RemoteBuilder {
     }
     const directories = Array.isArray(remote.artifacts) ? remote.artifacts : []
     const artifacts = []
+    const pullBack = options.pullBack === true
+    const stageTarget = typeof options.stageTarget === 'string' && options.stageTarget !== '' ? options.stageTarget : null
+    if (!pullBack && directories.length > 0) {
+      await appendLog(jobDir, 'pull-back is off; the archives stay on the build host')
+    }
     // The member finished building but nothing is on this host yet: pulling the
     // archives is its own phase, so the bar does not claim "完成" while several
-    // hundred MiB are still moving over the mesh.
+    // hundred MiB are still moving over the mesh. With pull-back off the build
+    // is already complete and the only remaining work is staging the archive
+    // the automatic upgrade will use.
     let pulled = 0
-    if (directories.length > 0) await this.#update(jobDir, { phase: 'fetch', percent: 96, currentTarget: null })
-    for (const artifact of directories) {
-      const archive = typeof artifact.archive === 'string' ? artifact.archive : ''
-      if (archive === '') continue
-      const local = await this.#pull(runner, archive, windows)
+    if (pullBack && directories.length > 0) await this.#update(jobDir, { phase: 'fetch', percent: 96, currentTarget: null })
+    /**
+     * Copy one archive to the gateway and record its digest.
+     * @param {string} remoteArchive remote path.
+     * @returns {Promise<{local: string, digest: string, bytes: number}>} local copy.
+     */
+    const pullOne = async (remoteArchive) => {
+      const local = await this.#pull(runner, remoteArchive, windows)
       const info = await stat(local)
       const digest = await sha256File(local)
       await writeSidecar(local, digest)
+      await appendLog(jobDir, `pulled ${path.basename(local)} (${String(info.size)} bytes)`)
+      pulled += 1
+      await this.#update(jobDir, { phase: 'fetch', percent: 96 + Math.round((3 * pulled) / directories.length) })
+      return { local, digest, bytes: info.size }
+    }
+    // With pull-back off the only copy of a successful build is on the build
+    // host. If nothing is staged (auto-upgrade off, a cross-target build, or a
+    // staging failure), the temporary job tree is kept instead of deleting the
+    // only copy; the next build's preflight removes it.
+    let preservedAll = true
+    if (!pullBack && directories.length > 0 && stageTarget === null) {
+      preservedAll = false
+      await appendLog(jobDir, 'pull-back is off and no upgrade target is staged; keeping the member build dir so the archives survive')
+    }
+    for (const artifact of directories) {
+      const remoteArchive = typeof artifact.archive === 'string' ? artifact.archive : ''
+      if (remoteArchive === '') continue
+      let local = null
+      let digest = typeof artifact.sha256 === 'string' && artifact.sha256 !== '' ? artifact.sha256 : null
+      let bytes = Number.isSafeInteger(artifact.bytes) ? artifact.bytes : null
+      if (pullBack) {
+        const pulledArtifact = await pullOne(remoteArchive)
+        local = pulledArtifact.local
+        digest = pulledArtifact.digest
+        bytes = pulledArtifact.bytes
+      }
+      // The automatic upgrade runs after the temporary job tree is deleted, so
+      // the matching archive has to be copied somewhere durable. A copy (not a
+      // move) keeps the original available for the pull-back fallback below.
+      let staged = null
+      if (stageTarget !== null && artifact.target === stageTarget) {
+        staged = await this.#stageArtifact(runner, jobDir, state.id, remoteArchive, windows)
+        if (staged !== null) {
+          if (digest === null) digest = staged.sha256
+          if (bytes === null) bytes = staged.bytes
+          await appendLog(jobDir, `staged ${path.basename(staged.path)} for the automatic upgrade (${String(staged.bytes)} bytes)`)
+        } else if (local === null) {
+          // Staging failed and pull-back is off: copy the archive back so a
+          // successful build is never lost with the temporary job tree.
+          await appendLog(jobDir, 'staging failed; pulling the archive back so the build result is preserved')
+          try {
+            const pulledArtifact = await pullOne(remoteArchive)
+            local = pulledArtifact.local
+            digest = pulledArtifact.digest
+            bytes = pulledArtifact.bytes
+          } catch (error) {
+            preservedAll = false
+            await appendLog(jobDir, `could not preserve the archive: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+      }
       artifacts.push({
         target: artifact.target,
-        archive: local,
-        remoteArchive: archive,
-        bytes: info.size,
+        archive: local ?? staged?.path ?? remoteArchive,
+        remoteArchive,
+        stagedArchive: staged?.path ?? null,
+        pulled: local !== null,
+        bytes,
         sha256: digest,
         manifest: artifact.manifest ?? null,
         smoke: artifact.smoke ?? null,
       })
-      await appendLog(jobDir, `pulled ${path.basename(local)} (${String(info.size)} bytes, sha256 ${digest.slice(0, 12)}…)`)
-      pulled += 1
-      await this.#update(jobDir, { phase: 'fetch', percent: 96 + Math.round((3 * pulled) / directories.length) })
     }
-    // Archives are on the gateway now; the member-side tree (source,
-    // node_modules, both package trees, and the member's copy of the archive)
-    // is only temporary data. Settle the job first so the panel does not wait
-    // for a multi-minute delete.
+    // A target was requested but the build did not produce it: keep the tree so
+    // the other archives are not lost either.
+    if (!pullBack && directories.length > 0 && stageTarget !== null && !artifacts.some(artifact => artifact.stagedArchive !== null || artifact.pulled)) {
+      preservedAll = false
+      await appendLog(jobDir, `pull-back is off and ${stageTarget} was not packaged; keeping the member build dir so the archives survive`)
+    }
+    // Archives are on the gateway (when pull-back is on); the member-side tree
+    // (source, node_modules, both package trees, and the member's copy of the
+    // archive) is only temporary data. Settle the job first so the panel does
+    // not wait for a multi-minute delete. If nothing preserved an artifact,
+    // keep the member-side tree instead: a recoverable build beats a clean disk.
     const done = await this.#update(jobDir, {
       status: 'done',
       phase: 'done',
       percent: 100,
       currentTarget: null,
       artifacts,
+      pulledBack: pullBack || artifacts.some(artifact => artifact.pulled),
+      remoteDirKept: !preservedAll,
       remoteJob: remote.id ?? null,
       version: remote.version ?? null,
       publish: remote.publish ?? null,
     })
     await this.#cleanupReleaseConfig(runner, releaseConfigRemote, windows)
-    await this.#cleanupRemote(runner, jobDir, state.id, windows)
+    if (preservedAll) {
+      await this.#cleanupRemote(runner, jobDir, state.id, windows)
+    } else {
+      await appendLog(jobDir, `member build dir kept for recovery: $HOME/.dsh/mesh/build/${state.id}`)
+    }
     return done
   }
 
@@ -592,6 +678,64 @@ export class RemoteBuilder {
     await rm(local, { force: true })
     await rename(temporary, local)
     return local
+  }
+
+  /**
+   * Move one finished archive to a stable directory on the build host.
+   *
+   * The automatic upgrade starts after the temporary job tree is deleted, so
+   * the archive has to outlive it. It is copied (the original stays for a
+   * pull-back fallback) and its digest is computed on the build host: the
+   * upgrade plan needs bytes and SHA-256, and pulling 300–420 MiB back to the
+   * gateway just to hash it would defeat the point of leaving the package
+   * there.
+   * @param {SshRunner} runner ssh runner.
+   * @param {string} jobDir local job directory (used for logging).
+   * @param {string} jobId build job id.
+   * @param {string} remoteArchive archive path on the build host.
+   * @param {boolean} windows whether the build host runs Windows.
+   * @returns {Promise<{path: string, bytes: number, sha256: string}|null>} staged archive, or null.
+   */
+  async #stageArtifact(runner, jobDir, jobId, remoteArchive, windows) {
+    const name = remoteArchive.split(/[\\/]/u).pop() ?? path.basename(remoteArchive)
+    const command = windows
+      ? powershellCommand([
+          "$ProgressPreference = 'SilentlyContinue'",
+          `$stage = Join-Path $env:USERPROFILE '.dsh\\mesh\\upgrade\\${jobId}'`,
+          'New-Item -ItemType Directory -Force -Path $stage | Out-Null',
+          `$dest = Join-Path $stage ${quotePs(name)}`,
+          `Copy-Item -LiteralPath ${quotePs(remoteArchive)} -Destination $dest -Force`,
+          'Write-Output ("DSH-MESH-STAGED=" + $dest)',
+          'Write-Output ("DSH-MESH-SHA256=" + (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash.ToLower())',
+          'Write-Output ("DSH-MESH-BYTES=" + (Get-Item -LiteralPath $dest).Length)',
+        ].join('; '))
+      : [
+          'set -e',
+          `stage="${REMOTE_STAGE}/${jobId}"`,
+          'mkdir -p "$stage"',
+          `dest="$stage/${name}"`,
+          `cp -f -- ${quote(remoteArchive)} "$dest"`,
+          'printf \'DSH-MESH-STAGED=%s\\n\' "$dest"',
+          'printf \'DSH-MESH-SHA256=%s\\n\' "$(sha256sum -- "$dest" | awk \'{print $1}\')"',
+          'printf \'DSH-MESH-BYTES=%s\\n\' "$(stat -c %s -- "$dest")"',
+        ].join('\n')
+    try {
+      const { stdout } = await runner.runProcess('ssh', [...runner.sshOptions(), runner.target(), command])
+      const text = String(stdout)
+      const staged = /^DSH-MESH-STAGED=(.+)$/mu.exec(text)?.[1].trim() ?? ''
+      const sha256 = /^DSH-MESH-SHA256=([a-f0-9]{64})$/mu.exec(text)?.[1] ?? ''
+      const bytes = Number.parseInt(/^DSH-MESH-BYTES=(\d+)$/mu.exec(text)?.[1] ?? '', 10)
+      if (staged === '' || sha256 === '' || !Number.isSafeInteger(bytes) || bytes <= 0) {
+        throw new Error(`the build host did not report a staged archive (${text.trim().slice(-200)})`)
+      }
+      return { path: staged, bytes, sha256 }
+    } catch (error) {
+      // Staging only exists for the automatic upgrade; the build itself is
+      // already done and its archives are intact, so this must not fail it.
+      const message = error instanceof Error ? error.message : String(error)
+      await appendLog(jobDir, `could not stage an archive for the automatic upgrade: ${message}`)
+      return null
+    }
   }
 
   /**

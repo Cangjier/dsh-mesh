@@ -33,6 +33,14 @@
           targets:
             - linux-x64
             - win-x64
+          # 成员编译完成后是否把部署包拉回网关的 ~/.dsh/packages。
+          # 默认 false：包留在编译机的 ~/.dsh/mesh/upgrade/<job>/ 下，直接用于
+          # 编译后的自动升级，避免几百 MiB 再穿过一次 WireGuard。面板「拉回服务」
+          # 开关可对单次编译覆盖这个默认值。
+          pullBack: false
+          # 成员编译成功后，自动用这份包在该成员上走升级流程（独立的升级进程，
+          # 重启成员不会打断升级）。本机编译不自动升级。设 false 关闭。
+          autoUpgrade: true
           # true: app/ + runtime/node/ + gate + plugin (offline package).
           # false: web/ + gate + plugin only.
           full: true

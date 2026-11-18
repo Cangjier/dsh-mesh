@@ -618,6 +618,7 @@ export function layoutRootFor(appRoot, os) {
  * @param {string} [options.identityFile] private key.
  * @param {'linux'|'windows'} [options.os] target OS.
  * @param {string} [options.package] local archive.
+ * @param {{path: string, bytes: number, sha256: string}} [options.packageOnTarget] archive already on the target (used by the post-build upgrade).
  * @param {string} [options.appRoot] stable application root.
  * @param {string} [options.release] release id.
  * @param {Array} [options.services] service manifest.
@@ -631,10 +632,24 @@ export async function buildDeployPlan(options) {
   if (typeof options.host !== 'string' || options.host.trim() === '') throw new Error('host is required')
   const os = normalizeOs(options.os ?? 'linux')
   const repositoryRoot = options.repositoryRoot ?? process.cwd()
+  // An archive the build host already produced (and staged for its own
+  // upgrade) is described by path + size + digest; there is no local file to
+  // stat or hash, and the deploy must not upload it again.
+  const onTarget = options.packageOnTarget !== null && typeof options.packageOnTarget === 'object'
+    ? options.packageOnTarget
+    : null
   let packagePath = ''
   let packageInfo = null
   let sha256 = ''
-  if (options.skipPackage !== true) {
+  if (onTarget !== null) {
+    packagePath = typeof onTarget.path === 'string' ? onTarget.path.trim() : ''
+    const bytes = Number(onTarget.bytes)
+    sha256 = typeof onTarget.sha256 === 'string' ? onTarget.sha256.trim().toLowerCase() : ''
+    if (packagePath === '') throw new Error('packageOnTarget.path is required')
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error('packageOnTarget.bytes must be a positive integer')
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error('packageOnTarget.sha256 must be a 64-character hex digest')
+    packageInfo = { size: bytes }
+  } else if (options.skipPackage !== true) {
     packagePath = options.package
       ? path.resolve(options.package)
       : await findLatestPackage(repositoryRoot, os)
@@ -685,7 +700,10 @@ export async function buildDeployPlan(options) {
       ? path.resolve(options.identityFile)
       : undefined,
     os,
-    package: { path: packagePath, bytes: packageInfo?.size ?? 0, sha256 },
+    package: { path: packagePath, bytes: packageInfo?.size ?? 0, sha256, onTarget: onTarget !== null },
+    // The archive is already on the target, so upload/download must be skipped
+    // and the target path doubles as `remotePackage`.
+    packageOnTarget: onTarget !== null,
     release,
     appRoot,
     layoutRoot,
@@ -712,9 +730,11 @@ export async function buildDeployPlan(options) {
     interop: options.interop === false || process.env.DSH_DEPLOY_INTEROP === '0' ? null : interop,
     // Named by content, not by release, so a retried deploy of the same package
     // reuses the upload instead of pushing hundreds of megabytes again.
-    remotePackage: os === 'linux'
-      ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path.extname(packagePath)}`
-      : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path.extname(packagePath)}`,
+    remotePackage: onTarget !== null
+      ? packagePath
+      : os === 'linux'
+        ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path.extname(packagePath)}`
+        : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path.extname(packagePath)}`,
     // A test upgrade rehearses the *flat* upgrade (the path the gateway uses
     // on itself) in a sandbox on the member before touching it, then runs the
     // normal blue-green upgrade. Without this a member test proves nothing
@@ -1006,6 +1026,10 @@ $node = Join-Path $Stage 'runtime\\node\\node.exe'
 if (-not (Test-Path $node)) { $node = (Get-Command node -ErrorAction Stop).Source }
 & $node --check (Join-Path $Stage 'gate\\server.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'gate/server.mjs failed node --check' }
+# One 300–420 MiB archive per upgrade must not pile up in the temp directory.
+# Linux prepare already deletes its copy; Windows did not, and the build-host
+# archive staged for an automatic upgrade is no longer needed once extracted.
+Remove-Item -LiteralPath $Package -Force -ErrorAction SilentlyContinue
 Write-Output "prepared ${plan.release} at $Stage"
 `
 }
@@ -1095,7 +1119,9 @@ export function describePlan(plan) {
     services: plan.services,
     scope: plan.scope,
     steps: [
-      `obtain ${path.basename(plan.package.path)}: download from the release when configured, else upload to ${plan.remotePackage}`,
+      plan.packageOnTarget === true
+        ? `use the package already on the target (${plan.package.path}); no download or upload`
+        : `obtain ${path.basename(plan.package.path)}: download from the release when configured, else upload to ${plan.remotePackage}`,
       `extract and prepare ${plan.releases}/${plan.release} (no service switch)`,
       `update shared config and service definitions for ${plan.appRoot}/current`,
       `switch ${plan.current} to ${plan.release}`,
@@ -1815,6 +1841,7 @@ export class DeployManager {
       target: { host: plan.host, user: plan.user ?? null, port: plan.port, os: plan.os, appRoot: plan.appRoot },
       release: plan.release,
       package: plan.package.path,
+      packageOnTarget: plan.packageOnTarget === true,
       services: plan.services.map(service => service.name),
       status: 'running',
       phase: 'starting',
@@ -1886,7 +1913,17 @@ export class DeployManager {
       const existingBytes = typeof runner.remoteSize === 'function'
         ? await runner.remoteSize(plan.remotePackage).catch(() => null)
         : null
-      if (existingBytes === plan.package.bytes) {
+      if (plan.packageOnTarget === true) {
+        // A post-build upgrade reads the archive the build host just produced.
+        // There is no local copy to upload (and none may be deleted as a stale
+        // temp file), so the only two outcomes are "usable" and "gone".
+        if (existingBytes !== plan.package.bytes) {
+          throw new Error(`编译机上的安装包不可用：${plan.package.path} ${existingBytes === null ? '不存在' : `只有 ${formatBytes(existingBytes)}，应为 ${formatBytes(plan.package.bytes)}`}`)
+        }
+        meter('使用编译机上的安装包', { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 })
+        await mark('upload', 'succeeded', `${formatBytes(existingBytes)} · 编译机本地包，跳过下载/上传`)
+        await log(`using the package already on the build host (${plan.package.path}), skipping download and upload`)
+      } else if (existingBytes === plan.package.bytes) {
         await log(`package already present on the target (${formatBytes(existingBytes)}), skipping download and upload`)
         meter('获取安装包', { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 })
         await mark('upload', 'succeeded', `${formatBytes(existingBytes)} · 已存在，跳过下载/上传`)

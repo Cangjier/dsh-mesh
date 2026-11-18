@@ -19,6 +19,7 @@ import {
   Progress,
   Select,
   Space,
+  Switch,
   Table,
   Tag,
   Tooltip,
@@ -163,6 +164,55 @@ function smokeTag(job: BuildJob): JSX.Element | null {
   return <Tooltip title={reason === '' ? '这个任务没有执行抓屏' : reason}><Tag>未抓屏</Tag></Tooltip>
 }
 
+/**
+ * Where the finished archives live.
+ *
+ * Pull-back is off by default, so a member build normally leaves its package
+ * on that host. Saying so in the row avoids "the build finished but no package
+ * appeared under 部署包" looking like a failure.
+ * @param job build job.
+ * @returns status tag or null.
+ */
+function pullBackTag(job: BuildJob): JSX.Element | null {
+  if (job.mode !== 'remote') return null
+  if (job.pullBack === false) {
+    if (job.pulledBack === true) {
+      return <Tooltip title="暂存升级包失败，已回退为把产物拉回网关"><Tag color="orange">已回退拉回</Tag></Tooltip>
+    }
+    const kept = job.remoteDirKept === true
+    return (
+      <Tooltip title={kept
+        ? '产物留在编译机的构建目录（没有暂存升级包时不会删除）；没有复制到网关'
+        : '产物留在编译机；自动升级直接用这份包，没有复制到网关'}>
+        <Tag>未拉回</Tag>
+      </Tooltip>
+    )
+  }
+  if (job.pullBack === true) return <Tag color="geekblue">已拉回</Tag>
+  return null
+}
+
+/**
+ * The automatic upgrade the build host started for itself.
+ * @param job build job.
+ * @returns status tag or null.
+ */
+function autoUpgradeTag(job: BuildJob): JSX.Element | null {
+  const result = job.autoUpgradeResult
+  if (result === null || result === undefined) return null
+  const where = result.memberName === null || result.memberName === undefined ? '编译机' : result.memberName
+  if (result.status === 'started') {
+    return <Tooltip title={`升级任务 ${result.jobId ?? ''}（${where}）；状态看该成员的升级进度`}><Tag color="processing">已触发升级</Tag></Tooltip>
+  }
+  if (result.status === 'failed') {
+    return <Tooltip title={result.reason ?? '自动升级没有启动'}><Tag color="error">自动升级未启动</Tag></Tooltip>
+  }
+  if (result.status === 'skipped') {
+    return <Tooltip title={result.reason ?? '这次没有自动升级'}><Tag>未自动升级</Tag></Tooltip>
+  }
+  return <Tag>{result.status}</Tag>
+}
+
 function jobPercent(job: BuildJob): number {
   if (job.status === 'done') return 100
   // A stopped job keeps the percentage it actually reached. Forcing 100 made a
@@ -261,6 +311,8 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
   const [ref, setRef] = useState('master')
   const [targets, setTargets] = useState<string[]>([...DEFAULT_BUILD_TARGETS])
   const [starting, setStarting] = useState(false)
+  // `null` follows the bundle default (off): pull-back is opt-in per build.
+  const [pullBack, setPullBack] = useState<boolean | null>(null)
   const [error, setError] = useState('')
   const [logJob, setLogJob] = useState<BuildJob | null>(null)
   const [logLines, setLogLines] = useState<string[]>([])
@@ -298,6 +350,15 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
     if (!active) return
     void loadPackages()
     void loadJobs()
+    // The switch follows the bundle config until the operator changes it for
+    // this build; the server default is authoritative (false unless set).
+    let cancelled = false
+    void api.hostStatus().then(status => {
+      if (!cancelled) setPullBack(previous => previous ?? status.build.pullBack === true)
+    }).catch(() => {
+      // A status failure only means the switch keeps its local default.
+    })
+    return () => { cancelled = true }
   }, [active, loadPackages, loadJobs])
 
   const running = useMemo(() => jobs.some(job => ACTIVE_STATUSES.has(job.status)), [jobs])
@@ -309,6 +370,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
   const selectedBuildMember = buildMember ?? defaultBuildMember
   const selectedProxyMode = proxyMode ?? (defaultProxyMember === null ? 'none' : 'member')
   const selectedProxyMember = proxyMember ?? defaultProxyMember ?? undefined
+  const selectedPullBack = pullBack ?? false
 
   // One SSE connection carries every build change and log tail; there is no
   // timer and no request while nothing happens. `ready` fires on connect and
@@ -383,6 +445,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
         member: selectedBuildMember,
         ref: ref.trim() === '' ? undefined : ref.trim(),
         targets,
+        pullBack: selectedPullBack,
         ...(selectedProxyMode === 'member' ? { proxyMember: selectedProxyMember } : {}),
         ...(selectedProxyMode === 'url' ? { proxy: proxyUrl.trim() } : {}),
       })
@@ -394,7 +457,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
     } finally {
       setStarting(false)
     }
-  }, [messageApi, proxyUrl, ref, selectedBuildMember, selectedProxyMember, selectedProxyMode, targets, loadJobs])
+  }, [messageApi, proxyUrl, ref, selectedBuildMember, selectedProxyMember, selectedProxyMode, selectedPullBack, targets, loadJobs])
 
   /**
    * Remove every finished job in one go (the card's toolbar button).
@@ -437,6 +500,8 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
           {jobStatusTag(job)}
           {job.status === 'done' ? smokeTag(job) : null}
           {job.status === 'done' ? publishTag(job) : null}
+          {job.status === 'done' ? pullBackTag(job) : null}
+          {job.status === 'done' ? autoUpgradeTag(job) : null}
         </Space>
       ),
     },
@@ -647,6 +712,12 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
                   onChange={values => setTargets(values)}
                   options={TARGET_OPTIONS}
                 />
+              </Space>
+              <Space size={6}>
+                <Typography.Text type="secondary">拉回服务</Typography.Text>
+                <Tooltip title="编译完成后把部署包拉回网关 ~/.dsh/packages。默认关闭：包留在编译机，编译成功后直接在该成员上升级，不再复制几百 MiB。">
+                  <Switch size="small" checked={selectedPullBack} onChange={value => setPullBack(value)} />
+                </Tooltip>
               </Space>
               <Button
                 type="primary"

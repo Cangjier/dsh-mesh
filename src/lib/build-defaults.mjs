@@ -130,6 +130,37 @@ export function pickBuildMember(members) {
 }
 
 /**
+ * Whether a member build should copy its archives back to the gateway.
+ *
+ * Off by default: the archive is hundreds of MiB and the build host already
+ * owns it, so a normal member build leaves it there for the automatic upgrade.
+ * The panel exposes this per build, and the bundle config sets the default for
+ * every other trigger (the model tool and the nightly schedule).
+ * @param {{pullBack?: boolean}|null|undefined} request build request.
+ * @param {object|null|undefined} config plugin config.
+ * @returns {boolean} whether to pull the archives back.
+ */
+export function pullBackEnabled(request, config) {
+  if (typeof request?.pullBack === 'boolean') return request.pullBack
+  return config?.build?.pullBack === true
+}
+
+/**
+ * Whether a successful member build should upgrade that member in place.
+ *
+ * On by default: the package was just built for that host, so the useful next
+ * step is to run it there instead of asking the operator to open another
+ * dialog. `autoUpgrade: false` (config or request) turns it off.
+ * @param {{autoUpgrade?: boolean}|null|undefined} request build request.
+ * @param {object|null|undefined} config plugin config.
+ * @returns {boolean} whether to start an upgrade after a member build.
+ */
+export function autoUpgradeEnabled(request, config) {
+  if (typeof request?.autoUpgrade === 'boolean') return request.autoUpgrade
+  return config?.build?.autoUpgrade !== false
+}
+
+/**
  * The member a fresh panel should use as the outbound proxy: a foreign Linux
  * member, preferring a reachable DSH, then the lowest WireGuard latency, then
  * the bigger machine.

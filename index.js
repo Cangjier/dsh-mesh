@@ -5308,10 +5308,19 @@ async function buildDeployPlan(options) {
   if (typeof options.host !== "string" || options.host.trim() === "") throw new Error("host is required");
   const os9 = normalizeOs(options.os ?? "linux");
   const repositoryRoot = options.repositoryRoot ?? process.cwd();
+  const onTarget = options.packageOnTarget !== null && typeof options.packageOnTarget === "object" ? options.packageOnTarget : null;
   let packagePath = "";
   let packageInfo2 = null;
   let sha256 = "";
-  if (options.skipPackage !== true) {
+  if (onTarget !== null) {
+    packagePath = typeof onTarget.path === "string" ? onTarget.path.trim() : "";
+    const bytes = Number(onTarget.bytes);
+    sha256 = typeof onTarget.sha256 === "string" ? onTarget.sha256.trim().toLowerCase() : "";
+    if (packagePath === "") throw new Error("packageOnTarget.path is required");
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error("packageOnTarget.bytes must be a positive integer");
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error("packageOnTarget.sha256 must be a 64-character hex digest");
+    packageInfo2 = { size: bytes };
+  } else if (options.skipPackage !== true) {
     packagePath = options.package ? path14.resolve(options.package) : await findLatestPackage(repositoryRoot, os9);
     packageInfo2 = await stat8(packagePath);
     if (!packageInfo2.isFile()) throw new Error(`package is not a file: ${packagePath}`);
@@ -5352,7 +5361,10 @@ async function buildDeployPlan(options) {
     port: Number.isSafeInteger(options.port) ? options.port : 22,
     identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path14.resolve(options.identityFile) : void 0,
     os: os9,
-    package: { path: packagePath, bytes: packageInfo2?.size ?? 0, sha256 },
+    package: { path: packagePath, bytes: packageInfo2?.size ?? 0, sha256, onTarget: onTarget !== null },
+    // The archive is already on the target, so upload/download must be skipped
+    // and the target path doubles as `remotePackage`.
+    packageOnTarget: onTarget !== null,
     release,
     appRoot,
     layoutRoot,
@@ -5379,7 +5391,7 @@ async function buildDeployPlan(options) {
     interop: options.interop === false || process.env.DSH_DEPLOY_INTEROP === "0" ? null : interop,
     // Named by content, not by release, so a retried deploy of the same package
     // reuses the upload instead of pushing hundreds of megabytes again.
-    remotePackage: os9 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path14.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path14.extname(packagePath)}`,
+    remotePackage: onTarget !== null ? packagePath : os9 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path14.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path14.extname(packagePath)}`,
     // A test upgrade rehearses the *flat* upgrade (the path the gateway uses
     // on itself) in a sandbox on the member before touching it, then runs the
     // normal blue-green upgrade. Without this a member test proves nothing
@@ -5573,6 +5585,10 @@ $node = Join-Path $Stage 'runtime\\node\\node.exe'
 if (-not (Test-Path $node)) { $node = (Get-Command node -ErrorAction Stop).Source }
 & $node --check (Join-Path $Stage 'gate\\server.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'gate/server.mjs failed node --check' }
+# One 300\u2013420 MiB archive per upgrade must not pile up in the temp directory.
+# Linux prepare already deletes its copy; Windows did not, and the build-host
+# archive staged for an automatic upgrade is no longer needed once extracted.
+Remove-Item -LiteralPath $Package -Force -ErrorAction SilentlyContinue
 Write-Output "prepared ${plan.release} at $Stage"
 `;
 }
@@ -5634,7 +5650,7 @@ function describePlan(plan) {
     services: plan.services,
     scope: plan.scope,
     steps: [
-      `obtain ${path14.basename(plan.package.path)}: download from the release when configured, else upload to ${plan.remotePackage}`,
+      plan.packageOnTarget === true ? `use the package already on the target (${plan.package.path}); no download or upload` : `obtain ${path14.basename(plan.package.path)}: download from the release when configured, else upload to ${plan.remotePackage}`,
       `extract and prepare ${plan.releases}/${plan.release} (no service switch)`,
       `update shared config and service definitions for ${plan.appRoot}/current`,
       `switch ${plan.current} to ${plan.release}`,
@@ -6251,6 +6267,7 @@ var DeployManager = class {
       target: { host: plan.host, user: plan.user ?? null, port: plan.port, os: plan.os, appRoot: plan.appRoot },
       release: plan.release,
       package: plan.package.path,
+      packageOnTarget: plan.packageOnTarget === true,
       services: plan.services.map((service) => service.name),
       status: "running",
       phase: "starting",
@@ -6319,7 +6336,14 @@ var DeployManager = class {
       await mark("upload", "running");
       const uploadStarted = Date.now();
       const existingBytes = typeof runner.remoteSize === "function" ? await runner.remoteSize(plan.remotePackage).catch(() => null) : null;
-      if (existingBytes === plan.package.bytes) {
+      if (plan.packageOnTarget === true) {
+        if (existingBytes !== plan.package.bytes) {
+          throw new Error(`\u7F16\u8BD1\u673A\u4E0A\u7684\u5B89\u88C5\u5305\u4E0D\u53EF\u7528\uFF1A${plan.package.path} ${existingBytes === null ? "\u4E0D\u5B58\u5728" : `\u53EA\u6709 ${formatBytes2(existingBytes)}\uFF0C\u5E94\u4E3A ${formatBytes2(plan.package.bytes)}`}`);
+        }
+        meter("\u4F7F\u7528\u7F16\u8BD1\u673A\u4E0A\u7684\u5B89\u88C5\u5305", { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 });
+        await mark("upload", "succeeded", `${formatBytes2(existingBytes)} \xB7 \u7F16\u8BD1\u673A\u672C\u5730\u5305\uFF0C\u8DF3\u8FC7\u4E0B\u8F7D/\u4E0A\u4F20`);
+        await log(`using the package already on the build host (${plan.package.path}), skipping download and upload`);
+      } else if (existingBytes === plan.package.bytes) {
         await log(`package already present on the target (${formatBytes2(existingBytes)}), skipping download and upload`);
         meter("\u83B7\u53D6\u5B89\u88C5\u5305", { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 });
         await mark("upload", "succeeded", `${formatBytes2(existingBytes)} \xB7 \u5DF2\u5B58\u5728\uFF0C\u8DF3\u8FC7\u4E0B\u8F7D/\u4E0A\u4F20`);
@@ -6816,6 +6840,7 @@ import path15 from "node:path";
 var DEFAULT_MESH_REPO = "https://github.com/Cangjier/dsh-mesh.git";
 var REMOTE_SRC = "$HOME/.dsh/mesh/build-src";
 var REMOTE_JOBS = "$HOME/.dsh/mesh/build";
+var REMOTE_STAGE = "$HOME/.dsh/mesh/upgrade";
 var REMOTE_BIN = "$HOME/.dsh/mesh/bin";
 var REMOTE_NODE_DIR = "$HOME/.dsh/dsh-mesh/current/runtime/node/bin";
 function publishArgument(options) {
@@ -6844,6 +6869,9 @@ function remoteBuildScript(options) {
     // gateway keeps the state and the log, so the member-side directory is
     // only ever needed while that build runs.
     `find "${REMOTE_JOBS}" -mindepth 1 -maxdepth 1 -type d ! -name ${quote(String(options.jobId))} -exec rm -rf {} + 2>/dev/null || true`,
+    // Archives staged for a previous build's automatic upgrade are one copy
+    // per build; the upgrade has long finished by the time another build runs.
+    `find "${REMOTE_STAGE}" -mindepth 1 -maxdepth 1 -type d ! -name ${quote(String(options.jobId))} -exec rm -rf {} + 2>/dev/null || true`,
     `free_kb=$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')`,
     `if [ "\${free_kb:-0}" -lt ${String(needGiB * 1024 * 1024)} ]; then echo "not enough free space on the build host: \${free_kb:-0} KiB free, ${String(needGiB)} GiB needed" >&2; exit 4; fi`,
     `if [ ! -d "${REMOTE_SRC}/.git" ]; then`,
@@ -6855,7 +6883,7 @@ function remoteBuildScript(options) {
     'corepack enable --install-directory "$HOME/.dsh/mesh/bin" >/dev/null 2>&1 || true',
     `cd "${REMOTE_SRC}" || { echo "mesh checkout is missing" >&2; exit 3; }`,
     'echo "mesh head $(git rev-parse --short HEAD)"',
-    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --stream --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.buildStamp ? ` --build-stamp ${quote(options.buildStamp)}` : ""}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ""}${publishArgument(options)}`,
+    `"${REMOTE_NODE_DIR}/node" code/build/cli.mjs build --stream --out "${out}" --ref ${quote(ref)} --targets ${quote(targets)}${options.buildStamp ? ` --build-stamp ${quote(options.buildStamp)}` : ""}${options.proxyUrl ? ` --proxy ${quote(options.proxyUrl)}` : ""}${options.full === false ? " --web-only" : ""}${publishArgument(options)}`,
     "code=$?",
     `ls -1d "${out}"/* 2>/dev/null | head -n 5`,
     "exit $code",
@@ -6899,6 +6927,7 @@ function windowsBuildScript(options) {
     "$buildRoot = Join-Path $root 'build'",
     `$rmScript = "const fs=require('fs');const p=process.argv[1];fs.rmSync(p,{recursive:true,force:true,maxRetries:5,retryDelay:200})"`,
     `Get-ChildItem -LiteralPath $buildRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} } | ForEach-Object { & (Join-Path $nodeDir 'node.exe') -e $rmScript $_.FullName 2>$null; if (Test-Path -LiteralPath $_.FullName) { Write-Output ('could not remove a leftover job dir: ' + $_.Name) } }`,
+    `Get-ChildItem -LiteralPath (Join-Path $root 'upgrade') -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue`,
     "$driveFree = 0",
     "try { $driveFree = (Get-PSDrive ((Get-Item $env:USERPROFILE).PSDrive.Name)).Free } catch { $driveFree = (Get-PSDrive C).Free }",
     `if ($driveFree -lt ${String(needGiB * 1024 ** 3)}) { throw ("not enough free space on the build host: {0:N1} GiB free, ${String(needGiB)} GiB needed" -f ($driveFree / 1GB)) }`,
@@ -6939,7 +6968,7 @@ function windowsBuildScript(options) {
     'if (-not (Test-Path (Join-Path $src "code\\build\\cli.mjs"))) { throw "mesh checkout is incomplete" }',
     `& (Join-Path $nodeDir 'corepack.cmd') enable --install-directory $bin | Out-Null`,
     "Set-Location $src",
-    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --stream --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(","))}${options.buildStamp ? ` --build-stamp ${quotePs(options.buildStamp)}` : ""}${proxy2 === "" ? "" : ` --proxy ${quotePs(proxy2)}`}${windowsPublishArgument(options)}`,
+    `& (Join-Path $nodeDir 'node.exe') code/build/cli.mjs build --stream --out $out --ref ${quotePs(options.ref)} --targets ${quotePs(options.targets.join(","))}${options.buildStamp ? ` --build-stamp ${quotePs(options.buildStamp)}` : ""}${proxy2 === "" ? "" : ` --proxy ${quotePs(proxy2)}`}${options.full === false ? " --web-only" : ""}${windowsPublishArgument(options)}`,
     "$code = $LASTEXITCODE",
     "Get-ChildItem -Directory $out -ErrorAction SilentlyContinue | Select-Object -First 5 -ExpandProperty FullName",
     "exit $code",
@@ -7000,7 +7029,7 @@ var RemoteBuilder = class {
   /**
    * Run one job on a member and settle the local job state.
    * @param {string} jobDir local job directory.
-   * @param {{plan: {os?: string, appRoot?: string}, memberName: string, proxyUrl?: string|null, repoUrl?: string, buildStamp?: string, heapMb?: number, releaseConfig?: object|null}} options run options.
+   * @param {{plan: {os?: string, appRoot?: string}, memberName: string, proxyUrl?: string|null, repoUrl?: string, buildStamp?: string, heapMb?: number, releaseConfig?: object|null, pullBack?: boolean, stageTarget?: string|null, full?: boolean}} options run options.
    * @returns {Promise<object>} final local state.
    */
   async run(jobDir, options) {
@@ -7029,7 +7058,8 @@ var RemoteBuilder = class {
       heapMb: options.heapMb,
       appRoot: options.plan.appRoot,
       releaseConfigRemote,
-      publish: releaseConfigRemote !== null
+      publish: releaseConfigRemote !== null,
+      full: options.full
     }) : remoteBuildScript({
       jobId: state.id,
       ref: state.ref,
@@ -7039,7 +7069,8 @@ var RemoteBuilder = class {
       buildStamp: options.buildStamp,
       heapMb: options.heapMb,
       releaseConfigRemote,
-      publish: releaseConfigRemote !== null
+      publish: releaseConfigRemote !== null,
+      full: options.full
     });
     let percent = 1;
     const onLine = (line) => {
@@ -7093,27 +7124,75 @@ var RemoteBuilder = class {
     }
     const directories = Array.isArray(remote.artifacts) ? remote.artifacts : [];
     const artifacts = [];
+    const pullBack = options.pullBack === true;
+    const stageTarget = typeof options.stageTarget === "string" && options.stageTarget !== "" ? options.stageTarget : null;
+    if (!pullBack && directories.length > 0) {
+      await appendLog(jobDir, "pull-back is off; the archives stay on the build host");
+    }
     let pulled = 0;
-    if (directories.length > 0) await this.#update(jobDir, { phase: "fetch", percent: 96, currentTarget: null });
-    for (const artifact of directories) {
-      const archive = typeof artifact.archive === "string" ? artifact.archive : "";
-      if (archive === "") continue;
-      const local = await this.#pull(runner, archive, windows);
+    if (pullBack && directories.length > 0) await this.#update(jobDir, { phase: "fetch", percent: 96, currentTarget: null });
+    const pullOne = async (remoteArchive) => {
+      const local = await this.#pull(runner, remoteArchive, windows);
       const info = await stat9(local);
       const digest = await sha256File3(local);
       await writeSidecar(local, digest);
+      await appendLog(jobDir, `pulled ${path15.basename(local)} (${String(info.size)} bytes)`);
+      pulled += 1;
+      await this.#update(jobDir, { phase: "fetch", percent: 96 + Math.round(3 * pulled / directories.length) });
+      return { local, digest, bytes: info.size };
+    };
+    let preservedAll = true;
+    if (!pullBack && directories.length > 0 && stageTarget === null) {
+      preservedAll = false;
+      await appendLog(jobDir, "pull-back is off and no upgrade target is staged; keeping the member build dir so the archives survive");
+    }
+    for (const artifact of directories) {
+      const remoteArchive = typeof artifact.archive === "string" ? artifact.archive : "";
+      if (remoteArchive === "") continue;
+      let local = null;
+      let digest = typeof artifact.sha256 === "string" && artifact.sha256 !== "" ? artifact.sha256 : null;
+      let bytes = Number.isSafeInteger(artifact.bytes) ? artifact.bytes : null;
+      if (pullBack) {
+        const pulledArtifact = await pullOne(remoteArchive);
+        local = pulledArtifact.local;
+        digest = pulledArtifact.digest;
+        bytes = pulledArtifact.bytes;
+      }
+      let staged = null;
+      if (stageTarget !== null && artifact.target === stageTarget) {
+        staged = await this.#stageArtifact(runner, jobDir, state.id, remoteArchive, windows);
+        if (staged !== null) {
+          if (digest === null) digest = staged.sha256;
+          if (bytes === null) bytes = staged.bytes;
+          await appendLog(jobDir, `staged ${path15.basename(staged.path)} for the automatic upgrade (${String(staged.bytes)} bytes)`);
+        } else if (local === null) {
+          await appendLog(jobDir, "staging failed; pulling the archive back so the build result is preserved");
+          try {
+            const pulledArtifact = await pullOne(remoteArchive);
+            local = pulledArtifact.local;
+            digest = pulledArtifact.digest;
+            bytes = pulledArtifact.bytes;
+          } catch (error) {
+            preservedAll = false;
+            await appendLog(jobDir, `could not preserve the archive: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
       artifacts.push({
         target: artifact.target,
-        archive: local,
-        remoteArchive: archive,
-        bytes: info.size,
+        archive: local ?? staged?.path ?? remoteArchive,
+        remoteArchive,
+        stagedArchive: staged?.path ?? null,
+        pulled: local !== null,
+        bytes,
         sha256: digest,
         manifest: artifact.manifest ?? null,
         smoke: artifact.smoke ?? null
       });
-      await appendLog(jobDir, `pulled ${path15.basename(local)} (${String(info.size)} bytes, sha256 ${digest.slice(0, 12)}\u2026)`);
-      pulled += 1;
-      await this.#update(jobDir, { phase: "fetch", percent: 96 + Math.round(3 * pulled / directories.length) });
+    }
+    if (!pullBack && directories.length > 0 && stageTarget !== null && !artifacts.some((artifact) => artifact.stagedArchive !== null || artifact.pulled)) {
+      preservedAll = false;
+      await appendLog(jobDir, `pull-back is off and ${stageTarget} was not packaged; keeping the member build dir so the archives survive`);
     }
     const done = await this.#update(jobDir, {
       status: "done",
@@ -7121,12 +7200,18 @@ var RemoteBuilder = class {
       percent: 100,
       currentTarget: null,
       artifacts,
+      pulledBack: pullBack || artifacts.some((artifact) => artifact.pulled),
+      remoteDirKept: !preservedAll,
       remoteJob: remote.id ?? null,
       version: remote.version ?? null,
       publish: remote.publish ?? null
     });
     await this.#cleanupReleaseConfig(runner, releaseConfigRemote, windows);
-    await this.#cleanupRemote(runner, jobDir, state.id, windows);
+    if (preservedAll) {
+      await this.#cleanupRemote(runner, jobDir, state.id, windows);
+    } else {
+      await appendLog(jobDir, `member build dir kept for recovery: $HOME/.dsh/mesh/build/${state.id}`);
+    }
     return done;
   }
   /**
@@ -7227,6 +7312,59 @@ var RemoteBuilder = class {
     await rm10(local, { force: true });
     await rename7(temporary, local);
     return local;
+  }
+  /**
+   * Move one finished archive to a stable directory on the build host.
+   *
+   * The automatic upgrade starts after the temporary job tree is deleted, so
+   * the archive has to outlive it. It is copied (the original stays for a
+   * pull-back fallback) and its digest is computed on the build host: the
+   * upgrade plan needs bytes and SHA-256, and pulling 300–420 MiB back to the
+   * gateway just to hash it would defeat the point of leaving the package
+   * there.
+   * @param {SshRunner} runner ssh runner.
+   * @param {string} jobDir local job directory (used for logging).
+   * @param {string} jobId build job id.
+   * @param {string} remoteArchive archive path on the build host.
+   * @param {boolean} windows whether the build host runs Windows.
+   * @returns {Promise<{path: string, bytes: number, sha256: string}|null>} staged archive, or null.
+   */
+  async #stageArtifact(runner, jobDir, jobId, remoteArchive, windows) {
+    const name = remoteArchive.split(/[\\/]/u).pop() ?? path15.basename(remoteArchive);
+    const command = windows ? powershellCommand([
+      "$ProgressPreference = 'SilentlyContinue'",
+      `$stage = Join-Path $env:USERPROFILE '.dsh\\mesh\\upgrade\\${jobId}'`,
+      "New-Item -ItemType Directory -Force -Path $stage | Out-Null",
+      `$dest = Join-Path $stage ${quotePs(name)}`,
+      `Copy-Item -LiteralPath ${quotePs(remoteArchive)} -Destination $dest -Force`,
+      'Write-Output ("DSH-MESH-STAGED=" + $dest)',
+      'Write-Output ("DSH-MESH-SHA256=" + (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash.ToLower())',
+      'Write-Output ("DSH-MESH-BYTES=" + (Get-Item -LiteralPath $dest).Length)'
+    ].join("; ")) : [
+      "set -e",
+      `stage="${REMOTE_STAGE}/${jobId}"`,
+      'mkdir -p "$stage"',
+      `dest="$stage/${name}"`,
+      `cp -f -- ${quote(remoteArchive)} "$dest"`,
+      `printf 'DSH-MESH-STAGED=%s\\n' "$dest"`,
+      `printf 'DSH-MESH-SHA256=%s\\n' "$(sha256sum -- "$dest" | awk '{print $1}')"`,
+      `printf 'DSH-MESH-BYTES=%s\\n' "$(stat -c %s -- "$dest")"`
+    ].join("\n");
+    try {
+      const { stdout } = await runner.runProcess("ssh", [...runner.sshOptions(), runner.target(), command]);
+      const text = String(stdout);
+      const staged = /^DSH-MESH-STAGED=(.+)$/mu.exec(text)?.[1].trim() ?? "";
+      const sha256 = /^DSH-MESH-SHA256=([a-f0-9]{64})$/mu.exec(text)?.[1] ?? "";
+      const bytes = Number.parseInt(/^DSH-MESH-BYTES=(\d+)$/mu.exec(text)?.[1] ?? "", 10);
+      if (staged === "" || sha256 === "" || !Number.isSafeInteger(bytes) || bytes <= 0) {
+        throw new Error(`the build host did not report a staged archive (${text.trim().slice(-200)})`);
+      }
+      return { path: staged, bytes, sha256 };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await appendLog(jobDir, `could not stage an archive for the automatic upgrade: ${message}`);
+      return null;
+    }
   }
   /**
    * Read the member-side job state.
@@ -7935,6 +8073,14 @@ function pickBuildMember(members) {
   if (candidates.length === 0) return "local";
   return [...candidates].sort(compareBuildCapacity)[0]?.id ?? "local";
 }
+function pullBackEnabled(request, config) {
+  if (typeof request?.pullBack === "boolean") return request.pullBack;
+  return config?.build?.pullBack === true;
+}
+function autoUpgradeEnabled(request, config) {
+  if (typeof request?.autoUpgrade === "boolean") return request.autoUpgrade;
+  return config?.build?.autoUpgrade !== false;
+}
 function pickProxyMember(members) {
   const candidates = Array.isArray(members) ? members.filter((member) => canProxyThrough(member) && isForeignMember(member)) : [];
   if (candidates.length === 0) return null;
@@ -7946,6 +8092,22 @@ function pickProxyMember(members) {
     if (rtt !== 0) return rtt;
     return compareBuildCapacity(left, right);
   })[0]?.id ?? null;
+}
+
+// src/lib/build-artifacts.mjs
+function memberBuildTarget(member) {
+  const platform = String(member?.system?.platform ?? "").trim().toLowerCase();
+  const arch = String(member?.system?.arch ?? "").trim().toLowerCase();
+  if (arch !== "x64" && arch !== "arm64") return null;
+  if (platform.startsWith("linux")) return `linux-${arch}`;
+  if (platform.startsWith("win")) return `win-${arch}`;
+  return null;
+}
+function pickArtifactForMember(artifacts, member) {
+  const target = memberBuildTarget(member);
+  if (target === null) return null;
+  const list = Array.isArray(artifacts) ? artifacts : [];
+  return list.find((artifact) => artifact !== null && typeof artifact === "object" && artifact.target === target) ?? null;
 }
 
 // src/lib/service.mjs
@@ -8124,6 +8286,9 @@ var MeshService = class {
         source: typeof this.config.build?.source === "string" ? this.config.build.source : "",
         ref: typeof this.config.build?.ref === "string" ? this.config.build.ref : "master",
         targets: Array.isArray(this.config.build?.targets) ? this.config.build.targets : ["linux-x64", "win-x64"],
+        // Panel defaults: pull-back is opt-in, the post-build upgrade is on.
+        pullBack: pullBackEnabled(void 0, this.config),
+        autoUpgrade: autoUpgradeEnabled(void 0, this.config),
         jobRoot: this.jobRoot
       },
       deploy: { jobRoot: this.deployRoot }
@@ -8348,8 +8513,9 @@ var MeshService = class {
    * Remove the temporary files a build leaves behind.
    *
    * `state.json` and `build.log` are the postmortem, so they stay; the source
-   * worktree, smoke screenshots, work order and extracted package trees are
-   * only useful while the build runs.
+   * worktree, work order and extracted package trees are only useful while the
+   * build runs. The job named by `keep` also keeps its smoke screenshots until
+   * the next build cleans them, so the panel's screenshot paths resolve.
    *
    * A successful job keeps its archives under `dist/` — a member build's were
    * already pulled into the packages directory, while a local build has no
@@ -8378,7 +8544,7 @@ var MeshService = class {
       if (this.running.has(state.id) && state.id !== options.keep) continue;
       if (state.status === "created" || state.status === "needs-fix" || state.status === "learned") continue;
       await rm12(path18.join(dir, "src"), { recursive: true, force: true });
-      await rm12(path18.join(dir, "smoke"), { recursive: true, force: true });
+      if (state.id !== options.keep) await rm12(path18.join(dir, "smoke"), { recursive: true, force: true });
       await rm12(path18.join(dir, "work-order"), { recursive: true, force: true });
       if (options.keepDist !== true) {
         if (state.status === "done") await this.#pruneDist(path18.join(dir, "dist"));
@@ -8408,11 +8574,12 @@ var MeshService = class {
    * Start one build job in the background.
    *
    * `member` chooses the build host: empty or `local` runs the engine here,
-   * anything else runs the same engine on that member over SSH and copies the
-   * archives back into `~/.dsh/packages`. `proxyMember` borrows another
+   * anything else runs the same engine on that member over SSH. The archives
+   * stay on that member unless `pullBack` is on, and a successful member build
+   * upgrades the member from its own archive. `proxyMember` borrows another
    * member's internet access for the downloads; `proxy` is an explicit HTTP
    * proxy URL that both the engine and npm use.
-   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean, member?: string, proxy?: string, proxyMember?: string}} request build request.
+   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean, member?: string, proxy?: string, proxyMember?: string, pullBack?: boolean, autoUpgrade?: boolean}} request build request.
    * @returns {Promise<object>} the initial job state.
    */
   async startBuild(request = {}) {
@@ -8423,6 +8590,8 @@ var MeshService = class {
     const memberId = typeof request.member === "string" ? request.member.trim() : "";
     const proxyMemberId = typeof request.proxyMember === "string" ? request.proxyMember.trim() : "";
     const proxyUrl = typeof request.proxy === "string" ? request.proxy.trim() : "";
+    const pullBack = pullBackEnabled(request, this.config);
+    const autoUpgrade = autoUpgradeEnabled(request, this.config);
     if (this.running.size > 0) {
       throw Object.assign(new Error("a build is already running; wait for it to finish"), { status: 409 });
     }
@@ -8469,10 +8638,17 @@ var MeshService = class {
         memberName: member.name,
         memberIp: member.ip,
         percent: 0,
-        proxyMember: proxyMember?.id ?? null
+        proxyMember: proxyMember?.id ?? null,
+        pullBack,
+        autoUpgrade
       });
-    } else if (proxyMember !== null) {
-      await updateState(job.dir, { proxyMember: proxyMember.id, percent: 0 });
+    } else {
+      await updateState(job.dir, {
+        ...proxyMember !== null ? { proxyMember: proxyMember.id } : {},
+        percent: 0,
+        pullBack,
+        autoUpgrade
+      });
     }
     this.logLine(`mesh build job ${job.id} created (${member === null ? "local" : member.name}${proxyMember === null ? "" : `, egress via ${proxyMember.name}`})`);
     const promise = this.#runBuild(job, {
@@ -8481,7 +8657,9 @@ var MeshService = class {
       proxyUrl,
       planOnly: request.planOnly === true,
       version: request.version,
-      buildStamp: job.state.buildStamp
+      buildStamp: job.state.buildStamp,
+      pullBack,
+      autoUpgrade
     }).catch((error) => {
       this.logLine(`mesh build job ${job.id} crashed: ${error instanceof Error ? error.message : String(error)}`);
     }).finally(() => {
@@ -8493,7 +8671,7 @@ var MeshService = class {
   /**
    * Run one build job to completion, local or on a member.
    * @param {{id: string, dir: string}} job new job.
-   * @param {{member: object|null, proxyMember: object|null, proxyUrl: string, planOnly: boolean, version?: string}} options run options.
+   * @param {{member: object|null, proxyMember: object|null, proxyUrl: string, planOnly: boolean, version?: string, pullBack?: boolean, autoUpgrade?: boolean}} options run options.
    * @returns {Promise<void>}
    */
   async #runBuild(job, options) {
@@ -8513,6 +8691,7 @@ var MeshService = class {
         await appendLog(job.dir, `outbound proxy ${proxyUrl} (${options.proxyMember.name})`);
         await updateState(job.dir, { proxy: proxyUrl, proxyMember: options.proxyMember.id });
       }
+      const full = this.config.build?.full !== false;
       if (options.member === null) {
         await runJob(job.dir, {
           repositoryRoot: this.repositoryRoot,
@@ -8524,7 +8703,7 @@ var MeshService = class {
           buildStamp: options.buildStamp,
           proxy: proxyUrl,
           publish: { config: releaseConfig, proxy: proxyUrl },
-          full: this.config.build?.full !== false,
+          full,
           nodeVersion: typeof this.config.build?.nodeVersion === "string" && this.config.build.nodeVersion !== "" ? this.config.build.nodeVersion : void 0,
           smoke: this.config.build?.smoke === false ? false : void 0,
           smokeRequired: this.config.build?.requireSmoke === true,
@@ -8532,13 +8711,24 @@ var MeshService = class {
         });
         return;
       }
-      await this.remoteBuilder.run(job.dir, {
+      const upgradeTarget = options.autoUpgrade === true ? memberBuildTarget(options.member) : null;
+      const final = await this.remoteBuilder.run(job.dir, {
         plan: await this.#memberSshPlan(options.member),
         memberName: options.member.name,
         proxyUrl,
         buildStamp: options.buildStamp,
         heapMb: typeof this.config.build?.memberHeapMb === "number" ? this.config.build.memberHeapMb : void 0,
-        releaseConfig: publishConfigured ? releaseConfig : null
+        releaseConfig: publishConfigured ? releaseConfig : null,
+        pullBack: options.pullBack === true,
+        // Stage the host's own archive only when the upgrade will use it.
+        stageTarget: upgradeTarget,
+        full
+      });
+      await this.#autoUpgradeAfterBuild(job, final, {
+        member: options.member,
+        autoUpgrade: options.autoUpgrade === true,
+        full,
+        upgradeTarget
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -8552,6 +8742,97 @@ var MeshService = class {
       await this.cleanupBuilds({ keep: job.id }).catch((error) => {
         this.logLine(`mesh build cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
       });
+    }
+  }
+  /**
+   * Start the post-build upgrade on the member that ran the build.
+   *
+   * The archive was staged on that machine by the remote builder, so the
+   * upgrade plan points at it directly: no release download and no upload from
+   * the gateway. The job is the same detached upgrade every other entry point
+   * starts, so restarting the member's DSH/gate cannot interrupt it. The build
+   * has already succeeded at this point; an upgrade that cannot start is
+   * recorded on the build (`autoUpgradeResult`) and never turns it red.
+   * @param {{id: string, dir: string}} job build job.
+   * @param {object} state final build state.
+   * @param {{member: object|null, autoUpgrade: boolean, full: boolean, upgradeTarget: string|null}} options upgrade input.
+   * @returns {Promise<void>} completion.
+   */
+  async #autoUpgradeAfterBuild(job, state, options) {
+    if (state?.status !== "done" || options.autoUpgrade !== true) return;
+    const member = options.member;
+    const record = async (patch) => {
+      const result = {
+        at: (/* @__PURE__ */ new Date()).toISOString(),
+        member: member?.id ?? null,
+        memberName: member?.name ?? null,
+        ...patch
+      };
+      await updateState(job.dir, { autoUpgradeResult: result }).catch(() => {
+      });
+      return result;
+    };
+    if (member === null || member === void 0) {
+      await record({ status: "skipped", reason: "\u672C\u673A\u7F16\u8BD1\u4E0D\u81EA\u52A8\u5347\u7EA7" });
+      return;
+    }
+    if (options.full === false) {
+      await appendLog(job.dir, "auto-upgrade skipped: a web-only package cannot upgrade an install").catch(() => {
+      });
+      await record({ status: "skipped", reason: "\u53EA Web \u5305\u4E0D\u80FD\u7528\u4E8E\u5347\u7EA7" });
+      return;
+    }
+    if (member.dsh !== true) {
+      await appendLog(job.dir, `auto-upgrade skipped: ${member.name} has no DSH install`).catch(() => {
+      });
+      await record({ status: "skipped", reason: "\u7F16\u8BD1\u673A\u8FD8\u6CA1\u6709\u5B89\u88C5 DSH\uFF0C\u6CA1\u6709\u53EF\u5347\u7EA7\u7684\u5B89\u88C5" });
+      return;
+    }
+    if (options.upgradeTarget === null) {
+      await appendLog(job.dir, "auto-upgrade skipped: this build has no target for the build host").catch(() => {
+      });
+      await record({ status: "skipped", reason: "\u8FD9\u6B21\u7F16\u8BD1\u7684\u76EE\u6807\u5E73\u53F0\u4E0E\u7F16\u8BD1\u673A\u4E0D\u5339\u914D" });
+      return;
+    }
+    const artifact = pickArtifactForMember(state.artifacts, member);
+    if (artifact === null) {
+      await appendLog(job.dir, `auto-upgrade skipped: no ${options.upgradeTarget} artifact`).catch(() => {
+      });
+      await record({ status: "skipped", reason: `\u8FD9\u6B21\u7F16\u8BD1\u6CA1\u6709\u4EA7\u51FA ${options.upgradeTarget} \u5305` });
+      return;
+    }
+    if (typeof artifact.stagedArchive !== "string" || artifact.stagedArchive === "" || typeof artifact.sha256 !== "string" || artifact.sha256 === "" || !Number.isSafeInteger(artifact.bytes)) {
+      await appendLog(job.dir, "auto-upgrade skipped: the archive was not staged on the build host").catch(() => {
+      });
+      await record({ status: "skipped", reason: "\u4EA7\u7269\u6CA1\u6709\u6210\u529F\u6682\u5B58\u5230\u7F16\u8BD1\u673A\uFF0C\u65E0\u6CD5\u5728\u672C\u673A\u5347\u7EA7" });
+      return;
+    }
+    try {
+      const started = await this.startDeploy({
+        member: member.id,
+        mode: "upgrade",
+        packageOnTarget: {
+          path: artifact.stagedArchive,
+          bytes: artifact.bytes,
+          sha256: artifact.sha256
+        }
+      });
+      const result = await record({
+        status: "started",
+        jobId: started.job.id,
+        release: started.job.release ?? null,
+        package: artifact.stagedArchive
+      });
+      await appendLog(job.dir, `auto-upgrade started on ${member.name}: ${result.jobId} (${artifact.stagedArchive})`).catch(() => {
+      });
+      this.logLine(`mesh build ${job.id} auto-upgrade ${result.jobId} started on ${member.name}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const busy = Number(error?.status) === 409;
+      await appendLog(job.dir, `auto-upgrade could not start: ${message}`).catch(() => {
+      });
+      await record({ status: busy ? "skipped" : "failed", reason: message });
+      this.logLine(`mesh build ${job.id} auto-upgrade did not start: ${message}`);
     }
   }
   /**
@@ -8726,7 +9007,12 @@ var MeshService = class {
       currentTarget: state.currentTarget ?? null,
       version: state.version ?? null,
       error: state.error ?? null,
-      publish: state.publish ?? null
+      publish: state.publish ?? null,
+      pullBack: state.pullBack ?? null,
+      pulledBack: state.pulledBack ?? null,
+      remoteDirKept: state.remoteDirKept ?? null,
+      autoUpgrade: state.autoUpgrade ?? null,
+      autoUpgradeResult: state.autoUpgradeResult ?? null
     };
   }
   /**
@@ -9118,7 +9404,7 @@ var MeshService = class {
    * member — including this gateway — can restart dsh-web and the gateway while
    * its own upgrade keeps going. This method only writes the job directory and
    * returns; `waitDeploy()` is what the model tool uses to block.
-   * @param {{host?: string, member?: string, package?: string, mode?: 'install'|'upgrade'}} request target and package.
+   * @param {{host?: string, member?: string, package?: string, packageOnTarget?: {path: string, bytes: number, sha256: string}, mode?: 'install'|'upgrade'}} request target and package.
    * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string, layout: string}>} queued job.
    */
   async startDeploy(request) {
@@ -9127,7 +9413,9 @@ var MeshService = class {
     if (test) throw new Error("\u6307\u9488\u5E03\u5C40\u6CA1\u6709\u5355\u72EC\u7684\u300C\u6D4B\u8BD5\u5347\u7EA7\u300D\uFF1A\u76F4\u63A5\u8FD0\u884C\u300C\u5347\u7EA7\u300D\uFF0C\u5065\u5EB7\u68C0\u67E5\u5931\u8D25\u4F1A\u81EA\u52A8\u56DE\u9000\u5230\u4E0A\u4E00\u4E2A release");
     const host = typeof request.host === "string" ? request.host.trim() : "";
     const memberId = typeof request.member === "string" ? request.member.trim() : "";
-    const packagePath = await this.resolvePackage(request.package);
+    const packageOnTarget = request.packageOnTarget !== null && typeof request.packageOnTarget === "object" ? request.packageOnTarget : null;
+    const packagePath = packageOnTarget === null ? await this.resolvePackage(request.package) : String(packageOnTarget.path ?? "").trim();
+    if (packagePath === "") throw new Error("packageOnTarget.path is required");
     const snapshot = await this.members();
     const all = [snapshot.local, ...snapshot.members].filter(Boolean);
     const member = memberId !== "" ? all.find((candidate) => candidate.id === memberId) : all.find((candidate) => candidate.id === host || candidate.name === host || candidate.ip === host);
@@ -9148,9 +9436,15 @@ var MeshService = class {
         return this.#startLocalJob({ member, packagePath, os: os10, mode, identity });
       }
       const deployRequest = await this.#memberDeployRequest(member, packagePath, os10);
-      const download3 = mode === "install" ? null : await this.#deployDownload(request, member, all);
+      const download3 = mode === "install" || packageOnTarget !== null ? null : await this.#deployDownload(request, member, all);
       const job2 = await this.#startEngineJob({
-        request: { ...deployRequest, member: member.id, test, download: download3 },
+        request: {
+          ...deployRequest,
+          member: member.id,
+          test,
+          download: download3,
+          ...packageOnTarget === null ? {} : { packageOnTarget }
+        },
         member: member.id,
         mode
       });
@@ -9160,8 +9454,12 @@ var MeshService = class {
     if (test) throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u9700\u8981\u4E00\u4E2A\u6210\u5458\uFF08\u8981\u5728\u6210\u5458\u7684\u5B89\u88C5\u4E0A\u6F14\u7EC3\uFF09\uFF0C\u4E0D\u80FD\u76F4\u63A5\u7ED9\u88F8 SSH \u4E3B\u673A");
     const os9 = /win(?:dows)?/iu.test(path18.basename(packagePath)) ? "windows" : "linux";
     const appRoot = os9 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
-    const download2 = mode === "install" ? null : await this.#deployDownload(request, null, all);
-    const job = await this.#startEngineJob({ request: { host, package: packagePath, os: os9, appRoot, download: download2 }, member: null, mode });
+    const download2 = mode === "install" || packageOnTarget !== null ? null : await this.#deployDownload(request, null, all);
+    const job = await this.#startEngineJob({
+      request: { host, package: packagePath, os: os9, appRoot, download: download2, ...packageOnTarget === null ? {} : { packageOnTarget } },
+      member: null,
+      mode
+    });
     return { ok: true, job, member: null, packagePath, layout: "bluegreen" };
   }
   /**
@@ -9361,6 +9659,7 @@ var MeshService = class {
       target: job.plan === null ? job.target : { host: job.plan.host, user: job.plan.user ?? null, port: job.plan.port, os: job.plan.os, appRoot: job.plan.appRoot },
       release: job.plan?.release ?? job.release ?? "local",
       package: job.plan?.package?.path ?? job.packagePath ?? null,
+      packageOnTarget: job.plan?.packageOnTarget === true,
       services: job.plan === null ? job.services ?? [] : job.plan.services.map((service) => service.name),
       status: "queued",
       phase: "starting",
@@ -10214,7 +10513,9 @@ function registerApi(ctx, service, scheduler = null) {
             version: typeof body.version === "string" ? body.version : void 0,
             member: typeof body.member === "string" ? body.member : void 0,
             proxy: typeof body.proxy === "string" ? body.proxy : void 0,
-            proxyMember: typeof body.proxyMember === "string" ? body.proxyMember : void 0
+            proxyMember: typeof body.proxyMember === "string" ? body.proxyMember : void 0,
+            pullBack: typeof body.pullBack === "boolean" ? body.pullBack : void 0,
+            autoUpgrade: typeof body.autoUpgrade === "boolean" ? body.autoUpgrade : void 0
           });
           writeJson(response, 202, { ok: true, job });
           return;

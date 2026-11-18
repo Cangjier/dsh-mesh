@@ -149,8 +149,25 @@ export interface HostStatus {
     source: string
     ref: string
     targets: string[]
+    /** Whether a member build copies its archives back to the gateway. */
+    pullBack?: boolean
+    /** Whether a successful member build upgrades that member automatically. */
+    autoUpgrade?: boolean
     jobRoot: string
   }
+}
+
+/** Outcome of the automatic post-build upgrade on the build host. */
+export interface AutoUpgradeResult {
+  /** `started` once the detached upgrade job exists. */
+  status: 'started' | 'skipped' | 'failed' | string
+  jobId?: string
+  member?: string | null
+  memberName?: string | null
+  release?: string | null
+  package?: string | null
+  reason?: string
+  at?: string
 }
 
 export interface BuildJob {
@@ -184,6 +201,16 @@ export interface BuildJob {
   learnedAt?: string | null
   /** Release publishing outcome, when the build carried a publish step. */
   publish?: PublishResult | null
+  /** Per-build pull-back decision; false means the archives stay on the build host. */
+  pullBack?: boolean | null
+  /** Whether pull-back actually ran for this finished remote job. */
+  pulledBack?: boolean | null
+  /** The member-side build tree was kept because no artifact could be preserved. */
+  remoteDirKept?: boolean | null
+  /** Whether this job was allowed to start an upgrade on the build host. */
+  autoUpgrade?: boolean | null
+  /** Result of that upgrade, once the build finished. */
+  autoUpgradeResult?: AutoUpgradeResult | null
   artifacts?: Array<{
     target: string
     archive: string
@@ -576,6 +603,8 @@ export const api = {
     member?: string
     proxy?: string
     proxyMember?: string
+    pullBack?: boolean
+    autoUpgrade?: boolean
   }): Promise<{ job: BuildJob }> {
     return request<{ job: BuildJob }>('/api/dsh-mesh/build', {
       method: 'POST',

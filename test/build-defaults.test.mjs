@@ -2,11 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   DEFAULT_BUILD_TARGETS,
+  autoUpgradeEnabled,
   canBuildOn,
   canProxyThrough,
   isForeignMember,
   pickBuildMember,
   pickProxyMember,
+  pullBackEnabled,
 } from '../src/lib/build-defaults.mjs'
 
 const GiB = 1024 ** 3
@@ -93,4 +95,24 @@ test('a country code is authoritative over a tag', () => {
   const codeFromTag = member('y', { countryCode: 'us' })
   assert.equal(isForeignMember(taggedButCn), false)
   assert.equal(isForeignMember(codeFromTag), true)
+})
+
+test('the build host keeps its artifacts unless pull-back is enabled', () => {
+  // Default: no copy back to the gateway. A member build upgrades itself from
+  // the archive it already has.
+  assert.equal(pullBackEnabled(undefined, undefined), false)
+  assert.equal(pullBackEnabled({}, {}), false)
+  assert.equal(pullBackEnabled({}, { build: { pullBack: false } }), false)
+  assert.equal(pullBackEnabled({}, { build: { pullBack: true } }), true)
+  // One build can override the bundle default in either direction.
+  assert.equal(pullBackEnabled({ pullBack: true }, { build: { pullBack: false } }), true)
+  assert.equal(pullBackEnabled({ pullBack: false }, { build: { pullBack: true } }), false)
+})
+
+test('a successful member build auto-upgrades unless explicitly disabled', () => {
+  assert.equal(autoUpgradeEnabled(undefined, undefined), true)
+  assert.equal(autoUpgradeEnabled({}, {}), true)
+  assert.equal(autoUpgradeEnabled({}, { build: { autoUpgrade: false } }), false)
+  assert.equal(autoUpgradeEnabled({ autoUpgrade: false }, {}), false)
+  assert.equal(autoUpgradeEnabled({ autoUpgrade: true }, { build: { autoUpgrade: false } }), true)
 })

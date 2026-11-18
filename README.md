@@ -76,7 +76,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - 按 `build/recipes.json` 应用源码覆盖层；每个覆盖层记录 pristine 文件的 SHA-256。
 - 覆盖层失配时**不继续构建**，写出 `work-order.md` / `subagent-prompt.txt`；DSH 用 subagent 修好工作树后，再次调用 `build { jobId }`，由构建自动固化覆盖层并复用工作树继续。
 - build 完成后清理更早 job 的 `src/`、`work-order/` 和 `dist/`，保留当前 job 的产物以及所有 job 的 `state.json` / `build.log`；`keepDist: true` 可保留更早 job 的 `dist/`。
-- **在成员上编译**：`member` 指定编译成员（Linux），网关通过 SSH 在成员的 dsh-mesh 检出里跑同一套 `code/build` 引擎，日志流回面板，产物自动拉回网关的 `~/.dsh/packages`。
+- **在成员上编译**：`member` 指定编译成员（Linux 或 Windows），网关通过 SSH 在成员的 dsh-mesh 检出里跑同一套 `code/build` 引擎，日志流回面板。产物默认**留在编译机**（没有压回网关）；编译成功后自动用这份包在该成员上走升级流程（独立的升级进程，重启成员不打断升级）。面板「拉回服务」开关默认关闭，打开后才把产物拉回网关的 `~/.dsh/packages`，供部署到其他成员。
 - **外网代理**：`proxyMember` 让指定成员临时启动一个只绑定其组网地址的 HTTP 代理（`code/shared/egress-proxy.mjs`），源码下载、Node 运行时和 npm 都走它；编译结束即关闭。也可以直接给 `proxy: "http://host:port"`。经 WireGuard 转发通常比成员直连慢，成员本身网络好时不必开代理。
 - **前置编译步骤**：干净工作树下 `apps/web` 依赖 workspace 里 `lib/` 产物（`dsh-client-web`、`ui-theme` 的 CSS、webworker 运行时等），`build/recipes.json` 的 `prepare` 会在 `pnpm run build:web` 之前执行这些命令（CLI 用 `--prepare` 覆盖）。
 - **构建后抓屏冒烟**：完整包归档后，在本机目标上真的启动一次（一次性沙箱 + 包内 supervisor/gate + 空闲端口），用 headless Chrome/Edge 过密码门、等 DSH 壳、点侧边栏 `Mesh`，确认面板出现并截图到 `<job>/smoke/<target>/`。页面报 `Failed to load plugins`、DSH 起不来、Mesh 面板不出现都会让构建以 `smoke-failed` 结束。单个目标跨平台或没有 Chrome/Chromium/Edge 时该目标记为跳过（Windows 上会自动探测 `Program Files (x86)` / `Program Files` / `LOCALAPPDATA` 下的 Edge，没装 Chrome 也能抓屏），但**一个目标都没真正启动过的完整包同样以 `smoke-failed` 结束**，不会留在 `~/.dsh/packages`；只有显式 `--no-smoke` 才接受未验证包，`--require-smoke` 还会把“没有浏览器”直接判失败。详见 [Step 010](docs/Step%20010%20从源码构建多平台Web包.md)。
@@ -91,6 +91,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 「包管理」把编译和分发放在一个页面：
 
 - **编译**：选择编译成员、外网代理（直连 / 经成员 / 自定义 URL）、源码引用（默认 `master`，可填提交号）和目标平台。默认值按当前成员自动选：编译成员取 CPU/内存最多的在线成员（Windows 和 Linux 都行），外网代理取公网 IP 在国外（非 CN）的 Linux 成员；目标平台默认 Linux x64 + Windows x64。成员的公网 IP 来自 WireGuard endpoint，国家查询结果缓存 30 天；查不到国家时保留直连，也认成员标签里的「国外 / 海外」。点「编译」后任务在后台跑，页面按阶段显示进度。
+- **拉回服务**：编译卡片里的开关，默认关闭。关闭时产物留在编译机的 `~/.dsh/mesh/upgrade/<job>/`，编译成功后自动在该成员上升级；打开后额外把包拉回网关 `~/.dsh/packages`，部署包列表里就能拿它部署到其他成员。默认值来自部署包内 `cordis.patch.yml` 的 `build.pullBack`；`build.autoUpgrade: false` 可关闭编译后的自动升级（本机编译始终不自动升级）。
 - **自动编译**：默认每天 04:00 触发，可在「编译」卡片下开关和改时间。触发前比较最近一次**已完成**编译的清单：DSH 源码 tarball 的 ETag、dsh-mesh 构建输入的内容指纹、`build/plugins.json` 里每个随包插件（当前是 xl）的 tarball ETag。三者都没有变化就跳过，不产生新包；有变化才用和面板相同的默认成员/代理策略启动后台编译。配置和上次结果写在 `<dataDir>/schedule.json`，不依赖浏览器开着。
 - **编译任务**：保留最近任务的成员、引用、目标、进度和时间；「日志」弹层实时跟随 `build.log`。
 - **包里带什么**：每个产物固定携带 `dsh-mesh` 与 `xl` 两个插件。`dsh-mesh` 是当前仓库；`xl` 来自 `Cangjier/xl` 的 `main`，每次编译现拉，来源与归档哈希记在包的 `manifest.json`（`extraPlugins`）里。清单在 `build/plugins.json`，加插件只要加一条。
@@ -229,10 +230,12 @@ build { "planOnly": true }                         # 只检查覆盖层
 build { "ref": "master", "targets": ["linux-x64"] }
 build { "jobId": "<needs-fix-job-id>" }            # 固化工作树修改并继续
 build { "keepDist": true }                         # 保留更早 build 的 dist
-build { "member": "10.66.66.2" }                   # 在成员上编译并把产物拉回本机
+build { "member": "10.66.66.2" }                   # 在成员上编译；产物留在成员，成功后自动升级该成员
 build { "member": "10.66.66.2", "proxyMember": "10.66.66.3" }  # 借成员的网络下载
 build { "member": "10.66.66.2", "proxy": "http://10.66.66.2:8888" }
 ```
+
+成员编译的产物默认不拉回（`build.pullBack: false`，面板「拉回服务」开关可覆盖）；需要部署到其他成员时再打开它。成员编译成功、且本次目标包含编译机自己的平台时，会直接用在编译机上暂存的包启动升级（不重新下载/上传）；本机（网关）编译不会自动升级。结果在 `state.autoUpgradeResult` 里，失败只记录、不影响已经成功的编译。
 
 构建是同步的：结束后返回 `data.logFile` / `data.stateFile`。build 完成后默认清理更早 job 的
 `src/`、`work-order/` 和 `dist/`，当前 job 的产物保留；所有 job 的 `state.json` / `build.log` 保留。

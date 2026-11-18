@@ -278,6 +278,8 @@ export function registerApi(ctx, service, scheduler = null) {
             member: typeof body.member === 'string' ? body.member : undefined,
             proxy: typeof body.proxy === 'string' ? body.proxy : undefined,
             proxyMember: typeof body.proxyMember === 'string' ? body.proxyMember : undefined,
+            pullBack: typeof body.pullBack === 'boolean' ? body.pullBack : undefined,
+            autoUpgrade: typeof body.autoUpgrade === 'boolean' ? body.autoUpgrade : undefined,
           })
           writeJson(response, 202, { ok: true, job })
           return

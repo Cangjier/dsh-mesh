@@ -50,6 +50,8 @@ test('remoteBuildScript pins the ref, targets, and proxy', () => {
   // Old job dirs are removed, then the free-space floor is checked before the
   // download starts, so a full member disk fails fast with a readable reason.
   assert.match(script, /find "\$HOME\/\.dsh\/mesh\/build" -mindepth 1 -maxdepth 1 -type d ! -name 'job-1' -exec rm -rf/u)
+  // Archives staged for an older automatic upgrade are pruned too.
+  assert.match(script, /find "\$HOME\/\.dsh\/mesh\/upgrade" -mindepth 1 -maxdepth 1 -type d ! -name 'job-1' -exec rm -rf/u)
   assert.match(script, /free_kb=\$\(df -Pk "\$HOME"/u)
   assert.match(script, /not enough free space on the build host/u)
 })
@@ -185,4 +187,13 @@ test('remote build scripts pass the published release config, or disable publish
   // No config path means the member must not fall back to a stale local file.
   const noPath = remoteBuildScript({ jobId: 'job-release', ref: 'main', targets: ['linux-x64'] })
   assert.match(noPath, /--no-publish/u)
+})
+
+test('remote build scripts carry the web-only switch', () => {
+  const linux = remoteBuildScript({ jobId: 'job-web', ref: 'main', targets: ['linux-x64'], full: false })
+  assert.match(linux, /--web-only/u)
+  const windows = windowsBuildScript({ jobId: 'job-web-win', ref: 'main', targets: ['win-x64'], full: false })
+  assert.match(windows, /--web-only/u)
+  // A full build (the default) must not silently become a web-only one.
+  assert.doesNotMatch(remoteBuildScript({ jobId: 'job-full', ref: 'main', targets: ['linux-x64'] }), /--web-only/u)
 })

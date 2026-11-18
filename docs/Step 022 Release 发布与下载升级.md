@@ -206,3 +206,21 @@ CLI 用 `--release-config` 读取，任务结束立即删除；token 不出现�
 | 升级日志「release download did not produce a usable package」 | 本次选的包不在 `latest` Release、目标无 Node、代理不可用、校验失败 | 正常回退到网关上传；想强制走 Release 就把该包重新编译/发布 |
 | GitHub 下载卡住 | 代理成员离线或目标到代理的 VPN 路由不通 | 面板改「直连」或换代理成员；失败仍会回退上传 |
 | Gitee 下载正常但 GitHub 不走代理 | 代理未配置 / 成员不是境外 Linux | 检查 `pickProxyMember` 或显式选代理成员；Gitee 本来就不应走代理 |
+
+## 10. 编译机就地升级与「拉回服务」
+
+成员编译默认不把产物拉回网关（`build.pullBack: false`，面板「拉回服务」默认关闭）：
+包留在编译机 `~/.dsh/mesh/upgrade/<job>/`，编译成功后直接在这台成员上升级，
+既不经过网关上行，也不依赖 Release 下载。成员编译成功后，网关把目标平台匹配
+该成员的那份归档从临时任务目录**复制**到上面的暂存目录并算好大小与 SHA-256，
+然后启动普通的独立升级 job（`packageOnTarget`）。升级 plan 跳过上传/下载，
+prepare 直接解压本机文件；升级进程在独立 systemd 单元里，重启成员不会打断它。
+
+- 编译目标不含编译机自己的平台（例如 Linux 成员只编了 `win-x64`）时跳过自动升级，编译仍算成功；
+  这种没有暂存升级包的情况会保留编译机的构建目录，避免产物随临时目录一起删掉（下次编译时清理）。
+- 关闭自动升级（`build.autoUpgrade: false`）时同样保留构建目录；打开「拉回服务」则产物已回到网关。
+- 编译机没有安装 DSH，或只编了 web-only 包时同样跳过。
+- 「拉回服务」打开时，归档会额外复制回网关 `~/.dsh/packages`；自动升级仍优先用编译机上的那份。
+- 本机（网关）编译不自动升级：重启网关会打断发起编译的面板，需要升级本机时从面板手动执行。
+- 结果写在编译任务的 `autoUpgradeResult`（`started` / `skipped` / `failed` + `jobId` / `reason`），
+  自动升级没启动不会把已经成功的编译标成失败。

@@ -52,7 +52,8 @@ import { quickSystemInfo } from '../../code/shared/system-info.mjs'
 import { GeoLookup } from '../../code/shared/geo.mjs'
 import { detectReleaseOwner, latestManifestSources, latestManifestUrls, loadReleaseConfig, sanitizeReleaseConfig, saveReleaseConfig } from '../../code/shared/release.mjs'
 import { buildUpdateReasons, memberDeployment, packageInfo, planUpgrades } from './schedule.mjs'
-import { pickBuildMember, pickProxyMember } from './build-defaults.mjs'
+import { autoUpgradeEnabled, pickBuildMember, pickProxyMember, pullBackEnabled } from './build-defaults.mjs'
+import { memberBuildTarget, pickArtifactForMember } from './build-artifacts.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -294,6 +295,9 @@ export class MeshService {
         source: typeof this.config.build?.source === 'string' ? this.config.build.source : '',
         ref: typeof this.config.build?.ref === 'string' ? this.config.build.ref : 'master',
         targets: Array.isArray(this.config.build?.targets) ? this.config.build.targets : ['linux-x64', 'win-x64'],
+        // Panel defaults: pull-back is opt-in, the post-build upgrade is on.
+        pullBack: pullBackEnabled(undefined, this.config),
+        autoUpgrade: autoUpgradeEnabled(undefined, this.config),
         jobRoot: this.jobRoot,
       },
       deploy: { jobRoot: this.deployRoot },
@@ -533,8 +537,9 @@ export class MeshService {
    * Remove the temporary files a build leaves behind.
    *
    * `state.json` and `build.log` are the postmortem, so they stay; the source
-   * worktree, smoke screenshots, work order and extracted package trees are
-   * only useful while the build runs.
+   * worktree, work order and extracted package trees are only useful while the
+   * build runs. The job named by `keep` also keeps its smoke screenshots until
+   * the next build cleans them, so the panel's screenshot paths resolve.
    *
    * A successful job keeps its archives under `dist/` — a member build's were
    * already pulled into the packages directory, while a local build has no
@@ -566,7 +571,10 @@ export class MeshService {
       // These statuses still own a worktree the repair flow resumes from.
       if (state.status === 'created' || state.status === 'needs-fix' || state.status === 'learned') continue
       await rm(path.join(dir, 'src'), { recursive: true, force: true })
-      await rm(path.join(dir, 'smoke'), { recursive: true, force: true })
+      // The current job keeps its screenshots so the panel's "抓屏通过"
+      // tooltip points at files that exist; the next build's cleanup removes
+      // them together with the previous job's temporary tree.
+      if (state.id !== options.keep) await rm(path.join(dir, 'smoke'), { recursive: true, force: true })
       await rm(path.join(dir, 'work-order'), { recursive: true, force: true })
       if (options.keepDist !== true) {
         // Only a done job has a deliverable to keep; a planned job never had
@@ -600,11 +608,12 @@ export class MeshService {
    * Start one build job in the background.
    *
    * `member` chooses the build host: empty or `local` runs the engine here,
-   * anything else runs the same engine on that member over SSH and copies the
-   * archives back into `~/.dsh/packages`. `proxyMember` borrows another
+   * anything else runs the same engine on that member over SSH. The archives
+   * stay on that member unless `pullBack` is on, and a successful member build
+   * upgrades the member from its own archive. `proxyMember` borrows another
    * member's internet access for the downloads; `proxy` is an explicit HTTP
    * proxy URL that both the engine and npm use.
-   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean, member?: string, proxy?: string, proxyMember?: string}} request build request.
+   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean, member?: string, proxy?: string, proxyMember?: string, pullBack?: boolean, autoUpgrade?: boolean}} request build request.
    * @returns {Promise<object>} the initial job state.
    */
   async startBuild(request = {}) {
@@ -621,6 +630,10 @@ export class MeshService {
     const memberId = typeof request.member === 'string' ? request.member.trim() : ''
     const proxyMemberId = typeof request.proxyMember === 'string' ? request.proxyMember.trim() : ''
     const proxyUrl = typeof request.proxy === 'string' ? request.proxy.trim() : ''
+    // Defaults come from the bundle config so the panel, the model tool and the
+    // nightly schedule all agree: no pull-back, then upgrade the build host.
+    const pullBack = pullBackEnabled(request, this.config)
+    const autoUpgrade = autoUpgradeEnabled(request, this.config)
     if (this.running.size > 0) {
       throw Object.assign(new Error('a build is already running; wait for it to finish'), { status: 409 })
     }
@@ -671,9 +684,16 @@ export class MeshService {
         memberIp: member.ip,
         percent: 0,
         proxyMember: proxyMember?.id ?? null,
+        pullBack,
+        autoUpgrade,
       })
-    } else if (proxyMember !== null) {
-      await updateState(job.dir, { proxyMember: proxyMember.id, percent: 0 })
+    } else {
+      await updateState(job.dir, {
+        ...(proxyMember !== null ? { proxyMember: proxyMember.id } : {}),
+        percent: 0,
+        pullBack,
+        autoUpgrade,
+      })
     }
     this.logLine(`mesh build job ${job.id} created (${member === null ? 'local' : member.name}${proxyMember === null ? '' : `, egress via ${proxyMember.name}`})`)
     const promise = this.#runBuild(job, {
@@ -683,6 +703,8 @@ export class MeshService {
       planOnly: request.planOnly === true,
       version: request.version,
       buildStamp: job.state.buildStamp,
+      pullBack,
+      autoUpgrade,
     }).catch((error) => {
       this.logLine(`mesh build job ${job.id} crashed: ${error instanceof Error ? error.message : String(error)}`)
     }).finally(() => {
@@ -695,7 +717,7 @@ export class MeshService {
   /**
    * Run one build job to completion, local or on a member.
    * @param {{id: string, dir: string}} job new job.
-   * @param {{member: object|null, proxyMember: object|null, proxyUrl: string, planOnly: boolean, version?: string}} options run options.
+   * @param {{member: object|null, proxyMember: object|null, proxyUrl: string, planOnly: boolean, version?: string, pullBack?: boolean, autoUpgrade?: boolean}} options run options.
    * @returns {Promise<void>}
    */
   async #runBuild(job, options) {
@@ -715,6 +737,7 @@ export class MeshService {
         await appendLog(job.dir, `outbound proxy ${proxyUrl} (${options.proxyMember.name})`)
         await updateState(job.dir, { proxy: proxyUrl, proxyMember: options.proxyMember.id })
       }
+      const full = this.config.build?.full !== false
       if (options.member === null) {
         await runJob(job.dir, {
           repositoryRoot: this.repositoryRoot,
@@ -726,21 +749,35 @@ export class MeshService {
           buildStamp: options.buildStamp,
           proxy: proxyUrl,
           publish: { config: releaseConfig, proxy: proxyUrl },
-          full: this.config.build?.full !== false,
+          full,
           nodeVersion: typeof this.config.build?.nodeVersion === 'string' && this.config.build.nodeVersion !== '' ? this.config.build.nodeVersion : undefined,
           smoke: this.config.build?.smoke === false ? false : undefined,
           smokeRequired: this.config.build?.requireSmoke === true,
           smokeChrome: typeof this.config.build?.chrome === 'string' && this.config.build.chrome !== '' ? this.config.build.chrome : undefined,
         })
+        // Only a member build auto-upgrades: restarting the gateway because a
+        // local build finished would interrupt the panel that started it, and
+        // is not what "在编译机器上升级" means for the operator.
         return
       }
-      await this.remoteBuilder.run(job.dir, {
+      const upgradeTarget = options.autoUpgrade === true ? memberBuildTarget(options.member) : null
+      const final = await this.remoteBuilder.run(job.dir, {
         plan: await this.#memberSshPlan(options.member),
         memberName: options.member.name,
         proxyUrl,
         buildStamp: options.buildStamp,
         heapMb: typeof this.config.build?.memberHeapMb === 'number' ? this.config.build.memberHeapMb : undefined,
         releaseConfig: publishConfigured ? releaseConfig : null,
+        pullBack: options.pullBack === true,
+        // Stage the host's own archive only when the upgrade will use it.
+        stageTarget: upgradeTarget,
+        full,
+      })
+      await this.#autoUpgradeAfterBuild(job, final, {
+        member: options.member,
+        autoUpgrade: options.autoUpgrade === true,
+        full,
+        upgradeTarget,
       })
     } catch (error) {
       // A failure before the engine starts (an unreachable proxy member, a
@@ -758,6 +795,92 @@ export class MeshService {
       await this.cleanupBuilds({ keep: job.id }).catch(error => {
         this.logLine(`mesh build cleanup failed: ${error instanceof Error ? error.message : String(error)}`)
       })
+    }
+  }
+
+  /**
+   * Start the post-build upgrade on the member that ran the build.
+   *
+   * The archive was staged on that machine by the remote builder, so the
+   * upgrade plan points at it directly: no release download and no upload from
+   * the gateway. The job is the same detached upgrade every other entry point
+   * starts, so restarting the member's DSH/gate cannot interrupt it. The build
+   * has already succeeded at this point; an upgrade that cannot start is
+   * recorded on the build (`autoUpgradeResult`) and never turns it red.
+   * @param {{id: string, dir: string}} job build job.
+   * @param {object} state final build state.
+   * @param {{member: object|null, autoUpgrade: boolean, full: boolean, upgradeTarget: string|null}} options upgrade input.
+   * @returns {Promise<void>} completion.
+   */
+  async #autoUpgradeAfterBuild(job, state, options) {
+    if (state?.status !== 'done' || options.autoUpgrade !== true) return
+    const member = options.member
+    const record = async (patch) => {
+      const result = {
+        at: new Date().toISOString(),
+        member: member?.id ?? null,
+        memberName: member?.name ?? null,
+        ...patch,
+      }
+      await updateState(job.dir, { autoUpgradeResult: result }).catch(() => {})
+      return result
+    }
+    if (member === null || member === undefined) {
+      await record({ status: 'skipped', reason: '本机编译不自动升级' })
+      return
+    }
+    if (options.full === false) {
+      await appendLog(job.dir, 'auto-upgrade skipped: a web-only package cannot upgrade an install').catch(() => {})
+      await record({ status: 'skipped', reason: '只 Web 包不能用于升级' })
+      return
+    }
+    if (member.dsh !== true) {
+      await appendLog(job.dir, `auto-upgrade skipped: ${member.name} has no DSH install`).catch(() => {})
+      await record({ status: 'skipped', reason: '编译机还没有安装 DSH，没有可升级的安装' })
+      return
+    }
+    if (options.upgradeTarget === null) {
+      await appendLog(job.dir, 'auto-upgrade skipped: this build has no target for the build host').catch(() => {})
+      await record({ status: 'skipped', reason: '这次编译的目标平台与编译机不匹配' })
+      return
+    }
+    const artifact = pickArtifactForMember(state.artifacts, member)
+    if (artifact === null) {
+      await appendLog(job.dir, `auto-upgrade skipped: no ${options.upgradeTarget} artifact`).catch(() => {})
+      await record({ status: 'skipped', reason: `这次编译没有产出 ${options.upgradeTarget} 包` })
+      return
+    }
+    // A package the builder could not stage has no digest; starting an upgrade
+    // without one would make the deploy plan hash a path that may not exist.
+    if (typeof artifact.stagedArchive !== 'string' || artifact.stagedArchive === '' || typeof artifact.sha256 !== 'string' || artifact.sha256 === '' || !Number.isSafeInteger(artifact.bytes)) {
+      await appendLog(job.dir, 'auto-upgrade skipped: the archive was not staged on the build host').catch(() => {})
+      await record({ status: 'skipped', reason: '产物没有成功暂存到编译机，无法在本机升级' })
+      return
+    }
+    try {
+      const started = await this.startDeploy({
+        member: member.id,
+        mode: 'upgrade',
+        packageOnTarget: {
+          path: artifact.stagedArchive,
+          bytes: artifact.bytes,
+          sha256: artifact.sha256,
+        },
+      })
+      const result = await record({
+        status: 'started',
+        jobId: started.job.id,
+        release: started.job.release ?? null,
+        package: artifact.stagedArchive,
+      })
+      await appendLog(job.dir, `auto-upgrade started on ${member.name}: ${result.jobId} (${artifact.stagedArchive})`).catch(() => {})
+      this.logLine(`mesh build ${job.id} auto-upgrade ${result.jobId} started on ${member.name}`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const busy = Number(error?.status) === 409
+      await appendLog(job.dir, `auto-upgrade could not start: ${message}`).catch(() => {})
+      await record({ status: busy ? 'skipped' : 'failed', reason: message })
+      this.logLine(`mesh build ${job.id} auto-upgrade did not start: ${message}`)
     }
   }
 
@@ -941,6 +1064,11 @@ export class MeshService {
       version: state.version ?? null,
       error: state.error ?? null,
       publish: state.publish ?? null,
+      pullBack: state.pullBack ?? null,
+      pulledBack: state.pulledBack ?? null,
+      remoteDirKept: state.remoteDirKept ?? null,
+      autoUpgrade: state.autoUpgrade ?? null,
+      autoUpgradeResult: state.autoUpgradeResult ?? null,
     }
   }
 
@@ -1357,7 +1485,7 @@ export class MeshService {
    * member — including this gateway — can restart dsh-web and the gateway while
    * its own upgrade keeps going. This method only writes the job directory and
    * returns; `waitDeploy()` is what the model tool uses to block.
-   * @param {{host?: string, member?: string, package?: string, mode?: 'install'|'upgrade'}} request target and package.
+   * @param {{host?: string, member?: string, package?: string, packageOnTarget?: {path: string, bytes: number, sha256: string}, mode?: 'install'|'upgrade'}} request target and package.
    * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string, layout: string}>} queued job.
    */
   async startDeploy(request) {
@@ -1372,7 +1500,16 @@ export class MeshService {
     if (test) throw new Error('指针布局没有单独的「测试升级」：直接运行「升级」，健康检查失败会自动回退到上一个 release')
     const host = typeof request.host === 'string' ? request.host.trim() : ''
     const memberId = typeof request.member === 'string' ? request.member.trim() : ''
-    const packagePath = await this.resolvePackage(request.package)
+    // The post-build upgrade already has its archive on the target. It is not
+    // in `~/.dsh/packages`, so it is described by path/bytes/digest instead of
+    // being resolved as a local package.
+    const packageOnTarget = request.packageOnTarget !== null && typeof request.packageOnTarget === 'object'
+      ? request.packageOnTarget
+      : null
+    const packagePath = packageOnTarget === null
+      ? await this.resolvePackage(request.package)
+      : String(packageOnTarget.path ?? '').trim()
+    if (packagePath === '') throw new Error('packageOnTarget.path is required')
     const snapshot = await this.members()
     const all = [snapshot.local, ...snapshot.members].filter(Boolean)
     const member = memberId !== ''
@@ -1406,10 +1543,17 @@ export class MeshService {
       // package itself through an external-network member. The plan carries
       // only public URLs and the proxy's SSH coordinates; the gateway keeps
       // the release tokens. An install has no Node runtime to run the
-      // downloader, so it keeps the direct gateway upload.
-      const download = mode === 'install' ? null : await this.#deployDownload(request, member, all)
+      // downloader, so it keeps the direct gateway upload. An archive already
+      // on the target needs neither path.
+      const download = mode === 'install' || packageOnTarget !== null ? null : await this.#deployDownload(request, member, all)
       const job = await this.#startEngineJob({
-        request: { ...deployRequest, member: member.id, test, download },
+        request: {
+          ...deployRequest,
+          member: member.id,
+          test,
+          download,
+          ...(packageOnTarget === null ? {} : { packageOnTarget }),
+        },
         member: member.id,
         mode,
       })
@@ -1419,8 +1563,12 @@ export class MeshService {
     if (test) throw new Error('测试升级需要一个成员（要在成员的安装上演练），不能直接给裸 SSH 主机')
     const os = /win(?:dows)?/iu.test(path.basename(packagePath)) ? 'windows' : 'linux'
     const appRoot = os === 'windows' ? 'C:\\dsh-mesh' : '/opt/dsh-mesh'
-    const download = mode === 'install' ? null : await this.#deployDownload(request, null, all)
-    const job = await this.#startEngineJob({ request: { host, package: packagePath, os, appRoot, download }, member: null, mode })
+    const download = mode === 'install' || packageOnTarget !== null ? null : await this.#deployDownload(request, null, all)
+    const job = await this.#startEngineJob({
+      request: { host, package: packagePath, os, appRoot, download, ...(packageOnTarget === null ? {} : { packageOnTarget }) },
+      member: null,
+      mode,
+    })
     return { ok: true, job, member: null, packagePath, layout: 'bluegreen' }
   }
 
@@ -1635,6 +1783,7 @@ export class MeshService {
         : { host: job.plan.host, user: job.plan.user ?? null, port: job.plan.port, os: job.plan.os, appRoot: job.plan.appRoot },
       release: job.plan?.release ?? job.release ?? 'local',
       package: job.plan?.package?.path ?? job.packagePath ?? null,
+      packageOnTarget: job.plan?.packageOnTarget === true,
       services: job.plan === null ? (job.services ?? []) : job.plan.services.map(service => service.name),
       status: 'queued',
       phase: 'starting',

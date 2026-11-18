@@ -602,12 +602,15 @@ test('release download scripts pass the manifest, digest, output and proxy', asy
     const linux = releaseDownloadScript(plan, {
       node: '/opt/member/current/runtime/node/bin/node',
       remoteDir: '/tmp/dsh-mesh-release-deadbeef',
-      manifests: ['https://github.com/o/r/releases/download/latest/latest.json', 'https://gitee.com/o/r/releases/download/latest/latest.json'],
+      manifests: [
+        { provider: 'github', url: 'https://github.com/o/r/releases/download/latest/latest.json' },
+        { provider: 'gitee', url: 'https://gitee.com/o/r/releases/download/latest/latest.json' },
+      ],
       proxyUrl: 'http://10.66.66.2:41234',
     })
     assert.match(linux, /release-download\.mjs/u)
-    assert.match(linux, /--manifest 'https:\/\/github\.com/u)
-    assert.match(linux, /--manifest 'https:\/\/gitee\.com/u)
+    assert.match(linux, /--manifest-github 'https:\/\/github\.com/u)
+    assert.match(linux, /--manifest-gitee 'https:\/\/gitee\.com/u)
     assert.match(linux, /--archive 'dsh-mesh-1\.0-linux-x64\.tar\.gz'/u)
     assert.match(linux, /--output '\/tmp\/dsh-mesh-/u)
     assert.match(linux, /--proxy 'http:\/\/10\.66\.66\.2:41234'/u)
@@ -617,7 +620,7 @@ test('release download scripts pass the manifest, digest, output and proxy', asy
     const windows = releaseDownloadScript(windowsPlan, {
       node: 'C:\\dsh-mesh\\current\\runtime\\node\\node.exe',
       remoteDir: 'C:\\Windows\\Temp\\dsh-mesh-release-deadbeef',
-      manifests: ['https://github.com/o/r/releases/download/latest/latest.json'],
+      manifests: [{ provider: 'github', url: 'https://github.com/o/r/releases/download/latest/latest.json' }],
       proxyUrl: null,
     })
     assert.match(windows, /release-download\.mjs/u)

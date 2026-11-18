@@ -50,7 +50,7 @@ import { CLUSTER_HEADER, deriveClusterSecret, signClusterRequest } from '../../c
 import { repackArchive } from '../../code/build/repack.mjs'
 import { quickSystemInfo } from '../../code/shared/system-info.mjs'
 import { GeoLookup } from '../../code/shared/geo.mjs'
-import { latestManifestUrls, loadReleaseConfig, sanitizeReleaseConfig, saveReleaseConfig } from '../../code/shared/release.mjs'
+import { latestManifestSources, latestManifestUrls, loadReleaseConfig, sanitizeReleaseConfig, saveReleaseConfig } from '../../code/shared/release.mjs'
 import { buildUpdateReasons, memberDeployment, packageInfo, planUpgrades } from './schedule.mjs'
 import { pickBuildMember, pickProxyMember } from './build-defaults.mjs'
 
@@ -1703,9 +1703,12 @@ export class MeshService {
    */
   async #deployDownload(request, target, everyone) {
     const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile })
-    const manifestUrls = latestManifestUrls(releaseConfig)
-    if (manifestUrls.length === 0) return null
-    if (request.direct === true || request.proxyMember === 'none') return { manifestUrls, proxy: null }
+    const sources = latestManifestSources(releaseConfig)
+    const manifests = []
+    if (sources.github !== null) manifests.push({ provider: 'github', url: sources.github })
+    if (sources.gitee !== null) manifests.push({ provider: 'gitee', url: sources.gitee })
+    if (manifests.length === 0) return null
+    if (request.direct === true || request.proxyMember === 'none') return { manifests, proxy: null }
     const wanted = typeof request.proxyMember === 'string' ? request.proxyMember.trim() : ''
     let proxyMember = null
     if (wanted !== '' && wanted !== 'auto') {
@@ -1720,10 +1723,10 @@ export class MeshService {
     }
     // A target proxying for itself is allowed (the listener binds its VPN
     // address), but there is no gain; keep it so an explicit choice is honoured.
-    if (proxyMember === null) return { manifestUrls, proxy: null }
+    if (proxyMember === null) return { manifests, proxy: null }
     const plan = await this.#memberSshPlan(proxyMember)
     return {
-      manifestUrls,
+      manifests,
       proxy: {
         host: plan.host,
         user: plan.user,

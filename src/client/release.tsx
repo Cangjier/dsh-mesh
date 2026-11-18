@@ -132,7 +132,7 @@ export function ReleaseCard({ active }: { active: boolean }) {
       {contextHolder}
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          编译完成后把最新包上传到固定的 <span className="dsh-pw-mono">{config?.tag ?? 'latest'}</span> Release（旧资产自动删除）；成员升级时优先从 Release 下载。
+          编译完成后把最新包上传到固定的 <span className="dsh-pw-mono">{config?.tag ?? 'latest'}</span> Release（旧资产自动删除）；成员升级时优先从 Release 下载：GitHub 走外网代理，Gitee 直连。
           Gitee 单附件约 100MB，包会按分片上传再合并；GitHub 保留整包。
         </Typography.Text>
         {error !== '' ? <Alert type="error" showIcon message={error} closable onClose={() => setError('')} /> : null}

@@ -3700,15 +3700,19 @@ function publicAssetUrl(value) {
     return value;
   }
 }
-function latestManifestUrls(config) {
-  const urls = [];
+function latestManifestSources(config) {
+  const sources = { github: null, gitee: null };
   if (config?.enabled !== false && config.github?.owner && config.github?.repo) {
-    urls.push(`${config.github.webBase ?? "https://github.com"}/${config.github.owner}/${config.github.repo}/releases/download/${config.tag}/${LATEST_MANIFEST_NAME}`);
+    sources.github = `${config.github.webBase ?? "https://github.com"}/${config.github.owner}/${config.github.repo}/releases/download/${config.tag}/${LATEST_MANIFEST_NAME}`;
   }
   if (config?.enabled !== false && config.gitee?.owner && config.gitee?.repo) {
-    urls.push(`${config.gitee.webBase ?? "https://gitee.com"}/${config.gitee.owner}/${config.gitee.repo}/releases/download/${config.tag}/${LATEST_MANIFEST_NAME}`);
+    sources.gitee = `${config.gitee.webBase ?? "https://gitee.com"}/${config.gitee.owner}/${config.gitee.repo}/releases/download/${config.tag}/${LATEST_MANIFEST_NAME}`;
   }
-  return urls;
+  return sources;
+}
+function latestManifestUrls(config) {
+  const sources = latestManifestSources(config);
+  return [sources.github, sources.gitee].filter((url) => typeof url === "string");
 }
 function releaseAssetUrl(config, repo, name) {
   const target = config[repo];
@@ -3958,7 +3962,7 @@ var GiteeRelease = class {
     this.repo = options.repo;
     this.token = options.token;
     this.branch = options.branch ?? "main";
-    this.proxy = shared.proxy ?? null;
+    this.proxy = null;
     this.log = shared.log ?? (() => {
     });
     this.apiBase = shared.apiBase ?? "https://gitee.com/api/v5";
@@ -6798,9 +6802,32 @@ $cmd = Get-Command node.exe -ErrorAction SilentlyContinue
 if ($cmd) { Write-Output ("DSH-MESH-NODE=" + $cmd.Source) }
 `;
 }
+function normalizeDownloadManifests(download2) {
+  if (download2 === null || typeof download2 !== "object") return [];
+  const entries = Array.isArray(download2.manifests) ? download2.manifests : [];
+  const normalized = [];
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== "object") continue;
+    const provider = entry.provider === "github" ? "github" : entry.provider === "gitee" ? "gitee" : "";
+    if (provider === "" || typeof entry.url !== "string" || entry.url === "") continue;
+    normalized.push({ provider, url: entry.url });
+  }
+  if (normalized.length > 0) return normalized;
+  for (const url of Array.isArray(download2.manifestUrls) ? download2.manifestUrls : []) {
+    if (typeof url !== "string" || url === "") continue;
+    let host = "";
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      host = "";
+    }
+    normalized.push({ provider: /(?:^|\.)github\.com$|githubusercontent\.com$/iu.test(host) ? "github" : "gitee", url });
+  }
+  return normalized;
+}
 function releaseDownloadScript(plan, options) {
   const archive = path14.basename(plan.package.path);
-  const manifestArgs = options.manifests.map((url) => `--manifest ${plan.os === "windows" ? ps(url) : sh(url)}`).join(" ");
+  const manifestArgs = options.manifests.map((entry) => `--manifest-${entry.provider} ${plan.os === "windows" ? ps(entry.url) : sh(entry.url)}`).join(" ");
   if (plan.os === "windows") {
     const script2 = `${options.remoteDir}\\deploy\\release-download.mjs`;
     const args2 = [
@@ -7158,7 +7185,7 @@ var DeployManager = class {
     const { log, meter, mark } = hooks;
     const download2 = plan.download;
     if (download2 === null || typeof download2 !== "object") return false;
-    const manifests = Array.isArray(download2.manifestUrls) ? download2.manifestUrls.filter((url) => typeof url === "string" && url !== "") : [];
+    const manifests = normalizeDownloadManifests(download2);
     if (manifests.length === 0) return false;
     const suffix = plan.package.sha256.slice(0, 12);
     const remoteDir = plan.os === "windows" ? `C:\\Windows\\Temp\\dsh-mesh-release-${suffix}` : `/tmp/dsh-mesh-release-${suffix}`;
@@ -7184,22 +7211,25 @@ var DeployManager = class {
       const join = (name) => plan.os === "windows" ? `${remoteDir}\\${name.replace(/\//gu, "\\")}` : `${remoteDir}/${name}`;
       await runner.upload(localDownloader, join("deploy/release-download.mjs"));
       await runner.upload(localClient, join("shared/http-client.mjs"));
-      if (download2.proxy !== null && typeof download2.proxy === "object") {
+      const needsProxy = manifests.some((entry) => entry.provider === "github");
+      if (download2.proxy !== null && typeof download2.proxy === "object" && needsProxy) {
         try {
           egress = new EgressProxy({ log: (line) => {
             void log(`download proxy: ${line}`);
           } });
           const started = await egress.start({ plan: download2.proxy, member: download2.proxy.name ?? download2.proxy.host });
           proxyUrl = started.url;
-          await log(`release download through ${download2.proxy.name ?? download2.proxy.host} proxy (${proxyUrl})`);
+          await log(`release download through ${download2.proxy.name ?? download2.proxy.host} proxy (${proxyUrl}); Gitee is fetched directly`);
         } catch (error) {
           egress?.closeAll();
           egress = null;
           proxyUrl = null;
           await log(`download proxy unavailable (${error instanceof Error ? error.message : String(error)}); trying a direct release download`);
         }
+      } else if (download2.proxy !== null && typeof download2.proxy === "object") {
+        await log("release download has only Gitee manifests; the proxy is not used");
       } else {
-        await log("release download has no proxy configured; downloading directly from the member");
+        await log("release download has no proxy configured; GitHub and Gitee are both fetched directly");
       }
       meter("\u4ECE Release \u4E0B\u8F7D\u5B89\u88C5\u5305", { percent: 0, indeterminate: true });
       const script = releaseDownloadScript(plan, { node, remoteDir, manifests, proxyUrl });
@@ -7218,9 +7248,14 @@ var DeployManager = class {
             total = Number.parseInt(planMatch[1], 10) || total;
             return;
           }
-          const manifestMatch = /^DSH-MESH-DOWNLOAD-MANIFEST (\S+)$/u.exec(line);
+          const manifestMatch = /^DSH-MESH-DOWNLOAD-MANIFEST (\S+) (\S+)$/u.exec(line);
           if (manifestMatch !== null) {
-            source = manifestMatch[1].includes("gitee.com") ? "Gitee Release" : "GitHub Release";
+            void log(`release manifest ${manifestMatch[1]}: ${manifestMatch[2]}`);
+            return;
+          }
+          const sourceMatch = /^DSH-MESH-DOWNLOAD-SOURCE (github|gitee)$/u.exec(line);
+          if (sourceMatch !== null) {
+            source = sourceMatch[1] === "gitee" ? "Gitee Release" : "GitHub Release";
             return;
           }
           const progressMatch = /^DSH-MESH-DOWNLOAD (\d+) (\d+)$/u.exec(line);
@@ -7249,7 +7284,7 @@ var DeployManager = class {
       const landed = typeof runner.remoteSize === "function" ? await runner.remoteSize(plan.remotePackage).catch(() => null) : null;
       if (failure === null && landed === plan.package.bytes) {
         const seconds = Math.max(0.1, (Date.now() - startedAt) / 1e3);
-        const via = proxyUrl === null ? "\u76F4\u8FDE" : `\u7ECF ${download2.proxy?.name ?? download2.proxy?.host ?? "\u5916\u7F51\u4E3B\u673A"} \u4EE3\u7406`;
+        const via = source === "Gitee Release" ? "Gitee \u76F4\u8FDE" : proxyUrl === null ? "GitHub \u76F4\u8FDE" : `GitHub \u7ECF ${download2.proxy?.name ?? download2.proxy?.host ?? "\u5916\u7F51\u4E3B\u673A"} \u4EE3\u7406`;
         meter("\u4ECE Release \u4E0B\u8F7D\u5B89\u88C5\u5305", { bytes: landed, totalBytes: landed, percent: 100, speed: landed / seconds });
         await mark("upload", "succeeded", `${formatBytes2(landed)} \xB7 ${source === "" ? "Release" : source} \u4E0B\u8F7D\uFF08${via}\uFF09${seconds.toFixed(1)}s \xB7 ${formatBytes2(landed / seconds)}/s`);
         await log(`downloaded the package from ${source === "" ? "the release" : source} (${via})`);
@@ -10110,9 +10145,12 @@ var MeshService = class {
    */
   async #deployDownload(request, target, everyone) {
     const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile });
-    const manifestUrls = latestManifestUrls(releaseConfig);
-    if (manifestUrls.length === 0) return null;
-    if (request.direct === true || request.proxyMember === "none") return { manifestUrls, proxy: null };
+    const sources = latestManifestSources(releaseConfig);
+    const manifests = [];
+    if (sources.github !== null) manifests.push({ provider: "github", url: sources.github });
+    if (sources.gitee !== null) manifests.push({ provider: "gitee", url: sources.gitee });
+    if (manifests.length === 0) return null;
+    if (request.direct === true || request.proxyMember === "none") return { manifests, proxy: null };
     const wanted = typeof request.proxyMember === "string" ? request.proxyMember.trim() : "";
     let proxyMember = null;
     if (wanted !== "" && wanted !== "auto") {
@@ -10125,10 +10163,10 @@ var MeshService = class {
       const picked = pickProxyMember(everyone);
       proxyMember = picked === null ? null : everyone.find((candidate) => candidate.id === picked) ?? null;
     }
-    if (proxyMember === null) return { manifestUrls, proxy: null };
+    if (proxyMember === null) return { manifests, proxy: null };
     const plan = await this.#memberSshPlan(proxyMember);
     return {
-      manifestUrls,
+      manifests,
       proxy: {
         host: plan.host,
         user: plan.user,

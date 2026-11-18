@@ -1940,7 +1940,7 @@ function Panel({ ctx }: { ctx: any }) {
                 />
               </Space>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                升级包优先从 GitHub / Gitee Release 下载（默认经有外网成员代理）；下载失败自动回退到本机上传。
+                升级包优先从 Release 下载：GitHub 默认经有外网成员代理，Gitee 一律直连；下载失败自动回退到本机上传。
               </Typography.Text>
             </Space>
           ) : null}

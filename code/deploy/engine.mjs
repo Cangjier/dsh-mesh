@@ -2329,6 +2329,36 @@ if ($cmd) { Write-Output ("DSH-MESH-NODE=" + $cmd.Source) }
 }
 
 /**
+ * Normalize the release manifest list carried by a deploy plan.
+ *
+ * New plans carry `{provider, url}` entries so the downloader knows that
+ * GitHub (and only GitHub) goes through the egress proxy. A plan queued by an
+ * older build may still have `manifestUrls`; the hostname is enough to classify
+ * those.
+ * @param {object} download plan download spec.
+ * @returns {Array<{provider: 'github'|'gitee', url: string}>} manifests.
+ */
+export function normalizeDownloadManifests(download) {
+  if (download === null || typeof download !== 'object') return []
+  const entries = Array.isArray(download.manifests) ? download.manifests : []
+  const normalized = []
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== 'object') continue
+    const provider = entry.provider === 'github' ? 'github' : entry.provider === 'gitee' ? 'gitee' : ''
+    if (provider === '' || typeof entry.url !== 'string' || entry.url === '') continue
+    normalized.push({ provider, url: entry.url })
+  }
+  if (normalized.length > 0) return normalized
+  for (const url of Array.isArray(download.manifestUrls) ? download.manifestUrls : []) {
+    if (typeof url !== 'string' || url === '') continue
+    let host = ''
+    try { host = new URL(url).hostname } catch { host = '' }
+    normalized.push({ provider: /(?:^|\.)github\.com$|githubusercontent\.com$/iu.test(host) ? 'github' : 'gitee', url })
+  }
+  return normalized
+}
+
+/**
  * The command that runs the target-side downloader.
  * @param {object} plan deployment plan.
  * @param {{node: string, remoteDir: string, manifests: string[], proxyUrl: string|null}} options options.
@@ -2336,7 +2366,9 @@ if ($cmd) { Write-Output ("DSH-MESH-NODE=" + $cmd.Source) }
  */
 export function releaseDownloadScript(plan, options) {
   const archive = path.basename(plan.package.path)
-  const manifestArgs = options.manifests.map(url => `--manifest ${plan.os === 'windows' ? ps(url) : sh(url)}`).join(' ')
+  const manifestArgs = options.manifests
+    .map(entry => `--manifest-${entry.provider} ${plan.os === 'windows' ? ps(entry.url) : sh(entry.url)}`)
+    .join(' ')
   if (plan.os === 'windows') {
     const script = `${options.remoteDir}\\deploy\\release-download.mjs`
     const args = [
@@ -2756,9 +2788,7 @@ export class DeployManager {
     const { log, meter, mark } = hooks
     const download = plan.download
     if (download === null || typeof download !== 'object') return false
-    const manifests = Array.isArray(download.manifestUrls)
-      ? download.manifestUrls.filter(url => typeof url === 'string' && url !== '')
-      : []
+    const manifests = normalizeDownloadManifests(download)
     if (manifests.length === 0) return false
     const suffix = plan.package.sha256.slice(0, 12)
     const remoteDir = plan.os === 'windows'
@@ -2786,20 +2816,23 @@ export class DeployManager {
       const join = (name) => plan.os === 'windows' ? `${remoteDir}\\${name.replace(/\//gu, '\\')}` : `${remoteDir}/${name}`
       await runner.upload(localDownloader, join('deploy/release-download.mjs'))
       await runner.upload(localClient, join('shared/http-client.mjs'))
-      if (download.proxy !== null && typeof download.proxy === 'object') {
+      const needsProxy = manifests.some(entry => entry.provider === 'github')
+      if (download.proxy !== null && typeof download.proxy === 'object' && needsProxy) {
         try {
           egress = new EgressProxy({ log: line => { void log(`download proxy: ${line}`) } })
           const started = await egress.start({ plan: download.proxy, member: download.proxy.name ?? download.proxy.host })
           proxyUrl = started.url
-          await log(`release download through ${download.proxy.name ?? download.proxy.host} proxy (${proxyUrl})`)
+          await log(`release download through ${download.proxy.name ?? download.proxy.host} proxy (${proxyUrl}); Gitee is fetched directly`)
         } catch (error) {
           egress?.closeAll()
           egress = null
           proxyUrl = null
           await log(`download proxy unavailable (${error instanceof Error ? error.message : String(error)}); trying a direct release download`)
         }
+      } else if (download.proxy !== null && typeof download.proxy === 'object') {
+        await log('release download has only Gitee manifests; the proxy is not used')
       } else {
-        await log('release download has no proxy configured; downloading directly from the member')
+        await log('release download has no proxy configured; GitHub and Gitee are both fetched directly')
       }
       meter('从 Release 下载安装包', { percent: 0, indeterminate: true })
       const script = releaseDownloadScript(plan, { node, remoteDir, manifests, proxyUrl })
@@ -2818,9 +2851,14 @@ export class DeployManager {
             total = Number.parseInt(planMatch[1], 10) || total
             return
           }
-          const manifestMatch = /^DSH-MESH-DOWNLOAD-MANIFEST (\S+)$/u.exec(line)
+          const manifestMatch = /^DSH-MESH-DOWNLOAD-MANIFEST (\S+) (\S+)$/u.exec(line)
           if (manifestMatch !== null) {
-            source = manifestMatch[1].includes('gitee.com') ? 'Gitee Release' : 'GitHub Release'
+            void log(`release manifest ${manifestMatch[1]}: ${manifestMatch[2]}`)
+            return
+          }
+          const sourceMatch = /^DSH-MESH-DOWNLOAD-SOURCE (github|gitee)$/u.exec(line)
+          if (sourceMatch !== null) {
+            source = sourceMatch[1] === 'gitee' ? 'Gitee Release' : 'GitHub Release'
             return
           }
           const progressMatch = /^DSH-MESH-DOWNLOAD (\d+) (\d+)$/u.exec(line)
@@ -2852,7 +2890,12 @@ export class DeployManager {
         : null
       if (failure === null && landed === plan.package.bytes) {
         const seconds = Math.max(0.1, (Date.now() - startedAt) / 1000)
-        const via = proxyUrl === null ? '直连' : `经 ${download.proxy?.name ?? download.proxy?.host ?? '外网主机'} 代理`
+        // Only GitHub uses the proxy; Gitee is always direct.
+        const via = source === 'Gitee Release'
+          ? 'Gitee 直连'
+          : proxyUrl === null
+            ? 'GitHub 直连'
+            : `GitHub 经 ${download.proxy?.name ?? download.proxy?.host ?? '外网主机'} 代理`
         meter('从 Release 下载安装包', { bytes: landed, totalBytes: landed, percent: 100, speed: landed / seconds })
         await mark('upload', 'succeeded', `${formatBytes(landed)} · ${source === '' ? 'Release' : source} 下载（${via}）${seconds.toFixed(1)}s · ${formatBytes(landed / seconds)}/s`)
         await log(`downloaded the package from ${source === '' ? 'the release' : source} (${via})`)

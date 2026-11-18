@@ -10,8 +10,11 @@
  *
  * It reads `latest.json` (GitHub first, Gitee second), downloads the whole
  * archive from GitHub or the split parts from Gitee, concatenates the parts,
- * and verifies the archive's SHA-256 from the manifest. Exit codes tell the
- * deploy engine whether falling back to a server upload makes sense:
+ * and verifies the archive's SHA-256 from the manifest. The `--proxy` value is
+ * used for GitHub only: Gitee is always fetched directly, so a domestic member
+ * does not detour through an overseas proxy to reach a domestic service. Exit
+ * codes tell the deploy engine whether falling back to a server upload makes
+ * sense:
  *
  *   0  downloaded and verified
  *   3  the release is reachable but does not contain this exact package
@@ -204,41 +207,50 @@ function selectAsset(manifest, archive) {
 
 async function main() {
   const values = parseArgs(process.argv.slice(2))
-  const manifests = values.get('manifest') ?? []
+  const githubManifest = valueOf(values, 'manifest-github')
+  const giteeManifest = valueOf(values, 'manifest-gitee')
+  const legacy = values.get('manifest') ?? []
   const archive = valueOf(values, 'archive')
   const output = valueOf(values, 'output')
   const proxy = valueOf(values, 'proxy')
   const expected = valueOf(values, 'sha256')
   const workdir = valueOf(values, 'workdir')
+  // GitHub goes through the proxy; Gitee never does.
+  const proxyFor = (provider) => (provider === 'github' && proxy !== '' ? proxy : null)
+  const manifests = [
+    ...(githubManifest === '' ? [] : [{ provider: 'github', url: githubManifest }]),
+    ...(giteeManifest === '' ? [] : [{ provider: 'gitee', url: giteeManifest }]),
+    ...legacy.map(url => ({ provider: /github/iu.test(url) ? 'github' : 'gitee', url })),
+  ]
   if (manifests.length === 0 || archive === '' || output === '') {
-    process.stderr.write('usage: release-download.mjs --manifest <url> [--manifest <url>] --archive <name> --output <file> [--sha256 <hex>] [--proxy <url>] [--workdir <dir>]\n')
+    process.stderr.write('usage: release-download.mjs --manifest-github <url> --manifest-gitee <url> --archive <name> --output <file> [--sha256 <hex>] [--proxy <url>] [--workdir <dir>]\n')
     process.exitCode = 5
     return
   }
 
   const errors = []
   let asset = null
-  for (const manifestUrl of manifests) {
+  for (const manifest of manifests) {
     try {
-      const response = await requestJson(manifestUrl, {
-        proxy: proxy === '' ? null : proxy,
+      const response = await requestJson(manifest.url, {
+        proxy: proxyFor(manifest.provider),
         timeoutMs: 30_000,
         idleTimeoutMs: 30_000,
         headers: { accept: 'application/json' },
       })
       if (response.status < 200 || response.status >= 300 || response.json === null) {
-        errors.push(`${manifestUrl}: HTTP ${String(response.status)}`)
+        errors.push(`${manifest.provider} ${manifest.url}: HTTP ${String(response.status)}`)
         continue
       }
       asset = selectAsset(response.json, archive)
       if (asset === null) {
-        errors.push(`${manifestUrl}: release has no asset named ${archive}`)
+        errors.push(`${manifest.provider} ${manifest.url}: release has no asset named ${archive}`)
         continue
       }
-      marker(`DSH-MESH-DOWNLOAD-MANIFEST ${manifestUrl}`)
+      marker(`DSH-MESH-DOWNLOAD-MANIFEST ${manifest.provider} ${manifest.url}`)
       break
     } catch (error) {
-      errors.push(`${manifestUrl}: ${error instanceof Error ? error.message : String(error)}`)
+      errors.push(`${manifest.provider} ${manifest.url}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
   if (asset === null) {
@@ -267,7 +279,8 @@ async function main() {
   const githubUrl = typeof asset.github?.url === 'string' ? asset.github.url : ''
   if (githubUrl !== '') {
     try {
-      const result = await fetchFile(githubUrl, output, { proxy, sha256, label: 'github', retries: 2, offset: 0, overallTotal: totalBytes })
+      marker('DSH-MESH-DOWNLOAD-SOURCE github')
+      const result = await fetchFile(githubUrl, output, { proxy: proxyFor('github'), sha256, label: 'github', retries: 2, offset: 0, overallTotal: totalBytes })
       marker(`DSH-MESH-DOWNLOAD-DONE ${String(result.bytes)} ${result.sha256}`)
       return
     } catch (error) {
@@ -283,6 +296,7 @@ async function main() {
     process.exitCode = 4
     return
   }
+  marker('DSH-MESH-DOWNLOAD-SOURCE gitee')
   const base = workdir === '' ? await mkdtemp(path.join(tmpdir(), 'dsh-mesh-download-')) : workdir
   await mkdir(base, { recursive: true })
   try {
@@ -295,7 +309,7 @@ async function main() {
       const url = urls[index] ?? urls[0]
       const file = path.join(base, path.basename(name))
       const downloaded = await fetchFile(url, file, {
-        proxy,
+        proxy: proxyFor('gitee'),
         sha256: typeof part?.sha256 === 'string' ? part.sha256 : '',
         label: name,
         retries: 2,

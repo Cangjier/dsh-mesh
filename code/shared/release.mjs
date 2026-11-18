@@ -236,15 +236,25 @@ function publicAssetUrl(value) {
  * @param {object} config loaded config.
  * @returns {string[]} absolute manifest URLs.
  */
-export function latestManifestUrls(config) {
-  const urls = []
+export function latestManifestSources(config) {
+  const sources = { github: null, gitee: null }
   if (config?.enabled !== false && config.github?.owner && config.github?.repo) {
-    urls.push(`${config.github.webBase ?? 'https://github.com'}/${config.github.owner}/${config.github.repo}/releases/download/${config.tag}/${LATEST_MANIFEST_NAME}`)
+    sources.github = `${config.github.webBase ?? 'https://github.com'}/${config.github.owner}/${config.github.repo}/releases/download/${config.tag}/${LATEST_MANIFEST_NAME}`
   }
   if (config?.enabled !== false && config.gitee?.owner && config.gitee?.repo) {
-    urls.push(`${config.gitee.webBase ?? 'https://gitee.com'}/${config.gitee.owner}/${config.gitee.repo}/releases/download/${config.tag}/${LATEST_MANIFEST_NAME}`)
+    sources.gitee = `${config.gitee.webBase ?? 'https://gitee.com'}/${config.gitee.owner}/${config.gitee.repo}/releases/download/${config.tag}/${LATEST_MANIFEST_NAME}`
   }
-  return urls
+  return sources
+}
+
+/**
+ * The latest.json locations in the order a client tries them (GitHub first).
+ * @param {object} config loaded config.
+ * @returns {string[]} URLs.
+ */
+export function latestManifestUrls(config) {
+  const sources = latestManifestSources(config)
+  return [sources.github, sources.gitee].filter(url => typeof url === 'string')
 }
 
 /**
@@ -572,7 +582,10 @@ export class GiteeRelease {
     this.repo = options.repo
     this.token = options.token
     this.branch = options.branch ?? 'main'
-    this.proxy = shared.proxy ?? null
+    // Gitee is reached directly. The egress proxy exists to get around the
+    // GitHub path that is slow or unreachable from mainland China; routing a
+    // domestic download through an overseas member would only make it slower.
+    this.proxy = null
     this.log = shared.log ?? (() => {})
     this.apiBase = shared.apiBase ?? 'https://gitee.com/api/v5'
     this.webBase = shared.webBase ?? 'https://gitee.com'
@@ -1019,8 +1032,12 @@ export async function fetchLatestManifest(options) {
   const errors = []
   for (const url of options.urls ?? []) {
     try {
+      let host = ''
+      try { host = new URL(url).hostname } catch { host = '' }
+      // Only GitHub needs the egress proxy; a Gitee manifest is domestic.
+      const proxy = /(?:^|\.)github\.com$|githubusercontent\.com$/iu.test(host) ? options.proxy ?? null : null
       const response = await requestJson(url, {
-        proxy: options.proxy ?? null,
+        proxy,
         timeoutMs: options.timeoutMs ?? 30_000,
         idleTimeoutMs: options.timeoutMs ?? 30_000,
         headers: { accept: 'application/json' },

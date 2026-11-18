@@ -1,6 +1,6 @@
 # Step 022 Release 发布与下载升级
 
-> 2026-11-18。编译完成后自动把最新部署包上传到 GitHub / Gitee Release；成员升级时优先从 Release 下载，默认经有外网成员代理，失败自动回退到网关上传。
+> 2026-11-18。编译完成后自动把最新部署包上传到 GitHub / Gitee Release；成员升级时优先从 Release 下载。**GitHub 走有外网成员代理，Gitee 一律直连**；下载失败自动回退到网关上传。
 
 ## 1. 为什么不再只从 server 拷
 
@@ -14,8 +14,10 @@
 编译机 ──(一次)──> GitHub Release（整包）
      └──(一次)──> Gitee Release（<100MB 分片）
 
-成员 A ──(经境外成员代理)──> GitHub / Gitee Release
-成员 B ──(经境外成员代理)──> GitHub / Gitee Release
+成员 A ──(经境外成员代理)──> GitHub Release
+       ──(直连)────────────> Gitee Release
+成员 B ──(经境外成员代理)──> GitHub Release
+       ──(直连)────────────> Gitee Release
 ```
 
 网关只传 plan（URL + 代理成员的 SSH 坐标），不再承载包体。下载器在目标成员上运行，校验 SHA-256 后
@@ -88,8 +90,8 @@
 1. 计算每个归档的 SHA-256；
 2. 为 Gitee 切分片（临时目录，发布结束删除）；
 3. 确保两个仓库都有 `latest` Release；
-4. GitHub：上传整包和 `latest.json`，然后删除不属于本次构建的资产；
-5. Gitee：先删除旧分片（保留旧 `latest.json`），上传新分片，用 API 返回的
+4. GitHub：经编译机的外网代理上传整包和 `latest.json`，然后删除不属于本次构建的资产；
+5. Gitee：**不走代理**，先删除旧分片（保留旧 `latest.json`），上传新分片，用 API 返回的
    `browser_download_url` 重建 `latest.json`，上传 `latest.json`；
 6. 如果 GitHub 的 `latest.json` 需要换成 Gitee 的最终分片地址，再替换一次。
 
@@ -126,9 +128,11 @@
 
 升级（`upgrade` / `test`）时，`MeshService.startDeploy` 决定下载计划：
 
-- `manifestUrls`：GitHub 在前、Gitee 在后；只要配置里有 owner/repo 就生成，不要求 token（下载是公开的）；
+- `manifests`：GitHub 在前、Gitee 在后；只要配置里有 owner/repo 就生成，不要求 token（下载是公开的）；
 - `proxy`：默认 `pickProxyMember` 选出的境外 Linux 成员，本次部署可以覆盖（面板「下载代理」，
   或 API 的 `proxyMember`）；`direct: true` 表示成员用自己的网络直连；
+- **代理只用于 GitHub**：`code/deploy/release-download.mjs` 按 provider 决定是否传代理，
+  Gitee 的清单和分片永远直连；`code/shared/release.mjs` 的 `GiteeRelease` 也强制忽略代理；
 - plan 里不包含任何 token。
 
 `code/deploy/engine.mjs` 的「获取安装包」步骤：
@@ -139,8 +143,8 @@
    `command -v node`）；
 4. 如果有代理成员，用 `code/shared/egress.mjs` 在它上面启动一次性 HTTP 代理（绑定其 VPN 地址）；
 5. 上传两个小文件到目标：`release-download.mjs` + `http-client.mjs`，用目标自己的 Node 运行；
-6. 下载器按顺序读 `latest.json`，按**归档文件名**匹配本次要部署的包，并核对 SHA-256；
-7. GitHub 整包下载失败时自动改用同一份清单里的 Gitee 分片；
+6. 下载器按顺序读 `latest.json`（GitHub 清单经代理，Gitee 清单直连），按**归档文件名**匹配本次要部署的包，并核对 SHA-256；
+7. GitHub 整包（经代理）下载失败时自动改用同一份清单里的 Gitee 分片（直连）；
 8. 下载并校验成功 → 「获取安装包」步骤显示「GitHub/Gitee Release 下载（经 X 代理）」；
    任何失败（无 Node、无网、代理不可用、清单里没有这个包、校验失败）都记录原因并回退到原有
    的网关上传，升级不会因为 Release 不可用而失败。
@@ -150,7 +154,7 @@
 
 ## 6. 覆盖与回退
 
-- **面板**：升级/测试升级弹窗里的「下载代理」可以选「自动 / 直连 / 指定成员」。
+- **面板**：升级/测试升级弹窗里的「下载代理」可以选「自动 / 直连 / 指定成员」；它只影响 GitHub，Gitee 始终直连。
 - **API**：`POST /api/dsh-mesh/upgrade`、`/test-upgrade` 接受 `proxyMember`（id/名称/VPN IP）、
   `direct: true`；`startDeploy` 对 `install` 不挂下载计划（目标还没有 Node 运行时）。
 - **完全关闭**：删除或设 `release.json` 的 `enabled: false`，或在面板关掉总开关；所有升级回到
@@ -190,4 +194,5 @@ CLI 用 `--release-config` 读取，任务结束立即删除；token 不出现�
 | `Not Found Project` | Gitee 仓库不存在或 token 无 projects 权限 | 创建公开仓库并重新生成 token |
 | Gitee 上传 403/413 | 单个分片超过 100MB 或仓库总量超 1GB | 调小「Gitee 分片」；确认旧资产已被清理 |
 | 升级日志「release download did not produce a usable package」 | 本次选的包不在 `latest` Release、目标无 Node、代理不可用、校验失败 | 正常回退到网关上传；想强制走 Release 就把该包重新编译/发布 |
-| 下载卡住 | 代理成员离线或目标到代理的 VPN 路由不通 | 面板改「直连」或换代理成员；失败仍会回退上传 |
+| GitHub 下载卡住 | 代理成员离线或目标到代理的 VPN 路由不通 | 面板改「直连」或换代理成员；失败仍会回退上传 |
+| Gitee 下载正常但 GitHub 不走代理 | 代理未配置 / 成员不是境外 Linux | 检查 `pickProxyMember` 或显式选代理成员；Gitee 本来就不应走代理 |

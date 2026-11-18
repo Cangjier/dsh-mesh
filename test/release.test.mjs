@@ -223,6 +223,69 @@ test('release config round-trips tokens without exposing them', async () => {
   }
 })
 
+/** A tiny forwarding HTTP proxy; records every absolute URI it sees. */
+async function startProxy() {
+  const seen = []
+  const server = http.createServer((request, response) => {
+    seen.push(request.url)
+    const target = new URL(request.url)
+    const upstream = http.request({
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: request.method,
+      headers: request.headers,
+    }, (answer) => {
+      response.writeHead(answer.statusCode ?? 502, answer.headers)
+      answer.pipe(response)
+    })
+    upstream.once('error', () => {
+      response.writeHead(502)
+      response.end('proxy error')
+    })
+    request.pipe(upstream)
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  return { server, port: server.address().port, seen }
+}
+
+test('publishing proxies GitHub only, never Gitee', async () => {
+  const fake = await startFakeProviders()
+  const proxy = await startProxy()
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-release-proxy-publish-'))
+  try {
+    const archive = path.join(dir, 'dsh-mesh-1.0-20261118A-linux-x64.tar.gz')
+    await writeFile(archive, Buffer.alloc(1024 * 1024 + 11, 9))
+    const config = {
+      enabled: true,
+      tag: 'latest',
+      partBytes: 1024 * 1024,
+      github: {
+        owner: 'o', repo: 'r', token: 'gh', enabled: true,
+        apiBase: `${fake.base}/github/api`, uploadBase: `${fake.base}/github/upload`, webBase: `${fake.base}/github/web`,
+      },
+      gitee: {
+        owner: 'o', repo: 'r', token: 'gt', enabled: true, branch: 'main',
+        apiBase: `${fake.base}/gitee/api`, webBase: `${fake.base}/gitee/web`,
+      },
+    }
+    const result = await publishRelease({
+      artifacts: [{ target: 'linux-x64', archive, manifest: { version: '1.0', buildStamp: '20261118A' } }],
+      config,
+      proxy: `http://127.0.0.1:${proxy.port}`,
+      log: () => {},
+    })
+    assert.equal(result.status, 'done', JSON.stringify(result))
+    const proxied = proxy.seen.map(url => new URL(url).pathname)
+    assert.ok(proxied.some(path => path.startsWith('/github/')), `GitHub requests must use the proxy, saw ${proxied.join(', ')}`)
+    assert.equal(proxied.some(path => path.startsWith('/gitee/')), false, `Gitee requests must bypass the proxy, saw ${proxied.join(', ')}`)
+  } finally {
+    fake.server.close()
+    proxy.server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('publishRelease writes the newest assets and removes the previous revision', async () => {
   const fake = await startFakeProviders()
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-release-publish-'))

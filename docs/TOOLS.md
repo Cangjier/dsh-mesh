@@ -217,7 +217,7 @@ build { "jobId": "<needs-fix-job-id>" }
   → 解析 package
   → host 命中成员：自动取成员 IP、SSH 用户/私钥、OS、安装目录
   → host 不是成员：按普通 SSH 主机处理，OS 由包名决定，安装目录用默认值
-  → 获取包：升级时目标从 GitHub/Gitee Release 下载（经外网成员代理），失败回退网关上传
+  → 获取包：升级时目标从 Release 下载（GitHub 经外网成员代理、Gitee 直连），失败回退网关上传
   → prepare：解压新 release、共享目录、gate.env、服务定义
   → activate：切 current，按 control → dsh → gate 重启
   → 健康检查 /__gate/health

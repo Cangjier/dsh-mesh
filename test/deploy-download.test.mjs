@@ -80,7 +80,8 @@ function fakeRunner(plan, options) {
       if (script.includes('release-download.mjs')) {
         if (this.downloadFailed) throw new Error('release download failed: simulated')
         await copyFile(options.source, plan.remotePackage)
-        onLine?.('DSH-MESH-DOWNLOAD-MANIFEST https://github.com/o/r/releases/download/latest/latest.json')
+        onLine?.('DSH-MESH-DOWNLOAD-MANIFEST github https://github.com/o/r/releases/download/latest/latest.json')
+        onLine?.('DSH-MESH-DOWNLOAD-SOURCE github')
         onLine?.(`DSH-MESH-DOWNLOAD-PLAN ${String(plan.package.bytes)}`)
         onLine?.(`DSH-MESH-DOWNLOAD ${String(plan.package.bytes)} ${String(plan.package.bytes)}`)
         onLine?.('DSH-MESH-DOWNLOAD-DONE 0 0')
@@ -105,7 +106,7 @@ test('the deploy engine downloads the package from the release and skips the upl
       package: local,
       os: 'linux',
       appRoot: '/opt/member',
-      download: { manifestUrls: [`http://127.0.0.1:${fixture.port}/latest.json`], proxy: null },
+      download: { manifests: [{ provider: 'github', url: `http://127.0.0.1:${fixture.port}/latest.json` }], proxy: null },
     })
     plan.remotePackage = remote
     const runner = fakeRunner(plan, { source: local })
@@ -142,7 +143,7 @@ test('a failed release download falls back to the gateway upload', async () => {
       package: local,
       os: 'linux',
       appRoot: '/opt/member',
-      download: { manifestUrls: [`http://127.0.0.1:${fixture.port}/latest.json`], proxy: null },
+      download: { manifests: [{ provider: 'github', url: `http://127.0.0.1:${fixture.port}/latest.json` }], proxy: null },
     })
     plan.remotePackage = remote
     const runner = fakeRunner(plan, { source: local, downloadFailed: true })

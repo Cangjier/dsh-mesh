@@ -132,7 +132,7 @@ test('release download fetches the whole archive from GitHub', async () => {
   try {
     const output = path.join(dir, 'pkg.tar.gz')
     const result = await run([
-      '--manifest', `http://127.0.0.1:${fixture.port}/latest-github.json`,
+      '--manifest-github', `http://127.0.0.1:${fixture.port}/latest-github.json`,
       '--archive', 'pkg.tar.gz',
       '--sha256', fixture.digest,
       '--output', output,
@@ -152,7 +152,7 @@ test('release download reassembles Gitee parts and verifies the archive', async 
   try {
     const output = path.join(dir, 'pkg.tar.gz')
     const result = await run([
-      '--manifest', `http://127.0.0.1:${fixture.port}/latest-gitee.json`,
+      '--manifest-gitee', `http://127.0.0.1:${fixture.port}/latest-gitee.json`,
       '--archive', 'pkg.tar.gz',
       '--sha256', fixture.digest,
       '--output', output,
@@ -173,7 +173,7 @@ test('release download goes through the configured HTTP proxy', async () => {
   try {
     const output = path.join(dir, 'pkg.tar.gz')
     const result = await run([
-      '--manifest', `http://127.0.0.1:${fixture.port}/latest-github.json`,
+      '--manifest-github', `http://127.0.0.1:${fixture.port}/latest-github.json`,
       '--archive', 'pkg.tar.gz',
       '--sha256', fixture.digest,
       '--output', output,
@@ -189,12 +189,35 @@ test('release download goes through the configured HTTP proxy', async () => {
   }
 })
 
+test('Gitee downloads ignore the proxy even when one is configured', async () => {
+  const fixture = await startFixture()
+  const proxy = await startProxy()
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-release-gitee-direct-'))
+  try {
+    const output = path.join(dir, 'pkg.tar.gz')
+    const result = await run([
+      '--manifest-gitee', `http://127.0.0.1:${fixture.port}/latest-gitee.json`,
+      '--archive', 'pkg.tar.gz',
+      '--sha256', fixture.digest,
+      '--output', output,
+      '--proxy', `http://127.0.0.1:${proxy.port}`,
+    ])
+    assert.equal(result.code, 0, result.stderr)
+    assert.equal(sha256(await readFile(output)), fixture.digest)
+    assert.equal(proxy.hits(), 0, 'Gitee must not go through the egress proxy')
+  } finally {
+    fixture.server.close()
+    proxy.server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('release download refuses a package the release does not carry', async () => {
   const fixture = await startFixture()
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-release-missing-'))
   try {
     const result = await run([
-      '--manifest', `http://127.0.0.1:${fixture.port}/latest-github.json`,
+      '--manifest-github', `http://127.0.0.1:${fixture.port}/latest-github.json`,
       '--archive', 'other.tar.gz',
       '--output', path.join(dir, 'other.tar.gz'),
     ])
@@ -212,7 +235,7 @@ test('release download fails verification with a wrong digest', async () => {
   try {
     const output = path.join(dir, 'pkg.tar.gz')
     const result = await run([
-      '--manifest', `http://127.0.0.1:${fixture.port}/latest-github.json`,
+      '--manifest-github', `http://127.0.0.1:${fixture.port}/latest-github.json`,
       '--archive', 'pkg.tar.gz',
       '--sha256', '0'.repeat(64),
       '--output', output,
@@ -231,7 +254,7 @@ test('release download reuses an already verified file', async () => {
     const output = path.join(dir, 'pkg.tar.gz')
     await writeFile(output, fixture.archive)
     const result = await run([
-      '--manifest', `http://127.0.0.1:${fixture.port}/latest-github.json`,
+      '--manifest-github', `http://127.0.0.1:${fixture.port}/latest-github.json`,
       '--archive', 'pkg.tar.gz',
       '--sha256', fixture.digest,
       '--output', output,

@@ -405,9 +405,9 @@ test('an upgrade plan carries the release download and the external proxy member
 
     const result = await service.startDeploy({ member: 'target', package: pkg, mode: 'upgrade' })
     const request = await readRequest(result.job)
-    assert.deepEqual(request.plan.download.manifestUrls, [
-      'https://github.com/Cangjier/dsh-mesh/releases/download/latest/latest.json',
-      'https://gitee.com/cangjier/dsh-mesh/releases/download/latest/latest.json',
+    assert.deepEqual(request.plan.download.manifests, [
+      { provider: 'github', url: 'https://github.com/Cangjier/dsh-mesh/releases/download/latest/latest.json' },
+      { provider: 'gitee', url: 'https://gitee.com/cangjier/dsh-mesh/releases/download/latest/latest.json' },
     ])
     assert.equal(request.plan.download.proxy.host, '10.66.66.2')
     assert.equal(request.plan.download.proxy.name, 'C')

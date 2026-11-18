@@ -25,7 +25,7 @@
       "files": [
         {
           "path": "packages/client/ui-settings-account/src/client/index.ts",
-          "baseSha256": "12c90db629da9117078be19462186033a157625503ab985dfb1e2ef1dc8ef478",
+          "baseSha256": "660c4c119a823125daa3d43cd5c66ad6588083a2da325294d5bb8195975cbe5e",
           "overlay": "packages/client/ui-settings-account/src/client/index.ts",
           "marker": "dsh-mesh overlay: login"
         },

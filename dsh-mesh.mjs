@@ -244,6 +244,9 @@ function runRole(options) {
   // The release is the package root for everything it starts: its config/,
   // data/ and workspace/ already point into shared/.
   env.DSH_PACKAGE_ROOT = releaseDir
+  // The layout root never moves: deploys must plan against it, not against the
+  // release directory they happen to be running from.
+  env.DSH_INSTALL_ROOT = root
   env.DSH_APP_DIR = env.DSH_APP_DIR || path.join(releaseDir, 'app')
   // The layout owns these three paths: a stale value inherited from the
   // caller's shell must not move DSH's home or data outside shared/.

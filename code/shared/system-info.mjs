@@ -211,7 +211,7 @@ export function quickSystemInfo(options = {}) {
     platform: process.platform,
     arch: process.arch,
     home: options.home ?? os.homedir(),
-    appRoot: options.appRoot ?? process.env.DSH_PACKAGE_ROOT ?? process.cwd(),
+    appRoot: options.appRoot ?? installRoot(),
     user: os.userInfo().username,
     cpu: { model: cpus[0]?.model ?? 'unknown', cores: cpus.length, usagePercent: cpuUsage },
     memory: {
@@ -222,6 +222,20 @@ export function quickSystemInfo(options = {}) {
     },
     disks,
   }
+}
+
+/**
+ * The stable install root this process runs under.
+ *
+ * `DSH_PACKAGE_ROOT` is the release directory and moves on every upgrade;
+ * `DSH_INSTALL_ROOT` (set by the mesh launcher) is the `.dsh` root that owns
+ * `releases/` and `shared/`, which is what a deploy must be planned against.
+ * @returns {string} absolute path.
+ */
+function installRoot() {
+  const layout = process.env.DSH_INSTALL_ROOT
+  if (typeof layout === 'string' && layout.trim() !== '') return layout.trim()
+  return process.env.DSH_PACKAGE_ROOT ?? process.cwd()
 }
 
 /**
@@ -249,7 +263,7 @@ export async function collectSystemInfo(options = {}) {
     arch: process.arch,
     release: os.release(),
     home: options.home ?? os.homedir(),
-    appRoot: options.appRoot ?? process.env.DSH_PACKAGE_ROOT ?? process.cwd(),
+    appRoot: options.appRoot ?? installRoot(),
     user: os.userInfo().username,
     uptimeSeconds: Math.floor(os.uptime()),
     node: process.version,

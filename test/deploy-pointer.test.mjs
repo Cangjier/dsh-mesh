@@ -9,7 +9,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { buildLinuxActivateScript, buildLinuxPrepareScript, buildLinuxRehearseScript, buildLinuxRollbackScript } from '../code/deploy/engine.mjs'
+import { buildLinuxActivateScript, buildLinuxPrepareScript, buildLinuxRehearseScript, buildLinuxRollbackScript, layoutRootFor } from '../code/deploy/engine.mjs'
+import { quickSystemInfo } from '../code/shared/system-info.mjs'
 import { readDeployment } from '../code/shared/deployment.mjs'
 
 /** A normalized plan, shaped like buildDeployPlan()'s output. */
@@ -110,4 +111,34 @@ test('Windows rollback delegates to the stable rollback orchestrator', async () 
   const script = buildWindowsRollbackScript({ ...plan, layoutRoot: 'C:\\Users\\Admin\\.dsh' })
   assert.match(script, /rollback-local\.mjs/u)
   assert.doesNotMatch(script, /current/u)
+})
+
+test('the layout root is derived from whatever the member reports', () => {
+  // A member may report its release directory or a legacy `current` link; both
+  // must plan against the stable `.dsh` root, never nest one release in another.
+  assert.equal(layoutRootFor('/root/.dsh', 'linux'), '/root/.dsh')
+  assert.equal(layoutRootFor('/root/.dsh/releases/20261118074449-bd82d5cb', 'linux'), '/root/.dsh')
+  assert.equal(layoutRootFor('/root/.dsh/dsh-mesh', 'linux'), '/root/.dsh')
+  assert.equal(layoutRootFor('C:\\Users\\Admin\\.dsh\\releases\\20261118071638-d90f0bcc', 'windows'), 'C:\\Users\\Admin\\.dsh')
+  assert.equal(layoutRootFor('C:\\Users\\Admin\\.dsh\\releases\\20261118071638-d90f0bcc\\current', 'windows'), 'C:\\Users\\Admin\\.dsh')
+  assert.equal(layoutRootFor('C:\\Users\\Admin\\.dsh\\dsh-mesh', 'windows'), 'C:\\Users\\Admin\\.dsh')
+  assert.equal(layoutRootFor('C:\\Users\\Admin\\.dsh', 'windows'), 'C:\\Users\\Admin\\.dsh')
+})
+
+test('the member reports the install root, not the release it runs from', () => {
+  const previous = { install: process.env.DSH_INSTALL_ROOT, package: process.env.DSH_PACKAGE_ROOT }
+  process.env.DSH_INSTALL_ROOT = 'C:\\Users\\Admin\\.dsh'
+  process.env.DSH_PACKAGE_ROOT = 'C:\\Users\\Admin\\.dsh\\releases\\20261118071638-d90f0bcc'
+  try {
+    assert.equal(quickSystemInfo().appRoot, 'C:\\Users\\Admin\\.dsh')
+    delete process.env.DSH_INSTALL_ROOT
+    // Without the launcher (an old blue-green install) the release is the best
+    // answer available, and layoutRootFor() still finds the stable root.
+    assert.equal(quickSystemInfo().appRoot, 'C:\\Users\\Admin\\.dsh\\releases\\20261118071638-d90f0bcc')
+  } finally {
+    if (previous.install === undefined) delete process.env.DSH_INSTALL_ROOT
+    else process.env.DSH_INSTALL_ROOT = previous.install
+    if (previous.package === undefined) delete process.env.DSH_PACKAGE_ROOT
+    else process.env.DSH_PACKAGE_ROOT = previous.package
+  }
 })

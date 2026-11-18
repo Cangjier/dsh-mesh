@@ -1176,6 +1176,37 @@ function proxyRequest(req, res) {
     agent,
   }, (upstreamRes) => {
     clearTimeout(responseTimer)
+
+    // The cookie check above only proves that *some* DSH session cookie is
+    // present. After an upgrade (or a secret rotation) DSH no longer accepts
+    // it, so the gate would skip the launch-token handoff and proxy straight
+    // into DSH's dead-end 401 page. Re-run the handoff once; if DSH rejects
+    // even that, expire the dead cookie so a reload starts the cycle over.
+    if (upstreamRes.statusCode === 401 && upstream.token !== undefined && isDocumentNavigation(req)) {
+      let requestUrl = null
+      try {
+        requestUrl = new URL(req.url ?? '/', 'http://gate.invalid')
+      } catch {
+        requestUrl = null
+      }
+      upstreamRes.resume()
+      if (requestUrl !== null && !requestUrl.searchParams.has('token')) {
+        res.writeHead(303, {
+          'cache-control': 'no-store',
+          location: `/?token=${encodeURIComponent(upstream.token)}`,
+          'referrer-policy': 'no-referrer',
+        })
+        res.end()
+        return
+      }
+      const deadCookie = dshCookieName(upstreamAuthority())
+      const headers = { 'cache-control': 'no-store', 'content-type': 'text/plain; charset=utf-8' }
+      if (deadCookie !== undefined) headers['set-cookie'] = `${deadCookie}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict`
+      res.writeHead(401, headers)
+      res.end('dsh web authentication required; the launch token was rejected. Reload to try again.\n')
+      return
+    }
+
     const headers = {}
     for (const [name, value] of Object.entries(upstreamRes.headers)) {
       if (value === undefined || HOP_BY_HOP.has(name.toLowerCase())) continue

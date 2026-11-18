@@ -5290,6 +5290,20 @@ async function findLatestPackage(repositoryRoot, os9) {
   }
   return candidates[0].file;
 }
+function layoutRootFor(appRoot, os9) {
+  const root = normalizeInstallRoot(appRoot);
+  if (root === "") return root;
+  const separator = os9 === "linux" ? "/" : "\\";
+  const parts = root.split(os9 === "linux" ? /\/+/u : /[\\/]+/u);
+  const index = parts.lastIndexOf("releases");
+  if (index > 0) {
+    const prefix = parts.slice(0, index).join(separator);
+    return /^[A-Za-z]:$/u.test(prefix) ? `${prefix}${separator}` : prefix;
+  }
+  const base = os9 === "linux" ? path14.posix.basename(root) : path14.win32.basename(root);
+  if (base === ".dsh") return root;
+  return os9 === "linux" ? path14.posix.dirname(root) : path14.win32.dirname(root);
+}
 async function buildDeployPlan(options) {
   if (typeof options.host !== "string" || options.host.trim() === "") throw new Error("host is required");
   const os9 = normalizeOs(options.os ?? "linux");
@@ -5308,9 +5322,7 @@ async function buildDeployPlan(options) {
     throw new Error("release must be 3-80 chars of letters, digits, dot, underscore or dash");
   }
   const appRoot = normalizeInstallRoot(options.appRoot) || DEFAULT_APP_ROOT[os9];
-  const appBase = os9 === "linux" ? path14.posix.basename(appRoot) : path14.win32.basename(appRoot);
-  const appDirname = os9 === "linux" ? path14.posix.dirname(appRoot) : path14.win32.dirname(appRoot);
-  const layoutRoot = appBase === ".dsh" ? appRoot : appDirname;
+  const layoutRoot = layoutRootFor(appRoot, os9);
   const services = normalizeServices(options.services, os9);
   const scope = options.scope === "dsh" ? "dsh" : "all";
   const gatePort = String(options.gatePort ?? "80");
@@ -7613,7 +7625,7 @@ function quickSystemInfo(options = {}) {
     platform: process.platform,
     arch: process.arch,
     home: options.home ?? os7.homedir(),
-    appRoot: options.appRoot ?? process.env.DSH_PACKAGE_ROOT ?? process.cwd(),
+    appRoot: options.appRoot ?? installRoot(),
     user: os7.userInfo().username,
     cpu: { model: cpus[0]?.model ?? "unknown", cores: cpus.length, usagePercent: cpuUsage2 },
     memory: {
@@ -7624,6 +7636,11 @@ function quickSystemInfo(options = {}) {
     },
     disks
   };
+}
+function installRoot() {
+  const layout = process.env.DSH_INSTALL_ROOT;
+  if (typeof layout === "string" && layout.trim() !== "") return layout.trim();
+  return process.env.DSH_PACKAGE_ROOT ?? process.cwd();
 }
 async function collectSystemInfo(options = {}) {
   const requested = Number.isSafeInteger(options.sampleMs) ? options.sampleMs : 200;
@@ -7645,7 +7662,7 @@ async function collectSystemInfo(options = {}) {
     arch: process.arch,
     release: os7.release(),
     home: options.home ?? os7.homedir(),
-    appRoot: options.appRoot ?? process.env.DSH_PACKAGE_ROOT ?? process.cwd(),
+    appRoot: options.appRoot ?? installRoot(),
     user: os7.userInfo().username,
     uptimeSeconds: Math.floor(os7.uptime()),
     node: process.version,

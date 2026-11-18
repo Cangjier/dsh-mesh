@@ -51,6 +51,7 @@ function makeRelease(root, id, options = {}) {
 import process from 'node:process'
 process.stdout.write(JSON.stringify({
   release: process.env.DSH_PACKAGE_ROOT,
+  installRoot: process.env.DSH_INSTALL_ROOT,
   home: process.env.DSH_HOME,
   workdir: process.env.DSH_WORKDIR,
   data: process.env.DSH_GATE_DATA_DIR,
@@ -127,6 +128,7 @@ test('activate writes the pointer and the launcher starts the active release', (
     assert.equal(gate.status, 0, gate.stderr)
     const report = JSON.parse(gate.stdout)
     assert.equal(report.release, path.join(root, 'releases', '20261118D-aaaaaaaa'))
+    assert.equal(report.installRoot, root)
     assert.equal(report.home, path.join(root, 'shared', 'home'))
     assert.equal(report.workdir, path.join(root, 'shared', 'workspace'))
     assert.equal(report.data, path.join(root, 'shared', 'data'))

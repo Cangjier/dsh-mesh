@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import http from 'node:http'
 import net from 'node:net'
@@ -276,6 +277,103 @@ test('plain HTTP redirects browsers to HTTPS but leaves machine endpoints alone'
   } finally {
     child.kill('SIGKILL')
     await upstream.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the gate refreshes a DSH cookie that DSH no longer accepts', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-gate-stale-'))
+  // An upstream that behaves like DSH's browser fence: only the launch token
+  // mints a session; everything else is the 401 page the operator saw.
+  const upstreamServer = http.createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://local.invalid')
+    if (url.searchParams.get('token') === 'test-token') {
+      res.writeHead(303, { location: './', 'set-cookie': 'dsh-auth-fresh=v1.ok; Path=/' })
+      res.end()
+      return
+    }
+    res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end('dsh web authentication required; reopen the URL printed by dsh web.\n')
+  })
+  await new Promise((resolve, reject) => {
+    upstreamServer.once('error', reject)
+    upstreamServer.listen(0, '127.0.0.1', resolve)
+  })
+  const upstreamPort = upstreamServer.address().port
+  const port = await freePort()
+  const password = 'stale-cookie-password'
+  const child = spawn(process.execPath, [gateEntry], {
+    cwd: root,
+    env: {
+      ...process.env,
+      DSH_GATE_BIND: '127.0.0.1',
+      DSH_GATE_PORT: String(port),
+      DSH_GATE_MEMBER_PORT: String(port),
+      DSH_GATE_PASSWORD: password,
+      DSH_GATE_DATA_DIR: path.join(dir, 'data'),
+      DSH_HOME: path.join(dir, 'home'),
+      DSH_GATE_NO_SPAWN: '1',
+      DSH_WEB_TOKEN_URL: `http://127.0.0.1:${String(upstreamPort)}/?token=test-token`,
+      DSH_GATE_DISCOVERY_TIMEOUT_MS: '100',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  try {
+    await waitForListening(child)
+    const login = await request(port, {
+      method: 'POST',
+      path: '/__gate/login',
+      headers: {
+        host: `127.0.0.1:${String(port)}`,
+        origin: `http://127.0.0.1:${String(port)}`,
+        'sec-fetch-site': 'same-origin',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: `password=${encodeURIComponent(password)}&next=%2F`,
+    })
+    assert.equal(login.status, 303)
+    const setCookie = Array.isArray(login.headers['set-cookie']) ? login.headers['set-cookie'] : [login.headers['set-cookie']]
+    const gateCookie = String(setCookie.find(value => value?.startsWith('dsh_gate=')) ?? '').split(';')[0]
+
+    const staleName = `dsh-auth-${createHash('sha256').update(`127.0.0.1:${String(upstreamPort)}`).digest('base64url')}`
+    const cookies = `${gateCookie}; ${staleName}=v1.stale.0000`
+
+    // A present-but-invalid DSH cookie used to dead-end on DSH's 401 page.
+    const first = await request(port, {
+      path: '/',
+      headers: { cookie: cookies, accept: 'text/html', 'sec-fetch-mode': 'navigate' },
+    })
+    assert.equal(first.status, 303)
+    assert.equal(first.headers.location, '/?token=test-token')
+
+    // The handoff itself works: the tokenised navigation is proxied, not 401.
+    const second = await request(port, {
+      path: '/?token=test-token',
+      headers: { cookie: cookies, accept: 'text/html', 'sec-fetch-mode': 'navigate' },
+    })
+    assert.equal(second.status, 303)
+    assert.equal(second.headers.location, './')
+    assert.match(String(second.headers['set-cookie']), /dsh-auth-fresh=/u)
+
+    // If DSH rejects the token too, the dead cookie is expired so a reload
+    // starts the handoff from scratch instead of looping on the 401.
+    const third = await request(port, {
+      path: '/?token=wrong',
+      headers: { cookie: cookies, accept: 'text/html', 'sec-fetch-mode': 'navigate' },
+    })
+    assert.equal(third.status, 401)
+    assert.match(String(third.headers['set-cookie']), new RegExp(`^${staleName}=; Path=/; Max-Age=0`, 'u'))
+    assert.match(third.body, /the launch token was rejected/u)
+  } finally {
+    child.kill('SIGTERM')
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve()
+      else {
+        child.once('exit', resolve)
+        setTimeout(() => { child.kill('SIGKILL'); resolve() }, 3_000).unref()
+      }
+    })
+    await new Promise((resolve) => upstreamServer.close(resolve))
     await rm(dir, { recursive: true, force: true })
   }
 })

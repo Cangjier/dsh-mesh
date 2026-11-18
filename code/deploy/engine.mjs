@@ -582,6 +582,34 @@ export async function findLatestPackage(repositoryRoot, os) {
 }
 
 /**
+ * The stable install root that owns `releases/`, `shared/` and the pointer.
+ *
+ * A member may report the directory it currently runs from: the release
+ * (`…/releases/<id>`), or the `current` link of a legacy blue-green install
+ * (`…/releases/<id>/current` after one nested itself into a pointer release).
+ * Releases always live in `<root>/releases`, so the segment before it is the
+ * stable root; anything else keeps the historical "parent of the directory"
+ * rule that maps `<home>/.dsh/dsh-mesh` to `<home>/.dsh`.
+ * @param {string} appRoot reported application root.
+ * @param {'linux'|'windows'} os target OS, for path syntax.
+ * @returns {string} layout root.
+ */
+export function layoutRootFor(appRoot, os) {
+  const root = normalizeInstallRoot(appRoot)
+  if (root === '') return root
+  const separator = os === 'linux' ? '/' : '\\'
+  const parts = root.split(os === 'linux' ? /\/+/u : /[\\/]+/u)
+  const index = parts.lastIndexOf('releases')
+  if (index > 0) {
+    const prefix = parts.slice(0, index).join(separator)
+    return /^[A-Za-z]:$/u.test(prefix) ? `${prefix}${separator}` : prefix
+  }
+  const base = os === 'linux' ? path.posix.basename(root) : path.win32.basename(root)
+  if (base === '.dsh') return root
+  return os === 'linux' ? path.posix.dirname(root) : path.win32.dirname(root)
+}
+
+/**
  * Build the immutable deployment plan.
  * @param {object} options deployment input.
  * @param {string} options.host SSH host.
@@ -623,12 +651,7 @@ export async function buildDeployPlan(options) {
     throw new Error('release must be 3-80 chars of letters, digits, dot, underscore or dash')
   }
   const appRoot = normalizeInstallRoot(options.appRoot) || DEFAULT_APP_ROOT[os]
-  // Every layout lives under the target's `.dsh` directory: a blue-green root
-  // is `<home>/.dsh/dsh-mesh`, the pointer root is `<home>/.dsh` itself. The
-  // deploy scripts use this instead of guessing from HOME.
-  const appBase = os === 'linux' ? path.posix.basename(appRoot) : path.win32.basename(appRoot)
-  const appDirname = os === 'linux' ? path.posix.dirname(appRoot) : path.win32.dirname(appRoot)
-  const layoutRoot = appBase === '.dsh' ? appRoot : appDirname
+  const layoutRoot = layoutRootFor(appRoot, os)
   const services = normalizeServices(options.services, os)
   const scope = options.scope === 'dsh' ? 'dsh' : 'all'
   const gatePort = String(options.gatePort ?? '80')

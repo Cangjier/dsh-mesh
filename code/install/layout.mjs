@@ -120,6 +120,31 @@ function linkDirectory(linkPath, target) {
   symlinkSync(target, linkPath, 'dir')
 }
 
+/**
+ * Keep the SCM wrapper's support scripts reachable from the layout root.
+ *
+ * `dsh-mesh-service.exe` sits in `<root>` and launches `start.ps1` from there,
+ * but it also runs `code/windows-service/select-session.ps1` and
+ * `code/wireguard/ssh-agent-service.js` relative to its own directory. A
+ * junction to the active release keeps those scripts exactly as current as the
+ * release, so the wrapper never has to know which release is active.
+ * @param {string} root layout root.
+ * @param {string} releaseDir active release directory.
+ * @returns {string} what happened.
+ */
+function linkRootCode(root, releaseDir, options = {}) {
+  if (process.platform !== 'win32') return 'skipped'
+  const target = path.join(releaseDir, 'code')
+  if (!existsSync(target)) return 'absent'
+  const link = path.join(root, 'code')
+  if (!isLink(link) && existsSync(link)) return 'kept (real directory)'
+  // Prepare runs before the pointer moves: an existing link still belongs to
+  // the release that is serving traffic, so only the switch re-points it.
+  if (options.onlyIfMissing === true && (isLink(link) || existsSync(link))) return 'kept'
+  linkDirectory(link, target)
+  return 'linked'
+}
+
 /** Copy a directory tree, keeping symlinks and modes. */
 function copyTree(source, destination) {
   mkdirSync(destination, { recursive: true })
@@ -351,6 +376,7 @@ function prepare(args, root) {
       '',
     ].join('\r\n')
     for (const name of ['start.ps1', 'start-stack.ps1']) writeFileSync(path.join(root, name), shim)
+    linkRootCode(root, releaseDir, { onlyIfMissing: true })
     // The wrapper writes data\service.log next to itself; the data that matters
     // lives in shared/data.
     const dataLink = path.join(root, 'data')
@@ -433,6 +459,7 @@ function activate(args, root) {
     updatedAt: new Date().toISOString(),
   }
   writeJson(pointerFile, state)
+  linkRootCode(root, releaseDir)
   // The acceptance page reads this marker. A first install has no previous
   // release and nothing to accept.
   let marker = null
@@ -474,6 +501,7 @@ function rollback(args, root) {
     updatedAt: new Date().toISOString(),
   }
   writeJson(pointerFile, state)
+  linkRootCode(root, previousDir)
   // Put back the launcher that was active before the upgrade. It is kept as
   // .bak on every replacement, and the failed release keeps its own copy, so
   // the next prepare can swap it again.

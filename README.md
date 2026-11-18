@@ -96,6 +96,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - **包里带什么**：每个产物固定携带 `dsh-mesh` 与 `xl` 两个插件。`dsh-mesh` 是当前仓库；`xl` 来自 `Cangjier/xl` 的 `main`，每次编译现拉，来源与归档哈希记在包的 `manifest.json`（`extraPlugins`）里。清单在 `build/plugins.json`，加插件只要加一条。
 - **部署包**：列出 `~/.dsh/packages` 里的包（平台、大小、时间），可直接删除；成员编译出的产物也会出现在这里，接着就能对成员「部署」。
 - **Release 发布**：编译成功后自动把本次最新包上传到 GitHub / Gitee 的固定 `latest` Release，旧资产随之删除。GitHub 存整包（单文件 2GB 上限，上传走编译机的外网代理）；Gitee 单附件约 100MB、仓库附件总量约 1GB，所以按 85MiB 分片上传（Gitee 直连、不走代理），客户端下载后拼接并校验 SHA-256。配置在 `~/.dsh/mesh/release.json`（0600），面板「Release 发布」卡片可编辑 owner/repo/token/tag/分片大小，token 不会回传浏览器。详见 [Step 022](docs/Step%20022%20Release%20发布与下载升级.md)。
+- **指针布局（新骨架）**：`~/.dsh` 下只保留一个稳定启动器 `dsh-mesh.mjs` 和指针 `dsh-mesh.json`，每个版本解压到 `releases/<id>` 后就不再覆盖；升级 = 写指针 + 重启，回退 = 指针翻回 + 重启。启动器替换前自动留 `.bak`，会话/配置统一在 `~/.dsh/shared`。升级实现只有 `code/deploy/upgrade-local.mjs` 一份，网关和 Linux 成员共用；`.sh` 只是旧调用方的兼容 shim。详见 [Step 023](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md)。
 - **升级优先从 Release 下载**：成员升级不再必须由网关上传整个包。部署计划只带公开的 `latest.json` URL 和一个有外网成员的代理坐标；目标成员直接下载（GitHub 优先、Gitee 分片兜底），校验 SHA-256 后原地进入 prepare/activate。下载失败、目标没有 Node、Release 里没有所选包时自动回退到原有的网关上传。代理默认按「公网 IP 非 CN 的 Linux 成员」选择，只作用于 GitHub；Gitee 不走代理。升级弹窗里可以改成直连或指定成员。
 
 成员也可以自己把产物推给网关（只接受组网来源，需要网关口令）：
@@ -318,6 +319,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 017 发起任务](docs/Step%20017%20发起任务.md) | 对象树（source/define/children）、平铺与树形视图、模板、历史快照 |
 | [Step 021 协调任务与工作区](docs/Step%20021%20协调任务与工作区.md) | 本机协调对话、只选其他成员、`~/.dsh/workspaces/<name>`、历史清空、消息详情 |
 | [Step 022 Release 发布与下载升级](docs/Step%20022%20Release%20发布与下载升级.md) | 固定 latest tag、GitHub 整包/Gitee 分片、仅保留最新版、成员经外网代理下载、失败回退上传 |
+| [Step 023 指针布局：稳定 mjs 启动器](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md) | 稳定 launcher + 指针文件、releases/shared 布局、启动器 .bak、升级/回退一份 mjs 实现、首次自动 adopt |
 | [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、蓝绿/平铺两条路径、清空编译日志 |
 | [Step 019 升级验收与回退页](docs/Step%20019%20升级验收与回退页.md) | 升级后先看后验收、查看/验收/回退三个按钮、marker、独立进程回退 |
 | [Step 020 内嵌 interop 服务](docs/Step%20020%20内嵌interop服务.md) | 会话由 DSH Web 拥有、嵌入式 :8765、部署/回滚、冷读「已停止」根因 |

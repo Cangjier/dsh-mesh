@@ -31,7 +31,9 @@
     "start-interop.sh",
     "install-interop-service.sh",
     "uninstall-interop-service.sh",
-    "README.md"
+    "README.md",
+    "dsh-mesh.mjs",
+    "code/install"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",

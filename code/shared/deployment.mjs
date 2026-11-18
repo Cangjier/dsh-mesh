@@ -30,22 +30,41 @@ function readJson(file) {
  * Accepts either the directory that owns `current/` (a blue-green install root
  * or the flat gateway) or the release directory itself (the gate's own
  * `PACKAGE_ROOT`).
+ * Supports the pointer layout too: the root holding `dsh-mesh.json` resolves
+ * to the active release, and a release directory inside `releases/` resolves
+ * through its grandparent's pointer.
  * @param {string} packageRoot install root or release directory.
- * @returns {{version: string|null, buildStamp: string|null, builtAt: string|null, release: string|null, layout: 'flat'|'bluegreen', target: object|null}} deployment info.
+ * @returns {{version: string|null, buildStamp: string|null, builtAt: string|null, release: string|null, layout: 'flat'|'bluegreen'|'pointer', target: object|null}} deployment info.
  */
 export function readDeployment(packageRoot) {
   const root = path.resolve(packageRoot)
   let resolved = root
   let layout = 'flat'
   const current = path.join(root, 'current')
-  if (existsSync(current)) {
+  // Pointer install: <root>/dsh-mesh.json names the active release. A release
+  // directory itself has no pointer, so look one level up as well (the gate
+  // runs with DSH_PACKAGE_ROOT=<release>).
+  const pointerRoot = existsSync(path.join(root, 'dsh-mesh.json'))
+    ? root
+    : path.basename(path.dirname(root)) === 'releases' && existsSync(path.join(path.dirname(path.dirname(root)), 'dsh-mesh.json'))
+      ? path.dirname(path.dirname(root))
+      : null
+  if (pointerRoot !== null) {
+    const pointer = readJson(path.join(pointerRoot, 'dsh-mesh.json'))
+    const active = typeof pointer?.active === 'string' && pointer.active !== '' ? pointer.active : ''
+    if (active !== '') {
+      resolved = path.isAbsolute(active) ? active : path.join(pointerRoot, active)
+      layout = 'pointer'
+    }
+  }
+  if (layout === 'flat' && existsSync(current)) {
     try {
       resolved = realpathSync(current)
       layout = 'bluegreen'
     } catch {
       // A dangling `current` is a broken install; report the root instead.
     }
-  } else if (path.basename(path.dirname(root)) === 'releases') {
+  } else if (layout === 'flat' && path.basename(path.dirname(root)) === 'releases') {
     layout = 'bluegreen'
   }
   const manifest = readJson(path.join(resolved, 'manifest.json'))
@@ -62,7 +81,7 @@ export function readDeployment(packageRoot) {
     builtAt: typeof manifest?.builtAt === 'string' && manifest.builtAt.trim() !== '' ? manifest.builtAt.trim() : null,
     // The release id only means something for blue-green installs; the flat
     // gateway's directory name is the operator's choice, not a version.
-    release: layout === 'bluegreen' ? path.basename(resolved) : null,
+    release: layout === 'flat' ? null : path.basename(resolved),
     layout,
     target: manifest?.target !== null && typeof manifest?.target === 'object' ? manifest.target : null,
   }

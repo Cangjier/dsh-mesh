@@ -37,15 +37,6 @@ function plan(os) {
   }
 }
 
-test('prepare scripts wire the packaged plugin into the DSH profile', () => {
-  const linux = buildLinuxPrepareScript(plan('linux'))
-  const windows = buildWindowsPrepareScript(plan('windows'))
-  assert.match(linux, /profiles\/web.*plugins\/dsh-mesh/su)
-  assert.match(linux, /DSH_MESH_PROFILE_WIRE/)
-  assert.ok(windows.includes('profiles\\web'), 'windows prepare wires the web profile')
-  assert.ok(windows.includes('dsh-mesh-profile-wire.mjs'), 'windows prepare runs the wire script')
-})
-
 test('the profile wire script copies the plugin and appends the bundle', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-wire-'))
   try {

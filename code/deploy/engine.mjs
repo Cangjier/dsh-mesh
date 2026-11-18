@@ -623,6 +623,12 @@ export async function buildDeployPlan(options) {
     throw new Error('release must be 3-80 chars of letters, digits, dot, underscore or dash')
   }
   const appRoot = normalizeInstallRoot(options.appRoot) || DEFAULT_APP_ROOT[os]
+  // Every layout lives under the target's `.dsh` directory: a blue-green root
+  // is `<home>/.dsh/dsh-mesh`, the pointer root is `<home>/.dsh` itself. The
+  // deploy scripts use this instead of guessing from HOME.
+  const appBase = os === 'linux' ? path.posix.basename(appRoot) : path.win32.basename(appRoot)
+  const appDirname = os === 'linux' ? path.posix.dirname(appRoot) : path.win32.dirname(appRoot)
+  const layoutRoot = appBase === '.dsh' ? appRoot : appDirname
   const services = normalizeServices(options.services, os)
   const scope = options.scope === 'dsh' ? 'dsh' : 'all'
   const gatePort = String(options.gatePort ?? '80')
@@ -659,6 +665,7 @@ export async function buildDeployPlan(options) {
     package: { path: packagePath, bytes: packageInfo?.size ?? 0, sha256 },
     release,
     appRoot,
+    layoutRoot,
     serviceUser,
     shared: `${appRoot}${os === 'linux' ? '/shared' : '\\shared'}`,
     current: `${appRoot}${os === 'linux' ? '/current' : '\\current'}`,
@@ -796,25 +803,8 @@ printf '%s\\n%s\\n' "$root" "$runuser"
  * @returns {string} shell script.
  */
 export function buildLinuxPrepareScript(plan) {
-  const serviceBlocks = plan.services.map(service => {
-    const unit = sh(service.name)
-    const command = service.command.startsWith('/') ? service.command : `${plan.appRoot}/current/${service.command}`
-    return `write_unit ${unit} ${sh(command)}`
-  }).join('\n')
-  // Files created by the sudo prepare belong to the user the existing unit
-  // runs as; otherwise a per-user member gets a root-owned tree.
-  const chown = plan.serviceUser === undefined || plan.serviceUser === 'root'
-    ? ''
-    : `chown -R ${sh(`${plan.serviceUser}:`)} "$APP_ROOT" 2>/dev/null || true\n`
   // Peers are often continents apart: 150 ms RTT with a few percent loss is
-  // enough for cubic to collapse to a few hundred Kbps, while BBR keeps the
-  // same link above 10 Mbps. Idempotent, non-fatal, and skipped when the
-  // kernel has no bbr module.
-  // provider/model/reasoningEffort travel as extra argv so the member's agent
-  // calls the same route the deployer does (an account route needs no API key).
-  const llmArgs = plan.llm === null || plan.llm === undefined
-    ? ''
-    : `${[plan.llm.provider, plan.llm.model ?? '', plan.llm.reasoningEffort ?? ''].map(value => sh(value)).join(' ')} `
+  // enough for cubic to collapse to a few hundred Kbps. Idempotent, non-fatal.
   const netTune = plan.tuneNetwork === false
     ? ''
     : `if command -v sysctl >/dev/null 2>&1; then
@@ -831,11 +821,9 @@ export function buildLinuxPrepareScript(plan) {
 fi
 `
   // A member that only joined the mesh has no boot persistence: `wg-quick` was
-  // brought up by hand, so after a reboot it comes back without a tunnel and
-  // the whole mesh sees it as offline. The config is ours, so enable the unit
-  // (enable only — the live interface must survive the deploy).
-  const wgPersist = plan.os === 'linux'
-    ? `for conf in /etc/wireguard/*.conf; do
+  // brought up by hand. Enable the unit (enable only — the live interface must
+  // survive the deploy).
+  const wgPersist = `for conf in /etc/wireguard/*.conf; do
   [ -f "$conf" ] || continue
   grep -q '^# Managed by the dsh-wireguard client bootstrap' "$conf" || continue
   iface=$(basename "$conf" .conf)
@@ -843,180 +831,38 @@ fi
   echo "wg-quick@$iface enabled for boot"
 done
 `
-    : ''
+  // Prepare is deliberately side-effect free for the running install: it only
+  // unpacks the package into a staging directory. Activate moves it into
+  // releases/ and flips the pointer in one step, so a failed prepare cannot
+  // leave a half-switched member.
   return `#!/usr/bin/env bash
 set -euo pipefail
-APP_ROOT=${sh(plan.appRoot)}
-RELEASE=${sh(plan.release)}
+LAYOUT_ROOT=${sh(plan.layoutRoot)}
+STAGE="$LAYOUT_ROOT/.staging/${plan.release}"
 PACKAGE=${sh(plan.remotePackage)}
-NEW="$APP_ROOT/releases/$RELEASE"
-SHARED="$APP_ROOT/shared"
-CURRENT="$APP_ROOT/current"
-PREVIOUS="$APP_ROOT/previous"
-mkdir -p "$APP_ROOT/releases" "$SHARED"
-# A failed prepare or activate can leave a whole release tree behind (about
-# 1.3 GB each). Keep only the running release and the rollback target; $NEW
-# does not exist yet unless this is a retry, and that case is refused below.
-CURRENT_REAL=$(readlink -f "$CURRENT" 2>/dev/null || true)
-PREVIOUS_REAL=$(readlink -f "$PREVIOUS" 2>/dev/null || true)
-for old in "$APP_ROOT"/releases/*; do
-  [ -d "$old" ] || continue
-  if [ "$old" = "$CURRENT_REAL" ] || [ "$old" = "$PREVIOUS_REAL" ] || [ "$old" = "$NEW" ]; then
-    continue
-  fi
-  rm -rf "$old" 2>/dev/null || true
-done
-if [ -e "$NEW" ]; then
-  echo "release already exists: $NEW" >&2
-  exit 1
-fi
-mkdir -p "$NEW"
+[ -f "$PACKAGE" ] || { echo "package is missing: $PACKAGE" >&2; exit 1; }
+rm -rf "$STAGE"
+mkdir -p "$STAGE" "$LAYOUT_ROOT/releases"
 # One marker per ${String(EXTRACT_CHECKPOINT)} extracted entries: the deploy engine turns
-# these into the panel's extraction progress. Counting first costs a gzip pass
-# but gives an honest denominator; printing every path would flood the job log
-# with 78k lines.
-#
-# Do not use tar's --checkpoint-action here: %u is the number of 10 KiB records
-# read, not entries, so multiplying it by the checkpoint interval produced
-# numbers far larger than the archive's entry count (and a bar stuck at 99%).
-printf 'DSH-MESH-EXTRACT-TOTAL %s\n' "$(tar -tzf "$PACKAGE" | wc -l | tr -d ' ')"
-tar -xzf "$PACKAGE" -C "$NEW" --strip-components=1 -v | {
+# these into the panel's extraction progress.
+printf 'DSH-MESH-EXTRACT-TOTAL %s\\n' "$(tar -tzf "$PACKAGE" | wc -l | tr -d ' ')"
+tar -xzf "$PACKAGE" -C "$STAGE" --strip-components=1 -v | {
   extracted=0
   while IFS= read -r _entry; do
     extracted=$((extracted + 1))
-    if [ $((extracted % ${String(EXTRACT_CHECKPOINT)})) -eq 0 ]; then printf 'DSH-MESH-EXTRACT %s\n' "$extracted"; fi
+    if [ $((extracted % ${String(EXTRACT_CHECKPOINT)})) -eq 0 ]; then printf 'DSH-MESH-EXTRACT %s\\n' "$extracted"; fi
   done
 }
-
-# Drop the archive as soon as it is expanded: it is 300+ MiB, /tmp on a member
-# is often a small tmpfs, and one copy left behind per job eventually fills it
-# so the next upload dies halfway with a bare scp "Failure".
+# The archive is 300+ MiB and /tmp is often a small tmpfs; one copy left
+# behind per job eventually fills it.
 rm -f "$PACKAGE"
-
-# Shared mutable state stays outside every release. The first deploy copies it
-# from the currently running tree; later deploys inherit it untouched.
-for dir in config data home workspace; do
-  if [ ! -e "$SHARED/$dir" ]; then
-    if [ -e "$CURRENT/$dir" ]; then
-      cp -a "$CURRENT/$dir" "$SHARED/$dir"
-    else
-      mkdir -p "$SHARED/$dir"
-    fi
-  fi
-  rm -rf "$NEW/$dir"
-  ln -s "$SHARED/$dir" "$NEW/$dir"
-done
-${chown}
-ENV_FILE="$SHARED/config/gate.env"
-if [ ! -f "$ENV_FILE" ]; then
-  # A member that was never installed has no shared config yet. The deploy
-  # already carries the package, the units and the password, so seed the same
-  # fields install.sh writes instead of refusing the first deploy.
-  mkdir -p "$SHARED/config" "$SHARED/home" "$SHARED/workspace"
-  cat > "$ENV_FILE" <<'DSH_MESH_ENV'
-# dsh-mesh：由首次 SSH 部署生成的网关配置（与 install.sh 的模板等价）
-DSH_GATE_BIND=::
-DSH_GATE_COOKIE_DAYS=30
-DSH_WEB_PORT=31280
-DSH_MESH_ENV
-  printf 'DSH_GATE_PORT=%s\\n' ${sh(plan.gatePort)} >> "$ENV_FILE"
-  printf 'DSH_GATE_PASSWORD=%s\\n' ${sh(plan.gatePassword || 'ChangeMe-Please-2026')} >> "$ENV_FILE"
-  chmod 600 "$ENV_FILE"
-  echo "seeded $ENV_FILE for a first deploy"
-fi
-${plan.serviceUser === undefined || plan.serviceUser === 'root' ? '' : `chown ${sh(`${plan.serviceUser}:`)} "$ENV_FILE" 2>/dev/null || true`}
-sed -i "s|^DSH_HOME=.*|DSH_HOME=$SHARED/home|" "$ENV_FILE"
-sed -i "s|^DSH_WORKDIR=.*|DSH_WORKDIR=$SHARED/workspace|" "$ENV_FILE"
-grep -q '^DSH_HOME=' "$ENV_FILE" || echo "DSH_HOME=$SHARED/home" >> "$ENV_FILE"
-grep -q '^DSH_WORKDIR=' "$ENV_FILE" || echo "DSH_WORKDIR=$SHARED/workspace" >> "$ENV_FILE"
-# The gateway password belongs to the deployer: peer requests are signed with a
-# secret derived from it, so members only need to share this password.
-${plan.gatePassword ? `sed -i ${sh(`s|^DSH_GATE_PASSWORD=.*|DSH_GATE_PASSWORD=${sedReplacement(plan.gatePassword)}|`)} "$ENV_FILE"
-grep -q '^DSH_GATE_PASSWORD=' "$ENV_FILE" || echo ${sh(`DSH_GATE_PASSWORD=${plan.gatePassword}`)} >> "$ENV_FILE"
-echo 'gateway password synced from the deployer'
-` : ''}sed -i '/^DSH_GATE_CLUSTER_KEY=/d' "$ENV_FILE"
-# An archive written on a filesystem without modes (or an old package) can lose
-# the executable bit on the launch scripts.
-chmod +x "$NEW"/*.sh 2>/dev/null || true
-# The runtime ships as runtime/node/bin/node; older packages used runtime/node/node.
-NODE_BIN="$NEW/runtime/node/bin/node"
-if [ ! -x "$NODE_BIN" ]; then NODE_BIN="$NEW/runtime/node/node"; fi
-if [ ! -x "$NODE_BIN" ]; then echo "missing the node binary under $NEW/runtime/node" >&2; exit 1; fi
-chmod +x "$NODE_BIN" 2>/dev/null || true
-"$NODE_BIN" --check "$NEW/gate/server.mjs"
-${netTune}${wgPersist}"$NODE_BIN" - "$SHARED/home/profiles/web" "$NEW/plugins/dsh-mesh" ${llmArgs}<<'DSH_MESH_PROFILE_WIRE'
-${PROFILE_WIRE_SCRIPT}
-DSH_MESH_PROFILE_WIRE
-# The deployer's account grants make this member signed in without a QR scan.
-CREDENTIALS_FILE=${sh(plan.remoteCredentials)}
-if [ -f "$CREDENTIALS_FILE" ]; then
-  MERGE_HELPER="$NEW/shared/credentials-merge.mjs"
-  if [ -f "$CREDENTIALS_FILE.mjs" ]; then MERGE_HELPER="$CREDENTIALS_FILE.mjs"; fi
-  if "$NODE_BIN" "$MERGE_HELPER" "$SHARED/home/.credentials.yaml" "$CREDENTIALS_FILE"; then
-    rm -f "$CREDENTIALS_FILE" "$CREDENTIALS_FILE.mjs"
-  else
-    echo "could not copy the deployer account sign-in" >&2
-  fi
-fi
-test -f "$NEW/manifest.json"
-
-write_unit() {
-  local unit="$1"
-  local command="$2"
-  local dropin="/etc/systemd/system/$unit.d"
-  mkdir -p "$dropin"
-  cat > "$dropin/dsh-release.conf" <<EOF
-[Service]
-WorkingDirectory=$APP_ROOT/current
-ExecStart=
-ExecStart=$command
-EOF
-  # A machine that never ran install.sh has no unit to extend; write a minimal
-  # one so the drop-in above has something to override.
-  if [ ! -f "/etc/systemd/system/$unit" ]; then
-    cat > "/etc/systemd/system/$unit" <<EOF
-[Unit]
-Description=$unit (dsh-mesh)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=$APP_ROOT/current
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  fi
-  systemctl enable "$unit" >/dev/null 2>&1 || true
-}
-${serviceBlocks}
-${plan.interop === null || plan.interop === undefined ? '' : `# The interop listener now runs inside DSH Web (the dsh-mesh plugin owns
-# :8765 and drives sessions through the host's own agent registry). The
-# configuration stays here: the plugin reads this file, and the gateway's
-# control service / member task tool authenticate with the gateway password.
-INTEROP_ENV="$SHARED/config/interop.env"
-cat > "$INTEROP_ENV" <<EOF
-# generated by the dsh-mesh deploy
-DSH_HOME=$SHARED/home
-DSH_WORKDIR=$SHARED/workspace
-DSH_INTEROP_BIND=${plan.interop.bind}
-DSH_INTEROP_PORT=${plan.interop.port}
-DSH_INTEROP_PROVIDER=${plan.interop.provider}
-DSH_INTEROP_MODEL=${plan.interop.model}
-DSH_INTEROP_APPROVE=1
-DSH_INTEROP_USE_GATE_PASSWORD=1
-EOF
-chmod 600 "$INTEROP_ENV"
-# Keep the standalone unit on disk for a rollback to a release that predates
-# the embedded listener, but never start it: DSH Web binds the same port.
-write_unit dsh-interop.service "$APP_ROOT/current/start-interop.sh"
-systemctl disable --now dsh-interop.service >/dev/null 2>&1 || true
-echo "embedded interop in DSH Web on ${plan.interop.bind}:${plan.interop.port}; standalone unit disabled"
-`}systemctl daemon-reload
-echo "prepared $RELEASE at $NEW"
+chmod +x "$STAGE"/*.sh "$STAGE/dsh-mesh.mjs" 2>/dev/null || true
+chmod +x "$STAGE/runtime/node/bin/node" 2>/dev/null || true
+NODE="$STAGE/runtime/node/bin/node"
+[ -x "$NODE" ] || NODE=$(command -v node || true)
+[ -n "$NODE" ] && [ -x "$NODE" ] || { echo "the package has no usable node" >&2; exit 1; }
+"$NODE" --check "$STAGE/gate/server.mjs"
+${netTune}${wgPersist}echo "prepared ${plan.release} at $STAGE"
 `
 }
 
@@ -1026,192 +872,36 @@ echo "prepared $RELEASE at $NEW"
  * @returns {string} shell script.
  */
 export function buildLinuxActivateScript(plan) {
-  const restart = plan.services
-    .filter(service => plan.scope === 'all' || service.role !== 'gate')
-    .map(service => `systemctl restart ${sh(service.name)}`)
-    .join('\n')
-  const rollbackRestart = plan.services
-    .filter(service => plan.scope === 'all' || service.role !== 'gate')
-    .map(service => `systemctl restart ${sh(service.name)}`)
-    .join('\n')
-  const interopHost = plan.interop === null || plan.interop === undefined
-    ? null
-    : plan.interop.bind === '0.0.0.0' ? '127.0.0.1' : plan.interop.bind
-  // The gate health only proves the Web page booted. The embedded interop has
-  // to bind :8765 in that same process before member delegation and panel
-  // launches actually work, so the deploy waits for both.
-  const interopHealth = interopHost === null
-    ? '  return 0'
-    : `  # The old stack may still own :8765 while its service stops; wait out the
-  # handover before accepting the new process's marker.
-  sleep 10
-  for _ in $(seq 1 30); do
-    if curl -fsS "http://${interopHost}:${plan.interop.port}/healthz" 2>/dev/null | grep -q "dsh-mesh-embedded-interop-v1"; then
-      return 0
-    fi
-    sleep 2
-  done
-  return 1`
-  // A rollback to a release that predates the embedded listener starts the
-  // standalone again; that endpoint has no marker, so the loose probe accepts
-  // any interop health. The initial activate stays strict so an old process on
-  // :8765 cannot make a failed embedded start look healthy.
-  const interopHealthLoose = interopHost === null
-    ? '  return 0'
-    : `  sleep 10
-  for _ in $(seq 1 30); do
-    if curl -fsS "http://${interopHost}:${plan.interop.port}/healthz" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 2
-  done
-  return 1`
+  const serviceList = plan.services.map(service => `${service.name}=${service.role}`).join(',')
+  const interop = plan.interop === null || plan.interop === undefined
+    ? ''
+    : ` --interop-bind ${sh(plan.interop.bind)} --interop-port ${sh(String(plan.interop.port))} --interop-provider ${sh(plan.interop.provider)} --interop-model ${sh(plan.interop.model)}`
+  const credentials = typeof plan.remoteCredentials === 'string' && plan.remoteCredentials !== ''
+    ? ` --credentials ${sh(plan.remoteCredentials)}`
+    : ''
+  const llm = plan.llm === null || plan.llm === undefined
+    ? ''
+    : ` --llm-provider ${sh(plan.llm.provider)}${plan.llm.model ? ` --llm-model ${sh(plan.llm.model)}` : ''}${plan.llm.reasoningEffort ? ` --llm-effort ${sh(plan.llm.reasoningEffort)}` : ''}`
+  // One implementation for the gateway and for members: upgrade-local.mjs
+  // moves the staged tree into releases/, rewrites the pointer, restarts the
+  // units in role order, health-checks and rolls back on failure.
   return `#!/usr/bin/env bash
 set -euo pipefail
-APP_ROOT=${sh(plan.appRoot)}
-RELEASE=${sh(plan.release)}
-NEW="$APP_ROOT/releases/$RELEASE"
-SHARED="$APP_ROOT/shared"
-CURRENT="$APP_ROOT/current"
-PREVIOUS="$APP_ROOT/previous"
-PORT=$(sed -n 's/^DSH_GATE_PORT=//p' "$SHARED/config/gate.env" | tail -n1)
-PORT=\${PORT:-${plan.gatePort}}
-OLD=$(readlink -f "$CURRENT" 2>/dev/null || true)
-if [ -n "$OLD" ]; then
-  ln -sfn "$OLD" "$PREVIOUS"
-fi
-ln -sfn "$NEW" "$CURRENT"
-
-# After an upgrade the member's gate shows the acceptance page first. A first
-# install has no previous release and nothing to accept, so it writes nothing.
-PENDING="$SHARED/data/upgrade-pending.json"
-rm -f "$PENDING" 2>/dev/null || true
-if [ -n "$OLD" ] && grep -q '__gate/fallback' "$NEW/gate/server.mjs" 2>/dev/null; then
-  MARKER_NODE="$NEW/runtime/node/bin/node"
-  [ -x "$MARKER_NODE" ] || MARKER_NODE="$NEW/runtime/node/node"
-  [ -x "$MARKER_NODE" ] || MARKER_NODE=$(command -v node || true)
-  if [ -n "$MARKER_NODE" ]; then
-    FROM_VERSION=$("$MARKER_NODE" -e 'try{process.stdout.write(String(require(process.argv[1]).version||""))}catch(e){}' "$OLD/manifest.json" 2>/dev/null || true)
-    TO_VERSION=$("$MARKER_NODE" -e 'try{process.stdout.write(String(require(process.argv[1]).version||""))}catch(e){}' "$NEW/manifest.json" 2>/dev/null || true)
-    FROM_VERSION=\${FROM_VERSION:-unknown}
-    TO_VERSION=\${TO_VERSION:-unknown}
-    mkdir -p "$SHARED/data"
-    "$MARKER_NODE" - "$PENDING" "$APP_ROOT" "$NEW" "$OLD" "$FROM_VERSION" "$TO_VERSION" "$PORT" "$SHARED/home" <<'DSH_MESH_PENDING'
-const fs = require('fs')
-const [file, root, release, previous, from, to, port, dshHome] = process.argv.slice(2)
-const state = {
-  format: 1,
-  status: 'pending',
-  layout: 'bluegreen',
-  root,
-  release,
-  previous,
-  from,
-  to,
-  port: Number(port) || 80,
-  dshHome,
-  upgradedAt: new Date().toISOString(),
-}
-fs.writeFileSync(file, JSON.stringify(state, null, 2) + "\\n", { mode: 0o600 })
-DSH_MESH_PENDING
-  fi
-fi
-
-# A failing systemctl restart must not abort the script: with set -e that
-# used to exit *after* current had already moved, leaving the member on a
-# release whose services never came up — and no rollback. Collect the failures
-# and let the single rollback path below decide.
-restart_services() {
-  local failed=0
-${restart.split('\n').map(line => `  ${line} || failed=1`).join('\n')}
-  return "$failed"
-}
-health() {
-  local gate_ok=0
-  for _ in $(seq 1 30); do
-    if curl -fsS "http://127.0.0.1:$PORT/__gate/health" >/dev/null 2>&1; then
-      gate_ok=1
-      break
-    fi
-    sleep 2
-  done
-  if [ "$gate_ok" != "1" ]; then return 1; fi
-${interopHealth}
-}
-health_loose() {
-  local gate_ok=0
-  for _ in $(seq 1 30); do
-    if curl -fsS "http://127.0.0.1:$PORT/__gate/health" >/dev/null 2>&1; then
-      gate_ok=1
-      break
-    fi
-    sleep 2
-  done
-  if [ "$gate_ok" != "1" ]; then return 1; fi
-${interopHealthLoose}
-}
-ROLLED_BACK=0
-rollback() {
-  if [ "$ROLLED_BACK" = "1" ]; then return 0; fi
-  ROLLED_BACK=1
-  rm -f "$SHARED/data/upgrade-pending.json" 2>/dev/null || true
-  if [ -z "$OLD" ]; then
-    echo "no previous release to roll back to; $CURRENT stays on $RELEASE" >&2
-    return 1
-  fi
-  echo "rolling back to $OLD" >&2
-  ln -sfn "$OLD" "$CURRENT"
-${rollbackRestart.split('\n').map(line => `  ${line} || true`).join('\n')}
-  # A release that shipped before the embedded listener still needs the
-  # standalone unit; an embedded release must keep it stopped or the plugin
-  # cannot bind :8765.
-  if { [ -f "$OLD/manifest.json" ] && grep -q "embedded-interop" "$OLD/manifest.json"; } || grep -q "dsh-mesh-embedded-interop-v1" "$OLD/plugins/dsh-mesh/index.js" 2>/dev/null; then
-    systemctl stop dsh-interop.service 2>/dev/null || true
-    systemctl disable dsh-interop.service 2>/dev/null || true
-  else
-    systemctl enable --now dsh-interop.service 2>/dev/null || true
-  fi
-  if health_loose; then
-    echo "rollback finished: $OLD answers the health check" >&2
-  else
-    echo "rollback finished but $OLD did not answer the health check; it needs a manual look" >&2
-  fi
-  # A failed release is no longer referenced, but it is a full package tree
-  # (about 1.3 GB); leaving one behind per failed attempt fills the disk. Keep
-  # it when the rollback did not actually move current away from it.
-  if [ -n "$NEW" ] && [ "$(readlink -f "$CURRENT" 2>/dev/null || true)" != "$(readlink -f "$NEW" 2>/dev/null || true)" ]; then
-    rm -rf "$NEW" 2>/dev/null || true
-    echo "removed the failed release $NEW" >&2
-  fi
-  return 0
-}
-# Any unexpected failure after the switch (a missing binary, a full disk) takes
-# the same rollback path instead of leaving the release half-applied.
-set -E
-trap 'rollback || true' ERR
-if ! restart_services; then
-  echo "a service failed to restart on $RELEASE; rolling back" >&2
-  rollback || true
-  exit 1
-fi
-# DSH Web hosts the interop listener; never let the standalone unit race it.
-systemctl stop dsh-interop.service >/dev/null 2>&1 || true
-systemctl disable dsh-interop.service >/dev/null 2>&1 || true
-if ! health; then
-  echo "health check failed on $RELEASE; rolling back" >&2
-  rollback || true
-  exit 1
-fi
-trap - ERR
-# Retention: keep the newest N releases and never the current/previous target.
-mapfile -t RELEASES < <(ls -1dt "$APP_ROOT/releases"/* 2>/dev/null || true)
-for ((i=${plan.retention}; i<\${#RELEASES[@]}; i++)); do
-  old="\${RELEASES[$i]}"
-  [ "$(readlink -f "$CURRENT")" = "$old" ] && continue
-  [ "$(readlink -f "$PREVIOUS")" = "$old" ] && continue
-  rm -rf "$old" || true
-done
-echo "activated $RELEASE"
+LAYOUT_ROOT=${sh(plan.layoutRoot)}
+STAGE="$LAYOUT_ROOT/.staging/${plan.release}"
+[ -f "$STAGE/manifest.json" ] || { echo "prepare did not leave $STAGE behind" >&2; exit 1; }
+NODE="$STAGE/runtime/node/bin/node"
+[ -x "$NODE" ] || NODE=$(command -v node || true)
+[ -n "$NODE" ] && [ -x "$NODE" ] || { echo 'no usable node on the target' >&2; exit 1; }
+exec "$NODE" "$STAGE/code/deploy/upgrade-local.mjs" \
+  --stage "$STAGE" \
+  --layout-root "$LAYOUT_ROOT" \
+  --release ${sh(plan.release)} \
+  --app-root ${sh(plan.appRoot)} \
+  --port ${sh(plan.gatePort)} \
+  --gate-port ${sh(plan.gatePort)} \
+  --gate-password ${sh(plan.gatePassword || '')} \
+  --services ${sh(serviceList)}${interop}${credentials}${llm}
 `
 }
 
@@ -1235,157 +925,13 @@ echo "activated $RELEASE"
  * @returns {string} shell script.
  */
 export function buildLinuxRehearseScript(plan) {
-  return `set -Eeuo pipefail
-APP_ROOT=${sh(plan.appRoot)}
-CURRENT="$APP_ROOT/current"
-SHARED=${sh(plan.shared)}
-PKG=${sh(plan.remotePackage)}
-RELEASE=${sh(plan.release)}
-TEST_PARENT="$APP_ROOT/../.dsh-mesh-test"
-TEST_ROOT="$TEST_PARENT/$RELEASE"
-APP="$TEST_ROOT/app"
-TEST_HOME="$TEST_ROOT/home"
-STAGE="$TEST_ROOT/stage"
-say() { printf '==> %s\\n' "$*"; }
-fail() { printf '[演练失败] %s\\n' "$*" >&2; exit 1; }
-cleanup() {
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    printf '[演练失败] 沙箱保留在 %s 供排查（下次演练会先清掉）\\n' "$TEST_ROOT" >&2
-    return 0
-  fi
-  rm -rf "$TEST_ROOT"
-  rmdir "$TEST_PARENT" 2>/dev/null || true
-}
-trap cleanup EXIT
-[ -f "$PKG" ] || fail "包不在目标机上：$PKG"
-[ -d "$CURRENT/plugins/dsh-mesh" ] || fail "目标成员当前版本里没有 plugins/dsh-mesh，无法构造升级前状态"
-[ -f "$SHARED/config/gate.env" ] || fail "目标成员没有 $SHARED/config/gate.env，不是 dsh-mesh 安装"
-# 上一次失败留下的沙箱先清掉，避免永久堆积。
-rm -rf "$TEST_PARENT"
-mkdir -p "$APP/config" "$APP/plugins" "$TEST_HOME/profiles/web" "$TEST_ROOT/tools" "$STAGE"
-# 解析成绝对路径：wire-profile 写的是绝对 link: 目标，带 .. 的路径永远比不相等。
-TEST_ROOT=$(CDPATH= cd -- "$TEST_ROOT" && pwd)
-APP="$TEST_ROOT/app"
-TEST_HOME="$TEST_ROOT/home"
-STAGE="$TEST_ROOT/stage"
-say "平铺升级演练：解压新包并复刻目标成员当前版本（沙箱 $TEST_ROOT）"
-tar -xzf "$PKG" -C "$STAGE" --strip-components=1
-NODE="$STAGE/runtime/node/bin/node"
-[ -x "$NODE" ] || NODE=$(command -v node || true)
-[ -n "$NODE" ] || fail '演练需要 node（包内 runtime 或系统 node）'
-# 升级前的状态尽量用目标成员的真实文件，而不是只造一个 plugins 目录：
-# 备份范围（code/gate/manifest/start.sh）、真实 gate.env、真实 profile 清单都要能测到。
-cp -a "$CURRENT/plugins/." "$APP/plugins/"
-for item in code gate locale manifest.json start.sh start-dsh.sh start-interop.sh; do
-  if [ -e "$CURRENT/$item" ]; then cp -a "$CURRENT/$item" "$APP/"; fi
-done
-if [ -d "$CURRENT/config" ]; then cp -a "$CURRENT/config/." "$APP/config/"; fi
-cp -a "$SHARED/config/gate.env" "$APP/config/gate.env"
-PROFILE_SRC="$SHARED/home/profiles/web"
-for file in package.json cordis.patch.yml; do
-  if [ -f "$PROFILE_SRC/$file" ]; then cp -a "$PROFILE_SRC/$file" "$TEST_HOME/profiles/web/"; fi
-done
-# 沙箱用自己的 DSH_HOME 和空闲端口，别碰成员真实的 80/8765。
-sed -i -e "s|^DSH_HOME=.*|DSH_HOME=$TEST_HOME|" -e "s|^DSH_GATE_PORT=.*|DSH_GATE_PORT=18080|" "$APP/config/gate.env"
-grep -q '^DSH_GATE_PORT=' "$APP/config/gate.env" || printf 'DSH_GATE_PORT=18080\\n' >> "$APP/config/gate.env"
-grep -q '^DSH_HOME=' "$APP/config/gate.env" || printf 'DSH_HOME=%s\\n' "$TEST_HOME" >> "$APP/config/gate.env"
-BEFORE=$("$NODE" -p "require('$APP/plugins/dsh-mesh/package.json').version" 2>/dev/null || echo unknown)
-say "升级前的沙箱版本：$BEFORE（以文件内容判断是否真的覆盖）"
-# 脚本来源与生产一致：优先用新包里的那份（runner.mjs 也是这么做的），
-# 这样新包的备份范围/回退逻辑在它自己的升级里就生效；只有老包不带
-# code/deploy 时才退回已安装插件里的那份。
-PLUGIN_DEPLOY="$CURRENT/plugins/dsh-mesh/code/deploy"
-if [ -f "$STAGE/code/deploy/upgrade-local.sh" ]; then
-  SCRIPT_SRC="$STAGE/code/deploy/upgrade-local.sh"
-  say '脚本来源：新包（与「升级」同源）'
-  if [ -f "$PLUGIN_DEPLOY/upgrade-local.sh" ]; then
-    A=$(sha256sum "$SCRIPT_SRC" | cut -d' ' -f1)
-    B=$(sha256sum "$PLUGIN_DEPLOY/upgrade-local.sh" | cut -d' ' -f1)
-    if [ "$A" != "$B" ]; then say '注意：新包里的脚本与已安装插件的不一致，按生产行为以新包为准'; fi
-  fi
-else
-  SCRIPT_SRC="$PLUGIN_DEPLOY/upgrade-local.sh"
-  say '脚本来源：已安装插件（新包是早于修复的版本，没有 code/deploy）'
-fi
-[ -f "$SCRIPT_SRC" ] || fail '已安装插件和新包里都没有 code/deploy/upgrade-local.sh，这个包做不了平铺升级'
-cp "$SCRIPT_SRC" "$TEST_ROOT/tools/upgrade-local.sh"
-if [ -f "$(dirname "$SCRIPT_SRC")/wire-profile.mjs" ]; then
-  cp "$(dirname "$SCRIPT_SRC")/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.mjs"
-elif [ -f "$STAGE/code/deploy/wire-profile.mjs" ]; then
-  cp "$STAGE/code/deploy/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.mjs"
-else
-  fail '找不到 wire-profile.mjs（脚本目录和新包里都没有）'
-fi
-chmod +x "$TEST_ROOT/tools/upgrade-local.sh"
-say '第一步：正常升级沙箱（--no-restart：备份、覆盖、接线；不碰任何服务）'
-bash "$TEST_ROOT/tools/upgrade-local.sh" --app-root "$APP" --stage "$STAGE" --dsh-home "$TEST_HOME" --port 18080 --no-restart
-say '核对升级结果'
-BACKUP_DIR=$(ls -1d "$APP/.upgrade-backup"/* 2>/dev/null | head -n1 || true)
-[ -n "$BACKUP_DIR" ] || fail '升级没有留下 .upgrade-backup 备份'
-for item in plugins code gate manifest.json; do
-  if [ -e "$CURRENT/$item" ]; then
-    [ -e "$BACKUP_DIR/$item" ] || fail "备份缺 $item：平铺升级的备份范围不对"
-  fi
-done
-cmp -s "$BACKUP_DIR/plugins/dsh-mesh/index.js" "$CURRENT/plugins/dsh-mesh/index.js" || fail '备份里的插件不是升级前那一份'
-cmp -s "$APP/plugins/dsh-mesh/index.js" "$STAGE/plugins/dsh-mesh/index.js" || fail '覆盖后的插件不是新包那一份'
-AFTER=$("$NODE" -p "require('$APP/plugins/dsh-mesh/package.json').version")
-say "升级后的沙箱版本：$AFTER；备份与覆盖逐字节核对过"
-LINK=$("$NODE" -e "const p=require('$TEST_HOME/profiles/web/package.json');process.stdout.write(String((p.dependencies||{})['@local/dsh-mesh']||''))")
-[ "$LINK" = "link:$APP/plugins/dsh-mesh" ] || fail "profile 的 @local/dsh-mesh 接线不对：$LINK"
-say "profile 接线：$LINK"
-if [ -d "$STAGE/plugins/xl" ]; then
-  [ -e "$TEST_HOME/profiles/web/node_modules/xl" ] || fail '新包带了 xl，但 profile 没有接上 xl'
-  say '随包插件 xl 已接入 profile'
-fi
-say '第二步：Chrome headless 抓屏确认升级后的 DSH 能启动、Mesh 面板能出现'
-SMOKE_SCRIPT="$APP/plugins/dsh-mesh/code/build/smoke-cli.mjs"
-[ -f "$SMOKE_SCRIPT" ] || SMOKE_SCRIPT="$STAGE/plugins/dsh-mesh/code/build/smoke-cli.mjs"
-[ -f "$SMOKE_SCRIPT" ] || fail '新包里没有 code/build/smoke-cli.mjs，无法验证 DSH 启动与 Mesh 面板'
-# 截图留在沙箱外面：成功会删 TEST_ROOT，失败要留证据。
-SMOKE_SHOT="$APP_ROOT/.dsh-mesh-test-$RELEASE"
-rm -rf "$SMOKE_SHOT"
-mkdir -p "$SMOKE_SHOT"
-# 成员没有 Chrome/Chromium/Edge 时，smoke-cli 会下载 Chrome for Testing 的
-# chrome-headless-shell（缓存到运行用户的 ~/.cache/dsh-mesh/chrome）。下载或
-# 启动失败不应让升级演练失败：那只是这台成员暂时没有可用的浏览器。
-if "$NODE" "$SMOKE_SCRIPT" --install --root "$APP" --port 18081 --home "$TEST_HOME" \
-    --workdir "$TEST_ROOT/workspace" --screenshot-dir "$SMOKE_SHOT" --download-chrome; then
-  say "抓屏通过：DSH 已启动，Mesh 面板已出现（截图 $SMOKE_SHOT）"
-else
-  smoke_rc=$?
-  if [ "$smoke_rc" = "3" ]; then
-    say '抓屏跳过：没有可用的 Chrome/Chromium/Edge，自动下载或启动也失败（详见上面的 [smoke] 日志；构建机上的「构建后抓屏」仍会执行）'
-  else
-    fail "升级后的沙箱没有通过 Chrome 抓屏冒烟（退出码 $smoke_rc）；截图与日志在 $SMOKE_SHOT"
-  fi
-fi
-
-# 第三步：注入一次“接线”失败，验证 upgrade-local.sh 的 restore() 能把
-# 已经覆盖过的文件还原。注入方式是把 wire-profile 换成必定失败的小脚本，
-# 它会留下一个标记，证明覆盖已经发生、失败点在接线。
-say '第三步：注入接线失败，验证 restore() 能还原'
-cp -a "$STAGE/." "$TEST_ROOT/bad/"
-printf '// bad stage\n' > "$TEST_ROOT/bad/plugins/dsh-mesh/index.js"
-mv "$TEST_ROOT/tools/wire-profile.mjs" "$TEST_ROOT/tools/wire-profile.real"
-cat > "$TEST_ROOT/tools/wire-profile.mjs" <<'DSH_MESH_REHEARSE_STUB'
-import { writeFileSync } from 'node:fs'
-writeFileSync(new URL('../wiring-ran', import.meta.url), 'ran')
-process.exit(3)
-DSH_MESH_REHEARSE_STUB
-chmod +x "$TEST_ROOT/tools/wire-profile.mjs"
-MARK_BEFORE=$(sha256sum "$APP/plugins/dsh-mesh/index.js" "$APP/manifest.json" "$APP/config/gate.env")
-if bash "$TEST_ROOT/tools/upgrade-local.sh" --app-root "$APP" --stage "$TEST_ROOT/bad" --dsh-home "$TEST_HOME" --port 18080 --no-restart; then
-  fail '注入失败后脚本居然成功了：restore() 路径没有被执行'
-fi
-mv "$TEST_ROOT/tools/wire-profile.real" "$TEST_ROOT/tools/wire-profile.mjs"
-[ -f "$TEST_ROOT/wiring-ran" ] || fail '注入的失败没有走到接线步骤：备份/覆盖没有被验证'
-MARK_AFTER=$(sha256sum "$APP/plugins/dsh-mesh/index.js" "$APP/manifest.json" "$APP/config/gate.env")
-[ "$MARK_BEFORE" = "$MARK_AFTER" ] || fail 'restore() 没有把覆盖过的文件还原'
-[ -f "$APP/plugins/dsh-mesh/index.js" ] || fail 'restore() 之后 index.js 没有被还原成文件'
-say 'restore() 已验证：接线失败后文件回到升级前'
-say '演练通过：备份、覆盖、接线、失败还原都按本机「升级」的脚本走了一遍；沙箱已清理'
+  // The pointer layout has no separate flat rehearsal: every upgrade goes
+  // through the same extract/pointer/restart path, and a failed activation
+  // rolls back to the previous release automatically.
+  return `#!/usr/bin/env bash
+set -euo pipefail
+echo 'test upgrade is retired: the pointer layout rehearses on every real upgrade and rolls back on failure' >&2
+exit 3
 `
 }
 
@@ -1395,29 +941,14 @@ say '演练通过：备份、覆盖、接线、失败还原都按本机「升级
  * @returns {string} shell script.
  */
 export function buildLinuxRollbackScript(plan) {
-  const restart = plan.services
-    .filter(service => plan.scope === 'all' || service.role !== 'gate')
-    .map(service => `systemctl restart ${sh(service.name)}`)
-    .join('\n')
   return `#!/usr/bin/env bash
 set -euo pipefail
-APP_ROOT=${sh(plan.appRoot)}
-CURRENT="$APP_ROOT/current"
-PREVIOUS="$APP_ROOT/previous"
-OLD=$(readlink -f "$PREVIOUS" 2>/dev/null || true)
-if [ -z "$OLD" ]; then
-  echo "no previous release to roll back to" >&2
-  exit 1
-fi
-ln -sfn "$OLD" "$CURRENT"
-${restart}
-if { [ -f "$OLD/manifest.json" ] && grep -q "embedded-interop" "$OLD/manifest.json"; } || grep -q "dsh-mesh-embedded-interop-v1" "$OLD/plugins/dsh-mesh/index.js" 2>/dev/null; then
-  systemctl stop dsh-interop.service 2>/dev/null || true
-  systemctl disable dsh-interop.service 2>/dev/null || true
-else
-  systemctl enable --now dsh-interop.service 2>/dev/null || true
-fi
-echo "rolled back to $OLD"
+LAYOUT_ROOT=${sh(plan.layoutRoot)}
+[ -f "$LAYOUT_ROOT/rollback-local.mjs" ] || { echo "no rollback orchestrator at $LAYOUT_ROOT/rollback-local.mjs" >&2; exit 1; }
+NODE="$LAYOUT_ROOT/runtime/node/bin/node"
+[ -x "$NODE" ] || NODE=$(command -v node || true)
+[ -n "$NODE" ] && [ -x "$NODE" ] || { echo 'no usable node on the target' >&2; exit 1; }
+exec "$NODE" "$LAYOUT_ROOT/rollback-local.mjs" --root "$LAYOUT_ROOT"
 `
 }
 
@@ -1427,177 +958,32 @@ echo "rolled back to $OLD"
  * @returns {string} PowerShell script.
  */
 export function buildWindowsPrepareScript(plan) {
-  const serviceLines = `# The gate spawns DSH itself, so a leftover split service would run a second
-# copy on another port. Retire it once.
-$legacy = Get-Service -Name 'DSH-Web-App' -ErrorAction SilentlyContinue
-if ($null -ne $legacy) {
-  Stop-Service -Name 'DSH-Web-App' -Force -ErrorAction SilentlyContinue
-  & sc.exe delete 'DSH-Web-App' | Out-Null
-  Write-Output 'removed the legacy DSH-Web-App service'
-}
-# A split install may have the standalone interop registered as its own
-# service. DSH Web now binds :8765 in-process, so that service must not race it.
-$legacyInterop = Get-Service -Name 'DSH-Interop' -ErrorAction SilentlyContinue
-if ($null -ne $legacyInterop) {
-  Stop-Service -Name 'DSH-Interop' -Force -ErrorAction SilentlyContinue
-  Set-Service -Name 'DSH-Interop' -StartupType Disabled -ErrorAction SilentlyContinue
-  Write-Output 'disabled the legacy DSH-Interop service'
-}
-function Ensure-DshService([string]$Name, [string]$Display, [string]$Description, [string]$ExePath) {
-  $binPath = '"' + $ExePath + '"'
-  if ($null -eq (Get-Service -Name $Name -ErrorAction SilentlyContinue)) {
-    & sc.exe create $Name binPath= $binPath start= auto DisplayName= $Display | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "sc create failed for $Name" }
-    & sc.exe description $Name $Description | Out-Null
-    & sc.exe failure $Name reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
-    Write-Output "created service $Name"
-  }
-  & sc.exe config $Name binPath= $binPath | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "sc config failed for $Name" }
-}
-` + plan.services.map(service => {
-    const command = service.command
-    const display = service.role === 'dsh' ? 'DSH Web App' : 'DSH Mesh Gateway'
-    const description = service.role === 'dsh' ? 'Independent DSH Web process' : 'DSH gateway, login and member proxy'
-    const source = service.role === 'dsh' ? 'DshWebAppService.cs' : 'DshMeshService.cs'
-    return `$exe = Join-Path $New ${ps(command)}
-if (-not (Test-Path $exe)) {
-  # The package ships the C# service sources, not the binaries, so compile the
-  # wrapper into this release with the .NET Framework compiler.
-  $serviceSource = Join-Path $New ${ps('code\\windows-service\\' + source)}
-  if (-not (Test-Path $serviceSource)) { throw "missing service source: $serviceSource" }
-  $csc = Join-Path ([System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) 'csc.exe'
-  if (-not (Test-Path $csc)) { throw 'cannot find csc.exe' }
-  & $csc /nologo /target:exe /out:$exe /r:System.ServiceProcess.dll $serviceSource
-  if ($LASTEXITCODE -ne 0) { throw "csc failed for $exe" }
-}
-Ensure-DshService ${ps(service.name)} ${ps(display)} ${ps(description)} ($AppRoot + '\\current\\' + ${ps(command)})`
-  }).join('\n')
+  // Prepare only unpacks: nothing about the running install changes. The
+  // engine pre-extracts with tar when it can, so this is often a no-op plus
+  // the single-directory flatten every dsh-mesh archive needs.
   return `$ErrorActionPreference = 'Stop'
-$AppRoot = ${ps(plan.appRoot)}
-$Release = ${ps(plan.release)}
+$LayoutRoot = ${ps(plan.layoutRoot)}
+$Stage = Join-Path $LayoutRoot ${ps(`.staging\\${plan.release}`)}
 $Package = ${ps(plan.remotePackage)}
-$New = Join-Path $AppRoot "releases\\$Release"
-$Shared = Join-Path $AppRoot 'shared'
-$Current = Join-Path $AppRoot 'current'
-$Previous = Join-Path $AppRoot 'previous'
-New-Item -ItemType Directory -Force -Path (Join-Path $AppRoot 'releases') | Out-Null
-New-Item -ItemType Directory -Force -Path $Shared | Out-Null
-# A failed prepare or activate can leave a whole release tree behind (about
-# 1.3 GB each). Keep only the running release and the rollback target; $New is
-# excluded because a retry refuses to overwrite it below anyway.
-$pruneCurrent = $null
-$prunePrevious = $null
-if (Test-Path -LiteralPath $Current) {
-  $pruneCurrent = (Get-Item -LiteralPath $Current -Force).Target
-  if ($pruneCurrent -is [array]) { $pruneCurrent = $pruneCurrent[0] }
+Write-Output "layout root $LayoutRoot"
+New-Item -ItemType Directory -Force -Path $LayoutRoot, (Join-Path $LayoutRoot 'releases') | Out-Null
+if (-not (Test-Path -LiteralPath $Stage)) {
+  if (-not (Test-Path -LiteralPath $Package)) { throw "package is missing: $Package" }
+  New-Item -ItemType Directory -Force -Path $Stage | Out-Null
+  Expand-Archive -LiteralPath $Package -DestinationPath $Stage -Force
+  if ($LASTEXITCODE -ne 0) { throw 'Expand-Archive failed' }
 }
-if (Test-Path -LiteralPath $Previous) {
-  $prunePrevious = (Get-Item -LiteralPath $Previous -Force).Target
-  if ($prunePrevious -is [array]) { $prunePrevious = $prunePrevious[0] }
-}
-$pruneTool = Join-Path $Current 'runtime\\node\\node.exe'
-Get-ChildItem -LiteralPath (Join-Path $AppRoot 'releases') -Directory |
-  Where-Object { $_.FullName -ne $pruneCurrent -and $_.FullName -ne $prunePrevious -and $_.FullName -ne $New } |
-  ForEach-Object {
-    if (Test-Path -LiteralPath $pruneTool) {
-      & $pruneTool -e "const fs=require('fs');fs.rmSync(process.argv[1],{recursive:true,force:true,maxRetries:5,retryDelay:200})" $_.FullName 2>$null
-    }
-    if (Test-Path -LiteralPath $_.FullName) {
-      Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    if (Test-Path -LiteralPath $_.FullName) { Write-Host ("could not remove old release " + $_.Name) }
-  }
-${plan.preExtracted
-  ? 'if (-not (Test-Path $New)) { throw "release directory missing: $New" }'
-  : 'if (Test-Path $New) { throw "release already exists: $New" }'}
-New-Item -ItemType Directory -Force -Path $New | Out-Null
-${plan.preExtracted ? '' : 'Expand-Archive -LiteralPath $Package -DestinationPath $New -Force'}
-$inner = Get-ChildItem -LiteralPath $New -Directory | Select-Object -First 1
+$inner = Get-ChildItem -LiteralPath $Stage -Directory | Select-Object -First 1
 if ($inner -and (Test-Path (Join-Path $inner.FullName 'manifest.json'))) {
-  Get-ChildItem -LiteralPath $inner.FullName -Force | Move-Item -Destination $New -Force
+  Get-ChildItem -LiteralPath $inner.FullName -Force | Move-Item -Destination $Stage -Force
   Remove-Item -LiteralPath $inner.FullName -Recurse -Force
 }
-foreach ($dir in @('config','data','home','workspace')) {
-  $sharedPath = Join-Path $Shared $dir
-  if (-not (Test-Path $sharedPath)) {
-    $oldPath = Join-Path $Current $dir
-    if (Test-Path $oldPath) { Copy-Item $oldPath $sharedPath -Recurse -Force } else { New-Item -ItemType Directory -Force -Path $sharedPath | Out-Null }
-  }
-  $newPath = Join-Path $New $dir
-  if (Test-Path $newPath) { Remove-Item $newPath -Recurse -Force }
-  & cmd.exe /c mklink /J "$newPath" "$sharedPath" | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "could not link $newPath" }
-}
-$envFile = Join-Path $Shared 'config\\gate.env'
-if (-not (Test-Path $envFile)) {
-  # First deploy of a fresh machine: create the gateway config that install.ps1
-  # would have written, with random secrets, so the split services can start.
-  $alphabet = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-  $password = ${plan.gatePassword ? ps(plan.gatePassword) : '(-join (1..24 | ForEach-Object { $alphabet[(Get-Random -Maximum $alphabet.Length)] }))'}
-  $lines = @(
-    '# DeepSeek Harness Web gateway (generated by the first deploy)',
-    'DSH_GATE_PORT=${plan.gatePort}',
-    'DSH_GATE_BIND=0.0.0.0',
-    "DSH_GATE_PASSWORD=$password",
-    'DSH_GATE_COOKIE_DAYS=30',
-    'DSH_WEB_PORT=31280',
-    'DSH_GATE_MEMBER_PORT=${plan.gatePort}',
-    'DSH_TRUSTED_HOSTS='
-  )
-  [System.IO.File]::WriteAllText($envFile, (($lines -join [Environment]::NewLine) + [Environment]::NewLine), [System.Text.UTF8Encoding]::new($false))
-  Write-Output "generated $envFile (${plan.gatePassword ? 'gateway password copied from the deployer' : 'gateway password: $password'})"
-  try {
-    if (-not (Get-NetFirewallRule -DisplayName 'DSH Mesh ${plan.gatePort}' -ErrorAction SilentlyContinue)) {
-      New-NetFirewallRule -DisplayName 'DSH Mesh ${plan.gatePort}' -Direction Inbound -Protocol TCP -LocalPort ${plan.gatePort} -Action Allow | Out-Null
-    }
-  } catch { Write-Warning "could not add the firewall rule: $($_.Exception.Message)" }
-}
-$text = Get-Content -LiteralPath $envFile -Raw
-$text = [regex]::Replace($text, '(?m)^DSH_HOME=.*$', "DSH_HOME=$Shared\\home")
-$text = [regex]::Replace($text, '(?m)^DSH_WORKDIR=.*$', "DSH_WORKDIR=$Shared\\workspace")
-if ($text -notmatch '(?m)^DSH_HOME=') { $text += "\`r\`nDSH_HOME=$Shared\\home" }
-if ($text -notmatch '(?m)^DSH_WORKDIR=') { $text += "\`r\`nDSH_WORKDIR=$Shared\\workspace" }
-${plan.gatePassword ? `$text = [regex]::Replace($text, '(?m)^DSH_GATE_PASSWORD=.*$', ${psReplacement(`DSH_GATE_PASSWORD=${plan.gatePassword}`)})
-if ($text -notmatch '(?m)^DSH_GATE_PASSWORD=') { $text += [Environment]::NewLine + ${ps(`DSH_GATE_PASSWORD=${plan.gatePassword}`)} }
-Write-Output 'gateway password synced from the deployer'
-` : ''}$text = [regex]::Replace($text, '(?m)^DSH_GATE_CLUSTER_KEY=.*\r?\n?', '')
-Set-Content -LiteralPath $envFile -Value $text -Encoding utf8 -NoNewline
-$node = Join-Path $New 'runtime\\node\\node.exe'
-if (-not (Test-Path $node)) { throw "missing $node" }
-& $node --check (Join-Path $New 'gate\\server.mjs')
-if ($LASTEXITCODE -ne 0) { throw 'gate syntax check failed' }
-$wireScript = Join-Path $env:TEMP 'dsh-mesh-profile-wire.mjs'
-[IO.File]::WriteAllText($wireScript, ${ps(PROFILE_WIRE_SCRIPT)}, [Text.UTF8Encoding]::new($false))
-& $node $wireScript (Join-Path $Shared 'home\\profiles\\web') (Join-Path $New 'plugins\\dsh-mesh')${plan.llm === null || plan.llm === undefined ? '' : ' ' + [plan.llm.provider, plan.llm.model ?? '', plan.llm.reasoningEffort ?? ''].map(value => ps(value)).join(' ')}
-if ($LASTEXITCODE -ne 0) { throw 'could not wire the dsh-mesh plugin into the DSH profile' }
-Remove-Item $wireScript -Force -ErrorAction SilentlyContinue
-$credentialsFile = '${plan.remoteCredentials}'
-if (Test-Path $credentialsFile) {
-  $mergeHelper = Join-Path $New 'shared\\credentials-merge.mjs'
-  if (Test-Path ($credentialsFile + '.mjs')) { $mergeHelper = $credentialsFile + '.mjs' }
-  & $node $mergeHelper (Join-Path $Shared 'home\\.credentials.yaml') $credentialsFile
-  if ($LASTEXITCODE -eq 0) { Remove-Item $credentialsFile, ($credentialsFile + '.mjs') -Force -ErrorAction SilentlyContinue } else { Write-Warning 'could not copy the deployer account sign-in' }
-}
-${serviceLines}
-${plan.interop === null || plan.interop === undefined ? '' : `# DSH Web hosts the interop listener now; only its configuration belongs
-# here: bind the VPN address, reuse the gateway password as the token, and use
-# the same model route the deployer uses.
-$interopEnv = Join-Path $Shared 'config\\interop.env'
-$interopLines = @(
-  '# generated by the dsh-mesh deploy',
-  "DSH_HOME=$Shared\\home",
-  "DSH_WORKDIR=$Shared\\workspace",
-  "DSH_INTEROP_BIND=${plan.interop.bind}",
-  "DSH_INTEROP_PORT=${plan.interop.port}",
-  "DSH_INTEROP_PROVIDER=${plan.interop.provider}",
-  "DSH_INTEROP_MODEL=${plan.interop.model}",
-  'DSH_INTEROP_APPROVE=1',
-  'DSH_INTEROP_USE_GATE_PASSWORD=1'
-)
-[System.IO.File]::WriteAllText($interopEnv, (($interopLines -join [Environment]::NewLine) + [Environment]::NewLine), [System.Text.UTF8Encoding]::new($false))
-Write-Output 'wrote config\\interop.env'
-`}Write-Output "prepared $Release at $New"
+if (-not (Test-Path (Join-Path $Stage 'dsh-mesh.mjs'))) { throw 'package is missing dsh-mesh.mjs' }
+$node = Join-Path $Stage 'runtime\\node\\node.exe'
+if (-not (Test-Path $node)) { $node = (Get-Command node -ErrorAction Stop).Source }
+& $node --check (Join-Path $Stage 'gate\\server.mjs')
+if ($LASTEXITCODE -ne 0) { throw 'gate/server.mjs failed node --check' }
+Write-Output "prepared ${plan.release} at $Stage"
 `
 }
 
@@ -1607,161 +993,47 @@ Write-Output 'wrote config\\interop.env'
  * @returns {string} PowerShell script.
  */
 export function buildWindowsActivateScript(plan) {
-  const interopHost = plan.interop === null || plan.interop === undefined
-    ? null
-    : plan.interop.bind === '0.0.0.0' ? '127.0.0.1' : plan.interop.bind
-  const interopUrl = interopHost === null ? '' : `http://${interopHost}:${plan.interop.port}/healthz`
-  const restart = plan.services
-    .filter(service => plan.scope === 'all' || service.role !== 'gate')
-    .map(service => `Restart-Service -Name ${ps(service.name)} -Force`)
-    .join('\n')
-  const rollbackRestart = plan.services
-    .filter(service => plan.scope === 'all' || service.role !== 'gate')
-    .map(service => `Restart-Service -Name ${ps(service.name)} -Force -ErrorAction SilentlyContinue`)
-    .join('\n')
+  const serviceList = plan.services.map(service => `${service.name}=${service.role}`).join(',')
+  const interop = plan.interop === null || plan.interop === undefined
+    ? ''
+    : ` --interop-bind ${ps(plan.interop.bind)} --interop-port ${ps(String(plan.interop.port))} --interop-provider ${ps(plan.interop.provider)} --interop-model ${ps(plan.interop.model)}`
+  const credentials = typeof plan.remoteCredentials === 'string' && plan.remoteCredentials !== ''
+    ? ` --credentials ${ps(plan.remoteCredentials)}`
+    : ''
+  const llm = plan.llm === null || plan.llm === undefined
+    ? ''
+    : ` --llm-provider ${ps(plan.llm.provider)}${plan.llm.model ? ` --llm-model ${ps(plan.llm.model)}` : ''}${plan.llm.reasoningEffort ? ` --llm-effort ${ps(plan.llm.reasoningEffort)}` : ''}`
+  // Switch the pointer without restarting, then re-register the SCM service
+  // against the new layout root (the C# wrapper is compiled there and only
+  // ever launches the stable launcher). Starting the service is what makes the
+  // new release visible.
   return `$ErrorActionPreference = 'Stop'
-$AppRoot = ${ps(plan.appRoot)}
-$Release = ${ps(plan.release)}
-$New = Join-Path $AppRoot "releases\\$Release"
-$Current = Join-Path $AppRoot 'current'
-$Previous = Join-Path $AppRoot 'previous'
+$LayoutRoot = ${ps(plan.layoutRoot)}
+$Stage = Join-Path $LayoutRoot ${ps(`.staging\\${plan.release}`)}
+$node = Join-Path $Stage 'runtime\\node\\node.exe'
+if (-not (Test-Path $node)) { $node = (Get-Command node -ErrorAction Stop).Source }
 $port = ${ps(plan.gatePort)}
-$interopUrl = ${ps(interopUrl)}
-$old = $null
-if (Test-Path $Current) {
-  $item = Get-Item -LiteralPath $Current -Force
-  $old = $item.Target
-  if ($old -is [array]) { $old = $old[0] }
-}
-if ($old) {
-  if (Test-Path $Previous) { & cmd.exe /c rmdir "$Previous" | Out-Null }
-  & cmd.exe /c mklink /J "$Previous" "$old" | Out-Null
-}
-if (Test-Path $Current) { & cmd.exe /c rmdir "$Current" | Out-Null }
-& cmd.exe /c mklink /J "$Current" "$New" | Out-Null
+& $node (Join-Path $Stage 'code\\deploy\\upgrade-local.mjs') --stage $Stage --layout-root $LayoutRoot --release ${ps(plan.release)} --app-root ${ps(plan.appRoot)} --port $port --gate-port $port --gate-password ${ps(plan.gatePassword || '')} --services ${ps(serviceList)}${interop}${credentials}${llm} --no-restart
+if ($LASTEXITCODE -ne 0) { throw "pointer switch failed (exit $LASTEXITCODE)" }
+$installer = Join-Path $Stage 'code\\windows-service\\install-service.ps1'
+if (-not (Test-Path $installer)) { throw "missing $installer" }
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -Root $LayoutRoot
 if ($LASTEXITCODE -ne 0) {
-  # Without the junction the member has no current link at all: put the old one
-  # back before failing, or every service definition points at nothing.
-  if ($old) { & cmd.exe /c mklink /J "$Current" "$old" | Out-Null }
-  throw "could not switch current to $New"
+  & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+  if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a failed service install also failed' }
+  throw 'service installation failed after the pointer switch; rolled back'
 }
-function Test-Health {
-  $gateOk = $false
-  for ($i = 0; $i -lt 30; $i++) {
-    try {
-      $response = Invoke-WebRequest -Uri "http://127.0.0.1:$port/__gate/health" -UseBasicParsing -TimeoutSec 3
-      if ($response.StatusCode -eq 200) { $gateOk = $true; break }
-    } catch { }
-    Start-Sleep -Seconds 2
-  }
-  if (-not $gateOk) { return $false }
-  if ($interopUrl -ne '') {
-    # Let the old stack release :8765 before accepting the new process's marker.
-    Start-Sleep -Seconds 10
-    for ($i = 0; $i -lt 30; $i++) {
-      try {
-        $response = Invoke-WebRequest -Uri $interopUrl -UseBasicParsing -TimeoutSec 3
-        if ($response.StatusCode -eq 200 -and $response.Content -match 'dsh-mesh-embedded-interop-v1') { return $true }
-      } catch { }
-      Start-Sleep -Seconds 2
-    }
-    return $false
-  }
-  return $true
-}
-function Test-Health-Loose {
-  # A rollback to a release without the embedded listener starts the standalone
-  # interop, whose health has no marker. Only the rollback uses this probe.
-  for ($i = 0; $i -lt 30; $i++) {
-    try {
-      $response = Invoke-WebRequest -Uri "http://127.0.0.1:$port/__gate/health" -UseBasicParsing -TimeoutSec 3
-      if ($response.StatusCode -eq 200) {
-        if ($interopUrl -eq '') { return $true }
-        try {
-          $interop = Invoke-WebRequest -Uri $interopUrl -UseBasicParsing -TimeoutSec 3
-          if ($interop.StatusCode -eq 200) { return $true }
-        } catch { }
-      }
-    } catch { }
-    Start-Sleep -Seconds 2
-  }
-  return $false
-}
-function Remove-Release([string]$Path) {
-  if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return }
-  # Never remove the release current points at: a rollback that failed to
-  # switch must leave the member on something runnable.
-  $active = $null
-  if (Test-Path -LiteralPath $Current) {
-    $active = (Get-Item -LiteralPath $Current -Force).Target
-    if ($active -is [array]) { $active = $active[0] }
-  }
-  if ($active -eq $Path) { return }
-  # Remove-Item cannot delete node_modules paths past MAX_PATH and stops
-  # halfway through. Use the active release's Node runtime, never the tree
-  # being removed (a running exe cannot delete its own directory).
-  $tool = Join-Path $Current 'runtime\\node\\node.exe'
-  if (-not (Test-Path -LiteralPath $tool)) { $tool = Join-Path $AppRoot 'current\\runtime\\node\\node.exe' }
-  if (Test-Path -LiteralPath $tool) {
-    & $tool -e "const fs=require('fs');fs.rmSync(process.argv[1],{recursive:true,force:true,maxRetries:5,retryDelay:200})" $Path 2>$null
-  }
-  if (Test-Path -LiteralPath $Path) {
-    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
-  }
-  if (Test-Path -LiteralPath $Path) { Write-Host "could not remove $Path" } else { Write-Host "removed $Path" }
-}
-# A restart that throws must not skip the health check and the rollback: with
-# ErrorActionPreference=Stop it used to abort the script right here, after
-# current had already moved.
-$restartFailed = $false
-try {
-${restart}
-} catch {
-  $restartFailed = $true
-  Write-Host ("a service failed to restart on " + $Release + ": " + $_.Exception.Message)
-}
-function Invoke-Rollback {
-  # Logging must not throw here: with ErrorActionPreference=Stop a Write-Error
-  # would abort the rollback itself.
-  $ErrorActionPreference = 'Continue'
-  if (-not $old) {
-    Write-Host "no previous release to roll back to; current stays on $Release"
-    return
-  }
-  Write-Host "rolling back to $old"
-  if (Test-Path $Current) { & cmd.exe /c rmdir "$Current" | Out-Null }
-  & cmd.exe /c mklink /J "$Current" "$old" | Out-Null
+$deadline = (Get-Date).AddSeconds(180)
+while ((Get-Date) -lt $deadline) {
   try {
-${rollbackRestart.split('\n').map(line => `    ${line}`).join('\n')}
-  } catch { Write-Host "rollback restart failed: $($_.Exception.Message)" }
-  if (Test-Health-Loose) { Write-Host "rollback finished: $old answers the health check" }
-  else { Write-Host "rollback finished but $old did not answer the health check; it needs a manual look" }
-  # The failed release is no longer referenced; keeping it would leave a full
-  # package tree (about 1.3 GB) behind after every failed attempt.
-  Remove-Release $New
+    $response = Invoke-WebRequest -Uri ("http://127.0.0.1:" + $port + "/__gate/health") -UseBasicParsing -TimeoutSec 3
+    if ($response.StatusCode -eq 200) { Write-Output 'gateway healthy'; exit 0 }
+  } catch { }
+  Start-Sleep -Seconds 3
 }
-if ($restartFailed -or -not (Test-Health)) {
-  if (-not $restartFailed) { Write-Host "health check failed on $Release; rolling back" }
-  Invoke-Rollback
-  exit 1
-}
-# Retention: keep the newest N releases and never the current/previous target.
-$keep = ${plan.retention}
-$currentTarget = $null
-$previousTarget = $null
-if (Test-Path $Current) { $currentTarget = (Get-Item -LiteralPath $Current -Force).Target }
-if (Test-Path $Previous) { $previousTarget = (Get-Item -LiteralPath $Previous -Force).Target }
-if ($currentTarget -is [array]) { $currentTarget = $currentTarget[0] }
-if ($previousTarget -is [array]) { $previousTarget = $previousTarget[0] }
-Get-ChildItem -LiteralPath (Join-Path $AppRoot 'releases') -Directory |
-  Sort-Object LastWriteTime -Descending |
-  Select-Object -Skip $keep |
-  ForEach-Object {
-    if ($_.FullName -ne $currentTarget -and $_.FullName -ne $previousTarget) {
-      Remove-Release $_.FullName
-    }
-  }
-Write-Output "activated $Release"
+& $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a failed health check also failed' }
+throw 'gateway health check failed after the pointer switch; rolled back'
 `
 }
 
@@ -1771,21 +1043,12 @@ Write-Output "activated $Release"
  * @returns {string} PowerShell script.
  */
 export function buildWindowsRollbackScript(plan) {
-  const restart = plan.services
-    .filter(service => plan.scope === 'all' || service.role !== 'gate')
-    .map(service => `Restart-Service -Name ${ps(service.name)} -Force`)
-    .join('\n')
   return `$ErrorActionPreference = 'Stop'
-$AppRoot = ${ps(plan.appRoot)}
-$Current = Join-Path $AppRoot 'current'
-$Previous = Join-Path $AppRoot 'previous'
-if (-not (Test-Path $Previous)) { throw 'no previous release to roll back to' }
-$old = (Get-Item -LiteralPath $Previous -Force).Target
-if ($old -is [array]) { $old = $old[0] }
-if (Test-Path $Current) { & cmd.exe /c rmdir "$Current" | Out-Null }
-& cmd.exe /c mklink /J "$Current" "$old" | Out-Null
-${restart}
-Write-Output "rolled back to $old"
+$LayoutRoot = ${ps(plan.layoutRoot)}
+$node = Join-Path $LayoutRoot 'runtime\\node\\node.exe'
+if (-not (Test-Path $node)) { $node = (Get-Command node -ErrorAction Stop).Source }
+& $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+if ($LASTEXITCODE -ne 0) { throw 'rollback failed' }
 `
 }
 
@@ -2721,7 +1984,7 @@ export class DeployManager {
         return false
       }
       if (plan.os === 'windows' && typeof runner.archiveEntries === 'function' && typeof runner.extractArchive === 'function') {
-        const newDir = `${plan.releases}\\${plan.release}`
+        const newDir = `${plan.layoutRoot}\\.staging\\${plan.release}`
         const total = await runner.archiveEntries(plan.remotePackage).catch(() => 0)
         if (total > 0) {
           await log(`extracting ${total} archive entries with tar`)

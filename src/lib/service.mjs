@@ -1297,6 +1297,10 @@ export class MeshService {
     // member normally. It is never a local job: the whole point is not to be
     // the machine being tested.
     const test = request.test === true || mode === 'test'
+    // The pointer layout has one upgrade path for every machine: extract a
+    // release, flip the pointer, restart, and roll back automatically when the
+    // health check fails. There is nothing left to rehearse separately.
+    if (test) throw new Error('指针布局没有单独的「测试升级」：直接运行「升级」，健康检查失败会自动回退到上一个 release')
     const host = typeof request.host === 'string' ? request.host.trim() : ''
     const memberId = typeof request.member === 'string' ? request.member.trim() : ''
     const packagePath = await this.resolvePackage(request.package)
@@ -1512,10 +1516,14 @@ export class MeshService {
     if (install === null) {
       throw new Error('本机没有可识别的 dsh-mesh 安装目录（找不到 config/gate.env），无法升级本机')
     }
-    if (input.os === 'windows' && install.layout === 'flat') {
+    if (input.os === 'windows' && (install.layout === 'flat' || install.layout === 'pointer')) {
       throw new Error('本机是 Linux 网关，不能安装 Windows 部署包')
     }
-    if (install.layout === 'flat') {
+    // The pointer layout runs the same in-place orchestrator as a flat install:
+    // the package's upgrade script moves the tree into releases/<id>, rewrites
+    // the pointer and restarts the launcher-backed units. A blue-green install
+    // still switches a symlink through the engine instead.
+    if (install.layout === 'flat' || install.layout === 'pointer') {
       const job = await this.#queueJob({
         mode: input.mode,
         member: 'local',
@@ -1526,7 +1534,7 @@ export class MeshService {
         packagePath: input.packagePath,
         release: path.basename(input.packagePath),
       })
-      return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: 'flat' }
+      return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: install.layout }
     }
     const job = await this.#startEngineJob({
       request: { host: '127.0.0.1', local: true, package: input.packagePath, os: input.os, appRoot: install.appRoot, member: input.member.id },
@@ -1621,7 +1629,7 @@ export class MeshService {
 
   /**
    * Locate the install that owns this plugin.
-   * @returns {{appRoot: string, layout: 'flat'|'bluegreen'}|null} install, or null in a source checkout.
+   * @returns {{appRoot: string, layout: 'flat'|'bluegreen'|'pointer'}|null} install, or null in a source checkout.
    */
   #localAppRoot() {
     let candidate = path.resolve(this.repositoryRoot, '..')
@@ -1637,6 +1645,12 @@ export class MeshService {
       }
       if (existsSync(path.join(candidate, 'current')) && existsSync(path.join(candidate, 'releases'))) {
         return { appRoot: candidate, layout: 'bluegreen' }
+      }
+      // Pointer layout: the root owns dsh-mesh.json + releases/; the release
+      // directory itself (where this plugin lives) has config/gate.env through
+      // its shared symlink, so this check must come before the flat one.
+      if (existsSync(path.join(candidate, 'dsh-mesh.json')) && existsSync(path.join(candidate, 'releases'))) {
+        return { appRoot: candidate, layout: 'pointer' }
       }
       if (existsSync(path.join(candidate, 'config', 'gate.env')) && existsSync(path.join(candidate, 'plugins', 'dsh-mesh'))) {
         return { appRoot: candidate, layout: 'flat' }

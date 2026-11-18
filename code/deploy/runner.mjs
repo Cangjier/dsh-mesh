@@ -214,15 +214,22 @@ async function runInplace(context) {
   // way round; the 2026-11-16 rollback failed because the old installed script
   // did not back up app/runtime/web, and the fix could not take effect until
   // after an upgrade that used it.)
+  // The pointer layout has exactly one implementation, upgrade-local.mjs.
+  // A package that predates it still carries the shell shim; run whichever is
+  // there, so a single upgrade can move the machine onto the new layout.
+  const packedMjs = path.join(stage, 'code', 'deploy', 'upgrade-local.mjs')
   const packed = path.join(stage, 'code', 'deploy', 'upgrade-local.sh')
-  const source = await stat(packed)
-    .then(() => packed)
-    .catch(async () => {
-      const installed = path.join(HERE, 'upgrade-local.sh')
-      const found = await stat(installed).then(() => true).catch(() => false)
-      if (!found) throw new Error(`upgrade script is missing: neither ${packed} nor ${installed}`)
-      return installed
-    })
+  const hasMjs = await stat(packedMjs).then(() => true).catch(() => false)
+  const source = hasMjs
+    ? packedMjs
+    : await stat(packed)
+      .then(() => packed)
+      .catch(async () => {
+        const installed = path.join(HERE, 'upgrade-local.sh')
+        const found = await stat(installed).then(() => true).catch(() => false)
+        if (!found) throw new Error(`upgrade script is missing: neither ${packedMjs}, ${packed} nor ${installed}`)
+        return installed
+      })
   // Copy the script (and its profile-wiring helper) out of the install before
   // running it: the copy step below replaces plugins/dsh-mesh, and bash reads
   // its script lazily, so running the in-place file would edit it under the
@@ -230,10 +237,9 @@ async function runInplace(context) {
   const tools = path.join(jobDir, 'tools')
   await rm(tools, { recursive: true, force: true })
   await mkdir(tools, { recursive: true })
-  const script = path.join(tools, 'upgrade-local.sh')
+  const script = path.join(tools, hasMjs ? 'upgrade-local.mjs' : 'upgrade-local.sh')
   await cp(source, script)
   await chmod(script, 0o755)
-  await cp(path.join(path.dirname(source), 'wire-profile.mjs'), path.join(tools, 'wire-profile.mjs')).catch(() => {})
   await mark('activate', 'running')
   meter('重启服务并检查', { percent: 99, indeterminate: true })
   const args = ['--app-root', String(settings.appRoot ?? ''), '--job-dir', jobDir, '--stage', stage]
@@ -244,7 +250,7 @@ async function runInplace(context) {
   if (typeof settings.port === 'string' && settings.port !== '') args.push('--port', settings.port)
   if (typeof settings.interopToken === 'string' && settings.interopToken !== '') args.push('--interop-token', settings.interopToken)
   await note(`running ${path.relative(stage, script)}`)
-  await run('bash', [script, ...args], line => {
+  await run(hasMjs ? process.execPath : 'bash', [script, ...args], line => {
     if (/^DSH-MESH-EXTRACT /u.test(line)) return
     note(line).catch(() => {})
   })

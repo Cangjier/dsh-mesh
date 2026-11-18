@@ -675,6 +675,9 @@ const PLUGIN_FINGERPRINT_FILES = [
   'start-dsh.sh', 'start-interop.sh', 'install-interop-service.sh', 'uninstall-interop-service.sh',
   'install.sh', 'start.sh', 'stop.sh', 'status.sh', 'doctor.sh',
   'install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'start-stack.ps1',
+  // The stable launcher and its pointer live at the layout root; a package
+  // that lacks them cannot be installed in the pointer layout.
+  'dsh-mesh.mjs',
 ]
 const PLUGIN_FINGERPRINT_DIRS = ['locale', 'build', 'docs', 'code']
 
@@ -820,6 +823,10 @@ export async function assembleWebPackage(options) {
   // A flat install upgrades itself by running code/deploy/upgrade-local.sh from
   // the package and then re-wiring the profile with code/deploy/wire-profile.mjs.
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'deploy'), path.join(packageDir, 'code', 'deploy'))
+  // The pointer-layout installer and the stable launcher are part of the
+  // package: upgrades run them from the extracted tree.
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'install'), path.join(packageDir, 'code', 'install'))
+  await copyIfExists(path.join(options.repositoryRoot, 'dsh-mesh.mjs'), path.join(packageDir, 'dsh-mesh.mjs'))
   await copyIfExists(path.join(options.repositoryRoot, 'docs'), path.join(packageDir, 'docs'))
   for (const file of ['install.sh', 'start.sh', 'stop.sh', 'status.sh', 'doctor.sh', 'install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'start-stack.ps1', 'VERSION']) {
     await copyIfExists(path.join(options.repositoryRoot, 'code', file), path.join(packageDir, file))
@@ -839,6 +846,7 @@ export async function assembleWebPackage(options) {
   // The deploy runner/engine travel with the plugin too: a member that runs
   // its own panel starts `code/deploy/runner.mjs` from its plugin directory.
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'deploy'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'deploy'))
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'install'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'install'))
   // Plugins that travel with dsh-mesh (currently xl): fetched from main at build
   // time, so a package built today carries today's plugin code.
   const extraPlugins = await copyExtraPlugins({

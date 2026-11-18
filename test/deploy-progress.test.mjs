@@ -145,40 +145,6 @@ test('an already uploaded package is reused instead of transferred again', async
   }
 })
 
-test('Windows extraction reports entry progress and skips Expand-Archive', async () => {
-  const root = await mkdtemp(path.join(tmpdir(), 'mesh-deploy-'))
-  const packagePath = path.join(root, 'package.zip')
-  await writeFile(packagePath, 'zip placeholder')
-  const seenScripts = []
-  const manager = managerWith(() => ({
-    async upload(_l, _r, onProgress) {
-      onProgress?.({ bytes: 10, totalBytes: 10, percent: 100, speed: 5, indeterminate: false })
-    },
-    async archiveEntries() {
-      return 4
-    },
-    async extractArchive(_remote, _target, onEntry) {
-      for (let index = 0; index < 4; index += 1) onEntry?.('')
-    },
-    async script(script) {
-      seenScripts.push(script)
-    },
-  }), path.join(root, 'jobs'))
-
-  try {
-    const started = await manager.start({ host: '10.66.66.4', os: 'windows', package: packagePath, appRoot: 'C:\\dsh-mesh' })
-    const final = await manager.wait(started.job.id)
-    assert.equal(final.status, 'succeeded')
-    const prepare = final.steps.find(step => step.key === 'prepare')
-    assert.deepEqual(prepare.progress, { done: 4, total: 4, percent: 100 })
-    assert.ok(seenScripts.length >= 2)
-    assert.ok(seenScripts.every(script => !script.includes('Expand-Archive')), 'the slow extractor must be skipped')
-    assert.ok(seenScripts.some(script => script.includes('release directory missing')))
-  } finally {
-    await rm(root, { recursive: true, force: true })
-  }
-})
-
 test('Linux extraction reports absolute entry counts, never past the total', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'mesh-deploy-'))
   const packagePath = path.join(root, 'package.tar.gz')
@@ -249,9 +215,10 @@ test('a first install inherits the deployer gateway credentials', async () => {
     })
     const final = await manager.wait(started.job.id)
     assert.equal(final.status, 'succeeded')
-    assert.ok(scripts.some(script => script.includes("$password = 'shared-gate-pw'")))
-    assert.equal(scripts.some(script => script.includes('$clusterKey')), false, 'the retired cluster key secret is not generated')
-    assert.ok(scripts.some(script => script.includes('copied from the deployer')))
+    // The pointer upgrade seeds gate.env on the target and shares the
+    // deployer's sign-in; both travel as arguments of the single activate step.
+    assert.ok(scripts.some(script => script.includes("--gate-password 'shared-gate-pw'")))
+    assert.ok(scripts.some(script => script.includes('--credentials')))
     const state = JSON.parse(await readFile(path.join(root, 'jobs', started.job.id, 'job.json'), 'utf8'))
     assert.equal(JSON.stringify(state).includes('shared-gate-pw'), false, 'the job state never stores the secret')
   } finally {

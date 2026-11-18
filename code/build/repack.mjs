@@ -27,15 +27,15 @@ const run = promisify(execFile)
 /** Root-level scripts copied out of `code/`. */
 const CODE_SCRIPTS = ['install.sh', 'start.sh', 'stop.sh', 'status.sh', 'doctor.sh', 'install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'start-stack.ps1']
 /** Scripts that live at the repository root. */
-const ROOT_SCRIPTS = ['start-interop.sh', 'install-interop-service.sh', 'uninstall-interop-service.sh']
+const ROOT_SCRIPTS = ['start-interop.sh', 'install-interop-service.sh', 'uninstall-interop-service.sh', 'dsh-mesh.mjs']
 /** Plugin files copied from the repository root. */
 const PLUGIN_FILES = ['index.js', 'client.js', 'cordis.patch.yml', 'package.json']
 /** Plugin directories copied from the repository root. */
-const PLUGIN_DIRS = ['locale', 'build', 'code/build', 'code/shared', 'code/deploy']
+const PLUGIN_DIRS = ['locale', 'build', 'code/build', 'code/shared', 'code/deploy', 'code/install']
 /** Directories copied from `code/` into the package's `code/`. */
 // `shared` appears twice on purpose: `shared/` is the runtime copy the gate
 // and scripts use, and `code/shared/` is what the `code/` modules import.
-const CODE_DIRS = ['windows-service', 'interop-service', 'wireguard', 'dsh-service', 'deploy', 'shared']
+const CODE_DIRS = ['windows-service', 'interop-service', 'wireguard', 'dsh-service', 'deploy', 'install', 'shared']
 
 /**
  * Remove a path if it exists.

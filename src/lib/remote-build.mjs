@@ -154,12 +154,7 @@ export function windowsBuildScript(options) {
   const proxy = typeof options.proxyUrl === 'string' ? options.proxyUrl.trim() : ''
   const proxyArgument = proxy === '' ? '' : ` -Proxy ${quotePs(proxy)}`
   const appRoot = String(options.appRoot ?? '').replace(/[\\/]+$/u, '')
-  const candidates = [
-    ...(appRoot === '' ? [] : [quotePs(`${appRoot}\\runtime\\node`)]),
-    '"$env:USERPROFILE\\.dsh\\dsh-mesh\\current\\runtime\\node"',
-    '"$env:USERPROFILE\\.dsh\\dsh-person-web\\runtime\\node"',
-    '"$env:ProgramFiles\\nodejs"',
-  ]
+  const candidates = windowsNodeLookup(appRoot)
   return [
     "$ErrorActionPreference = 'Stop'",
     "$ProgressPreference = 'SilentlyContinue'",
@@ -170,18 +165,28 @@ export function windowsBuildScript(options) {
     `$out = Join-Path $root 'build\\${options.jobId}'`,
     'New-Item -ItemType Directory -Force -Path $out, $bin | Out-Null',
     '$nodeDir = $null',
-    `foreach ($candidate in @(${candidates.join(', ')})) { if (Test-Path (Join-Path $candidate 'node.exe')) { $nodeDir = $candidate; break } }`,
+    `foreach ($candidate in @(${candidates})) { if (Test-Path (Join-Path $candidate 'node.exe')) { $nodeDir = $candidate; break } }`,
     "if ($null -eq $nodeDir) { throw 'no node runtime on this member' }",
-    // Remove last run's job directory with Node instead of Remove-Item:
-    // node_modules paths are longer than MAX_PATH and Remove-Item fails on
-    // them halfway through, which is exactly how a member's disk filled up.
+    // Last run's job tree is removed by a background Node process instead of
+    // synchronously: a 1.9 GiB / 112k-file tree took minutes on the Windows
+    // member, and that was pure delay in front of every build. Remove-Item is
+    // not an option — node_modules paths are longer than MAX_PATH and it gives
+    // up halfway through, which is exactly how a member's disk filled up.
     "$buildRoot = Join-Path $root 'build'",
-    "$rmScript = \"const fs=require('fs');const p=process.argv[1];fs.rmSync(p,{recursive:true,force:true,maxRetries:5,retryDelay:200})\"",
-    `Get-ChildItem -LiteralPath $buildRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} } | ForEach-Object { & (Join-Path $nodeDir 'node.exe') -e $rmScript $_.FullName 2>$null; if (Test-Path -LiteralPath $_.FullName) { Write-Output ('could not remove a leftover job dir: ' + $_.Name) } }`,
-    `Get-ChildItem -LiteralPath (Join-Path $root 'upgrade') -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue`,
+    "$upgradeRoot = Join-Path $root 'upgrade'",
+    ...rmTreeScriptLines(),
+    `$leftovers = @(Get-ChildItem -LiteralPath $buildRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} }) + @(Get-ChildItem -LiteralPath $upgradeRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} })`,
+    '$cleaners = @()',
+    "foreach ($dir in $leftovers) { try { $cleaners += Start-Process -FilePath (Join-Path $nodeDir 'node.exe') -ArgumentList ('\"{0}\" \"{1}\"' -f (Join-Path $bin 'rm-tree.cjs'), $dir.FullName) -WindowStyle Hidden -PassThru -ErrorAction Stop } catch { Write-Output ('could not start the leftover cleanup: ' + $dir.Name) } }",
     '$driveFree = 0',
     'try { $driveFree = (Get-PSDrive ((Get-Item $env:USERPROFILE).PSDrive.Name)).Free } catch { $driveFree = (Get-PSDrive C).Free }',
-    `if ($driveFree -lt ${String(needGiB * 1024 ** 3)}) { throw ("not enough free space on the build host: {0:N1} GiB free, ${String(needGiB)} GiB needed" -f ($driveFree / 1GB)) }`,
+    `if ($driveFree -lt ${String(needGiB * 1024 ** 3)}) {`,
+    // Only the rare full-disk start waits for the deletion; a normal build
+    // downloads its checkout while the previous tree is still going away.
+    '  foreach ($cleaner in $cleaners) { if (-not $cleaner.HasExited) { $cleaner.WaitForExit(600000) | Out-Null } }',
+    '  try { $driveFree = (Get-PSDrive ((Get-Item $env:USERPROFILE).PSDrive.Name)).Free } catch { $driveFree = (Get-PSDrive C).Free }',
+    `  if ($driveFree -lt ${String(needGiB * 1024 ** 3)}) { throw ("not enough free space on the build host: {0:N1} GiB free, ${String(needGiB)} GiB needed" -f ($driveFree / 1GB)) }`,
+    '}',
     '$env:PATH = "$bin;$nodeDir;$env:PATH"',
     "$env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'",
     "$env:CI = '1'",
@@ -223,6 +228,95 @@ export function windowsBuildScript(options) {
     '$code = $LASTEXITCODE',
     'Get-ChildItem -Directory $out -ErrorAction SilentlyContinue | Select-Object -First 5 -ExpandProperty FullName',
     'exit $code',
+    '',
+  ].filter(line => line !== '').join('\r\n')
+}
+
+/**
+ * Node helper that removes one directory tree with retries.
+ *
+ * `Remove-Item` is far slower and fails on `node_modules` paths longer than
+ * MAX_PATH, which is how a member's disk filled up with half-deleted job
+ * trees. The helper is written next to the member's build bin directory and
+ * used by both the preflight (background) and the cleanup (synchronous).
+ * @type {string}
+ */
+export const RM_TREE_SCRIPT = [
+  "const fs = require('fs')",
+  'const target = process.argv[2]',
+  'try {',
+  '  fs.rmSync(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 })',
+  '} catch (error) {',
+  '  console.error(String(error && error.message ? error.message : error))',
+  '  process.exitCode = 1',
+  '}',
+].join('\n')
+
+/**
+ * PowerShell lines that materialise {@link RM_TREE_SCRIPT} as `$bin\rm-tree.cjs`.
+ *
+ * A single-quoted here-string keeps the JavaScript literal, so the generated
+ * script is readable in the log and in the member's bin directory.
+ * @returns {string[]} PowerShell lines.
+ */
+function rmTreeScriptLines() {
+  return [
+    "$rmScript = @'",
+    ...RM_TREE_SCRIPT.split('\n'),
+    "'@",
+    "[IO.File]::WriteAllText((Join-Path $bin 'rm-tree.cjs'), $rmScript, (New-Object System.Text.UTF8Encoding($false)))",
+  ]
+}
+
+/**
+ * PowerShell expressions for the directories that may hold `node.exe`.
+ *
+ * The pointer layout keeps the runtime at `%USERPROFILE%\.dsh\runtime\node` on
+ * a Windows member; older installs kept it inside the release directory. The
+ * cleanup resolves node exactly like the build does — resolving it wrong made
+ * it fall back to `Remove-Item`, which took minutes and left 1.9 GiB behind.
+ * @param {string} appRoot install root learned from the member.
+ * @returns {string} comma-separated PowerShell list.
+ */
+function windowsNodeLookup(appRoot) {
+  const root = String(appRoot ?? '').replace(/[\\/]+$/u, '')
+  return [
+    ...(root === '' ? [] : [quotePs(`${root}\\runtime\\node`)]),
+    '"$env:USERPROFILE\\.dsh\\runtime\\node"',
+    '"$env:USERPROFILE\\.dsh\\dsh-mesh\\current\\runtime\\node"',
+    '"$env:USERPROFILE\\.dsh\\dsh-person-web\\runtime\\node"',
+    '"$env:ProgramFiles\\nodejs"',
+  ].join(', ')
+}
+
+/**
+ * Build the PowerShell script that deletes one job directory on a Windows member.
+ *
+ * It reports what actually happened (`DSH-MESH-REMOVED` / `DSH-MESH-LEFTOVER`)
+ * instead of letting the caller claim a clean removal: a half-deleted tree is
+ * the reason the next build's preflight has to delete it again.
+ * @param {{jobId: string, appRoot?: string}} options job input.
+ * @returns {string} PowerShell script.
+ */
+export function windowsCleanupScript(options) {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    "$root = Join-Path $env:USERPROFILE '.dsh\\mesh'",
+    "$bin = Join-Path $root 'bin'",
+    "$out = Join-Path $root 'build\\" + String(options.jobId) + "'",
+    'New-Item -ItemType Directory -Force -Path $bin | Out-Null',
+    '$nodeDir = $null',
+    `foreach ($candidate in @(${windowsNodeLookup(options.appRoot ?? '')})) { if (Test-Path (Join-Path $candidate 'node.exe')) { $nodeDir = $candidate; break } }`,
+    ...rmTreeScriptLines(),
+    'if (-not (Test-Path -LiteralPath $out)) { Write-Output ("DSH-MESH-MISSING=" + $out); exit 0 }',
+    "if ($null -ne $nodeDir) { & (Join-Path $nodeDir 'node.exe') (Join-Path $bin 'rm-tree.cjs') $out 2>$null | Out-Null }",
+    'if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue }',
+    'if (Test-Path -LiteralPath $out) {',
+    '  $left = (Get-ChildItem -LiteralPath $out -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count',
+    '  Write-Output ("DSH-MESH-LEFTOVER=" + $out + " files=" + $left)',
+    '} else { Write-Output ("DSH-MESH-REMOVED=" + $out) }',
     '',
   ].filter(line => line !== '').join('\r\n')
 }
@@ -393,16 +487,23 @@ export class RemoteBuilder {
         full: options.full,
       })
     let percent = 1
+    let currentTarget = typeof state.currentTarget === 'string' ? state.currentTarget : null
     const onLine = (line) => {
       void appendLog(jobDir, line)
-      const update = phaseFromLine(line, state.targets)
+      // The mapping is stateless, so the target a line belongs to (the one the
+      // engine last announced) has to be handed to it: a `$ npm install` line
+      // during the second target must not move the first target's slice.
+      const update = phaseFromLine(line, state.targets, { currentTarget })
       if (update === null) return
       const patch = { phase: update.phase }
       if (typeof update.percent === 'number' && update.percent > percent) {
         percent = update.percent
         patch.percent = percent
       }
-      if (update.currentTarget !== undefined) patch.currentTarget = update.currentTarget
+      if (update.currentTarget !== undefined) {
+        currentTarget = update.currentTarget
+        patch.currentTarget = update.currentTarget
+      }
       // The phase (and especially the target) changes more often than the
       // percent; applying only the percent would leave "打包" without saying
       // which target while the second one is being assembled.
@@ -626,9 +727,10 @@ export class RemoteBuilder {
    * The gateway keeps the job state and mirrors the member's output into its
    * own build log, so the member only needs the directory while the build
    * runs. Removing it keeps the next full build from starting on a disk that
-   * older jobs filled. Windows deletes through Node's fs.rmSync because
-   * node_modules paths are longer than MAX_PATH and Remove-Item gives up on
-   * them halfway.
+   * older jobs filled. Windows deletes through the shared `rm-tree.cjs` helper
+   * (node's fs.rmSync) because node_modules paths are longer than MAX_PATH and
+   * Remove-Item gives up on them halfway; the outcome is reported as it really
+   * is, so a half-deleted tree is not logged as "removed".
    * @param {SshRunner} runner ssh runner.
    * @param {string} jobDir local job directory (the cleanup is logged there).
    * @param {string} jobId build job id (also the remote directory name).
@@ -638,17 +740,17 @@ export class RemoteBuilder {
   async #cleanupRemote(runner, jobDir, jobId, windows) {
     const localPath = `$HOME/.dsh/mesh/build/${jobId}`
     const command = windows
-      ? powershellCommand([
-          "$ProgressPreference = 'SilentlyContinue'",
-          `$out = Join-Path $env:USERPROFILE '.dsh\\mesh\\build\\${jobId}'`,
-          "$node = Join-Path $env:USERPROFILE '.dsh\\dsh-mesh\\current\\runtime\\node\\node.exe'",
-          "if (-not (Test-Path $node)) { $node = Join-Path $env:USERPROFILE '.dsh\\dsh-person-web\\runtime\\node\\node.exe' }",
-          `if ((Test-Path $out) -and (Test-Path $node)) { & $node -e "const fs=require('fs');fs.rmSync(process.argv[1],{recursive:true,force:true,maxRetries:5,retryDelay:200})" $out }`,
-          'if (Test-Path $out) { Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue }',
-        ].join('; '))
+      ? powershellCommand(windowsCleanupScript({ jobId, appRoot: runner.plan.appRoot }))
       : `rm -rf "${localPath}"`
     try {
-      await runner.runProcess('ssh', [...runner.sshOptions(), runner.target(), command])
+      const { stdout } = await runner.runProcess('ssh', [...runner.sshOptions(), runner.target(), command])
+      const text = String(stdout)
+      const leftover = /^DSH-MESH-LEFTOVER=(.+)$/mu.exec(text)?.[1]?.trim() ?? ''
+      if (leftover !== '') {
+        await appendLog(jobDir, `member build dir partially removed: ${leftover} (the next build retries)`)
+        this.log(`remote build dir partially removed: ${leftover}`)
+        return
+      }
       await appendLog(jobDir, `member build dir removed: ${jobId}`)
       this.log(`remote build dir removed: ${jobId}`)
     } catch (error) {

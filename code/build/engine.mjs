@@ -928,6 +928,10 @@ export async function archivePackage(packageDir, target, options = {}) {
     ? `${packageDir}.zip`
     : `${packageDir}.tar.gz`
   await rm(archive, { force: true })
+  // Compressing a ~1 GiB package tree is one of the long silent steps (one
+  // core, several minutes on a member); the marker keeps the panel moving and
+  // says which target owns the time.
+  options.log?.(`archiving ${target}`)
   let result
   if (targetOs === 'win' && process.platform !== 'win32') {
     // GNU tar cannot create a zip; a Linux build host needs the `zip` tool.
@@ -1320,6 +1324,9 @@ export async function assembleRuntimePackage(options) {
     await rm(web, { recursive: true, force: true })
     await cp(frontend.dist, web, { recursive: true })
   }
+  // The runtime download/extract is silent for up to two minutes per target;
+  // the marker is what a remote build maps onto that target's archive stage.
+  log(`node runtime ${options.target}`)
   await installNodeRuntime({
     version: options.nodeVersion,
     target: options.target,

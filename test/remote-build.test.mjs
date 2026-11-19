@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { decodeWindowsState, phaseFromLine, powershellCommand, remoteBuildScript, windowsBuildScript } from '../src/lib/remote-build.mjs'
+import { RM_TREE_SCRIPT, decodeWindowsState, phaseFromLine, powershellCommand, remoteBuildScript, windowsBuildScript, windowsCleanupScript } from '../src/lib/remote-build.mjs'
 
 test('phaseFromLine follows the engine markers', () => {
   assert.deepEqual(phaseFromLine('job created'), { phase: 'prepare', percent: 2 })
@@ -32,6 +32,32 @@ test('phaseFromLine gives each target its own slice', () => {
   assert.equal(phaseFromLine('smoke win-x64: starting the packaged DSH', targets)?.percent, 88)
   assert.equal(phaseFromLine('smoke win-x64: passed (/tmp/x.png)', targets)?.percent, 95)
   assert.equal(phaseFromLine('packaged win-x64: /tmp/b.zip', targets)?.currentTarget, 'win-x64')
+})
+
+test('phaseFromLine keeps the long silent steps moving', () => {
+  const targets = ['linux-x64', 'win-x64']
+  // pnpm prints these while it links 1400+ packages; without a rule the bar
+  // stayed at 18% for the whole install.
+  assert.deepEqual(phaseFromLine('Progress: resolved 1437, reused 1430, added 50'), { phase: 'build', percent: 30 })
+  // The prepare recipes are two silent runs of 1-2 minutes each; they used to
+  // match nothing, so the panel sat at 18% for seven minutes.
+  assert.deepEqual(phaseFromLine('$ pnpm exec tsx scripts/compile-referenced-projects.ts client'), { phase: 'build', percent: 44 })
+  assert.deepEqual(phaseFromLine('$ pnpm exec tsdown --config-loader native --env.DSH_BUILD_FACE client'), { phase: 'build', percent: 44 })
+  // A target announces itself before its three-minute npm install.
+  assert.deepEqual(phaseFromLine('packaging win-x64', targets), { phase: 'package', percent: 80, currentTarget: 'win-x64' })
+  assert.deepEqual(phaseFromLine('packaging linux-x64', targets), { phase: 'package', percent: 65, currentTarget: 'linux-x64' })
+  // The install line belongs to the target the engine last announced, not to
+  // the first target of the job.
+  assert.deepEqual(phaseFromLine('$ npm install @deepseek-ai/dsh@0.2.2-rc.5 --os=win32 --cpu=x64', targets, { currentTarget: 'win-x64' }), {
+    phase: 'package',
+    percent: 82,
+    currentTarget: 'win-x64',
+  })
+  assert.equal(phaseFromLine('patching dsh-client-ui-chat client bundle', targets, { currentTarget: 'win-x64' })?.currentTarget, 'win-x64')
+  // Runtime extraction and compression are the other long silent steps.
+  assert.deepEqual(phaseFromLine('node runtime win-x64', targets), { phase: 'package', percent: 93, currentTarget: 'win-x64' })
+  assert.deepEqual(phaseFromLine('archiving linux-x64', targets), { phase: 'package', percent: 78, currentTarget: 'linux-x64' })
+  assert.deepEqual(phaseFromLine('archiving win-x64', targets), { phase: 'package', percent: 93, currentTarget: 'win-x64' })
 })
 
 test('remoteBuildScript pins the ref, targets, and proxy', () => {
@@ -155,6 +181,36 @@ test('resolveEgressScript finds the script in source and bundled layouts', async
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('windowsBuildScript prunes leftovers in the background', () => {
+  const script = windowsBuildScript({ jobId: 'job-bg', ref: 'main', targets: ['win-x64'] })
+  // Deleting a 1.9 GiB / 112k-file tree synchronously cost ~80 s in front of
+  // every build; it now overlaps the checkout download.
+  assert.match(script, /Start-Process -FilePath \(Join-Path \$nodeDir 'node\.exe'\)/u)
+  assert.match(script, /rm-tree\.cjs/u)
+  assert.match(script, /WaitForExit\(600000\)/u)
+  assert.doesNotMatch(script, /ForEach-Object \{ & \(Join-Path \$nodeDir 'node\.exe'\) -e \$rmScript/u)
+  // The free-space guard still means something on a full disk.
+  assert.match(script, /not enough free space on the build host/u)
+  assert.match(script, /fs\.rmSync/u)
+  assert.match(script, /\$rmScript = @'/u)
+  assert.match(script, /^'@$/mu)
+})
+
+test('windowsCleanupScript resolves node like the build and reports leftovers', () => {
+  const script = windowsCleanupScript({ jobId: 'job-x', appRoot: 'C:\\Users\\Admin\\.dsh' })
+  // The pointer layout keeps node at <appRoot>\runtime\node; the old cleanup
+  // only looked inside .dsh-mesh\current and fell back to Remove-Item.
+  assert.match(script, /'C:\\Users\\Admin\\\.dsh\\runtime\\node'/u)
+  assert.match(script, /\.dsh\\runtime\\node/u)
+  assert.match(script, /rm-tree\.cjs/u)
+  assert.match(script, /DSH-MESH-REMOVED=/u)
+  assert.match(script, /DSH-MESH-LEFTOVER=/u)
+  // The staged upgrade archive for this job must survive the cleanup: the
+  // automatic upgrade reads it right after the job settles.
+  assert.doesNotMatch(script, /upgrade/u)
+  assert.match(RM_TREE_SCRIPT, /fs\.rmSync/u)
 })
 
 test('decodeWindowsState survives noise and non-ASCII state', () => {

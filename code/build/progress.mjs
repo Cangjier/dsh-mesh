@@ -6,7 +6,7 @@
  * second target re-runs the same phases, so the bar stalls at the first
  * target's numbers until the job is done. Instead the packaging share of the
  * job is divided evenly between the targets, and every target walks its own
- * slice (assemble → smoke → archive).
+ * slice (install → archive → smoke).
  *
  * The same mapping is used by the local engine (structured calls) and by a
  * remote build (log-line markers), so both hosts show the same numbers.
@@ -19,7 +19,7 @@ export const BUILD_DONE = 65
 /** Percent reached when every target has been packaged. */
 export const PACKAGE_END = 95
 /** Stage inside one target's slice. */
-const STAGE_FACTOR = { start: 0, smoke: 0.55, end: 1 }
+const STAGE_FACTOR = { start: 0, install: 0.15, smoke: 0.55, archive: 0.85, end: 1 }
 
 /**
  * First and last percent of one target's slice.
@@ -41,7 +41,7 @@ export function targetRange(targets, target) {
  * Percent inside one target's slice.
  * @param {string[]} targets every target of the job, in run order.
  * @param {string} target target being worked on.
- * @param {'start'|'smoke'|'end'} stage stage within the slice.
+ * @param {'start'|'install'|'smoke'|'archive'|'end'} stage stage within the slice.
  * @returns {number} percent.
  */
 export function targetPercent(targets, target, stage = 'start') {
@@ -54,22 +54,49 @@ export function targetPercent(targets, target, stage = 'start') {
  * Map one engine log line onto a phase, percent, and the target it names.
  *
  * The engine prints stable markers (`extracting`, `$ pnpm install`,
+ * `packaging <target>`, `node runtime <target>`, `archiving <target>`,
  * `packaged <target>:`, `smoke <target>:`) that a remote build sees as text.
  * @param {string} line log line.
  * @param {string[]} [targets] targets of this job.
+ * @param {{currentTarget?: string|null}} [context] what the job was last seen doing.
  * @returns {{phase: string, percent?: number, currentTarget?: string, status?: string}|null} update.
  */
-export function phaseFromLine(line, targets = ['linux-x64']) {
+export function phaseFromLine(line, targets = ['linux-x64'], context = {}) {
   const text = String(line)
+  const list = Array.isArray(targets) && targets.length > 0 ? targets : ['linux-x64']
+  const known = typeof context?.currentTarget === 'string' && context.currentTarget !== '' ? context.currentTarget : null
   if (text.includes('job created')) return { phase: 'prepare', percent: 2 }
   if (text.includes('extracting ')) return { phase: 'prepare', percent: 6 }
   if (text.includes('needs-fix')) return { phase: 'apply', percent: 14, status: 'needs-fix' }
   if (/^(?:applied|skipped) /u.test(text)) return { phase: 'apply', percent: 11 }
   if (text.includes('$ pnpm install') || text.includes('$ pnpm i')) return { phase: 'build', percent: 18 }
+  // pnpm's own progress lines keep the install visible: linking 1400+ packages
+  // from the store takes minutes and used to happen entirely at 18%.
+  if (text.startsWith('Progress: resolved')) return { phase: 'build', percent: 30 }
   if (text.includes('$ pnpm run build:web') || text.includes('$ pnpm build')) return { phase: 'build', percent: 50 }
+  // The prepare recipes (`pnpm exec tsx …`, `pnpm exec tsdown …`) are the
+  // longest silent step of a source build: two runs of ~1-2 minutes each that
+  // matched nothing, so the bar sat at 18% for seven minutes. They own the gap
+  // between the install and the web build.
+  if (/^\$ pnpm (?:exec|run) /u.test(text)) return { phase: 'build', percent: 44 }
+  // A target announces itself before its three-minute npm install, so the bar
+  // and "currentTarget" move at the right moment instead of only after the
+  // archive is finished.
+  const packaging = /^packaging (\S+)$/u.exec(text.trim())
+  if (packaging !== null) {
+    return { phase: 'package', percent: targetPercent(list, packaging[1], 'start'), currentTarget: packaging[1] }
+  }
+  if (text.includes('$ npm install @deepseek-ai/dsh')) {
+    const target = known ?? list[0]
+    return { phase: 'package', percent: targetPercent(list, target, 'install'), currentTarget: target }
+  }
+  const stagedStep = /^(?:node runtime|archiving) (\S+)$/u.exec(text.trim())
+  if (stagedStep !== null) {
+    return { phase: 'package', percent: targetPercent(list, stagedStep[1], 'archive'), currentTarget: stagedStep[1] }
+  }
   if (text.includes('frontend installed') || text.includes('patching ')) {
-    const first = Array.isArray(targets) && targets.length > 0 ? targets[0] : 'linux-x64'
-    return { phase: 'package', percent: targetPercent(targets, first, 'start'), currentTarget: first }
+    const target = known ?? list[0]
+    return { phase: 'package', percent: targetPercent(list, target, 'install'), currentTarget: target }
   }
   const packaged = /^packaged (\S+):/u.exec(text)
   if (packaged !== null) {

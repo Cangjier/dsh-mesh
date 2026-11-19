@@ -300,6 +300,10 @@ export async function runJob(dir, options) {
         percent: targetPercent(targets, target, 'start'),
         currentTarget: target,
       })
+      // A marker rather than only a state write: a remote build sees the log,
+      // and its progress mapping needs to know which target owns the next
+      // three minutes of npm install.
+      log(`packaging ${target}`)
       const shared = {
         dist: built.dist,
         target,

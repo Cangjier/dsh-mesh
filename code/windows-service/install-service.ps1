@@ -9,14 +9,21 @@ if ([string]::IsNullOrWhiteSpace($Root)) {
 }
 $Root = (Resolve-Path $Root).Path
 $exe = Join-Path $Root 'dsh-mesh-service.exe'
+# Compile next to the final name, never onto it: the service that is being
+# replaced has the exe open, so writing it directly fails with CS0016 ("the
+# process cannot access the file") — that is how the 2026-11-19 upgrade of
+# DESKTOP-678CDF3 failed and rolled back. A fresh file also means a compile
+# error leaves the running service untouched.
+$staged = "$exe.new"
 $source = Join-Path $PSScriptRoot 'DshMeshService.cs'
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path $csc)) { $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe' }
 if (-not (Test-Path $csc)) { throw 'Cannot find the .NET Framework C# compiler (csc.exe).' }
 if (-not (Test-Path $source)) { throw "Missing $source" }
 
-Write-Host "Compiling $exe"
-& $csc /nologo /target:exe /out:$exe /r:System.ServiceProcess.dll $source
+Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+Write-Host "Compiling $staged"
+& $csc /nologo /target:exe /out:$staged /r:System.ServiceProcess.dll $source
 if ($LASTEXITCODE -ne 0) { throw "csc failed with exit code $LASTEXITCODE" }
 
 Write-Host 'Stopping a manually started gateway, if any'
@@ -43,7 +50,24 @@ if ($existing) {
   Write-Host "Removing existing service $ServiceName"
   Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
   & sc.exe delete $ServiceName 2>$null | Out-Null
-  Start-Sleep -Seconds 2
+  # sc delete only marks it deleted; the wrapper process keeps the old exe open
+  # until it actually exits, so wait for that before swapping the file.
+  $exitDeadline = (Get-Date).AddSeconds(30)
+  while ((Get-Date) -lt $exitDeadline -and (Get-Process -Name 'dsh-mesh-service' -ErrorAction SilentlyContinue)) {
+    Start-Sleep -Milliseconds 300
+  }
+  Start-Sleep -Seconds 1
+}
+
+$replaceDeadline = (Get-Date).AddSeconds(20)
+while ($true) {
+  try {
+    Move-Item -LiteralPath $staged -Destination $exe -Force -ErrorAction Stop
+    break
+  } catch {
+    if ((Get-Date) -ge $replaceDeadline) { throw "could not replace ${exe}: $($_.Exception.Message)" }
+    Start-Sleep -Milliseconds 500
+  }
 }
 
 Write-Host "Creating service $ServiceName"

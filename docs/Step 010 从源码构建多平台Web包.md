@@ -287,12 +287,55 @@ node build/tools/package-prebuilt.mjs --targets linux-x64,win-x64
 |---|---|
 | 源码 tarball | `~/.dsh/mesh/cache/sources/` |
 | Node 运行时 | `~/.dsh/mesh/cache/node/` |
+| 前端构建产物（按源码 + 覆盖层） | `~/.dsh/mesh/cache/web/<key>/dist/` |
+| 目标 app 安装树（按 DSH 版本 + 目标） | `~/.dsh/mesh/cache/app/<version>-<os>-<arch>/` |
 | 任务工作树 / 依赖 / 产物 | `~/.dsh/mesh/build/<job>/` |
 
 - 完整包每个目标需要约 0.7–1 GB 依赖 + 约 40–80 MB Node 运行时；构建机至少留几 GB。
 - 源码 tarball 和 Node 运行时会复用；分支/tag 的 tarball 缓存 6 小时后自动刷新，40 位 commit 永久缓存。
-- `pnpm install` 针对 monorepo，第一次较慢；源码 tarball 和 Node 运行时会复用。
-- Web 构建与目标平台无关；同一 commit + 覆盖层可以只为新目标重新装配，不必重新构建前端（缓存留在任务目录）。
+- **同一条提交重编不再重跑 install/build**：见下面的「构建加速」。
+
+## 构建加速
+
+一次 `master` 全量构建（2026-11-19，Windows 编译机 4C/8T、32 GB，DSH 0.2.2-rc.5）的实际耗时：
+
+| 阶段 | 耗时 | 说明 |
+|---|---|---|
+| 解压源码 | 14 s | |
+| `pnpm install --frozen-lockfile` | 2 m 37 s | 1437 个包全部命中 pnpm store，仍要建 416 个 workspace 链接 |
+| `compile-referenced-projects host-libraries` | 2 m 18 s | `tsc` 单线程 |
+| `compile-referenced-projects client` | 1 m 30 s | `tsc` 单线程 |
+| `tsdown`（client face） | 17 s | 多项目并行 |
+| `vite build` | 11 s | 单入口 |
+| linux-x64 `npm install` app | 3 m 19 s | 与网络无关，第二次装也只快一点：耗时在解包/落盘 |
+| linux-x64 归档 | 2 m 16 s | 旧路径：`tar -czf` + 整包 gunzip→改 mode→level 9 重压 |
+| win-x64 `npm install` app | 3 m 16 s | |
+| win-x64 归档（zip） | 1 m 17 s | |
+| win-x64 抓屏 | 14 s | |
+| **合计（到打包完成）** | **约 18 分钟** | 发布上传另算 |
+
+针对这张表做了四件事，同一条提交、缓存已建立时重编通常只要 2–4 分钟：
+
+1. **前端构建缓存**（`cache/web`）：key = 源码 tarball 的 SHA-256 + 覆盖层内容 + `recipes.json` + prepare/install/build 命令 + 平台 + Node 版本。命中时整段 `pnpm install`、两个 `tsc`、`tsdown`、`vite` 全部跳过。源码 tarball 换了、覆盖层改了或命令改了都会得到新 key，不会拿到旧壳。
+2. **目标 app 缓存**（`cache/app`）：`npm install @deepseek-ai/dsh@<ver> --os/--cpu` + 两个客户端 bundle 补丁只对「版本 + 目标 + 补丁脚本内容」生效，装一次就存下来。之后打包时用硬链接克隆（同盘；20k 文件实测约 8 秒，约 100k 文件的真实 app 树几十秒；跨盘自动退化成复制），归档、冒烟、删任务都不会改到缓存。补丁脚本改了会判缓存过期并重装。包 `manifest.json` 里 `app.source` 记录这次是 `cache` 还是 `npm`。
+3. **app 安装与 Web 构建重叠**：版本号在解压后就已知，两个目标的 app 安装先启动，与 `tsc`/`vite` 并行；冷缓存时省掉「先等构建、再等安装」的串行等待。
+4. **归档并行压缩**：Linux 包不再 `tar -czf`，而是 `tar -cf` 后按 512 字节块流式改写 header mode（替掉整包 gunzip + level 9 重压），再把 tar 切成独立块用 worker 线程并行 gzip。输出是多个 gzip member 顺序拼接，GNU tar 和 Windows bsdtar 都能正常解压（测试里用 GNU tar 解包校验）。8 线程 Windows 编译机上 293 MB 不可压数据实测：新路径 5.4 秒，旧 `tar -czf` 单线程 11.5 秒，且旧路径之后还要整包 gunzip + level 9 重压（1.2 GB 包的归档原来是 2 分 16 秒）。Windows 的 zip 仍是 bsdtar，单线程。
+
+**并行打包**：`linux-x64` 和 `win-x64` 现在可以同时装配。默认并行度按 CPU/内存自动选（内存 < 6 GB 或核数太少时为 1，即保持原来的串行）；`--concurrency N` 或 `DSH_MESH_CONCURRENCY=N` 可覆盖，`--concurrency 1` 就是旧行为。状态文件由每个 job 一条写队列串行化，进度只增不减。
+
+**开关**：
+
+| 参数 / 环境变量 | 作用 |
+|---|---|
+| `--no-cache` / `DSH_MESH_NO_CACHE=1` | 不使用也不写前端/app 缓存 |
+| `--refresh-app-cache` | 强制重新 `npm install` 目标 app |
+| `--refresh-web-cache` | 即使 key 命中也不复用前端产物 |
+| `--concurrency <n>` / `DSH_MESH_CONCURRENCY` | 同时装配的目标数 |
+| `--archive-threads <n>` / `DSH_MESH_ARCHIVE_THREADS` | gzip worker 数（默认 CPU 数，上限 8） |
+
+**磁盘**：app 缓存每个约 1 GB，只保留最新 3 份（自动清理）；前端缓存每个几十 MB，保留 4 份。要彻底重来就删 `~/.dsh/mesh/cache/web` 和 `~/.dsh/mesh/cache/app`。
+
+注意：前端与 app 的契约检查仍会在**新源码**上完整构建一次（当前 `master` 领先 npm 版 DSH 时会保留 app 自带前端），这是正确性检查，缓存只避免重复付这笔钱。
 
 ## 工具与状态机
 

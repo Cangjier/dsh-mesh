@@ -21,6 +21,7 @@ import {
   proxyFor,
   assembleRuntimePackage,
   assembleWebPackage,
+  ensureAppCache,
   learnOverlays,
   loadRecipes,
   pluginFingerprint,
@@ -28,6 +29,7 @@ import {
   runWebBuild,
   writeWorkOrder,
 } from './engine.mjs'
+import { cachesDisabled, packagingConcurrency, webBuildCacheKey } from './cache.mjs'
 import { runPackageSmoke } from './smoke.mjs'
 import { buildStampDate, isValidBuildStamp } from './stamp.mjs'
 import { targetPercent } from './progress.mjs'
@@ -139,16 +141,29 @@ export async function readLogTail(dir, lines = 80) {
   }
 }
 
+/** One read-modify-write queue per job directory. */
+const stateQueues = new Map()
+
 /**
  * Update one job state field and return the new state.
+ *
+ * Packaging runs its targets concurrently, so several callers can update the
+ * same state file at once. A plain read-modify-write loses fields when it
+ * interleaves (one caller's `percent` overwriting the other's `artifacts`);
+ * the queue serialises the read, the merge, and the atomic write.
  * @param {string} dir job directory.
  * @param {Partial<object>} patch fields.
  * @returns {Promise<object>} updated state.
  */
-export async function updateState(dir, patch) {
-  const state = { ...(await readState(dir)), ...patch }
-  await writeState(dir, state)
-  return state
+export function updateState(dir, patch) {
+  const previous = stateQueues.get(dir) ?? Promise.resolve()
+  const run = previous.catch(() => {}).then(async () => {
+    const state = { ...(await readState(dir)), ...patch }
+    await writeState(dir, state)
+    return state
+  })
+  stateQueues.set(dir, run)
+  return run
 }
 
 /**
@@ -258,28 +273,91 @@ export async function runJob(dir, options) {
       applied: result.applied,
       skipped: result.skipped,
     })
-    const built = await runWebBuild({
-      dir: prepared.dir,
-      log,
-      install: options.install,
-      build: options.build,
-      prepare: options.prepare ?? (Array.isArray(recipes.prepare) ? recipes.prepare : null),
-      env: outbound.env,
-      prebuild: options.prebuild,
-      // The install and the web build are the two long silent steps; the
-      // panel would otherwise sit at 12% until packaging starts.
-      onProgress: async update => {
-        state = await updateState(dir, { phase: update.phase, percent: update.percent })
-      },
-    })
+    const full = options.full !== false
+    const targets = state.targets
+    const cacheDir = options.cacheDir ?? defaultCacheDir()
+    const env = options.env ?? process.env
+    const cacheEnabled = options.cache !== false && !cachesDisabled(env)
+    // The DSH version is on disk before the web build runs, so the per-target
+    // app installs can start now and overlap the TypeScript/vite work instead
+    // of following it. On a cold cache that install is the longest step of the
+    // whole build (minutes per target); on a warm one it costs nothing.
+    const version = options.version ?? await readSourceVersion(prepared.dir)
+    const pluginVersion = await readPluginVersion(repositoryRoot)
+    const fingerprint = await pluginFingerprint(repositoryRoot)
+    const webKey = cacheEnabled
+      ? await webBuildCacheKey({
+        archiveSha256: prepared.archiveSha256 ?? state.archiveSha256 ?? null,
+        source: state.source,
+        recipesFile: recipesPath,
+        overlayRoot,
+        prepare: options.prepare ?? (Array.isArray(recipes.prepare) ? recipes.prepare : null),
+        install: options.install,
+        build: options.build,
+        prebuild: options.prebuild !== false,
+      })
+      : null
+    let prefetch = Promise.resolve()
+    if (cacheEnabled && full) {
+      prefetch = (async () => {
+        for (const target of targets) {
+          log(`prefetch app ${target}`)
+          try {
+            await ensureAppCache({
+              cacheDir,
+              version,
+              target,
+              repositoryRoot,
+              env: outbound.env,
+              refresh: options.refreshAppCache === true,
+              log,
+            })
+          } catch (error) {
+            // Packaging retries and reports the real failure; a prefetch that
+            // dies early (network, registry) must not mask a build failure.
+            log(`prefetch app ${target} failed: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+      })().catch(error => {
+        log(`app prefetch stopped: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
+    let built
+    try {
+      built = await runWebBuild({
+        dir: prepared.dir,
+        log,
+        install: options.install,
+        build: options.build,
+        prepare: options.prepare ?? (Array.isArray(recipes.prepare) ? recipes.prepare : null),
+        env: outbound.env,
+        prebuild: options.prebuild,
+        cacheDir: cacheEnabled ? cacheDir : null,
+        cacheKey: webKey,
+        cacheMeta: {
+          source: state.source,
+          ref: state.ref,
+          archiveSha256: prepared.archiveSha256 ?? null,
+          tree: recipes.tree ?? null,
+        },
+        refreshCache: options.refreshWebCache === true,
+        // The install and the web build are the two long silent steps; the
+        // panel would otherwise sit at 12% until packaging starts.
+        onProgress: async update => {
+          state = await updateState(dir, { phase: update.phase, percent: update.percent })
+        },
+      })
+    } finally {
+      // The prefetch runs in the background on purpose, but it must be settled
+      // before the job returns: a half-started npm install left behind by an
+      // early return would keep writing into the cache.
+      await prefetch
+    }
     if (!built.ok) {
       state = await updateState(dir, { status: 'build-failed', phase: 'build', error: built.error ?? 'web build failed' })
       log(`build failed: ${built.error ?? 'unknown error'}`)
       return state
     }
-    const version = options.version ?? await readSourceVersion(prepared.dir)
-    const pluginVersion = await readPluginVersion(repositoryRoot)
-    const fingerprint = await pluginFingerprint(repositoryRoot)
     state = await updateState(dir, {
       phase: 'package',
       percent: 65,
@@ -287,22 +365,38 @@ export async function runJob(dir, options) {
       pluginVersion,
       pluginFingerprint: fingerprint,
       dist: built.dist,
+      webBuild: { cached: built.cached === true, key: webKey === null ? null : webKey.slice(0, 12) },
     })
+    // `--no-cache` must also stop the packaging step from creating an app cache.
+    const appCacheDir = cacheEnabled ? cacheDir : null
+    const jobSource = state.source
+    const jobRef = state.ref
+    const sourceEtag = state.archiveEtag ?? null
     const artifacts = []
-    const full = options.full !== false
-    const targets = state.targets
-    for (const target of targets) {
-      // Every target owns one equal slice of 65% → 95%; the second target of a
-      // two-target build therefore keeps the bar moving instead of stalling
-      // at the first target's smoke percentage.
+    let failure = null
+    let reported = 65
+    const concurrency = packagingConcurrency({
+      targets: targets.length,
+      requested: options.concurrency,
+      env,
+    })
+    if (concurrency > 1) log(`packaging ${String(targets.length)} targets with up to ${String(concurrency)} at a time`)
+    // Progress is monotonic: two targets in flight report their own slices, and
+    // the bar must not jump backwards when the slower one updates.
+    const advance = async (target, stage, extra = {}) => {
+      reported = Math.max(reported, targetPercent(targets, target, stage))
       state = await updateState(dir, {
-        phase: 'package',
-        percent: targetPercent(targets, target, 'start'),
+        phase: stage === 'smoke' ? 'smoke' : 'package',
+        percent: reported,
         currentTarget: target,
+        ...extra,
       })
+    }
+    const packageTarget = async (target) => {
+      await advance(target, 'start')
       // A marker rather than only a state write: a remote build sees the log,
       // and its progress mapping needs to know which target owns the next
-      // three minutes of npm install.
+      // install.
       log(`packaging ${target}`)
       const shared = {
         dist: built.dist,
@@ -311,15 +405,15 @@ export async function runJob(dir, options) {
         version,
         buildStamp,
         repositoryRoot,
-        source: state.source,
-        ref: state.ref,
+        source: jobSource,
+        ref: jobRef,
         tree: recipes.tree ?? null,
-        sourceEtag: state.archiveEtag ?? null,
+        sourceEtag,
         pluginVersion,
         pluginFingerprint: fingerprint,
         fetchImpl: outbound.fetchImpl,
         env: outbound.env,
-        cacheDir: options.cacheDir ?? defaultCacheDir(),
+        cacheDir,
         log,
       }
       const assembled = full
@@ -327,10 +421,15 @@ export async function runJob(dir, options) {
           ...shared,
           dshVersion: version,
           nodeVersion: options.nodeVersion ?? process.versions.node,
-          cacheDir: options.cacheDir ?? defaultCacheDir(),
+          appCacheDir,
+          refreshAppCache: options.refreshAppCache === true,
         })
         : await assembleWebPackage(shared)
-      const archive = await archivePackage(assembled.packageDir, target, { log })
+      const archive = await archivePackage(assembled.packageDir, target, {
+        log,
+        env: outbound.env,
+        threads: options.archiveThreads,
+      })
       const info = await stat(archive)
       // A package that installs cleanly can still ship a UI that never boots.
       // Start it and look at it with headless Chrome before calling the build
@@ -341,11 +440,7 @@ export async function runJob(dir, options) {
       } else if (!full) {
         smoke = { ok: true, status: 'skipped', reason: 'web-only package has no app/runtime to start', checks: [], screenshots: [] }
       } else {
-        state = await updateState(dir, {
-          phase: 'smoke',
-          percent: targetPercent(targets, target, 'smoke'),
-          currentTarget: target,
-        })
+        await advance(target, 'smoke')
         log(`smoke ${target}: starting the packaged DSH under headless Chrome`)
         smoke = await runPackageSmoke({
           packageRoot: assembled.packageDir,
@@ -371,23 +466,49 @@ export async function runJob(dir, options) {
       }
       artifacts.push(artifact)
       log(`packaged ${target}: ${archive}`)
+      await advance(target, 'end', { artifacts: [...artifacts] })
       if (smoke?.status === 'failed') {
-        state = await updateState(dir, {
-          status: 'smoke-failed',
-          phase: 'smoke',
-          percent: targetPercent(targets, target, 'end'),
-          error: `${target} smoke test failed: ${smoke.error ?? 'see smoke.log'}`,
-          artifacts,
-        })
-        log(`smoke ${target}: failed; stopping before the next target`)
-        return state
+        throw Object.assign(
+          new Error(`${target} smoke test failed: ${smoke.error ?? 'see smoke.log'}`),
+          { smokeFailure: true },
+        )
       }
+    }
+    // A target that fails stops the queue; work already in flight is allowed to
+    // finish so its archive and log are not left half written.
+    const queue = [...targets]
+    let stopped = false
+    const worker = async () => {
+      while (!stopped) {
+        const target = queue.shift()
+        if (target === undefined) return
+        try {
+          await packageTarget(target)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          failure ??= { message, smoke: error instanceof Error && error.smokeFailure === true }
+          stopped = true
+          if (concurrency > 1) log(`${target} failed; letting the other target finish`)
+          return
+        }
+      }
+    }
+    await Promise.all(Array.from(
+      { length: Math.min(concurrency, targets.length) },
+      () => worker(),
+    ))
+    artifacts.sort((left, right) => targets.indexOf(left.target) - targets.indexOf(right.target))
+    if (failure !== null) {
       state = await updateState(dir, {
-        phase: 'package',
-        percent: targetPercent(targets, target, 'end'),
-        currentTarget: target,
+        status: failure.smoke ? 'smoke-failed' : 'failed',
+        phase: failure.smoke ? 'smoke' : 'failed',
+        percent: reported,
+        error: failure.message,
         artifacts,
       })
+      if (failure.smoke) log(`smoke verification failed: ${failure.message}`)
+      else log(`build failed: ${failure.message}`)
+      return state
     }
     // A package is a deliverable only after something actually booted it. A
     // Windows build host cannot run the Linux target, and without Chrome it

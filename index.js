@@ -1,14 +1,14 @@
 // src/index.ts
 import { homedir as homedir4 } from "node:os";
-import path25 from "node:path";
+import path27 from "node:path";
 
 // src/lib/service.mjs
-import { mkdir as mkdir11, readFile as readFile13, readdir as readdir7, rm as rm12, stat as stat11, writeFile as writeFile11 } from "node:fs/promises";
-import { existsSync as existsSync11, readFileSync as readFileSync4, realpathSync as realpathSync2 } from "node:fs";
-import { spawn as spawn6 } from "node:child_process";
-import { createHash as createHash7 } from "node:crypto";
-import os8 from "node:os";
-import path19 from "node:path";
+import { mkdir as mkdir12, readFile as readFile14, readdir as readdir8, rm as rm14, stat as stat13, writeFile as writeFile12 } from "node:fs/promises";
+import { existsSync as existsSync12, readFileSync as readFileSync4, realpathSync } from "node:fs";
+import { spawn as spawn7 } from "node:child_process";
+import { createHash as createHash8 } from "node:crypto";
+import os10 from "node:os";
+import path21 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // code/shared/wireguard.mjs
@@ -506,7 +506,7 @@ async function discoverMembers(options) {
 }
 
 // code/shared/deployment.mjs
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path3 from "node:path";
 function readJson(file) {
   try {
@@ -518,27 +518,10 @@ function readJson(file) {
 }
 function readDeployment(packageRoot) {
   const root = path3.resolve(packageRoot);
-  let resolved = root;
-  let layout = "flat";
-  const current = path3.join(root, "current");
-  const pointerRoot = existsSync(path3.join(root, "dsh-mesh.json")) ? root : path3.basename(path3.dirname(root)) === "releases" && existsSync(path3.join(path3.dirname(path3.dirname(root)), "dsh-mesh.json")) ? path3.dirname(path3.dirname(root)) : null;
-  if (pointerRoot !== null) {
-    const pointer = readJson(path3.join(pointerRoot, "dsh-mesh.json"));
-    const active = typeof pointer?.active === "string" && pointer.active !== "" ? pointer.active : "";
-    if (active !== "") {
-      resolved = path3.isAbsolute(active) ? active : path3.join(pointerRoot, active);
-      layout = "pointer";
-    }
-  }
-  if (layout === "flat" && existsSync(current)) {
-    try {
-      resolved = realpathSync(current);
-      layout = "bluegreen";
-    } catch {
-    }
-  } else if (layout === "flat" && path3.basename(path3.dirname(root)) === "releases") {
-    layout = "bluegreen";
-  }
+  const pointerRoot = existsSync(path3.join(root, "dsh-mesh.json")) ? root : path3.basename(path3.dirname(root)) === "releases" ? path3.dirname(path3.dirname(root)) : root;
+  const pointer = readJson(path3.join(pointerRoot, "dsh-mesh.json"));
+  const active = typeof pointer?.active === "string" && pointer.active !== "" ? pointer.active : "";
+  const resolved = active === "" ? root : path3.isAbsolute(active) ? active : path3.join(pointerRoot, active);
   const manifest = readJson(path3.join(resolved, "manifest.json"));
   const plugin = manifest === null ? readJson(path3.join(resolved, "plugins", "dsh-mesh", "package.json")) : null;
   const manifestVersion = typeof manifest?.version === "string" && manifest.version.trim() !== "" ? manifest.version.trim() : null;
@@ -547,49 +530,572 @@ function readDeployment(packageRoot) {
     version: manifestVersion ?? pluginVersion,
     buildStamp: typeof manifest?.buildStamp === "string" && manifest.buildStamp.trim() !== "" ? manifest.buildStamp.trim() : null,
     builtAt: typeof manifest?.builtAt === "string" && manifest.builtAt.trim() !== "" ? manifest.builtAt.trim() : null,
-    // The release id only means something for blue-green installs; the flat
-    // gateway's directory name is the operator's choice, not a version.
-    release: layout === "flat" ? null : path3.basename(resolved),
-    layout,
+    release: active === "" ? null : path3.basename(resolved),
+    layout: "pointer",
     target: manifest?.target !== null && typeof manifest?.target === "object" ? manifest.target : null
   };
 }
 
 // code/build/job.mjs
-import { appendFile as appendFile2, mkdir as mkdir8, readFile as readFile9, rename as rename5, rm as rm8, stat as stat6, writeFile as writeFile7 } from "node:fs/promises";
-import { existsSync as existsSync6 } from "node:fs";
+import { appendFile as appendFile2, mkdir as mkdir9, readFile as readFile10, rename as rename6, rm as rm10, stat as stat8, writeFile as writeFile8 } from "node:fs/promises";
+import { existsSync as existsSync7 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import os6 from "node:os";
-import path12 from "node:path";
+import os8 from "node:os";
+import path14 from "node:path";
 
 // code/build/engine.mjs
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { createWriteStream, existsSync as existsSync3 } from "node:fs";
-import { chmod, cp, mkdir as mkdir2, open, readFile as readFile4, readdir as readdir2, rename, rm, stat, writeFile as writeFile2 } from "node:fs/promises";
+import { spawn as spawn2 } from "node:child_process";
+import { createHash as createHash2 } from "node:crypto";
+import { createWriteStream as createWriteStream2, existsSync as existsSync4 } from "node:fs";
+import { chmod as chmod2, cp as cp2, mkdir as mkdir3, open as open2, readFile as readFile5, readdir as readdir3, rename as rename2, rm as rm3, stat as stat3, writeFile as writeFile3 } from "node:fs/promises";
 import { Readable as Readable2 } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import { gzipSync, gunzipSync } from "node:zlib";
+import { pipeline as pipeline2 } from "node:stream/promises";
+import os4 from "node:os";
+import path7 from "node:path";
+
+// code/build/archive.mjs
+import { spawn } from "node:child_process";
+import { createReadStream, createWriteStream } from "node:fs";
+import { open, rm, stat } from "node:fs/promises";
 import os2 from "node:os";
+import path4 from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { Worker } from "node:worker_threads";
+import { createGzip } from "node:zlib";
+var MIN_CHUNK = 2 * 1024 * 1024;
+var MAX_CHUNK = 32 * 1024 * 1024;
+var BLOCK = 512;
+var DEFAULT_LEVEL = 6;
+function archiveThreads(options = {}) {
+  const env = options.env ?? process.env;
+  const requested = Number(env.DSH_MESH_ARCHIVE_THREADS);
+  if (Number.isSafeInteger(requested) && requested > 0) return Math.min(8, requested);
+  const cpus = Number(options.cpus) || os2.availableParallelism?.() || os2.cpus().length || 1;
+  return Math.max(1, Math.min(8, cpus));
+}
+function run(command, args, options = {}) {
+  const log = options.log ?? (() => {
+  });
+  const tail = [];
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(command, args, { cwd: options.cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      resolve({ ok: false, code: null, tail: [error instanceof Error ? error.message : String(error)] });
+      return;
+    }
+    const onData = (chunk) => {
+      for (const line of String(chunk).split(/\r?\n/u)) {
+        if (line === "") continue;
+        tail.push(line);
+        if (tail.length > 80) tail.shift();
+        log(line);
+      }
+    };
+    child.stdout.on("data", onData);
+    child.stderr.on("data", onData);
+    child.on("error", (error) => resolve({ ok: false, code: null, tail: [...tail, String(error)] }));
+    child.on("close", (code) => resolve({ ok: code === 0, code, tail }));
+  });
+}
+async function createTar(packageDir, tarPath, options = {}) {
+  await rm(tarPath, { force: true });
+  const result = await run("tar", ["-cf", tarPath, "-C", path4.dirname(packageDir), path4.basename(packageDir)], options);
+  if (!result.ok) throw new Error(`cannot create ${tarPath}: ${result.tail.join("\n")}`);
+}
+function isZeroBlock(block) {
+  for (const byte of block) if (byte !== 0) return false;
+  return true;
+}
+function parseOctal(field) {
+  const text = field.toString("ascii").replace(/\0.*$/u, "").trim();
+  if (text === "") return 0;
+  const value = Number.parseInt(text, 8);
+  return Number.isFinite(value) ? value : 0;
+}
+function patchHeader(header) {
+  header.write("0000755\0", 100, 8, "ascii");
+  header.fill(32, 148, 156);
+  let sum = 0;
+  for (const byte of header) sum += byte;
+  header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
+}
+function patchChunk(chunk, state) {
+  let offset = 0;
+  while (offset + BLOCK <= chunk.length) {
+    if (state.dataLeft > 0) {
+      const take = Math.min(state.dataLeft, chunk.length - offset);
+      offset += take;
+      state.dataLeft -= take;
+      continue;
+    }
+    const header = chunk.subarray(offset, offset + BLOCK);
+    if (isZeroBlock(header)) {
+      offset += BLOCK;
+      continue;
+    }
+    patchHeader(header);
+    state.dataLeft = Math.ceil(parseOctal(header.subarray(124, 136)) / BLOCK) * BLOCK;
+    offset += BLOCK;
+  }
+}
+var COMPRESS_WORKER = `
+const { parentPort } = require('node:worker_threads')
+const { gzipSync } = require('node:zlib')
+parentPort.on('message', message => {
+  const input = Buffer.from(message.chunk)
+  const compressed = gzipSync(input, { level: message.level })
+  const exact = compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength)
+  parentPort.postMessage({ seq: message.seq, chunk: exact }, [exact])
+})
+`;
+async function gzipParallel(options) {
+  const log = options.log ?? (() => {
+  });
+  const info = await stat(options.source);
+  const level = Number.isSafeInteger(options.level) ? options.level : DEFAULT_LEVEL;
+  const wanted = Math.max(1, Math.min(options.threads, Math.floor(info.size / MIN_CHUNK) || 1));
+  const threads = Math.max(1, Math.min(wanted, 8));
+  const chunkSize = Math.max(MIN_CHUNK, Math.min(MAX_CHUNK, Math.ceil(info.size / threads / BLOCK) * BLOCK));
+  await rm(options.destination, { force: true });
+  const input = await open(options.source, "r");
+  const output = await open(options.destination, "w");
+  const workers = [];
+  const idle = [];
+  const waiting = [];
+  const acquire = () => idle.length > 0 ? Promise.resolve(idle.pop()) : new Promise((resolve) => waiting.push(resolve));
+  const release = (worker) => {
+    const next = waiting.shift();
+    if (next !== void 0) next(worker);
+    else idle.push(worker);
+  };
+  let seqDispatched = 0;
+  const compressed = /* @__PURE__ */ new Map();
+  let nextWrite = 0;
+  let written = 0;
+  let drainChain = Promise.resolve();
+  let failure = null;
+  let received = 0;
+  let settle = null;
+  const finished2 = new Promise((resolve) => {
+    settle = resolve;
+  });
+  const maybeSettled = () => {
+    if (received === seqDispatched && nextWrite === received) settle?.();
+  };
+  const writeAll = async (buffer) => {
+    let done = 0;
+    while (done < buffer.length) {
+      const result = await output.write(buffer, done, buffer.length - done);
+      if (result.bytesWritten <= 0) throw new Error(`cannot write ${options.destination}`);
+      done += result.bytesWritten;
+    }
+  };
+  const drain3 = () => {
+    drainChain = drainChain.then(async () => {
+      while (compressed.has(nextWrite)) {
+        const buffer = compressed.get(nextWrite);
+        compressed.delete(nextWrite);
+        await writeAll(buffer);
+        written += buffer.length;
+        nextWrite += 1;
+        maybeSettled();
+      }
+    }).catch((error) => {
+      failure = failure ?? (error instanceof Error ? error : new Error(String(error)));
+      waiting.splice(0).forEach((resolve) => resolve(null));
+    });
+    return drainChain;
+  };
+  try {
+    for (let index = 0; index < threads; index += 1) {
+      const worker = new Worker(COMPRESS_WORKER, { eval: true });
+      worker.on("message", (message) => {
+        compressed.set(message.seq, Buffer.from(message.chunk));
+        received += 1;
+        release(worker);
+        void drain3();
+        maybeSettled();
+      });
+      worker.on("error", (error) => {
+        failure = failure ?? (error instanceof Error ? error : new Error(String(error)));
+        log(`compression worker failed: ${failure.message}`);
+        waiting.splice(0).forEach((resolve) => resolve(null));
+      });
+      idle.push(worker);
+      workers.push(worker);
+    }
+    const state = { dataLeft: 0 };
+    let offset = 0;
+    while (offset < info.size) {
+      const length = Math.min(chunkSize, info.size - offset);
+      const buffer = Buffer.allocUnsafeSlow(length);
+      let filled = 0;
+      while (filled < length) {
+        const read = await input.read(buffer, filled, length - filled, offset + filled);
+        if (read.bytesRead === 0) break;
+        filled += read.bytesRead;
+      }
+      if (filled < length) throw new Error(`short read from ${options.source} at ${String(offset)}: ${String(filled)} of ${String(length)} bytes`);
+      if (options.patchModes === true) patchChunk(buffer, state);
+      const worker = await acquire();
+      if (worker === null) throw failure ?? new Error("compression worker failed");
+      worker.postMessage({ seq: seqDispatched, chunk: buffer.buffer, level }, [buffer.buffer]);
+      seqDispatched += 1;
+      offset += filled;
+    }
+    await finished2;
+    await drain3();
+    if (failure !== null) throw failure;
+    if (nextWrite !== seqDispatched) {
+      throw new Error(`compression lost chunks: wrote ${String(nextWrite)} of ${String(seqDispatched)}`);
+    }
+    await output.sync();
+  } finally {
+    await output.close().catch(() => {
+    });
+    await input.close().catch(() => {
+    });
+    await Promise.all(workers.map((worker) => worker.terminate().catch(() => {
+    })));
+  }
+  return { members: nextWrite, bytes: written };
+}
+async function gzipSingle(source, destination, patchModes) {
+  const steps = [createReadStream(source)];
+  if (patchModes) {
+    const state = { dataLeft: 0, remainder: Buffer.alloc(0) };
+    steps.push(new Transform({
+      transform(chunk, _encoding, callback) {
+        state.remainder = Buffer.concat([state.remainder, chunk]);
+        const usable = state.remainder.length - state.remainder.length % BLOCK;
+        if (usable > 0) {
+          const body = state.remainder.subarray(0, usable);
+          patchChunk(body, state);
+          this.push(body);
+          state.remainder = state.remainder.subarray(usable);
+        }
+        callback();
+      },
+      flush(callback) {
+        if (state.remainder.length > 0) this.push(state.remainder);
+        callback();
+      }
+    }));
+  }
+  steps.push(createGzip({ level: DEFAULT_LEVEL }), createWriteStream(destination));
+  await pipeline(...steps);
+  return { members: 1, bytes: (await stat(destination)).size };
+}
+async function createTarGz(options) {
+  const log = options.log ?? (() => {
+  });
+  const tarPath = `${options.destination}.tar`;
+  const threads = Math.max(1, Number(options.threads) || 1);
+  try {
+    log(`creating tar for ${path4.basename(options.packageDir)}`);
+    await createTar(options.packageDir, tarPath, { log });
+    const size = (await stat(tarPath)).size;
+    if (threads <= 1 || size < MIN_CHUNK) {
+      return await gzipSingle(tarPath, options.destination, options.patchModes === true);
+    }
+    const started = Date.now();
+    const result = await gzipParallel({
+      source: tarPath,
+      destination: options.destination,
+      threads,
+      patchModes: options.patchModes === true,
+      log
+    });
+    log(`compressed ${path4.basename(options.destination)} on ${String(threads)} threads (${String(result.members)} gzip members, ${String(Math.max(1, Math.round((Date.now() - started) / 1e3)))}s)`);
+    return result;
+  } finally {
+    await rm(tarPath, { force: true }).catch(() => {
+    });
+  }
+}
+
+// code/build/cache.mjs
+import { createHash } from "node:crypto";
+import { existsSync as existsSync2 } from "node:fs";
+import { cp, lstat, link, mkdir as mkdir2, readFile as readFile3, readdir, readlink, rename, rm as rm2, stat as stat2, symlink, chmod, writeFile as writeFile2 } from "node:fs/promises";
+import os3 from "node:os";
 import path5 from "node:path";
+var WEB_CACHE_FORMAT = 2;
+var WEB_CACHE_KEEP = 4;
+var APP_CACHE_KEEP = 3;
+function targetSlug(target) {
+  return String(target).trim().toLowerCase().replace(/[^a-z0-9._-]+/gu, "_");
+}
+function appCacheDir(cacheDir, version, target) {
+  const versionSlug = String(version).trim().replace(/[^A-Za-z0-9._+-]+/gu, "_");
+  return path5.join(cacheDir, "app", `${versionSlug}-${targetSlug(target)}`);
+}
+function appCacheMetaFile(cacheDir, version, target) {
+  return `${appCacheDir(cacheDir, version, target)}.json`;
+}
+function webCacheDir(cacheDir, key) {
+  return path5.join(cacheDir, "web", key);
+}
+async function hashTree(dir, hash, root = dir) {
+  if (!existsSync2(dir)) return;
+  const entries = await readdir(dir, { withFileTypes: true });
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    const full = path5.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await hashTree(full, hash, root);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    hash.update(`\0file:${path5.relative(root, full).split(path5.sep).join("/")}\0`);
+    hash.update(await readFile3(full));
+  }
+}
+async function webBuildCacheKey(options) {
+  const sourcePinned = typeof options.archiveSha256 === "string" && options.archiveSha256 !== "";
+  if (!sourcePinned) return null;
+  const hash = createHash("sha256");
+  hash.update(JSON.stringify({
+    format: WEB_CACHE_FORMAT,
+    platform: `${process.platform}-${process.arch}`,
+    node: process.versions.node,
+    source: options.source ?? null,
+    archiveSha256: options.archiveSha256,
+    prepare: options.prepare ?? null,
+    install: options.install ?? null,
+    build: options.build ?? null,
+    prebuild: options.prebuild !== false
+  }));
+  if (typeof options.recipesFile === "string" && existsSync2(options.recipesFile)) {
+    hash.update("\0recipes\0");
+    hash.update(await readFile3(options.recipesFile));
+  }
+  hash.update("\0overlays\0");
+  await hashTree(options.overlayRoot ?? "", hash);
+  return hash.digest("hex");
+}
+async function readWebCache(cacheDir, key) {
+  const dir = webCacheDir(cacheDir, key);
+  const dist = path5.join(dir, "dist");
+  if (!existsSync2(path5.join(dist, "index.html"))) return null;
+  let meta = {};
+  try {
+    meta = JSON.parse(await readFile3(path5.join(dir, "meta.json"), "utf8"));
+  } catch {
+  }
+  return { dist, meta };
+}
+async function writeWebCache(options) {
+  const log = options.log ?? (() => {
+  });
+  const dir = webCacheDir(options.cacheDir, options.key);
+  const staging = `${dir}.tmp-${String(process.pid)}`;
+  try {
+    await rm2(staging, { recursive: true, force: true });
+    await mkdir2(staging, { recursive: true });
+    await cp(options.dist, path5.join(staging, "dist"), { recursive: true });
+    await writeFile2(path5.join(staging, "meta.json"), JSON.stringify({
+      ...options.meta,
+      key: options.key,
+      platform: `${process.platform}-${process.arch}`,
+      node: process.versions.node,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    }, null, 2), "utf8");
+    await rm2(dir, { recursive: true, force: true });
+    await rename(staging, dir);
+    await pruneWebCache(options.cacheDir, WEB_CACHE_KEEP, log);
+    return true;
+  } catch (error) {
+    log(`web build cache write failed (ignored): ${error instanceof Error ? error.message : String(error)}`);
+    await rm2(staging, { recursive: true, force: true }).catch(() => {
+    });
+    return false;
+  }
+}
+async function pruneWebCache(cacheDir, keep = WEB_CACHE_KEEP, log = () => {
+}) {
+  const root = path5.join(cacheDir, "web");
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const dirs = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const full = path5.join(root, entry.name);
+    try {
+      dirs.push({ full, mtime: (await stat2(full)).mtimeMs });
+    } catch {
+    }
+  }
+  dirs.sort((left, right) => right.mtime - left.mtime);
+  for (const stale of dirs.slice(keep)) {
+    await rm2(stale.full, { recursive: true, force: true }).catch(() => {
+    });
+    log(`pruned web build cache ${path5.basename(stale.full)}`);
+  }
+}
+async function readAppCache(cacheDir, version, target) {
+  const dir = appCacheDir(cacheDir, version, target);
+  const metaFile = appCacheMetaFile(cacheDir, version, target);
+  if (!existsSync2(path5.join(dir, "node_modules", "@deepseek-ai", "dsh", "package.json"))) return null;
+  try {
+    const meta = JSON.parse(await readFile3(metaFile, "utf8"));
+    if (meta.complete !== true) return null;
+    if (meta.version !== version || meta.target !== target) return null;
+    return meta;
+  } catch {
+    return null;
+  }
+}
+async function writeAppCacheMeta(options) {
+  const log = options.log ?? (() => {
+  });
+  await mkdir2(path5.join(options.cacheDir, "app"), { recursive: true });
+  await writeFile2(appCacheMetaFile(options.cacheDir, options.version, options.target), JSON.stringify({
+    ...options.meta,
+    version: options.version,
+    target: options.target,
+    complete: true,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString()
+  }, null, 2), "utf8");
+  await pruneAppCache(options.cacheDir, APP_CACHE_KEEP, options.target, options.version, log);
+}
+async function pruneAppCache(cacheDir, keep = APP_CACHE_KEEP, currentTarget = "", currentVersion = "", log = () => {
+}) {
+  const root = path5.join(cacheDir, "app");
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const dirs = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const full = path5.join(root, entry.name);
+    try {
+      dirs.push({ full, mtime: (await stat2(full)).mtimeMs });
+    } catch {
+    }
+  }
+  dirs.sort((left, right) => right.mtime - left.mtime);
+  const keepDir = appCacheDir(cacheDir, currentVersion, currentTarget);
+  const survivors = new Set(dirs.slice(0, keep).map((entry) => entry.full));
+  survivors.add(keepDir);
+  for (const entry of dirs) {
+    if (survivors.has(entry.full)) continue;
+    await rm2(entry.full, { recursive: true, force: true }).catch(() => {
+    });
+    await rm2(`${entry.full}.json`, { force: true }).catch(() => {
+    });
+    log(`pruned app cache ${path5.basename(entry.full)}`);
+  }
+}
+var CLONE_CONCURRENCY = 24;
+function semaphore(limit) {
+  let active = 0;
+  const waiting = [];
+  const next = () => {
+    if (active >= limit) return;
+    const job = waiting.shift();
+    if (job === void 0) return;
+    void job();
+  };
+  return async (fn) => {
+    const run3 = () => {
+      active += 1;
+      return fn().finally(() => {
+        active -= 1;
+        next();
+      });
+    };
+    if (active < limit) return run3();
+    return new Promise((resolve, reject) => {
+      waiting.push(() => {
+        run3().then(resolve, reject);
+      });
+    });
+  };
+}
+async function cloneTree(from, to, options = {}) {
+  const log = options.log ?? (() => {
+  });
+  await rm2(to, { recursive: true, force: true });
+  const counts = { linked: 0, copied: 0, symlinked: 0 };
+  const run3 = semaphore(CLONE_CONCURRENCY);
+  const cloneEntry = async (source, destination) => {
+    const info = await run3(() => lstat(source));
+    if (info.isDirectory()) {
+      await run3(() => mkdir2(destination, { recursive: true }));
+      const entries = await run3(() => readdir(source));
+      await Promise.all(entries.map((name) => cloneEntry(path5.join(source, name), path5.join(destination, name))));
+      return;
+    }
+    if (info.isSymbolicLink()) {
+      const target = await run3(() => readlink(source));
+      await run3(() => symlink(target, destination));
+      counts.symlinked += 1;
+      return;
+    }
+    if (!info.isFile()) return;
+    try {
+      await run3(() => link(source, destination));
+      counts.linked += 1;
+      return;
+    } catch {
+      await run3(() => cp(source, destination, { preserveTimestamps: true }));
+      try {
+        await run3(() => chmod(destination, info.mode & 511));
+      } catch {
+      }
+      counts.copied += 1;
+    }
+  };
+  await cloneEntry(from, to);
+  log(`cloned app tree: ${String(counts.linked)} linked, ${String(counts.copied)} copied, ${String(counts.symlinked)} symlinks`);
+  return counts;
+}
+function cachesDisabled(env = process.env) {
+  const value = String(env.DSH_MESH_NO_CACHE ?? "").trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+function packagingConcurrency(options = {}) {
+  const targets = Math.max(1, Number(options.targets) || 1);
+  if (targets === 1) return 1;
+  const requested = Number(options.requested);
+  if (Number.isSafeInteger(requested) && requested > 0) return Math.min(targets, requested);
+  const env = options.env ?? process.env;
+  const fromEnv = Number(env.DSH_MESH_CONCURRENCY);
+  if (Number.isSafeInteger(fromEnv) && fromEnv > 0) return Math.min(targets, fromEnv);
+  const cpus = Number(options.cpus) || os3.availableParallelism?.() || os3.cpus().length || 1;
+  const memory = Number(options.totalMemBytes) || os3.totalmem();
+  if (memory < 6 * 1024 ** 3) return 1;
+  return Math.min(targets, Math.max(1, Math.floor(cpus / 4)));
+}
 
 // code/build/static-assets.mjs
-import { existsSync as existsSync2 } from "node:fs";
-import { readFile as readFile3, readdir } from "node:fs/promises";
-import path4 from "node:path";
+import { existsSync as existsSync3 } from "node:fs";
+import { readFile as readFile4, readdir as readdir2 } from "node:fs/promises";
+import path6 from "node:path";
 var NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 var FILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 var SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 async function collectStaticAssets(gateDirectory) {
-  const assetsDirectory = path4.join(gateDirectory, "assets");
-  if (!existsSync2(assetsDirectory)) return [];
-  const directories = await readdir(assetsDirectory, { withFileTypes: true }).catch(() => []);
+  const assetsDirectory = path6.join(gateDirectory, "assets");
+  if (!existsSync3(assetsDirectory)) return [];
+  const directories = await readdir2(assetsDirectory, { withFileTypes: true }).catch(() => []);
   const result = [];
   for (const directory of directories) {
     if (!directory.isDirectory()) continue;
     try {
-      const manifestPath = path4.join(assetsDirectory, directory.name, "manifest.json");
-      const raw = JSON.parse(await readFile3(manifestPath, "utf8"));
+      const manifestPath = path6.join(assetsDirectory, directory.name, "manifest.json");
+      const raw = JSON.parse(await readFile4(manifestPath, "utf8"));
       const entries = Array.isArray(raw.assets) ? raw.assets : typeof raw.file === "string" ? [{ os: "windows", arch: "x64", file: raw.file, sha256: raw.sha256, bytes: raw.bytes }] : [];
       const assets = [];
       for (const entry of entries) {
@@ -599,7 +1105,7 @@ async function collectStaticAssets(gateDirectory) {
         const bytes = Number(entry.bytes);
         if (!FILE_PATTERN.test(file) || !SHA256_PATTERN.test(sha256)) continue;
         if (!Number.isSafeInteger(bytes) || bytes <= 0) continue;
-        if (!existsSync2(path4.join(assetsDirectory, directory.name, file))) continue;
+        if (!existsSync3(path6.join(assetsDirectory, directory.name, file))) continue;
         assets.push({
           os: typeof entry.os === "string" ? entry.os : "",
           arch: typeof entry.arch === "string" ? entry.arch : "",
@@ -824,6 +1330,9 @@ function createProxyFetch(proxyUrl, options = {}) {
 var DEFAULT_SOURCE = "https://github.com/deepseek-ai/deepseek-harness";
 var DEFAULT_REF = "master";
 var DEFAULT_TARGETS = Object.freeze(["linux-x64", "win-x64"]);
+function defaultCacheDir() {
+  return path7.join(os4.homedir(), ".dsh", "mesh", "cache");
+}
 function proxyFor(options = {}) {
   const proxy2 = typeof options.proxy === "string" && options.proxy.trim() !== "" ? options.proxy.trim() : null;
   if (proxy2 === null) return { fetchImpl: options.fetchImpl, env: options.env, proxy: null };
@@ -834,8 +1343,8 @@ function proxyFor(options = {}) {
   };
 }
 async function sha256File(file) {
-  const hash = createHash("sha256");
-  const handle = await open(file, "r");
+  const hash = createHash2("sha256");
+  const handle = await open2(file, "r");
   try {
     const buffer = Buffer.alloc(1024 * 1024);
     while (true) {
@@ -849,17 +1358,17 @@ async function sha256File(file) {
   return hash.digest("hex");
 }
 function sha256Text(text) {
-  return createHash("sha256").update(text).digest("hex");
+  return createHash2("sha256").update(text).digest("hex");
 }
 function parseTarget(target) {
-  const [os9, arch] = String(target).split("-");
-  if (!["linux", "win", "darwin"].includes(os9)) throw new Error(`unsupported target OS: ${target}`);
+  const [os11, arch] = String(target).split("-");
+  if (!["linux", "win", "darwin"].includes(os11)) throw new Error(`unsupported target OS: ${target}`);
   if (!["x64", "arm64"].includes(arch)) throw new Error(`unsupported target architecture: ${target}`);
-  return { os: os9, arch, libc: os9 === "linux" ? "glibc" : "" };
+  return { os: os11, arch, libc: os11 === "linux" ? "glibc" : "" };
 }
 function classifySource(source) {
   const value = String(source).trim().replace(/^git\+/u, "").replace(/\.git$/u, "").replace(/\/+$/u, "");
-  if (existsSync3(value)) return { kind: "local", dir: path5.resolve(value) };
+  if (existsSync4(value)) return { kind: "local", dir: path7.resolve(value) };
   let url;
   try {
     url = new URL(value);
@@ -909,7 +1418,7 @@ async function remoteRevision(source, ref, options = {}) {
   }
 }
 async function download(url, file, options = {}) {
-  if (existsSync3(file) && (await stat(file)).size > 0) return true;
+  if (existsSync4(file) && (await stat3(file)).size > 0) return true;
   const fetchImpl = options.fetchImpl ?? fetch;
   const log = options.log ?? (() => {
   });
@@ -917,10 +1426,10 @@ async function download(url, file, options = {}) {
   const response = await fetchImpl(url, { redirect: "follow" });
   if (response.status === 404) return false;
   if (!response.ok || response.body === null) throw new Error(`download failed: ${url} -> HTTP ${String(response.status)}`);
-  await mkdir2(path5.dirname(file), { recursive: true });
+  await mkdir3(path7.dirname(file), { recursive: true });
   const temporary = `${file}.part`;
-  await pipeline(Readable2.fromWeb(response.body), createWriteStream(temporary));
-  await rename(temporary, file);
+  await pipeline2(Readable2.fromWeb(response.body), createWriteStream2(temporary));
+  await rename2(temporary, file);
   return true;
 }
 function runCommand(command, args, options = {}) {
@@ -930,7 +1439,7 @@ function runCommand(command, args, options = {}) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(command, args, {
+      child = spawn2(command, args, {
         cwd: options.cwd,
         env: options.env ?? process.env,
         shell: options.shell === true,
@@ -971,24 +1480,24 @@ function runCommand(command, args, options = {}) {
   });
 }
 async function extractTarball(archive, destination, options = {}) {
-  await rm(destination, { recursive: true, force: true });
-  await mkdir2(destination, { recursive: true });
+  await rm3(destination, { recursive: true, force: true });
+  await mkdir3(destination, { recursive: true });
   if (archive.toLowerCase().endsWith(".zip") && process.platform !== "win32") {
     const temporary = `${destination}.zip-tmp`;
-    await rm(temporary, { recursive: true, force: true });
-    await mkdir2(temporary, { recursive: true });
+    await rm3(temporary, { recursive: true, force: true });
+    await mkdir3(temporary, { recursive: true });
     const unzipped = await runCommand("unzip", ["-q", archive, "-d", temporary], { log: options.log });
     if (!unzipped.ok) {
       throw new Error(`cannot extract ${archive}: ${unzipped.error?.message ?? `unzip exited with ${String(unzipped.code)}`}
 ${unzipped.tail.join("\n")}`);
     }
-    const entries = await readdir2(temporary);
+    const entries = await readdir3(temporary);
     const first = entries[0];
-    const wrapped = entries.length === 1 && first !== void 0 && (await stat(path5.join(temporary, first))).isDirectory();
-    const content = wrapped ? path5.join(temporary, first) : temporary;
-    await rm(destination, { recursive: true, force: true });
-    await cp(content, destination, { recursive: true });
-    await rm(temporary, { recursive: true, force: true });
+    const wrapped = entries.length === 1 && first !== void 0 && (await stat3(path7.join(temporary, first))).isDirectory();
+    const content = wrapped ? path7.join(temporary, first) : temporary;
+    await rm3(destination, { recursive: true, force: true });
+    await cp2(content, destination, { recursive: true });
+    await rm3(temporary, { recursive: true, force: true });
     return;
   }
   const result = await runCommand("tar", ["-xf", archive, "--strip-components=1", "-C", destination], {
@@ -1009,26 +1518,26 @@ async function prepareSource(options) {
     log(`using local source ${classified.dir}`);
     return { dir: classified.dir, source, ref, local: true };
   }
-  const cacheDir = options.cacheDir ?? path5.join(os2.homedir(), ".dsh", "mesh", "cache");
+  const cacheDir = options.cacheDir ?? path7.join(os4.homedir(), ".dsh", "mesh", "cache");
   const urls = tarballUrls(classified, ref);
-  const archive = path5.join(cacheDir, "sources", `${sha256Text(`${classified.owner}/${classified.repo}@${ref}`).slice(0, 16)}.tar.gz`);
+  const archive = path7.join(cacheDir, "sources", `${sha256Text(`${classified.owner}/${classified.repo}@${ref}`).slice(0, 16)}.tar.gz`);
   const etagFile = `${archive}.etag`;
   const immutable = /^[0-9a-f]{40}$/iu.test(ref);
   const remoteEtag = immutable ? null : await remoteRevision(source, ref, { fetchImpl: options.fetchImpl, log });
   let cachedEtag = "";
-  if (!immutable && existsSync3(etagFile)) {
+  if (!immutable && existsSync4(etagFile)) {
     try {
-      cachedEtag = (await readFile4(etagFile, "utf8")).trim();
+      cachedEtag = (await readFile5(etagFile, "utf8")).trim();
     } catch {
       cachedEtag = "";
     }
   }
-  if (!immutable && existsSync3(archive)) {
-    const age = Date.now() - (await stat(archive)).mtimeMs;
+  if (!immutable && existsSync4(archive)) {
+    const age = Date.now() - (await stat3(archive)).mtimeMs;
     const staleContent = remoteEtag !== null && cachedEtag !== remoteEtag;
     if (staleContent || age > (options.maxCacheAgeMs ?? 6 * 60 * 6e4)) {
       log(staleContent ? `refreshing cached tarball for ${ref} (remote content changed)` : `refreshing cached tarball for ${ref} (older than the cache window)`);
-      await rm(archive, { force: true });
+      await rm3(archive, { force: true });
     }
   }
   let downloaded = false;
@@ -1039,19 +1548,19 @@ async function prepareSource(options) {
   if (!downloaded) throw new Error(`cannot find ref "${ref}" in ${classified.owner}/${classified.repo}`);
   if (remoteEtag !== null) {
     try {
-      await writeFile2(etagFile, `${remoteEtag}
+      await writeFile3(etagFile, `${remoteEtag}
 `, "utf8");
     } catch {
     }
   }
   const archiveSha256 = await sha256File(archive);
-  const dir = path5.join(options.workDir, "src");
-  log(`extracting ${path5.basename(archive)} to ${dir}`);
+  const dir = path7.join(options.workDir, "src");
+  log(`extracting ${path7.basename(archive)} to ${dir}`);
   await extractTarball(archive, dir, { log });
   return { dir, source, ref, local: false, archive, archiveSha256, archiveEtag: remoteEtag };
 }
 async function loadRecipes(file) {
-  const parsed = JSON.parse(await readFile4(file, "utf8"));
+  const parsed = JSON.parse(await readFile5(file, "utf8"));
   if (parsed === null || typeof parsed !== "object" || !Array.isArray(parsed.steps)) {
     throw new Error(`${file} is not a recipe manifest`);
   }
@@ -1065,16 +1574,16 @@ async function applyRecipes(options) {
   const mismatches = [];
   for (const step of options.recipes.steps) {
     for (const entry of step.files ?? []) {
-      const target = path5.join(options.dir, entry.path);
-      const overlay = path5.join(options.overlayRoot, entry.overlay);
+      const target = path7.join(options.dir, entry.path);
+      const overlay = path7.join(options.overlayRoot, entry.overlay);
       const label = { step: step.id, title: step.title, doc: step.doc, path: entry.path };
-      if (!existsSync3(overlay)) {
+      if (!existsSync4(overlay)) {
         mismatches.push({ ...label, reason: "overlay file is missing", expected: entry.baseSha256 ?? null, actual: null });
         continue;
       }
       let current = null;
       try {
-        current = await readFile4(target, "utf8");
+        current = await readFile5(target, "utf8");
       } catch (error) {
         if (entry.baseSha256 !== null) {
           mismatches.push({ ...label, reason: "upstream file is missing", expected: entry.baseSha256, actual: null });
@@ -1097,9 +1606,9 @@ async function applyRecipes(options) {
           continue;
         }
       }
-      await mkdir2(path5.dirname(target), { recursive: true });
-      await cp(overlay, target);
-      const written = await readFile4(target, "utf8");
+      await mkdir3(path7.dirname(target), { recursive: true });
+      await cp2(overlay, target);
+      const written = await readFile5(target, "utf8");
       if (!written.includes(entry.marker)) {
         mismatches.push({ ...label, reason: "overlay was written but its marker is missing", expected: entry.baseSha256 ?? null, actual: sha256Text(written) });
         continue;
@@ -1111,23 +1620,23 @@ async function applyRecipes(options) {
   return { ok: mismatches.length === 0, applied, skipped: skipped2, mismatches };
 }
 async function writeWorkOrder(options) {
-  await mkdir2(options.dir, { recursive: true });
+  await mkdir3(options.dir, { recursive: true });
   const jobDir = options.jobDir ?? options.dir;
-  const jsonPath = path5.join(options.dir, "work-order.json");
-  const markdownPath = path5.join(options.dir, "work-order.md");
-  const promptPath = path5.join(options.dir, "subagent-prompt.txt");
+  const jsonPath = path7.join(options.dir, "work-order.json");
+  const markdownPath = path7.join(options.dir, "work-order.md");
+  const promptPath = path7.join(options.dir, "subagent-prompt.txt");
   const prompt = [
     `\u4F60\u5728\u4E3A dsh-mesh \u6784\u5EFA ${options.source}@${options.ref} \u7684\u4FEE\u6539\u7248 Web \u5305\u3002`,
     "\u786E\u5B9A\u6027\u6784\u5EFA\u5728\u5E94\u7528\u6E90\u7801\u8986\u76D6\u5C42\u65F6\u5931\u8D25\u3002\u8BF7\u53EA\u4FEE\u590D\u5DE5\u4F5C\u6811\u91CC\u7684\u6E90\u7801\uFF0C\u4E0D\u8981\u653E\u5BBD\u8986\u76D6\u5C42\u6821\u9A8C\u3002",
     "\u5148\u8BFB work-order.md \u4E0E\u5BF9\u5E94\u7684 Step \u6587\u6863\uFF0C\u518D\u4FEE\u6539\u4E0B\u5217\u6587\u4EF6\uFF0C\u4F7F\u6BCF\u4E2A\u6587\u4EF6\u7684\u8986\u76D6\u5C42 marker \u5B58\u5728\uFF0C\u5E76\u8BA9 pnpm run build:web \u901A\u8FC7\u3002",
-    `\u4FEE\u5B8C\u540E\u8C03\u7528 dsh-mesh \u7684 build \u5DE5\u5177\uFF0C\u5E76\u4F20 jobId="${path5.basename(jobDir)}"\uFF1B\u5B83\u4F1A\u81EA\u52A8\u628A\u4FEE\u6539\u56FA\u5316\u6210\u8986\u76D6\u5C42\u5E76\u7EE7\u7EED\u540C\u4E00\u4E2A job\u3002`,
+    `\u4FEE\u5B8C\u540E\u8C03\u7528 dsh-mesh \u7684 build \u5DE5\u5177\uFF0C\u5E76\u4F20 jobId="${path7.basename(jobDir)}"\uFF1B\u5B83\u4F1A\u81EA\u52A8\u628A\u4FEE\u6539\u56FA\u5316\u6210\u8986\u76D6\u5C42\u5E76\u7EE7\u7EED\u540C\u4E00\u4E2A job\u3002`,
     "",
     ...options.result.mismatches.map((item) => `- ${item.path}\uFF08${item.step}\uFF1B${item.doc}\uFF09\uFF1A${item.reason}`)
   ].join("\n");
   const markdown = [
     `# \u6784\u5EFA\u5DE5\u4F5C\u5355\uFF1A${options.source}@${options.ref}`,
     "",
-    `- \u6E90\u7801\u6811\uFF1A\`${options.worktree ?? path5.join(jobDir, "src")}\``,
+    `- \u6E90\u7801\u6811\uFF1A\`${options.worktree ?? path7.join(jobDir, "src")}\``,
     `- \u4EFB\u52A1\u76EE\u5F55\uFF1A\`${jobDir}\``,
     `- \u751F\u6210\u65F6\u95F4\uFF1A${(/* @__PURE__ */ new Date()).toISOString()}`,
     `- \u5931\u8D25\u9879\uFF1A${String(options.result.mismatches.length)}`,
@@ -1142,7 +1651,7 @@ async function writeWorkOrder(options) {
     "",
     "1. \u6253\u5F00\u6E90\u7801\u6811\u91CC\u7684\u76EE\u6807\u6587\u4EF6\uFF0C\u6309\u5BF9\u5E94 Step \u6587\u6863\u628A\u754C\u9762\u6539\u597D\u3002",
     "2. \u4FDD\u6301\u8986\u76D6\u5C42 marker \u6CE8\u91CA\u5B58\u5728\uFF1Apicker \u662F `dsh-mesh overlay: picker`\uFF0Clogin \u662F `dsh-mesh overlay: login`\u3002",
-    `3. \u8C03\u7528 build \u5DE5\u5177\uFF0C\u53C2\u6570 \`jobId="${path5.basename(jobDir)}"\`\uFF1B\u5B83\u4F1A\u628A\u6539\u597D\u7684\u6587\u4EF6\u5199\u56DE \`build/overlays/\`\u3002`,
+    `3. \u8C03\u7528 build \u5DE5\u5177\uFF0C\u53C2\u6570 \`jobId="${path7.basename(jobDir)}"\`\uFF1B\u5B83\u4F1A\u628A\u6539\u597D\u7684\u6587\u4EF6\u5199\u56DE \`build/overlays/\`\u3002`,
     "4. \u540C\u4E00\u6B21 build \u8C03\u7528\u4F1A\u590D\u7528\u5DE5\u4F5C\u6811\u7EE7\u7EED install/build/package\uFF1B\u4E0B\u4E00\u6B21\u540C\u4E00 ref \u4F1A\u76F4\u63A5\u5E94\u7528\u65B0\u8986\u76D6\u5C42\u3002",
     "",
     "## \u5EFA\u8BAE\u7684\u5B50\u4EE3\u7406\u63D0\u793A\u8BCD",
@@ -1151,16 +1660,16 @@ async function writeWorkOrder(options) {
     prompt,
     "```"
   ].join("\n");
-  await writeFile2(jsonPath, JSON.stringify({
+  await writeFile3(jsonPath, JSON.stringify({
     source: options.source,
     ref: options.ref,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
     jobDir,
-    worktree: options.worktree ?? path5.join(jobDir, "src"),
+    worktree: options.worktree ?? path7.join(jobDir, "src"),
     mismatches: options.result.mismatches
   }, null, 2), "utf8");
-  await writeFile2(markdownPath, markdown, "utf8");
-  await writeFile2(promptPath, prompt, "utf8");
+  await writeFile3(markdownPath, markdown, "utf8");
+  await writeFile3(promptPath, prompt, "utf8");
   return { json: jsonPath, markdown: markdownPath, prompt: promptPath };
 }
 async function learnOverlays(options) {
@@ -1170,19 +1679,19 @@ async function learnOverlays(options) {
   );
   for (const step of options.recipes.steps) {
     for (const entry of step.files ?? []) {
-      const source = path5.join(options.worktree, entry.path);
+      const source = path7.join(options.worktree, entry.path);
       let text;
       try {
-        text = await readFile4(source, "utf8");
+        text = await readFile5(source, "utf8");
       } catch {
         throw new Error(`cannot learn ${entry.path}: the file is missing from the worktree`);
       }
       if (!text.includes(entry.marker)) {
         throw new Error(`cannot learn ${entry.path}: the overlay marker "${entry.marker}" is missing`);
       }
-      const target = path5.join(options.overlayRoot, entry.overlay);
-      await mkdir2(path5.dirname(target), { recursive: true });
-      await writeFile2(target, text, "utf8");
+      const target = path7.join(options.overlayRoot, entry.overlay);
+      await mkdir3(path7.dirname(target), { recursive: true });
+      await writeFile3(target, text, "utf8");
       const actual = actualByPath.get(entry.path);
       if (actual !== void 0 && entry.baseSha256 !== null) entry.baseSha256 = actual;
       learned.push({ step: step.id, path: entry.path, overlay: entry.overlay });
@@ -1198,8 +1707,8 @@ async function buildWebWorkerPackages(options) {
   });
   const built = [];
   for (const name of ["@deepseek-ai/dsh-experimental-webworker-runtime", "@deepseek-ai/dsh-experimental-webworker-packer"]) {
-    const packageDir = path5.join(options.dir, "packages", "experimental", name.replace("@deepseek-ai/dsh-experimental-", ""));
-    if (!existsSync3(packageDir)) {
+    const packageDir = path7.join(options.dir, "packages", "experimental", name.replace("@deepseek-ai/dsh-experimental-", ""));
+    if (!existsSync4(packageDir)) {
       log(`skipping ${name}: not in this revision`);
       continue;
     }
@@ -1227,6 +1736,16 @@ async function runWebBuild(options) {
   };
   const install = options.install === void 0 ? ["pnpm", "install", "--frozen-lockfile"] : options.install;
   const build = options.build ?? ["pnpm", "run", "build:web"];
+  const cacheDir = typeof options.cacheDir === "string" && options.cacheDir !== "" ? options.cacheDir : null;
+  const cacheKey = typeof options.cacheKey === "string" && options.cacheKey !== "" ? options.cacheKey : null;
+  if (cacheDir !== null && cacheKey !== null && options.refreshCache !== true) {
+    const cached = await readWebCache(cacheDir, cacheKey);
+    if (cached !== null) {
+      log(`web build cache hit ${cacheKey.slice(0, 12)}: skipping pnpm install and the web build`);
+      await progress("build", 62);
+      return { ok: true, dist: cached.dist, cached: true };
+    }
+  }
   if (install !== null && install.length > 0) {
     await progress("build", 16);
     log(`$ ${install.join(" ")}`);
@@ -1278,29 +1797,39 @@ ${built.tail.join("\n")}` };
   }
   await progress("build", 62);
   const candidates = [
-    path5.join(options.dir, "apps", "web", "dist"),
-    path5.join(options.dir, "dist")
+    path7.join(options.dir, "apps", "web", "dist"),
+    path7.join(options.dir, "dist")
   ];
   for (const candidate of candidates) {
-    if (existsSync3(path5.join(candidate, "index.html"))) return { ok: true, dist: candidate };
+    if (!existsSync4(path7.join(candidate, "index.html"))) continue;
+    if (cacheDir !== null && cacheKey !== null) {
+      await writeWebCache({
+        cacheDir,
+        key: cacheKey,
+        dist: candidate,
+        meta: options.cacheMeta ?? {},
+        log
+      });
+    }
+    return { ok: true, dist: candidate, cached: false };
   }
   return { ok: false, dist: null, error: "the build finished but no dist/index.html was found" };
 }
 async function copyIfExists(from, to) {
-  if (!existsSync3(from)) return;
-  await mkdir2(path5.dirname(to), { recursive: true });
-  await cp(from, to, { recursive: true });
+  if (!existsSync4(from)) return;
+  await mkdir3(path7.dirname(to), { recursive: true });
+  await cp2(from, to, { recursive: true });
 }
 async function listFiles(dir) {
   const out = [];
   async function walk(current) {
-    for (const entry of await readdir2(current, { withFileTypes: true })) {
-      const full = path5.join(current, entry.name);
+    for (const entry of await readdir3(current, { withFileTypes: true })) {
+      const full = path7.join(current, entry.name);
       if (entry.isDirectory()) await walk(full);
-      else if (entry.isFile()) out.push(path5.relative(dir, full));
+      else if (entry.isFile()) out.push(path7.relative(dir, full));
     }
   }
-  if (existsSync3(dir)) await walk(dir);
+  if (existsSync4(dir)) await walk(dir);
   return out;
 }
 var PLUGIN_FINGERPRINT_FILES = [
@@ -1310,21 +1839,11 @@ var PLUGIN_FINGERPRINT_FILES = [
   "cordis.patch.yml",
   "icon.svg",
   "VERSION",
-  "start-dsh.sh",
   "start-interop.sh",
   "install-interop-service.sh",
   "uninstall-interop-service.sh",
   "install.sh",
-  "start.sh",
-  "stop.sh",
-  "status.sh",
-  "doctor.sh",
   "install.ps1",
-  "start.ps1",
-  "stop.ps1",
-  "start.cmd",
-  "stop.cmd",
-  "start-stack.ps1",
   // The stable launcher and its pointer live at the layout root; a package
   // that lacks them cannot be installed in the pointer layout.
   "dsh-mesh.mjs"
@@ -1333,34 +1852,42 @@ var PLUGIN_FINGERPRINT_DIRS = ["locale", "build", "docs", "code"];
 async function pluginFingerprint(repositoryRoot) {
   const files = [];
   for (const name of PLUGIN_FINGERPRINT_FILES) {
-    if (existsSync3(path5.join(repositoryRoot, name))) files.push(name);
+    if (existsSync4(path7.join(repositoryRoot, name))) files.push(name);
   }
   for (const dir of PLUGIN_FINGERPRINT_DIRS) {
-    for (const rel of await listFiles(path5.join(repositoryRoot, dir))) files.push(path5.join(dir, rel));
+    for (const rel of await listFiles(path7.join(repositoryRoot, dir))) files.push(path7.join(dir, rel));
   }
   files.sort();
-  const hash = createHash("sha256");
+  const hash = createHash2("sha256");
   for (const rel of files) {
     hash.update(rel);
     hash.update("\0");
-    hash.update(await sha256File(path5.join(repositoryRoot, rel)));
+    hash.update(await sha256File(path7.join(repositoryRoot, rel)));
     hash.update("\n");
   }
   return hash.digest("hex");
 }
 async function readExtraPlugins(repositoryRoot) {
-  const file = path5.join(repositoryRoot, "build", "plugins.json");
-  if (!existsSync3(file)) return [];
-  const parsed = JSON.parse(await readFile4(file, "utf8"));
+  const file = path7.join(repositoryRoot, "build", "plugins.json");
+  if (!existsSync4(file)) return [];
+  const parsed = JSON.parse(await readFile5(file, "utf8"));
   const list = parsed !== null && typeof parsed === "object" && Array.isArray(parsed.plugins) ? parsed.plugins : [];
   return list.filter((entry) => entry !== null && typeof entry === "object").map((entry) => ({
     name: typeof entry.name === "string" ? entry.name.trim() : "",
     dir: typeof entry.dir === "string" && entry.dir.trim() !== "" ? entry.dir.trim() : "",
     repo: typeof entry.repo === "string" ? entry.repo.trim() : "",
     ref: typeof entry.ref === "string" && entry.ref.trim() !== "" ? entry.ref.trim() : "main"
-  })).filter((entry) => entry.name !== "" && entry.repo !== "").map((entry) => ({ ...entry, dir: entry.dir !== "" ? entry.dir : path5.join("plugins", entry.name) }));
+  })).filter((entry) => entry.name !== "" && entry.repo !== "").map((entry) => ({ ...entry, dir: entry.dir !== "" ? entry.dir : path7.join("plugins", entry.name) }));
 }
+var extraPluginsGate = Promise.resolve();
 async function copyExtraPlugins(options) {
+  const run3 = extraPluginsGate.then(() => copyExtraPluginsOnce(options));
+  extraPluginsGate = run3.then(() => {
+  }, () => {
+  });
+  return run3;
+}
+async function copyExtraPluginsOnce(options) {
   const plugins = await readExtraPlugins(options.repositoryRoot);
   if (plugins.length === 0) return [];
   const cacheDir = options.cacheDir ?? defaultCacheDir();
@@ -1372,9 +1899,9 @@ async function copyExtraPlugins(options) {
     if (classified.kind !== "github") {
       throw new Error(`extra plugin ${plugin.name} must be a github.com repository, not ${plugin.repo}`);
     }
-    const archive = path5.join(cacheDir, "plugins", `${plugin.name}.tar.gz`);
-    await mkdir2(path5.dirname(archive), { recursive: true });
-    await rm(archive, { force: true });
+    const archive = path7.join(cacheDir, "plugins", `${plugin.name}.tar.gz`);
+    await mkdir3(path7.dirname(archive), { recursive: true });
+    await rm3(archive, { force: true });
     let downloaded = false;
     for (const url of tarballUrls(classified, plugin.ref)) {
       downloaded = await download(url, archive, { fetchImpl: options.fetchImpl, log });
@@ -1383,14 +1910,14 @@ async function copyExtraPlugins(options) {
     if (!downloaded) {
       throw new Error(`cannot download extra plugin ${plugin.name} from ${plugin.repo}@${plugin.ref}`);
     }
-    const tree = path5.join(cacheDir, "plugins", `${plugin.name}-tree`);
-    await rm(tree, { recursive: true, force: true });
+    const tree = path7.join(cacheDir, "plugins", `${plugin.name}-tree`);
+    await rm3(tree, { recursive: true, force: true });
     await extractTarball(archive, tree, { log });
-    const target = path5.join(options.packageDir, plugin.dir);
-    await rm(target, { recursive: true, force: true });
-    await mkdir2(path5.dirname(target), { recursive: true });
-    await cp(tree, target, { recursive: true });
-    await rm(tree, { recursive: true, force: true });
+    const target = path7.join(options.packageDir, plugin.dir);
+    await rm3(target, { recursive: true, force: true });
+    await mkdir3(path7.dirname(target), { recursive: true });
+    await cp2(tree, target, { recursive: true });
+    await rm3(tree, { recursive: true, force: true });
     records.push({
       name: plugin.name,
       dir: plugin.dir,
@@ -1407,37 +1934,37 @@ async function assembleWebPackage(options) {
   const { os: targetOs2, arch, libc } = parseTarget(options.target);
   const buildStamp = typeof options.buildStamp === "string" && options.buildStamp !== "" ? options.buildStamp : null;
   const identity = buildStamp === null ? options.version : `${options.version}-${buildStamp}`;
-  const packageDir = path5.join(options.outputDir, `dsh-mesh-${identity}-${targetOs2}-${arch}`);
-  await rm(packageDir, { recursive: true, force: true });
-  await mkdir2(path5.join(packageDir, "web"), { recursive: true });
-  await cp(options.dist, path5.join(packageDir, "web"), { recursive: true });
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "gate"), path5.join(packageDir, "gate"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "shared"), path5.join(packageDir, "shared"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "shared"), path5.join(packageDir, "code", "shared"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "config"), path5.join(packageDir, "config"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "windows-service"), path5.join(packageDir, "code", "windows-service"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "interop-service"), path5.join(packageDir, "code", "interop-service"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "wireguard"), path5.join(packageDir, "code", "wireguard"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "dsh-service"), path5.join(packageDir, "code", "dsh-service"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "deploy"), path5.join(packageDir, "code", "deploy"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "install"), path5.join(packageDir, "code", "install"));
-  await copyIfExists(path5.join(options.repositoryRoot, "dsh-mesh.mjs"), path5.join(packageDir, "dsh-mesh.mjs"));
-  await copyIfExists(path5.join(options.repositoryRoot, "docs"), path5.join(packageDir, "docs"));
-  for (const file of ["install.sh", "start.sh", "stop.sh", "status.sh", "doctor.sh", "install.ps1", "start.ps1", "stop.ps1", "start.cmd", "stop.cmd", "start-stack.ps1", "VERSION"]) {
-    await copyIfExists(path5.join(options.repositoryRoot, "code", file), path5.join(packageDir, file));
+  const packageDir = path7.join(options.outputDir, `dsh-mesh-${identity}-${targetOs2}-${arch}`);
+  await rm3(packageDir, { recursive: true, force: true });
+  await mkdir3(path7.join(packageDir, "web"), { recursive: true });
+  await cp2(options.dist, path7.join(packageDir, "web"), { recursive: true });
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "gate"), path7.join(packageDir, "gate"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "shared"), path7.join(packageDir, "shared"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "shared"), path7.join(packageDir, "code", "shared"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "config"), path7.join(packageDir, "config"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "windows-service"), path7.join(packageDir, "code", "windows-service"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "interop-service"), path7.join(packageDir, "code", "interop-service"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "wireguard"), path7.join(packageDir, "code", "wireguard"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "dsh-service"), path7.join(packageDir, "code", "dsh-service"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "deploy"), path7.join(packageDir, "code", "deploy"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "install"), path7.join(packageDir, "code", "install"));
+  await copyIfExists(path7.join(options.repositoryRoot, "dsh-mesh.mjs"), path7.join(packageDir, "dsh-mesh.mjs"));
+  await copyIfExists(path7.join(options.repositoryRoot, "docs"), path7.join(packageDir, "docs"));
+  for (const file of ["install.sh", "install.ps1", "VERSION"]) {
+    await copyIfExists(path7.join(options.repositoryRoot, "code", file), path7.join(packageDir, file));
   }
-  for (const file of ["start-dsh.sh", "start-interop.sh", "install-interop-service.sh", "uninstall-interop-service.sh"]) {
-    await copyIfExists(path5.join(options.repositoryRoot, file), path5.join(packageDir, file));
+  for (const file of ["start-interop.sh", "install-interop-service.sh", "uninstall-interop-service.sh"]) {
+    await copyIfExists(path7.join(options.repositoryRoot, file), path7.join(packageDir, file));
   }
   for (const file of ["index.js", "client.js", "cordis.patch.yml", "package.json"]) {
-    await copyIfExists(path5.join(options.repositoryRoot, file), path5.join(packageDir, "plugins", "dsh-mesh", file));
+    await copyIfExists(path7.join(options.repositoryRoot, file), path7.join(packageDir, "plugins", "dsh-mesh", file));
   }
-  await copyIfExists(path5.join(options.repositoryRoot, "locale"), path5.join(packageDir, "plugins", "dsh-mesh", "locale"));
-  await copyIfExists(path5.join(options.repositoryRoot, "build"), path5.join(packageDir, "plugins", "dsh-mesh", "build"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "build"), path5.join(packageDir, "plugins", "dsh-mesh", "code", "build"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "shared"), path5.join(packageDir, "plugins", "dsh-mesh", "code", "shared"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "deploy"), path5.join(packageDir, "plugins", "dsh-mesh", "code", "deploy"));
-  await copyIfExists(path5.join(options.repositoryRoot, "code", "install"), path5.join(packageDir, "plugins", "dsh-mesh", "code", "install"));
+  await copyIfExists(path7.join(options.repositoryRoot, "locale"), path7.join(packageDir, "plugins", "dsh-mesh", "locale"));
+  await copyIfExists(path7.join(options.repositoryRoot, "build"), path7.join(packageDir, "plugins", "dsh-mesh", "build"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "build"), path7.join(packageDir, "plugins", "dsh-mesh", "code", "build"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "shared"), path7.join(packageDir, "plugins", "dsh-mesh", "code", "shared"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "deploy"), path7.join(packageDir, "plugins", "dsh-mesh", "code", "deploy"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "install"), path7.join(packageDir, "plugins", "dsh-mesh", "code", "install"));
   const extraPlugins = await copyExtraPlugins({
     packageDir,
     repositoryRoot: options.repositoryRoot,
@@ -1445,7 +1972,7 @@ async function assembleWebPackage(options) {
     fetchImpl: options.fetchImpl,
     log: options.log
   });
-  const staticAssets = await collectStaticAssets(path5.join(options.repositoryRoot, "code", "gate"));
+  const staticAssets = await collectStaticAssets(path7.join(options.repositoryRoot, "code", "gate"));
   const manifest = {
     format: 1,
     name: "dsh-mesh",
@@ -1471,46 +1998,42 @@ async function assembleWebPackage(options) {
     staticAssets,
     extraPlugins
   };
-  await writeFile2(path5.join(packageDir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
+  await writeFile3(path7.join(packageDir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
   return { packageDir, manifest };
-}
-async function fixTarExecutableModes(archive) {
-  const raw = gunzipSync(await readFile4(archive));
-  let offset = 0;
-  while (offset + 512 <= raw.length) {
-    const header = raw.subarray(offset, offset + 512);
-    if (header.every((byte) => byte === 0)) break;
-    const type = String.fromCharCode(header[156] || 0);
-    const sizeText = header.subarray(124, 136).toString("ascii").replace(/\0.*$/u, "").trim();
-    const size = sizeText === "" ? 0 : Number.parseInt(sizeText, 8);
-    if (type === "0" || type === "\0" || type === "5" || type === "2") {
-      header.write("0000755\0", 100, 8, "ascii");
-    }
-    header.fill(32, 148, 156);
-    let checksum = 0;
-    for (const byte of header) checksum += byte;
-    header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
-    offset += 512 + (Number.isFinite(size) ? Math.ceil(size / 512) * 512 : 0);
-  }
-  await writeFile2(archive, gzipSync(raw, { level: 9 }));
 }
 async function archivePackage(packageDir, target, options = {}) {
   const { os: targetOs2 } = parseTarget(target);
   const archive = targetOs2 === "win" ? `${packageDir}.zip` : `${packageDir}.tar.gz`;
-  await rm(archive, { force: true });
+  await rm3(archive, { force: true });
   options.log?.(`archiving ${target}`);
-  let result;
-  if (targetOs2 === "win" && process.platform !== "win32") {
-    result = await runCommand("zip", ["-qr", archive, path5.basename(packageDir)], {
-      cwd: path5.dirname(packageDir),
+  if (targetOs2 === "win") {
+    let result;
+    if (process.platform !== "win32") {
+      result = await runCommand("zip", ["-qr", archive, path7.basename(packageDir)], {
+        cwd: path7.dirname(packageDir),
+        log: options.log
+      });
+    } else {
+      result = await runCommand("tar", ["-a", "-c", "-f", archive, "-C", path7.dirname(packageDir), path7.basename(packageDir)], {
+        log: options.log
+      });
+    }
+    if (!result.ok) throw new Error(`cannot archive ${packageDir}: ${result.tail.join("\n")}`);
+    return archive;
+  }
+  try {
+    await createTarGz({
+      packageDir,
+      destination: archive,
+      // On a Windows host the tar header modes are wrong for a Linux target;
+      // patching them is part of the streaming compressor now.
+      patchModes: process.platform === "win32",
+      threads: options.threads ?? archiveThreads({ env: options.env }),
       log: options.log
     });
-  } else {
-    const args = targetOs2 === "win" ? ["-a", "-c", "-f", archive, "-C", path5.dirname(packageDir), path5.basename(packageDir)] : ["-czf", archive, "-C", path5.dirname(packageDir), path5.basename(packageDir)];
-    result = await runCommand("tar", args, { log: options.log });
+  } catch (error) {
+    throw new Error(`cannot archive ${packageDir}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (!result.ok) throw new Error(`cannot archive ${packageDir}: ${result.tail.join("\n")}`);
-  if (targetOs2 !== "win" && process.platform === "win32") await fixTarExecutableModes(archive);
   return archive;
 }
 function nodeArchiveName(version, target) {
@@ -1523,7 +2046,7 @@ async function installNodeRuntime(options) {
   });
   const archiveName = nodeArchiveName(options.version, parsed);
   const base = `https://nodejs.org/dist/v${options.version}`;
-  const archive = path5.join(options.cacheDir, "node", archiveName);
+  const archive = path7.join(options.cacheDir, "node", archiveName);
   const downloaded = await download(`${base}/${archiveName}`, archive, { fetchImpl: options.fetchImpl, log });
   if (!downloaded) throw new Error(`Node ${options.version} has no ${parsed.os}-${parsed.arch} archive`);
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -1537,11 +2060,11 @@ async function installNodeRuntime(options) {
   if (actual !== expected) throw new Error(`Node archive checksum mismatch for ${archiveName}`);
   await extractTarball(archive, options.destination, { log });
   if (parsed.os === "win") {
-    if (!existsSync3(path5.join(options.destination, "node.exe"))) throw new Error("Node archive did not contain node.exe");
+    if (!existsSync4(path7.join(options.destination, "node.exe"))) throw new Error("Node archive did not contain node.exe");
   } else {
-    const node = path5.join(options.destination, "bin", "node");
-    if (!existsSync3(node)) throw new Error("Node archive did not contain bin/node");
-    await chmod(node, 493);
+    const node = path7.join(options.destination, "bin", "node");
+    if (!existsSync4(node)) throw new Error("Node archive did not contain bin/node");
+    await chmod2(node, 493);
   }
   return { directory: options.destination, archive, sha256: actual };
 }
@@ -1549,8 +2072,8 @@ async function installAppDependencies(options) {
   const parsed = parseTarget(options.target);
   const log = options.log ?? (() => {
   });
-  await mkdir2(options.appDir, { recursive: true });
-  await writeFile2(path5.join(options.appDir, "package.json"), JSON.stringify({
+  await mkdir3(options.appDir, { recursive: true });
+  await writeFile3(path7.join(options.appDir, "package.json"), JSON.stringify({
     name: "dsh-web-offline",
     private: true,
     version: "1.0.0"
@@ -1579,34 +2102,34 @@ async function installAppDependencies(options) {
     throw new Error(`npm install @deepseek-ai/dsh@${options.version} failed (exit ${String(result.code)})
 ${result.tail.join("\n")}`);
   }
-  return { appDir: options.appDir, nodeModules: path5.join(options.appDir, "node_modules") };
+  return { appDir: options.appDir, nodeModules: path7.join(options.appDir, "node_modules") };
 }
 async function overlayFrontend(options) {
   const log = options.log ?? (() => {
   });
-  const frontend = path5.join(options.appDir, "node_modules", "@deepseek-ai", "dsh-web-frontend");
-  const packageFile = path5.join(frontend, "package.json");
-  if (!existsSync3(packageFile)) {
+  const frontend = path7.join(options.appDir, "node_modules", "@deepseek-ai", "dsh-web-frontend");
+  const packageFile = path7.join(frontend, "package.json");
+  if (!existsSync4(packageFile)) {
     throw new Error(`cannot find @deepseek-ai/dsh-web-frontend under ${options.appDir}`);
   }
-  const target = path5.join(frontend, "dist");
-  await rm(target, { recursive: true, force: true });
-  await cp(options.dist, target, { recursive: true });
-  if (!existsSync3(path5.join(target, "index.html"))) {
+  const target = path7.join(frontend, "dist");
+  await rm3(target, { recursive: true, force: true });
+  await cp2(options.dist, target, { recursive: true });
+  if (!existsSync4(path7.join(target, "index.html"))) {
     throw new Error("the built web frontend has no index.html after the copy");
   }
   log(`frontend installed at ${target}`);
   return target;
 }
 async function inspectShellSeedTable(distDir) {
-  const index = path5.join(distDir, "index.html");
-  if (!existsSync3(index)) return null;
-  const html = await readFile4(index, "utf8");
+  const index = path7.join(distDir, "index.html");
+  if (!existsSync4(index)) return null;
+  const html = await readFile5(index, "utf8");
   const sources = [...html.matchAll(/<script[^>]+src="\.?\/?([^"]+\.js)"/gu)].map((match) => match[1]);
   for (const relative of sources) {
-    const file = path5.join(distDir, relative);
-    if (!existsSync3(file)) continue;
-    const text = await readFile4(file, "utf8");
+    const file = path7.join(distDir, relative);
+    if (!existsSync4(file)) continue;
+    const text = await readFile5(file, "utf8");
     const call = /staticModules:([A-Za-z_$][\w$]*)\(\)/u.exec(text);
     if (call === null) continue;
     const name = call[1];
@@ -1622,13 +2145,13 @@ async function inspectShellSeedTable(distDir) {
   return null;
 }
 async function inspectAppModuleLoader(appDir) {
-  const root = path5.join(appDir, "node_modules", "@deepseek-ai", "dsh-client-modules");
-  const file = path5.join(root, "lib", "client.js");
-  if (!existsSync3(file)) return null;
-  const text = await readFile4(file, "utf8");
+  const root = path7.join(appDir, "node_modules", "@deepseek-ai", "dsh-client-modules");
+  const file = path7.join(root, "lib", "client.js");
+  if (!existsSync4(file)) return null;
+  const text = await readFile5(file, "utf8");
   let version = null;
   try {
-    version = JSON.parse(await readFile4(path5.join(root, "package.json"), "utf8")).version ?? null;
+    version = JSON.parse(await readFile5(path7.join(root, "package.json"), "utf8")).version ?? null;
   } catch {
     version = null;
   }
@@ -1643,16 +2166,16 @@ async function inspectAppModuleLoader(appDir) {
   };
 }
 async function findClientBundleUsing(appDir, exportName) {
-  const scope = path5.join(appDir, "node_modules", "@deepseek-ai");
-  if (!existsSync3(scope)) return null;
-  const entries = await readdir2(scope, { withFileTypes: true }).catch(() => []);
+  const scope = path7.join(appDir, "node_modules", "@deepseek-ai");
+  if (!existsSync4(scope)) return null;
+  const entries = await readdir3(scope, { withFileTypes: true }).catch(() => []);
   const pattern = new RegExp(`\\.${exportName}\\b`, "u");
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     if (entry.name === "dsh-client-ui-primitives" || entry.name === "dsh-client-modules") continue;
-    const file = path5.join(scope, entry.name, "lib", "client.js");
-    if (!existsSync3(file)) continue;
-    const text = await readFile4(file, "utf8").catch(() => "");
+    const file = path7.join(scope, entry.name, "lib", "client.js");
+    if (!existsSync4(file)) continue;
+    const text = await readFile5(file, "utf8").catch(() => "");
     if (pattern.test(text)) return entry.name;
   }
   return null;
@@ -1695,8 +2218,8 @@ async function chooseFrontend(options) {
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     log(`source-built frontend is incompatible with app/: ${reason}`);
-    const published = path5.join(options.appDir, "node_modules", "@deepseek-ai", "dsh-web-frontend", "dist");
-    if (!existsSync3(path5.join(published, "index.html"))) throw error;
+    const published = path7.join(options.appDir, "node_modules", "@deepseek-ai", "dsh-web-frontend", "dist");
+    if (!existsSync4(path7.join(published, "index.html"))) throw error;
     log("keeping the published frontend from app/ (its client bundles match by construction); the UI overlays still apply through patchInstalledClient");
     await checkFrontendAppContract({ appDir: options.appDir, dist: published, log });
     return { source: "published", dist: published, reason };
@@ -1705,7 +2228,7 @@ async function chooseFrontend(options) {
 async function patchInstalledClient(options) {
   const log = options.log ?? (() => {
   });
-  const picker = path5.join(
+  const picker = path7.join(
     options.appDir,
     "node_modules",
     "@deepseek-ai",
@@ -1713,7 +2236,7 @@ async function patchInstalledClient(options) {
     "lib",
     "client.js"
   );
-  const login = path5.join(
+  const login = path7.join(
     options.appDir,
     "node_modules",
     "@deepseek-ai",
@@ -1722,14 +2245,14 @@ async function patchInstalledClient(options) {
     "client.js"
   );
   for (const file of [picker, login]) {
-    if (!existsSync3(file)) throw new Error(`installed client bundle is missing: ${file}`);
+    if (!existsSync4(file)) throw new Error(`installed client bundle is missing: ${file}`);
   }
   const steps = [
-    { file: picker, script: path5.join(options.repositoryRoot, "code", "gate", "patch-picker.mjs"), marker: "dsh-picker-patched" },
-    { file: login, script: path5.join(options.repositoryRoot, "code", "gate", "patch-login.mjs"), marker: "dsh-gate-account-login" }
+    { file: picker, script: path7.join(options.repositoryRoot, "code", "gate", "patch-picker.mjs"), marker: "dsh-picker-patched" },
+    { file: login, script: path7.join(options.repositoryRoot, "code", "gate", "patch-login.mjs"), marker: "dsh-gate-account-login" }
   ];
   for (const step of steps) {
-    log(`patching ${path5.basename(path5.dirname(path5.dirname(step.file)))} client bundle`);
+    log(`patching ${path7.basename(path7.dirname(path7.dirname(step.file)))} client bundle`);
     const result = await runCommand(process.execPath, [step.script, step.file], {
       cwd: options.repositoryRoot,
       log,
@@ -1737,48 +2260,128 @@ async function patchInstalledClient(options) {
     });
     if (!result.ok) throw new Error(`client bundle patch failed: ${step.script}
 ${result.tail.join("\n")}`);
-    const text = await readFile4(step.file, "utf8");
+    const text = await readFile5(step.file, "utf8");
     if (!text.includes(step.marker)) throw new Error(`client bundle patch did not leave its marker: ${step.file}`);
-    await rm(`${step.file}.orig`, { force: true });
+    await rm3(`${step.file}.orig`, { force: true });
   }
   return { picker, login };
+}
+var APP_CACHE_FORMAT = 1;
+async function patchBundleFingerprint(repositoryRoot) {
+  const hash = createHash2("sha256");
+  hash.update(`format:${String(APP_CACHE_FORMAT)}`);
+  for (const name of ["patch-picker.mjs", "patch-login.mjs"]) {
+    hash.update(`\0${name}\0`);
+    try {
+      hash.update(await readFile5(path7.join(repositoryRoot, "code", "gate", name)));
+    } catch {
+      hash.update("missing");
+    }
+  }
+  return hash.digest("hex");
+}
+async function ensureAppCache(options) {
+  const log = options.log ?? (() => {
+  });
+  if (typeof options.cacheDir !== "string" || options.cacheDir === "") {
+    throw new Error("ensureAppCache needs a cacheDir");
+  }
+  const patchFingerprint = await patchBundleFingerprint(options.repositoryRoot);
+  if (options.refresh !== true) {
+    const cached = await readAppCache(options.cacheDir, options.version, options.target);
+    if (cached !== null && cached.patchFingerprint === patchFingerprint) {
+      log(`app cache hit ${options.target} (@deepseek-ai/dsh@${options.version})`);
+      return { dir: appCacheDir(options.cacheDir, options.version, options.target), meta: cached, cached: true };
+    }
+    if (cached !== null) log(`app cache stale ${options.target}: the client patch scripts changed; reinstalling`);
+  }
+  const dir = appCacheDir(options.cacheDir, options.version, options.target);
+  log(`app cache miss ${options.target}: installing @deepseek-ai/dsh@${options.version}`);
+  await rm3(dir, { recursive: true, force: true });
+  await rm3(appCacheMetaFile(options.cacheDir, options.version, options.target), { force: true });
+  await installAppDependencies({
+    appDir: dir,
+    version: options.version,
+    target: options.target,
+    env: options.env,
+    log
+  });
+  await patchInstalledClient({ appDir: dir, repositoryRoot: options.repositoryRoot, log });
+  const meta = {
+    format: APP_CACHE_FORMAT,
+    version: options.version,
+    target: options.target,
+    patchFingerprint,
+    installedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    npm: process.env.npm_config_user_agent ?? null,
+    node: process.versions.node
+  };
+  await writeAppCacheMeta({
+    cacheDir: options.cacheDir,
+    version: options.version,
+    target: options.target,
+    meta,
+    log
+  });
+  log(`app cache stored ${options.target}`);
+  return { dir, meta, cached: false };
+}
+async function materializeApp(options) {
+  const log = options.log ?? (() => {
+  });
+  if (typeof options.cacheDir !== "string" || options.cacheDir === "") {
+    await installAppDependencies({
+      appDir: options.appDir,
+      version: options.version,
+      target: options.target,
+      env: options.env,
+      log
+    });
+    await patchInstalledClient({ appDir: options.appDir, repositoryRoot: options.repositoryRoot, log });
+    return { cached: false, meta: null };
+  }
+  const cached = await ensureAppCache({ ...options, log });
+  await cloneTree(cached.dir, options.appDir, { log });
+  return { cached: true, meta: cached.meta };
 }
 async function assembleRuntimePackage(options) {
   const log = options.log ?? (() => {
   });
   const { packageDir, manifest } = await assembleWebPackage(options);
-  const appDir = path5.join(packageDir, "app");
-  await mkdir2(appDir, { recursive: true });
-  await installAppDependencies({
-    appDir,
+  const appDir = path7.join(packageDir, "app");
+  const app = await materializeApp({
+    // `appCacheDir` lets a build disable the app cache while still using
+    // `cacheDir` for the Node runtime and the extra plugin tarballs.
+    cacheDir: options.appCacheDir === void 0 ? options.cacheDir : options.appCacheDir,
     version: options.dshVersion,
     target: options.target,
+    appDir,
+    repositoryRoot: options.repositoryRoot,
     env: options.env,
-    log
+    log,
+    refresh: options.refreshAppCache
   });
-  await patchInstalledClient({ appDir, repositoryRoot: options.repositoryRoot, log });
   const frontend = await chooseFrontend({ appDir, dist: options.dist, log });
   if (frontend.source === "built") {
     await overlayFrontend({ appDir, dist: frontend.dist, log });
   } else {
-    const web = path5.join(packageDir, "web");
-    await rm(web, { recursive: true, force: true });
-    await cp(frontend.dist, web, { recursive: true });
+    const web = path7.join(packageDir, "web");
+    await rm3(web, { recursive: true, force: true });
+    await cp2(frontend.dist, web, { recursive: true });
   }
   log(`node runtime ${options.target}`);
   await installNodeRuntime({
     version: options.nodeVersion,
     target: options.target,
     cacheDir: options.cacheDir,
-    destination: path5.join(packageDir, "runtime", "node"),
+    destination: path7.join(packageDir, "runtime", "node"),
     fetchImpl: options.fetchImpl,
     log
   });
-  for (const file of ["install.ps1", "start.ps1", "stop.ps1", "start.cmd", "stop.cmd", "start-stack.ps1"]) {
-    await copyIfExists(path5.join(options.repositoryRoot, "code", file), path5.join(packageDir, file));
-  }
-  await writeFile2(path5.join(packageDir, ".offline-payload"), "dsh-mesh\n", "utf8");
-  await writeFile2(path5.join(packageDir, "VERSION"), `${options.dshVersion}
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "install.sh"), path7.join(packageDir, "install.sh"));
+  await copyIfExists(path7.join(options.repositoryRoot, "code", "install.ps1"), path7.join(packageDir, "install.ps1"));
+  await writeFile3(path7.join(packageDir, ".offline-payload"), "dsh-mesh\n", "utf8");
+  await writeFile3(path7.join(packageDir, "VERSION"), `${options.dshVersion}
 `, "utf8");
   const updated = {
     ...manifest,
@@ -1789,26 +2392,29 @@ async function assembleRuntimePackage(options) {
     // shipped in the app because the two revisions disagreed. `reason` keeps
     // the drift visible on the package instead of only in the build log.
     frontend: frontend.reason === null ? { source: frontend.source } : { source: frontend.source, reason: frontend.reason },
+    // Where the installed app came from: the cache (the version and target
+    // were installed before) or a fresh npm install during this build.
+    app: { source: app.cached ? "cache" : "npm", installedAt: app.meta?.installedAt ?? null },
     files: (await listFiles(packageDir)).length
   };
-  await writeFile2(path5.join(packageDir, "manifest.json"), JSON.stringify(updated, null, 2), "utf8");
+  await writeFile3(path7.join(packageDir, "manifest.json"), JSON.stringify(updated, null, 2), "utf8");
   return { packageDir, manifest: updated };
 }
 
 // code/build/smoke.mjs
-import { spawn as spawn3 } from "node:child_process";
-import { accessSync, constants, existsSync as existsSync5 } from "node:fs";
-import { appendFile, copyFile, mkdir as mkdir5, mkdtemp as mkdtemp3, readFile as readFile6, rm as rm5, symlink as symlink2, writeFile as writeFile4 } from "node:fs/promises";
+import { spawn as spawn4 } from "node:child_process";
+import { accessSync, constants, existsSync as existsSync6 } from "node:fs";
+import { appendFile, copyFile, mkdir as mkdir6, mkdtemp as mkdtemp3, readFile as readFile7, rm as rm7, symlink as symlink3, writeFile as writeFile5 } from "node:fs/promises";
 import net from "node:net";
-import os4 from "node:os";
-import path9 from "node:path";
+import os6 from "node:os";
+import path11 from "node:path";
 
 // code/shared/chrome.mjs
-import { spawn as spawn2 } from "node:child_process";
-import { existsSync as existsSync4 } from "node:fs";
-import { mkdtemp, readFile as readFile5, rm as rm2 } from "node:fs/promises";
+import { spawn as spawn3 } from "node:child_process";
+import { existsSync as existsSync5 } from "node:fs";
+import { mkdtemp, readFile as readFile6, rm as rm4 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import path6 from "node:path";
+import path8 from "node:path";
 var CdpSocket = class _CdpSocket {
   #socket;
   #nextId = 1;
@@ -1871,14 +2477,14 @@ var CdpSocket = class _CdpSocket {
 async function waitForFile(file, timeoutMs, signal) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (existsSync4(file)) return;
-    if (signal?.aborted === true) throw new Error(`aborted waiting for ${path6.basename(file)}`);
+    if (existsSync5(file)) return;
+    if (signal?.aborted === true) throw new Error(`aborted waiting for ${path8.basename(file)}`);
     await new Promise((resolve) => {
       const timer = setTimeout(resolve, 120);
       timer.unref?.();
     });
   }
-  throw new Error(`timed out waiting for ${path6.basename(file)}`);
+  throw new Error(`timed out waiting for ${path8.basename(file)}`);
 }
 var ChromeSession = class _ChromeSession {
   #child;
@@ -1892,8 +2498,8 @@ var ChromeSession = class _ChromeSession {
    */
   static async launch(binary, { width = 560, height = 820 } = {}) {
     const session = new _ChromeSession();
-    session.#profileDir = await mkdtemp(path6.join(tmpdir(), "dsh-chrome-"));
-    session.#child = spawn2(binary, [
+    session.#profileDir = await mkdtemp(path8.join(tmpdir(), "dsh-chrome-"));
+    session.#child = spawn3(binary, [
       "--headless=new",
       "--no-sandbox",
       "--disable-gpu",
@@ -1911,7 +2517,7 @@ var ChromeSession = class _ChromeSession {
     session.#child.stderr.on("data", (chunk) => {
       stderr = `${stderr}${String(chunk)}`.slice(-4e3);
     });
-    const portFile = path6.join(session.#profileDir, "DevToolsActivePort");
+    const portFile = path8.join(session.#profileDir, "DevToolsActivePort");
     const exitedEarly = new Promise((_resolve, reject) => {
       session.#child.once("error", (error) => {
         reject(new Error(`cannot run ${binary}: ${error.message}`));
@@ -1932,7 +2538,7 @@ var ChromeSession = class _ChromeSession {
     } finally {
       waiting.abort();
     }
-    const [port, wsPath] = (await readFile5(portFile, "utf8")).split("\n");
+    const [port, wsPath] = (await readFile6(portFile, "utf8")).split("\n");
     if (port === void 0 || wsPath === void 0) throw new Error("chrome wrote no debug port");
     const browser = await CdpSocket.open(`ws://127.0.0.1:${String(port).trim()}${wsPath.trim()}`);
     const created = await browser.send("Target.createTarget", { url: "about:blank" });
@@ -2064,25 +2670,25 @@ var ChromeSession = class _ChromeSession {
     } catch {
     }
     if (this.#profileDir !== void 0) {
-      rm2(this.#profileDir, { recursive: true, force: true }).catch(() => {
+      rm4(this.#profileDir, { recursive: true, force: true }).catch(() => {
       });
     }
   }
 };
 
 // code/build/chrome-download.mjs
-import { createWriteStream as createWriteStream3 } from "node:fs";
-import { chmod as chmod3, mkdir as mkdir4, mkdtemp as mkdtemp2, readdir as readdir3, rename as rename2, rm as rm4, stat as stat3 } from "node:fs/promises";
-import os3 from "node:os";
-import path8 from "node:path";
+import { createWriteStream as createWriteStream4 } from "node:fs";
+import { chmod as chmod4, mkdir as mkdir5, mkdtemp as mkdtemp2, readdir as readdir4, rename as rename3, rm as rm6, stat as stat5 } from "node:fs/promises";
+import os5 from "node:os";
+import path10 from "node:path";
 import { Readable as Readable3 } from "node:stream";
-import { pipeline as pipeline3 } from "node:stream/promises";
+import { pipeline as pipeline4 } from "node:stream/promises";
 
 // code/build/zip.mjs
-import { createReadStream, createWriteStream as createWriteStream2 } from "node:fs";
-import { chmod as chmod2, mkdir as mkdir3, open as open2, rm as rm3, stat as stat2, symlink, writeFile as writeFile3 } from "node:fs/promises";
-import path7 from "node:path";
-import { pipeline as pipeline2 } from "node:stream/promises";
+import { createReadStream as createReadStream2, createWriteStream as createWriteStream3 } from "node:fs";
+import { chmod as chmod3, mkdir as mkdir4, open as open3, rm as rm5, stat as stat4, symlink as symlink2, writeFile as writeFile4 } from "node:fs/promises";
+import path9 from "node:path";
+import { pipeline as pipeline3 } from "node:stream/promises";
 import { createInflateRaw, inflateRawSync } from "node:zlib";
 var EOCD_SIGNATURE = 101010256;
 var CENTRAL_SIGNATURE = 33639248;
@@ -2107,9 +2713,9 @@ function safeEntryPath(destination, name) {
   }
   const segments = normalized.split("/").filter((segment) => segment !== "" && segment !== ".");
   if (segments.includes("..")) throw new Error(`zip entry escapes the destination: ${name}`);
-  const root = path7.resolve(destination);
-  const target = path7.resolve(root, ...segments);
-  if (target !== root && !target.startsWith(`${root}${path7.sep}`)) {
+  const root = path9.resolve(destination);
+  const target = path9.resolve(root, ...segments);
+  if (target !== root && !target.startsWith(`${root}${path9.sep}`)) {
     throw new Error(`zip entry escapes the destination: ${name}`);
   }
   return target;
@@ -2122,9 +2728,9 @@ async function readEntry(handle, offset, compressedSize, method) {
   throw new Error(`zip compression method ${String(method)} is not supported`);
 }
 async function extractZip(archive, destination) {
-  await rm3(destination, { recursive: true, force: true });
-  await mkdir3(destination, { recursive: true });
-  const handle = await open2(archive, "r");
+  await rm5(destination, { recursive: true, force: true });
+  await mkdir4(destination, { recursive: true });
+  const handle = await open3(archive, "r");
   const extracted = [];
   try {
     const size = (await handle.stat()).size;
@@ -2174,38 +2780,38 @@ async function extractZip(archive, destination) {
       const target = safeEntryPath(destination, name);
       const directory = name.endsWith("/") || kind === S_IFDIR;
       if (directory) {
-        await mkdir3(target, { recursive: true });
+        await mkdir4(target, { recursive: true });
         extracted.push(target);
         continue;
       }
-      await mkdir3(path7.dirname(target), { recursive: true });
+      await mkdir4(path9.dirname(target), { recursive: true });
       if (kind === S_IFLNK) {
         const linkTarget = (await readEntry(handle, dataOffset, compressedSize, method)).toString("utf8");
-        const resolved = path7.resolve(path7.dirname(target), linkTarget);
-        const root = path7.resolve(destination);
-        if (resolved !== root && !resolved.startsWith(`${root}${path7.sep}`)) {
+        const resolved = path9.resolve(path9.dirname(target), linkTarget);
+        const root = path9.resolve(destination);
+        if (resolved !== root && !resolved.startsWith(`${root}${path9.sep}`)) {
           throw new Error(`zip symlink escapes the destination: ${name} -> ${linkTarget}`);
         }
-        await symlink(linkTarget, target);
+        await symlink2(linkTarget, target);
         extracted.push(target);
         continue;
       }
       if (compressedSize === 0) {
-        await writeFile3(target, Buffer.alloc(0));
+        await writeFile4(target, Buffer.alloc(0));
       } else if (method === 0 || method === 8) {
-        const source = createReadStream(archive, { start: dataOffset, end: dataOffset + compressedSize - 1 });
-        const sink = createWriteStream2(target);
-        if (method === 8) await pipeline2(source, createInflateRaw(), sink);
-        else await pipeline2(source, sink);
+        const source = createReadStream2(archive, { start: dataOffset, end: dataOffset + compressedSize - 1 });
+        const sink = createWriteStream3(target);
+        if (method === 8) await pipeline3(source, createInflateRaw(), sink);
+        else await pipeline3(source, sink);
       } else {
         throw new Error(`zip compression method ${String(method)} is not supported: ${name}`);
       }
-      const written = (await stat2(target)).size;
+      const written = (await stat4(target)).size;
       if (uncompressedSize !== 4294967295 && written !== uncompressedSize) {
         throw new Error(`zip entry has the wrong size: ${name} (${String(written)} != ${String(uncompressedSize)})`);
       }
       const permissions = mode & 511;
-      if (permissions !== 0) await chmod2(target, permissions).catch(() => {
+      if (permissions !== 0) await chmod3(target, permissions).catch(() => {
       });
       extracted.push(target);
     }
@@ -2239,13 +2845,13 @@ function chromeForTestingPlatform(platform = process.platform, arch = process.ar
 }
 function defaultChromeDownloadDir(env = process.env, platform = process.platform) {
   const configured = typeof env.DSH_MESH_SMOKE_CHROME_CACHE === "string" ? env.DSH_MESH_SMOKE_CHROME_CACHE.trim() : "";
-  if (configured !== "") return path8.resolve(configured);
+  if (configured !== "") return path10.resolve(configured);
   if (platform === "win32") {
-    const localAppData = typeof env.LOCALAPPDATA === "string" && env.LOCALAPPDATA !== "" ? env.LOCALAPPDATA : path8.join(os3.homedir(), "AppData", "Local");
-    return path8.join(localAppData, "dsh-mesh", "chrome");
+    const localAppData = typeof env.LOCALAPPDATA === "string" && env.LOCALAPPDATA !== "" ? env.LOCALAPPDATA : path10.join(os5.homedir(), "AppData", "Local");
+    return path10.join(localAppData, "dsh-mesh", "chrome");
   }
-  const xdg = typeof env.XDG_CACHE_HOME === "string" && env.XDG_CACHE_HOME !== "" ? env.XDG_CACHE_HOME : path8.join(os3.homedir(), ".cache");
-  return path8.join(xdg, "dsh-mesh", "chrome");
+  const xdg = typeof env.XDG_CACHE_HOME === "string" && env.XDG_CACHE_HOME !== "" ? env.XDG_CACHE_HOME : path10.join(os5.homedir(), ".cache");
+  return path10.join(xdg, "dsh-mesh", "chrome");
 }
 function binaryName(platform) {
   return platform === "win32" ? `${ARTIFACT}.exe` : ARTIFACT;
@@ -2253,14 +2859,14 @@ function binaryName(platform) {
 async function findCachedChrome(cacheDir, platformKey, platform) {
   let entries;
   try {
-    entries = await readdir3(cacheDir, { withFileTypes: true });
+    entries = await readdir4(cacheDir, { withFileTypes: true });
   } catch {
     return null;
   }
   const versions = entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => entry.name).sort((left, right) => right.localeCompare(left, void 0, { numeric: true }));
   for (const version of versions) {
-    const binary = path8.join(cacheDir, version, platformKey, binaryName(platform));
-    const info = await stat3(binary).catch(() => null);
+    const binary = path10.join(cacheDir, version, platformKey, binaryName(platform));
+    const info = await stat5(binary).catch(() => null);
     if (info?.isFile() === true && info.size > 0) return { binary, version };
   }
   return null;
@@ -2278,7 +2884,7 @@ async function downloadFile(url, file, options) {
     throw new Error(`download failed: ${url} -> HTTP ${String(response.status)}`);
   }
   const total = Number(response.headers.get("content-length") ?? 0);
-  await mkdir4(path8.dirname(file), { recursive: true });
+  await mkdir5(path10.dirname(file), { recursive: true });
   const temporary = `${file}.part`;
   let received = 0;
   let nextPercent = 10;
@@ -2292,10 +2898,10 @@ async function downloadFile(url, file, options) {
     log(`downloading Chrome: ${String(percent)}% (${String(Math.round(received / 1048576))} MiB)`);
   });
   try {
-    await pipeline3(source, createWriteStream3(temporary));
-    await rename2(temporary, file);
+    await pipeline4(source, createWriteStream4(temporary));
+    await rename3(temporary, file);
   } catch (error) {
-    await rm4(temporary, { force: true }).catch(() => {
+    await rm6(temporary, { force: true }).catch(() => {
     });
     throw error;
   }
@@ -2342,34 +2948,34 @@ async function ensureDownloadedChrome(options = {}) {
   const version = resolved.version.replace(/[^0-9A-Za-z._-]/gu, "_");
   log(`no browser found; downloading Chrome for Testing ${version} (${platformKey})`);
   log(`archive: ${resolved.url}`);
-  await mkdir4(cacheDir, { recursive: true });
-  const temporary = await mkdtemp2(path8.join(cacheDir, ".download-"));
+  await mkdir5(cacheDir, { recursive: true });
+  const temporary = await mkdtemp2(path10.join(cacheDir, ".download-"));
   try {
-    const archive = path8.join(temporary, `${ARTIFACT}.zip`);
+    const archive = path10.join(temporary, `${ARTIFACT}.zip`);
     await downloadFile(resolved.url, archive, options);
     log(`extracting Chrome for Testing ${version}`);
-    const extracted = path8.join(temporary, "extract");
+    const extracted = path10.join(temporary, "extract");
     await extractZip(archive, extracted);
-    const binary = path8.join(temporary, "extract", `${ARTIFACT}-${platformKey}`, binaryName(platform));
-    const info = await stat3(binary).catch(() => null);
+    const binary = path10.join(temporary, "extract", `${ARTIFACT}-${platformKey}`, binaryName(platform));
+    const info = await stat5(binary).catch(() => null);
     if (info?.isFile() !== true) {
       throw new Error(`the ${platformKey} archive did not contain ${ARTIFACT}-${platformKey}/${binaryName(platform)}`);
     }
-    await chmod3(binary, 493);
-    const finalDir = path8.join(cacheDir, version, platformKey);
-    await mkdir4(path8.dirname(finalDir), { recursive: true });
-    await rm4(finalDir, { recursive: true, force: true });
-    await rename2(path8.dirname(binary), finalDir);
-    const installed = path8.join(finalDir, binaryName(platform));
-    for (const entry of await readdir3(cacheDir, { withFileTypes: true })) {
+    await chmod4(binary, 493);
+    const finalDir = path10.join(cacheDir, version, platformKey);
+    await mkdir5(path10.dirname(finalDir), { recursive: true });
+    await rm6(finalDir, { recursive: true, force: true });
+    await rename3(path10.dirname(binary), finalDir);
+    const installed = path10.join(finalDir, binaryName(platform));
+    for (const entry of await readdir4(cacheDir, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name === version) continue;
-      await rm4(path8.join(cacheDir, entry.name), { recursive: true, force: true }).catch(() => {
+      await rm6(path10.join(cacheDir, entry.name), { recursive: true, force: true }).catch(() => {
       });
     }
     log(`Chrome for Testing ${version} ready: ${installed}`);
     return { binary: installed, version, platform: platformKey, cacheDir, cached: false };
   } finally {
-    await rm4(temporary, { recursive: true, force: true }).catch(() => {
+    await rm6(temporary, { recursive: true, force: true }).catch(() => {
     });
   }
 }
@@ -2386,16 +2992,16 @@ function pathLookup(env, platform, names) {
   const dirs = key.split(separator).map((entry) => entry.trim()).filter((entry) => entry !== "");
   const found = [];
   for (const dir of dirs) {
-    for (const name of names) found.push(path9.join(dir, name));
+    for (const name of names) found.push(path11.join(dir, name));
   }
   return found;
 }
 function chromeCandidates(env = process.env, platform = process.platform) {
   const configured = [env.DSH_MESH_SMOKE_CHROME, env.DSH_GATE_CHROME].filter((value) => typeof value === "string" && value !== "");
   const edge = platform === "win32" ? [
-    path9.join(env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", "Microsoft", "Edge", "Application", "msedge.exe"),
-    path9.join(env.ProgramFiles ?? "C:\\Program Files", "Microsoft", "Edge", "Application", "msedge.exe"),
-    path9.join(env.LOCALAPPDATA ?? "", "Microsoft", "Edge", "Application", "msedge.exe")
+    path11.join(env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", "Microsoft", "Edge", "Application", "msedge.exe"),
+    path11.join(env.ProgramFiles ?? "C:\\Program Files", "Microsoft", "Edge", "Application", "msedge.exe"),
+    path11.join(env.LOCALAPPDATA ?? "", "Microsoft", "Edge", "Application", "msedge.exe")
   ] : platform === "darwin" ? ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"] : [
     "/usr/bin/microsoft-edge",
     "/usr/bin/microsoft-edge-stable",
@@ -2406,9 +3012,9 @@ function chromeCandidates(env = process.env, platform = process.platform) {
     "/opt/microsoft/msedge-dev/msedge"
   ];
   const chrome = platform === "win32" ? [
-    path9.join(env.ProgramFiles ?? "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
-    path9.join(env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", "Google", "Chrome", "Application", "chrome.exe"),
-    path9.join(env.LOCALAPPDATA ?? "", "Google", "Chrome", "Application", "chrome.exe")
+    path11.join(env.ProgramFiles ?? "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
+    path11.join(env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", "Google", "Chrome", "Application", "chrome.exe"),
+    path11.join(env.LOCALAPPDATA ?? "", "Google", "Chrome", "Application", "chrome.exe")
   ] : platform === "darwin" ? [
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
@@ -2479,8 +3085,8 @@ function browserStartReason(error) {
   return message;
 }
 function parseSmokeTarget(target) {
-  const [os9, arch] = String(target ?? "").split("-");
-  return { os: os9 ?? "", arch: arch ?? "" };
+  const [os11, arch] = String(target ?? "").split("-");
+  return { os: os11 ?? "", arch: arch ?? "" };
 }
 function targetOs(platform = process.platform) {
   if (platform === "win32") return "win";
@@ -2492,15 +3098,15 @@ function isNativeTarget(target, platform = process.platform, arch = process.arch
   return parsed.os === targetOs(platform) && parsed.arch === arch;
 }
 function packageNode(root) {
-  const candidates = process.platform === "win32" ? [path9.join(root, "runtime", "node", "node.exe"), path9.join(root, "runtime", "node", "bin", "node.exe")] : [path9.join(root, "runtime", "node", "bin", "node")];
+  const candidates = process.platform === "win32" ? [path11.join(root, "runtime", "node", "node.exe"), path11.join(root, "runtime", "node", "bin", "node.exe")] : [path11.join(root, "runtime", "node", "bin", "node")];
   for (const candidate of candidates) {
-    if (existsSync5(candidate)) return candidate;
+    if (existsSync6(candidate)) return candidate;
   }
   return process.execPath;
 }
 function startProcess(options) {
   const detached = process.platform !== "win32";
-  const child = spawn3(options.command, options.args, {
+  const child = spawn4(options.command, options.args, {
     cwd: options.cwd,
     env: options.env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -2603,7 +3209,7 @@ function cleanEnv(overrides) {
   return { ...env, ...overrides };
 }
 async function runNode(node, args, options) {
-  const child = spawn3(node, args, { cwd: options.cwd, env: cleanEnv({}), stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn4(node, args, { cwd: options.cwd, env: cleanEnv({}), stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   const consume = (chunk) => {
     const text = String(chunk);
@@ -2616,49 +3222,49 @@ async function runNode(node, args, options) {
   child.stderr?.on("data", consume);
   const result = await withTimeout(new Promise((resolve) => {
     child.once("exit", (code, signal) => resolve({ code, signal }));
-  }), options.timeoutMs ?? 12e4, `${path9.basename(args[0] ?? "node")} ${String(args[1] ?? "")}`);
+  }), options.timeoutMs ?? 12e4, `${path11.basename(args[0] ?? "node")} ${String(args[1] ?? "")}`);
   if (result.code !== 0) {
-    throw new Error(`${path9.basename(args[0] ?? "node")} exited ${String(result.signal ?? result.code)}: ${output.trim().slice(-1200)}`);
+    throw new Error(`${path11.basename(args[0] ?? "node")} exited ${String(result.signal ?? result.code)}: ${output.trim().slice(-1200)}`);
   }
   return output;
 }
 async function prepareInstallRoot(packageRoot, workDir) {
-  const root = path9.join(workDir, "install");
-  await rm5(root, { recursive: true, force: true });
-  await mkdir5(path9.join(root, "config"), { recursive: true });
-  await mkdir5(path9.join(root, "data"), { recursive: true });
-  await mkdir5(path9.join(root, "home", "profiles", "web"), { recursive: true });
-  await mkdir5(path9.join(root, "workspace"), { recursive: true });
+  const root = path11.join(workDir, "install");
+  await rm7(root, { recursive: true, force: true });
+  await mkdir6(path11.join(root, "config"), { recursive: true });
+  await mkdir6(path11.join(root, "data"), { recursive: true });
+  await mkdir6(path11.join(root, "home", "profiles", "web"), { recursive: true });
+  await mkdir6(path11.join(root, "workspace"), { recursive: true });
   for (const directory of ["app", "code", "gate", "plugins", "shared"]) {
-    const source = path9.join(packageRoot, directory);
-    if (!existsSync5(source)) throw new Error(`package is missing ${directory}/: ${packageRoot}`);
-    await symlink2(source, path9.join(root, directory), process.platform === "win32" ? "junction" : "dir");
+    const source = path11.join(packageRoot, directory);
+    if (!existsSync6(source)) throw new Error(`package is missing ${directory}/: ${packageRoot}`);
+    await symlink3(source, path11.join(root, directory), process.platform === "win32" ? "junction" : "dir");
   }
-  const runtime = path9.join(packageRoot, "runtime");
-  if (!existsSync5(runtime)) throw new Error(`package is missing runtime/: ${packageRoot}`);
-  await symlink2(runtime, path9.join(root, "runtime"), process.platform === "win32" ? "junction" : "dir");
-  const entry = path9.join(packageRoot, "app", "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
-  if (!existsSync5(entry)) throw new Error(`package has no DSH app entry: ${entry}`);
-  const patch = path9.join(packageRoot, "config", "browse-picker.patch.yml");
-  if (existsSync5(patch)) await copyFile(patch, path9.join(root, "config", "browse-picker.patch.yml"));
+  const runtime = path11.join(packageRoot, "runtime");
+  if (!existsSync6(runtime)) throw new Error(`package is missing runtime/: ${packageRoot}`);
+  await symlink3(runtime, path11.join(root, "runtime"), process.platform === "win32" ? "junction" : "dir");
+  const entry = path11.join(packageRoot, "app", "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
+  if (!existsSync6(entry)) throw new Error(`package has no DSH app entry: ${entry}`);
+  const patch = path11.join(packageRoot, "config", "browse-picker.patch.yml");
+  if (existsSync6(patch)) await copyFile(patch, path11.join(root, "config", "browse-picker.patch.yml"));
   return root;
 }
 async function wireProfile(options) {
   const candidates = [
-    path9.join(options.packageRoot, "code", "deploy", "wire-profile.mjs"),
-    path9.join(options.packageRoot, "plugins", "dsh-mesh", "code", "deploy", "wire-profile.mjs")
+    path11.join(options.packageRoot, "code", "deploy", "wire-profile.mjs"),
+    path11.join(options.packageRoot, "plugins", "dsh-mesh", "code", "deploy", "wire-profile.mjs")
   ];
-  const script = candidates.find((candidate) => existsSync5(candidate));
+  const script = candidates.find((candidate) => existsSync6(candidate));
   if (script === void 0) {
     throw new Error("package carries no code/deploy/wire-profile.mjs; cannot wire the DSH profile");
   }
-  const envFile2 = path9.join(options.root, "config", "gate.env");
-  await writeFile4(envFile2, [
+  const envFile2 = path11.join(options.root, "config", "gate.env");
+  await writeFile5(envFile2, [
     `DSH_GATE_PORT=${String(options.port)}`,
     `DSH_GATE_PASSWORD=${options.password}`,
     `DSH_HOME=${options.home}`,
     `DSH_WORKDIR=${options.workdir}`,
-    `DSH_GATE_DATA_DIR=${path9.join(options.root, "data")}`,
+    `DSH_GATE_DATA_DIR=${path11.join(options.root, "data")}`,
     ""
   ].join("\n"), { mode: 384 });
   const node = packageNode(options.packageRoot);
@@ -2667,7 +3273,7 @@ async function wireProfile(options) {
     "--root",
     options.root,
     "--profile",
-    path9.join(options.home, "profiles", "web"),
+    path11.join(options.home, "profiles", "web"),
     "--env",
     envFile2,
     "--dsh-home",
@@ -2683,20 +3289,20 @@ async function wireProfile(options) {
 }
 async function startStack(options) {
   const { root, node } = options;
-  const tokenFile = path9.join(root, "data", "dsh-web.json");
-  await rm5(tokenFile, { force: true });
+  const tokenFile = path11.join(root, "data", "dsh-web.json");
+  await rm7(tokenFile, { force: true });
   const supervisor = startProcess({
     command: node,
     // `--preserve-symlinks-main` keeps ROOT at the scratch install even when
     // the scratch `code` directory is a symlink. Older supervisors (packages
     // built before DSH_PACKAGE_ROOT was honoured) then still write their token
     // into the scratch `data/` rather than into the package being tested.
-    args: ["--preserve-symlinks-main", path9.join(root, "code", "dsh-service", "supervisor.mjs")],
+    args: ["--preserve-symlinks-main", path11.join(root, "code", "dsh-service", "supervisor.mjs")],
     cwd: root,
     env: cleanEnv({
       DSH_HOME: options.home,
       DSH_WORKDIR: options.workdir,
-      DSH_AGENTS_HOME: path9.join(options.home, "agents"),
+      DSH_AGENTS_HOME: path11.join(options.home, "agents"),
       DSH_WEB_PORT: "0",
       DSH_PACKAGE_ROOT: root
     }),
@@ -2712,9 +3318,9 @@ ${supervisor.tail()}`);
         error.fatal = true;
         throw error;
       }
-      if (!existsSync5(tokenFile)) return null;
+      if (!existsSync6(tokenFile)) return null;
       try {
-        const parsed = JSON.parse(await readFile6(tokenFile, "utf8"));
+        const parsed = JSON.parse(await readFile7(tokenFile, "utf8"));
         return Number.isInteger(parsed.port) && parsed.port > 0 ? parsed : null;
       } catch {
         return null;
@@ -2731,12 +3337,12 @@ ${supervisor.tail()}`);
   options.log(`dsh web ready on 127.0.0.1:${String(token.port)}; starting the gateway`);
   const gate = startProcess({
     command: node,
-    args: [path9.join(root, "gate", "server.mjs")],
+    args: [path11.join(root, "gate", "server.mjs")],
     cwd: root,
     env: cleanEnv({
       DSH_HOME: options.home,
       DSH_WORKDIR: options.workdir,
-      DSH_GATE_DATA_DIR: path9.join(root, "data"),
+      DSH_GATE_DATA_DIR: path11.join(root, "data"),
       DSH_GATE_PORT: String(options.port),
       // Never expose the throwaway instance beyond loopback: its password is
       // fixed for the test and the build host may be on a public network.
@@ -2746,8 +3352,8 @@ ${supervisor.tail()}`);
       DSH_WEB_TOKEN_FILE: tokenFile,
       DSH_GATE_MEMBER_PORT: String(options.port),
       DSH_PACKAGE_ROOT: root,
-      DSH_APP_DIR: path9.join(root, "app"),
-      DSH_GATE_PATCH: path9.join(root, "config", "browse-picker.patch.yml")
+      DSH_APP_DIR: path11.join(root, "app"),
+      DSH_GATE_PATCH: path11.join(root, "config", "browse-picker.patch.yml")
     }),
     name: "gate",
     log: options.log
@@ -2886,9 +3492,9 @@ async function inspectInChrome(options) {
       ok: state.meshButtons > 0,
       detail: `${String(state.meshButtons)} sidebar button(s) labelled Mesh`
     });
-    const shellShot = path9.join(options.screenshotDir, `dsh-${options.target}.png`);
-    await mkdir5(options.screenshotDir, { recursive: true });
-    await writeFile4(shellShot, await withTimeout(session.screenshot(), 3e4, "screenshot the shell"));
+    const shellShot = path11.join(options.screenshotDir, `dsh-${options.target}.png`);
+    await mkdir6(options.screenshotDir, { recursive: true });
+    await writeFile5(shellShot, await withTimeout(session.screenshot(), 3e4, "screenshot the shell"));
     screenshots.push(shellShot);
     options.log(`screenshot: ${shellShot}`);
     const clicked = await withTimeout(session.evaluate(`(() => {
@@ -2928,8 +3534,8 @@ async function inspectInChrome(options) {
       } else if (mode === "") {
         checks.push({ name: "mesh-panel", ok: false, detail: "the Mesh panel markup never appeared" });
       }
-      const panelShot = path9.join(options.screenshotDir, `mesh-${options.target}.png`);
-      await writeFile4(panelShot, await withTimeout(session.screenshot(), 3e4, "screenshot the Mesh panel"));
+      const panelShot = path11.join(options.screenshotDir, `mesh-${options.target}.png`);
+      await writeFile5(panelShot, await withTimeout(session.screenshot(), 3e4, "screenshot the Mesh panel"));
       screenshots.push(panelShot);
       options.log(`screenshot: ${panelShot}`);
     }
@@ -2941,9 +3547,9 @@ async function inspectInChrome(options) {
     }
     if (screenshots.length === 0) {
       try {
-        await mkdir5(options.screenshotDir, { recursive: true });
-        const failure = path9.join(options.screenshotDir, `failure-${options.target}.png`);
-        await writeFile4(failure, await withTimeout(session.screenshot(), 15e3, "screenshot the failure"));
+        await mkdir6(options.screenshotDir, { recursive: true });
+        const failure = path11.join(options.screenshotDir, `failure-${options.target}.png`);
+        await writeFile5(failure, await withTimeout(session.screenshot(), 15e3, "screenshot the failure"));
         screenshots.push(failure);
         options.log(`screenshot: ${failure}`);
       } catch {
@@ -2969,16 +3575,16 @@ async function runPackageSmoke(options) {
   const started = Date.now();
   const target = String(options.target ?? "");
   const base = { target, packageRoot: options.packageRoot };
-  if (options.packageRoot === void 0 || !existsSync5(options.packageRoot)) {
+  if (options.packageRoot === void 0 || !existsSync6(options.packageRoot)) {
     return { ...skipped("package directory does not exist", base), ok: false, status: "failed", error: `package directory does not exist: ${String(options.packageRoot)}` };
   }
   if (!isNativeTarget(target)) {
     return skipped(`${target} cannot run on ${targetOs()}-${process.arch}`, base);
   }
   const ownsWorkDir = options.workDir === void 0;
-  const workDir = options.workDir ?? await mkdtemp3(path9.join(os4.tmpdir(), "dsh-mesh-smoke-"));
-  await mkdir5(workDir, { recursive: true });
-  const logFile = path9.join(workDir, "smoke.log");
+  const workDir = options.workDir ?? await mkdtemp3(path11.join(os6.tmpdir(), "dsh-mesh-smoke-"));
+  await mkdir6(workDir, { recursive: true });
+  const logFile = path11.join(workDir, "smoke.log");
   const log = (line) => {
     const text = String(line);
     void appendFile(logFile, `${(/* @__PURE__ */ new Date()).toISOString()} ${text}
@@ -2991,7 +3597,7 @@ async function runPackageSmoke(options) {
   const resolved = await resolveSmokeChrome(options, download2, log);
   if (resolved.chrome === null) {
     const reason = missingChromeReason(download2, resolved.error, "set DSH_MESH_SMOKE_CHROME or run with --no-smoke");
-    if (ownsWorkDir && options.keep !== true) await rm5(workDir, { recursive: true, force: true }).catch(() => {
+    if (ownsWorkDir && options.keep !== true) await rm7(workDir, { recursive: true, force: true }).catch(() => {
     });
     return options.required === true ? { ...skipped(reason, base), ok: false, status: "failed", error: reason } : skipped(reason, base);
   }
@@ -3001,7 +3607,7 @@ async function runPackageSmoke(options) {
     } catch (error) {
       const reason = `downloaded Chrome for Testing ${resolved.version ?? ""} could not start: ${browserStartReason(error)}`;
       log(reason);
-      if (ownsWorkDir && options.keep !== true) await rm5(workDir, { recursive: true, force: true }).catch(() => {
+      if (ownsWorkDir && options.keep !== true) await rm7(workDir, { recursive: true, force: true }).catch(() => {
       });
       return options.required === true ? { ...skipped(reason, base), ok: false, status: "failed", error: reason } : skipped(reason, base);
     }
@@ -3013,8 +3619,8 @@ async function runPackageSmoke(options) {
   try {
     log(`smoke ${target}: package ${options.packageRoot}; chrome ${chromeLabel}`);
     root = await prepareInstallRoot(options.packageRoot, workDir);
-    const home = path9.join(root, "home");
-    const worktree = path9.join(root, "workspace");
+    const home = path11.join(root, "home");
+    const worktree = path11.join(root, "workspace");
     const port = await freePort();
     await wireProfile({
       packageRoot: options.packageRoot,
@@ -3089,19 +3695,19 @@ async function runPackageSmoke(options) {
   } finally {
     await stack?.close().catch(() => {
     });
-    if (root !== void 0 && options.keep !== true) await rm5(root, { recursive: true, force: true }).catch(() => {
+    if (root !== void 0 && options.keep !== true) await rm7(root, { recursive: true, force: true }).catch(() => {
     });
-    if (ownsWorkDir && options.keep !== true) await rm5(workDir, { recursive: true, force: true }).catch(() => {
+    if (ownsWorkDir && options.keep !== true) await rm7(workDir, { recursive: true, force: true }).catch(() => {
     });
   }
 }
 
 // code/build/stamp.mjs
-import { mkdir as mkdir6, readFile as readFile7, readdir as readdir4, rename as rename3, writeFile as writeFile5 } from "node:fs/promises";
-import os5 from "node:os";
-import path10 from "node:path";
+import { mkdir as mkdir7, readFile as readFile8, readdir as readdir5, rename as rename4, writeFile as writeFile6 } from "node:fs/promises";
+import os7 from "node:os";
+import path12 from "node:path";
 function defaultStampFile() {
-  return path10.join(os5.homedir(), ".dsh", "mesh", "build-stamp.json");
+  return path12.join(os7.homedir(), ".dsh", "mesh", "build-stamp.json");
 }
 function buildStampDate(date = /* @__PURE__ */ new Date()) {
   const year = String(date.getFullYear()).padStart(4, "0");
@@ -3140,20 +3746,20 @@ async function nextBuildStamp(options = {}) {
   const now = options.now ?? /* @__PURE__ */ new Date();
   const date = buildStampDate(now);
   const stateFile = options.stateFile ?? defaultStampFile();
-  const packagesDir = options.packagesDir ?? path10.join(os5.homedir(), ".dsh", "packages");
+  const packagesDir = options.packagesDir ?? path12.join(os7.homedir(), ".dsh", "packages");
   let state = {};
   try {
-    state = JSON.parse(await readFile7(stateFile, "utf8"));
+    state = JSON.parse(await readFile8(stateFile, "utf8"));
   } catch {
     state = {};
   }
   let next = state?.date === date && Number.isSafeInteger(state.next) && state.next > 0 ? state.next : 1;
-  const names = await readdir4(packagesDir).catch(() => []);
+  const names = await readdir5(packagesDir).catch(() => []);
   next = Math.max(next, highestFromNames(names, date) + 1);
   const stamp = `${date}${letterFor(next)}`;
-  await mkdir6(path10.dirname(stateFile), { recursive: true });
+  await mkdir7(path12.dirname(stateFile), { recursive: true });
   const temporary = `${stateFile}.${String(process.pid)}.tmp`;
-  await writeFile5(temporary, `${JSON.stringify({
+  await writeFile6(temporary, `${JSON.stringify({
     format: 1,
     date,
     next: next + 1,
@@ -3161,7 +3767,7 @@ async function nextBuildStamp(options = {}) {
     updatedAt: (/* @__PURE__ */ new Date()).toISOString()
   }, null, 2)}
 `, "utf8");
-  await rename3(temporary, stateFile);
+  await rename4(temporary, stateFile);
   return stamp;
 }
 
@@ -3192,6 +3798,8 @@ function phaseFromLine(line, targets = ["linux-x64"], context = {}) {
   if (text.includes("needs-fix")) return { phase: "apply", percent: 14, status: "needs-fix" };
   if (/^(?:applied|skipped) /u.test(text)) return { phase: "apply", percent: 11 };
   if (text.includes("$ pnpm install") || text.includes("$ pnpm i")) return { phase: "build", percent: 18 };
+  if (text.startsWith("prefetch app ")) return { phase: "build", percent: 20 };
+  if (text.includes("web build cache hit")) return { phase: "build", percent: 62 };
   if (text.startsWith("Progress: resolved")) return { phase: "build", percent: 30 };
   if (text.includes("$ pnpm run build:web") || text.includes("$ pnpm build")) return { phase: "build", percent: 50 };
   if (/^\$ pnpm (?:exec|run) /u.test(text)) return { phase: "build", percent: 44 };
@@ -3239,19 +3847,19 @@ function phaseFromLine(line, targets = ["linux-x64"], context = {}) {
 }
 
 // code/shared/release.mjs
-import { createHash as createHash2 } from "node:crypto";
-import { createReadStream as createReadStream3, createWriteStream as createWriteStream5 } from "node:fs";
-import { chmod as chmod4, mkdtemp as mkdtemp4, mkdir as mkdir7, readFile as readFile8, rm as rm7, stat as stat5, writeFile as writeFile6 } from "node:fs/promises";
+import { createHash as createHash3 } from "node:crypto";
+import { createReadStream as createReadStream4, createWriteStream as createWriteStream6 } from "node:fs";
+import { chmod as chmod5, mkdtemp as mkdtemp4, mkdir as mkdir8, readFile as readFile9, rm as rm9, stat as stat7, writeFile as writeFile7 } from "node:fs/promises";
 import { homedir, tmpdir as tmpdir2 } from "node:os";
-import path11 from "node:path";
+import path13 from "node:path";
 import { finished } from "node:stream/promises";
 
 // code/shared/http-client.mjs
-import { createReadStream as createReadStream2, createWriteStream as createWriteStream4 } from "node:fs";
-import { rm as rm6, rename as rename4, stat as stat4 } from "node:fs/promises";
+import { createReadStream as createReadStream3, createWriteStream as createWriteStream5 } from "node:fs";
+import { rm as rm8, rename as rename5, stat as stat6 } from "node:fs/promises";
 import http2 from "node:http";
 import https2 from "node:https";
-import { PassThrough, Readable as Readable4, Transform } from "node:stream";
+import { PassThrough, Readable as Readable4, Transform as Transform2 } from "node:stream";
 import tls2 from "node:tls";
 var MAX_REDIRECTS2 = 10;
 var MAX_ERROR_BODY = 64 * 1024;
@@ -3517,7 +4125,7 @@ async function requestJson(url, options = {}) {
 async function uploadFile(url, options) {
   const log = options.log ?? (() => {
   });
-  const info = await stat4(options.file);
+  const info = await stat6(options.file);
   const retries = Number.isSafeInteger(options.retries) ? Math.max(0, options.retries) : 2;
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -3529,7 +4137,7 @@ async function uploadFile(url, options) {
     let sent = 0;
     let lastReport = 0;
     let lastSent = 0;
-    const stream = new Transform({
+    const stream = new Transform2({
       transform(chunk, _encoding, callback) {
         sent += chunk.length;
         const now = Date.now();
@@ -3547,7 +4155,7 @@ async function uploadFile(url, options) {
         callback(null, chunk);
       }
     });
-    const file = createReadStream2(options.file);
+    const file = createReadStream3(options.file);
     file.once("error", (error) => stream.destroy(error));
     file.pipe(stream);
     try {
@@ -3590,7 +4198,7 @@ async function uploadFile(url, options) {
 }
 async function multipartFileBody(options) {
   const boundary = `----dsh-mesh-${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
-  const info = await stat4(options.file);
+  const info = await stat6(options.file);
   const fields = options.fields ?? {};
   const chunks = [];
   for (const [name, value] of Object.entries(fields)) {
@@ -3612,7 +4220,7 @@ Content-Type: ${options.type ?? "application/octet-stream"}\r
   const length = head.length + info.size + tail.length;
   const body = new PassThrough();
   body.write(head);
-  const file = createReadStream2(options.file);
+  const file = createReadStream3(options.file);
   file.once("error", (error) => body.destroy(error));
   file.pipe(body, { end: false });
   file.once("end", () => {
@@ -3633,8 +4241,8 @@ var MAX_PART_BYTES = 95 * 1024 * 1024;
 var LATEST_MANIFEST_NAME = "latest.json";
 var GITEE_REPO_QUOTA_BYTES = 950 * 1024 * 1024;
 function defaultReleaseConfigFile() {
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME.trim() : path11.join(homedir(), ".dsh");
-  return path11.join(home, "mesh", "release.json");
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME.trim() : path13.join(homedir(), ".dsh");
+  return path13.join(home, "mesh", "release.json");
 }
 function normalizeRepo(value) {
   if (value === null || typeof value !== "object") return { owner: "", repo: DEFAULT_RELEASE_REPO };
@@ -3677,7 +4285,7 @@ async function loadReleaseConfig(options = {}) {
   let parsed = {};
   let fileError = null;
   try {
-    parsed = JSON.parse(await readFile8(file, "utf8"));
+    parsed = JSON.parse(await readFile9(file, "utf8"));
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) parsed = {};
   } catch (error) {
     if (error?.code !== "ENOENT") fileError = error instanceof Error ? error.message : String(error);
@@ -3760,10 +4368,10 @@ async function saveReleaseConfig(options) {
     github: { owner: github.owner, repo: github.repo, token: githubToken },
     gitee: { owner: gitee.owner, repo: gitee.repo, token: giteeToken, branch }
   };
-  await mkdir7(path11.dirname(file), { recursive: true });
-  await writeFile6(file, `${JSON.stringify(stored, null, 2)}
+  await mkdir8(path13.dirname(file), { recursive: true });
+  await writeFile7(file, `${JSON.stringify(stored, null, 2)}
 `, { encoding: "utf8", mode: 384 });
-  await chmod4(file, 384).catch(() => {
+  await chmod5(file, 384).catch(() => {
   });
   return loadReleaseConfig({ file, env: options.env ?? {} });
 }
@@ -3796,13 +4404,13 @@ function releaseAssetUrl(config, repo, name) {
   return `${base}/${target.owner}/${target.repo}/releases/download/${config.tag}/${encodeURIComponent(name)}`;
 }
 async function sha256File2(file) {
-  const hash = createHash2("sha256");
-  await finished(createReadStream3(file).on("data", (chunk) => hash.update(chunk)));
+  const hash = createHash3("sha256");
+  await finished(createReadStream4(file).on("data", (chunk) => hash.update(chunk)));
   return hash.digest("hex");
 }
 async function copyRange(source, destination, start, end) {
-  const input = createReadStream3(source, { start, end });
-  const output = createWriteStream5(destination);
+  const input = createReadStream4(source, { start, end });
+  const output = createWriteStream6(destination);
   input.once("error", (error) => output.destroy(error));
   input.pipe(output);
   await finished(output);
@@ -3811,28 +4419,28 @@ async function splitArchive(file, options = {}) {
   const log = options.log ?? (() => {
   });
   const partBytes = Number.isSafeInteger(options.partBytes) ? Math.min(Math.max(options.partBytes, 1024 * 1024), MAX_PART_BYTES) : DEFAULT_PART_BYTES;
-  const info = await stat5(file);
+  const info = await stat7(file);
   if (!info.isFile()) throw new Error(`not a file: ${file}`);
-  const dir = options.dir ?? await mkdtemp4(path11.join(tmpdir2(), "dsh-mesh-release-"));
-  await mkdir7(dir, { recursive: true });
-  const name = path11.basename(file);
+  const dir = options.dir ?? await mkdtemp4(path13.join(tmpdir2(), "dsh-mesh-release-"));
+  await mkdir8(dir, { recursive: true });
+  const name = path13.basename(file);
   const count = Math.max(1, Math.ceil(info.size / partBytes));
   const parts = [];
   for (let index = 0; index < count; index += 1) {
     const start = index * partBytes;
     const end = Math.min(info.size, start + partBytes) - 1;
     const partName = `${name}.part${String(index + 1).padStart(3, "0")}`;
-    const partPath = path11.join(dir, partName);
-    await rm7(partPath, { force: true });
+    const partPath = path13.join(dir, partName);
+    await rm9(partPath, { force: true });
     await copyRange(file, partPath, start, end);
-    const partInfo = await stat5(partPath);
+    const partInfo = await stat7(partPath);
     parts.push({ name: partName, path: partPath, bytes: partInfo.size });
     log(`split ${name}: ${partName} (${formatBytes(partInfo.size)})`);
   }
   return { file, dir, partBytes, parts };
 }
 async function removeSplit(dir) {
-  await rm7(dir, { recursive: true, force: true }).catch(() => {
+  await rm9(dir, { recursive: true, force: true }).catch(() => {
   });
 }
 function formatBytes(value) {
@@ -3846,7 +4454,7 @@ function formatBytes(value) {
   }
   return `${amount >= 100 || unit === 0 ? String(Math.round(amount)) : amount.toFixed(1)} ${units[unit]}`;
 }
-async function withRetry(run2, options = {}) {
+async function withRetry(run3, options = {}) {
   const retries = Number.isSafeInteger(options.retries) ? Math.max(0, options.retries) : 2;
   const log = options.log ?? (() => {
   });
@@ -3858,7 +4466,7 @@ async function withRetry(run2, options = {}) {
       await new Promise((resolve) => setTimeout(resolve, delay2));
     }
     try {
-      return await run2();
+      return await run3();
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       if (lastError.retryable !== true) throw lastError;
@@ -4028,7 +4636,7 @@ var GitHubRelease = class {
    * @returns {Promise<object>} uploaded asset.
    */
   async uploadAsset(releaseId, file, onProgress) {
-    const name = path11.basename(file);
+    const name = path13.basename(file);
     const known = this.assetCache ?? await this.listAssets(releaseId);
     const existing = known.find((asset) => asset.name === name);
     if (existing !== void 0) await this.deleteAsset(existing.id);
@@ -4048,7 +4656,7 @@ var GitHubRelease = class {
     if (result.status !== 201 && !isSuccess(result.status)) {
       throw new Error(`GitHub asset upload failed for ${name}: HTTP ${String(result.status)} ${result.text.slice(0, 300)}`);
     }
-    this.assetCache = [...(this.assetCache ?? []).filter((asset) => asset.name !== name), { name, size: (await stat5(file)).size }];
+    this.assetCache = [...(this.assetCache ?? []).filter((asset) => asset.name !== name), { name, size: (await stat7(file)).size }];
     return result.json ?? {};
   }
   /**
@@ -4270,7 +4878,7 @@ var GiteeRelease = class {
    * @returns {Promise<{id:number,name:string,url:string}>} uploaded attachment.
    */
   async uploadAsset(releaseId, file, onProgress) {
-    const name = path11.basename(file);
+    const name = path13.basename(file);
     const known = this.assetCache ?? await this.listAssets(releaseId);
     const existing = known.find((asset) => asset.name === name);
     if (existing !== void 0) await this.deleteAsset(releaseId, existing.id);
@@ -4345,7 +4953,7 @@ function buildLatestManifest(options) {
   for (const artifact of artifacts) {
     const target = String(artifact.target ?? "");
     if (target === "") continue;
-    const name = path11.basename(String(artifact.archive ?? ""));
+    const name = path13.basename(String(artifact.archive ?? ""));
     const parts = Array.isArray(partResults[target]) ? partResults[target] : [];
     const entry = {
       archive: name,
@@ -4400,11 +5008,11 @@ async function publishRelease(options) {
   };
   try {
     for (const artifact of artifacts) {
-      const file = path11.resolve(artifact.archive);
-      const info = await stat5(file);
+      const file = path13.resolve(artifact.archive);
+      const info = await stat7(file);
       const digest = artifact.sha256 ?? await sha256File2(file);
       prepared.push({ ...artifact, archive: file, bytes: info.size, sha256: digest });
-      log(`release asset ${path11.basename(file)} (${formatBytes(info.size)}, sha256 ${digest.slice(0, 12)}\u2026)`);
+      log(`release asset ${path13.basename(file)} (${formatBytes(info.size)}, sha256 ${digest.slice(0, 12)}\u2026)`);
     }
     if (config.github.enabled && config.github.owner === "") {
       config.github.owner = await detectReleaseOwner("github", {
@@ -4441,9 +5049,9 @@ async function publishRelease(options) {
       }
     }
     const manifest = buildLatestManifest({ artifacts: prepared, config, partResults, publishedAt: now.toISOString() });
-    const manifestFile = path11.join(splits[0] ?? await mkdtemp4(path11.join(tmpdir2(), "dsh-mesh-release-")), LATEST_MANIFEST_NAME);
-    if (splits.length === 0) splits.push(path11.dirname(manifestFile));
-    await writeFile6(manifestFile, `${JSON.stringify(manifest, null, 2)}
+    const manifestFile = path13.join(splits[0] ?? await mkdtemp4(path13.join(tmpdir2(), "dsh-mesh-release-")), LATEST_MANIFEST_NAME);
+    if (splits.length === 0) splits.push(path13.dirname(manifestFile));
+    await writeFile7(manifestFile, `${JSON.stringify(manifest, null, 2)}
 `, "utf8");
     result.manifest = { ...manifest, assets: manifest.assets };
     if (config.github.enabled) {
@@ -4454,7 +5062,7 @@ async function publishRelease(options) {
         const release = await github.ensureRelease(config.tag, { name: `dsh-mesh ${manifest.version ?? ""} ${manifest.buildStamp ?? ""}`.trim() });
         result.github.releaseUrl = release.html_url ?? github.htmlUrl;
         for (const artifact of prepared) {
-          const name = path11.basename(artifact.archive);
+          const name = path13.basename(artifact.archive);
           log(`github upload ${name}`);
           let nextReport = 10;
           await github.uploadAsset(release.id, artifact.archive, (progress) => {
@@ -4467,7 +5075,7 @@ async function publishRelease(options) {
         }
         log(`github upload ${LATEST_MANIFEST_NAME}`);
         await github.uploadAsset(release.id, manifestFile);
-        result.github.assets.push({ name: LATEST_MANIFEST_NAME, bytes: (await stat5(manifestFile)).size });
+        result.github.assets.push({ name: LATEST_MANIFEST_NAME, bytes: (await stat7(manifestFile)).size });
         const keep = new Set(result.github.assets.map((asset) => asset.name));
         for (const asset of await github.listAssets(release.id)) {
           if (keep.has(asset.name)) continue;
@@ -4515,11 +5123,11 @@ async function publishRelease(options) {
         }
         const finalManifest = buildLatestManifest({ artifacts: prepared, config, partResults: uploaded, publishedAt: now.toISOString() });
         result.manifest = finalManifest;
-        await writeFile6(manifestFile, `${JSON.stringify(finalManifest, null, 2)}
+        await writeFile7(manifestFile, `${JSON.stringify(finalManifest, null, 2)}
 `, "utf8");
         log(`gitee upload ${LATEST_MANIFEST_NAME}`);
         await gitee.uploadAsset(release.id, manifestFile);
-        result.gitee.assets.push({ name: LATEST_MANIFEST_NAME, bytes: (await stat5(manifestFile)).size });
+        result.gitee.assets.push({ name: LATEST_MANIFEST_NAME, bytes: (await stat7(manifestFile)).size });
         for (const asset of await gitee.listAssets(release.id)) {
           if (newNames.has(asset.name)) continue;
           log(`gitee remove old asset ${asset.name}`);
@@ -4594,16 +5202,16 @@ ${errors.join("\n")}`);
 
 // code/build/job.mjs
 function defaultJobRoot() {
-  return path12.join(os6.homedir(), ".dsh", "mesh", "build");
+  return path14.join(os8.homedir(), ".dsh", "mesh", "build");
 }
 function defaultCacheDir2() {
-  return path12.join(os6.homedir(), ".dsh", "mesh", "cache");
+  return path14.join(os8.homedir(), ".dsh", "mesh", "cache");
 }
 async function createJob(options = {}) {
   const root = options.root ?? defaultJobRoot();
   const id = `${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/gu, "-")}-${randomBytes(3).toString("hex")}`;
-  const dir = path12.join(root, id);
-  await mkdir8(dir, { recursive: true });
+  const dir = path14.join(root, id);
+  await mkdir9(dir, { recursive: true });
   const state = {
     id,
     dir,
@@ -4633,21 +5241,21 @@ async function createJob(options = {}) {
   return { id, dir, state };
 }
 async function readState(dir) {
-  return JSON.parse(await readFile9(path12.join(dir, "state.json"), "utf8"));
+  return JSON.parse(await readFile10(path14.join(dir, "state.json"), "utf8"));
 }
 async function writeState(dir, state) {
-  const file = path12.join(dir, "state.json");
+  const file = path14.join(dir, "state.json");
   const temporary = `${file}.tmp`;
-  await writeFile7(temporary, JSON.stringify({ ...state, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }, null, 2), "utf8");
-  await rename5(temporary, file);
+  await writeFile8(temporary, JSON.stringify({ ...state, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }, null, 2), "utf8");
+  await rename6(temporary, file);
 }
 async function appendLog(dir, line) {
-  await appendFile2(path12.join(dir, "build.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
+  await appendFile2(path14.join(dir, "build.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `, "utf8");
 }
 async function readLogTail(dir, lines = 80) {
   try {
-    const text = await readFile9(path12.join(dir, "build.log"), "utf8");
+    const text = await readFile10(path14.join(dir, "build.log"), "utf8");
     const trimmed = text.trimEnd();
     if (trimmed === "") return [];
     return trimmed.split(/\r?\n/u).slice(-lines);
@@ -4655,10 +5263,17 @@ async function readLogTail(dir, lines = 80) {
     return [];
   }
 }
-async function updateState(dir, patch) {
-  const state = { ...await readState(dir), ...patch };
-  await writeState(dir, state);
-  return state;
+var stateQueues = /* @__PURE__ */ new Map();
+function updateState(dir, patch) {
+  const previous = stateQueues.get(dir) ?? Promise.resolve();
+  const run3 = previous.catch(() => {
+  }).then(async () => {
+    const state = { ...await readState(dir), ...patch };
+    await writeState(dir, state);
+    return state;
+  });
+  stateQueues.set(dir, run3);
+  return run3;
 }
 function unverifiedBuildReason(artifacts, options = {}) {
   if (options.full === false || options.smoke === false) return null;
@@ -4668,8 +5283,8 @@ function unverifiedBuildReason(artifacts, options = {}) {
 }
 async function runJob(dir, options) {
   const repositoryRoot = options.repositoryRoot;
-  const recipesPath = options.recipesPath ?? path12.join(repositoryRoot, "build", "recipes.json");
-  const overlayRoot = options.overlayRoot ?? path12.join(repositoryRoot, "build", "overlays");
+  const recipesPath = options.recipesPath ?? path14.join(repositoryRoot, "build", "recipes.json");
+  const overlayRoot = options.overlayRoot ?? path14.join(repositoryRoot, "build", "overlays");
   const outbound = proxyFor({ proxy: options.proxy, env: options.env, fetchImpl: options.fetchImpl });
   let state = await readState(dir);
   const buildStamp = options.buildStamp ?? state.buildStamp ?? `${buildStampDate()}A`;
@@ -4681,7 +5296,7 @@ async function runJob(dir, options) {
   };
   try {
     state = await updateState(dir, { status: "running", phase: "prepare", percent: 2, currentTarget: null, error: null });
-    const prepared = options.reuseWorktree === true && existsSync6(path12.join(dir, "src")) ? { dir: path12.join(dir, "src"), source: state.source, ref: state.ref, local: false, archiveSha256: state.archiveSha256 ?? null } : await prepareSource({
+    const prepared = options.reuseWorktree === true && existsSync7(path14.join(dir, "src")) ? { dir: path14.join(dir, "src"), source: state.source, ref: state.ref, local: false, archiveSha256: state.archiveSha256 ?? null } : await prepareSource({
       source: state.source,
       ref: state.ref,
       cacheDir: options.cacheDir ?? defaultCacheDir2(),
@@ -4703,7 +5318,7 @@ async function runJob(dir, options) {
     const result = await applyRecipes({ dir: prepared.dir, recipes, overlayRoot, log });
     if (!result.ok) {
       const order = await writeWorkOrder({
-        dir: path12.join(dir, "work-order"),
+        dir: path14.join(dir, "work-order"),
         jobDir: dir,
         source: state.source,
         ref: state.ref,
@@ -4741,89 +5356,158 @@ async function runJob(dir, options) {
       applied: result.applied,
       skipped: result.skipped
     });
-    const built = await runWebBuild({
-      dir: prepared.dir,
-      log,
+    const full = options.full !== false;
+    const targets = state.targets;
+    const cacheDir = options.cacheDir ?? defaultCacheDir2();
+    const env = options.env ?? process.env;
+    const cacheEnabled = options.cache !== false && !cachesDisabled(env);
+    const version = options.version ?? await readSourceVersion(prepared.dir);
+    const pluginVersion = await readPluginVersion(repositoryRoot);
+    const fingerprint = await pluginFingerprint(repositoryRoot);
+    const webKey = cacheEnabled ? await webBuildCacheKey({
+      archiveSha256: prepared.archiveSha256 ?? state.archiveSha256 ?? null,
+      source: state.source,
+      recipesFile: recipesPath,
+      overlayRoot,
+      prepare: options.prepare ?? (Array.isArray(recipes.prepare) ? recipes.prepare : null),
       install: options.install,
       build: options.build,
-      prepare: options.prepare ?? (Array.isArray(recipes.prepare) ? recipes.prepare : null),
-      env: outbound.env,
-      prebuild: options.prebuild,
-      // The install and the web build are the two long silent steps; the
-      // panel would otherwise sit at 12% until packaging starts.
-      onProgress: async (update) => {
-        state = await updateState(dir, { phase: update.phase, percent: update.percent });
-      }
-    });
+      prebuild: options.prebuild !== false
+    }) : null;
+    let prefetch = Promise.resolve();
+    if (cacheEnabled && full) {
+      prefetch = (async () => {
+        for (const target of targets) {
+          log(`prefetch app ${target}`);
+          try {
+            await ensureAppCache({
+              cacheDir,
+              version,
+              target,
+              repositoryRoot,
+              env: outbound.env,
+              refresh: options.refreshAppCache === true,
+              log
+            });
+          } catch (error) {
+            log(`prefetch app ${target} failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      })().catch((error) => {
+        log(`app prefetch stopped: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+    let built;
+    try {
+      built = await runWebBuild({
+        dir: prepared.dir,
+        log,
+        install: options.install,
+        build: options.build,
+        prepare: options.prepare ?? (Array.isArray(recipes.prepare) ? recipes.prepare : null),
+        env: outbound.env,
+        prebuild: options.prebuild,
+        cacheDir: cacheEnabled ? cacheDir : null,
+        cacheKey: webKey,
+        cacheMeta: {
+          source: state.source,
+          ref: state.ref,
+          archiveSha256: prepared.archiveSha256 ?? null,
+          tree: recipes.tree ?? null
+        },
+        refreshCache: options.refreshWebCache === true,
+        // The install and the web build are the two long silent steps; the
+        // panel would otherwise sit at 12% until packaging starts.
+        onProgress: async (update) => {
+          state = await updateState(dir, { phase: update.phase, percent: update.percent });
+        }
+      });
+    } finally {
+      await prefetch;
+    }
     if (!built.ok) {
       state = await updateState(dir, { status: "build-failed", phase: "build", error: built.error ?? "web build failed" });
       log(`build failed: ${built.error ?? "unknown error"}`);
       return state;
     }
-    const version = options.version ?? await readSourceVersion(prepared.dir);
-    const pluginVersion = await readPluginVersion(repositoryRoot);
-    const fingerprint = await pluginFingerprint(repositoryRoot);
     state = await updateState(dir, {
       phase: "package",
       percent: 65,
       version,
       pluginVersion,
       pluginFingerprint: fingerprint,
-      dist: built.dist
+      dist: built.dist,
+      webBuild: { cached: built.cached === true, key: webKey === null ? null : webKey.slice(0, 12) }
     });
+    const appCacheDir2 = cacheEnabled ? cacheDir : null;
+    const jobSource = state.source;
+    const jobRef = state.ref;
+    const sourceEtag = state.archiveEtag ?? null;
     const artifacts = [];
-    const full = options.full !== false;
-    const targets = state.targets;
-    for (const target of targets) {
+    let failure = null;
+    let reported = 65;
+    const concurrency = packagingConcurrency({
+      targets: targets.length,
+      requested: options.concurrency,
+      env
+    });
+    if (concurrency > 1) log(`packaging ${String(targets.length)} targets with up to ${String(concurrency)} at a time`);
+    const advance = async (target, stage, extra = {}) => {
+      reported = Math.max(reported, targetPercent(targets, target, stage));
       state = await updateState(dir, {
-        phase: "package",
-        percent: targetPercent(targets, target, "start"),
-        currentTarget: target
+        phase: stage === "smoke" ? "smoke" : "package",
+        percent: reported,
+        currentTarget: target,
+        ...extra
       });
+    };
+    const packageTarget = async (target) => {
+      await advance(target, "start");
       log(`packaging ${target}`);
       const shared = {
         dist: built.dist,
         target,
-        outputDir: path12.join(dir, "dist"),
+        outputDir: path14.join(dir, "dist"),
         version,
         buildStamp,
         repositoryRoot,
-        source: state.source,
-        ref: state.ref,
+        source: jobSource,
+        ref: jobRef,
         tree: recipes.tree ?? null,
-        sourceEtag: state.archiveEtag ?? null,
+        sourceEtag,
         pluginVersion,
         pluginFingerprint: fingerprint,
         fetchImpl: outbound.fetchImpl,
         env: outbound.env,
-        cacheDir: options.cacheDir ?? defaultCacheDir2(),
+        cacheDir,
         log
       };
       const assembled = full ? await assembleRuntimePackage({
         ...shared,
         dshVersion: version,
         nodeVersion: options.nodeVersion ?? process.versions.node,
-        cacheDir: options.cacheDir ?? defaultCacheDir2()
+        appCacheDir: appCacheDir2,
+        refreshAppCache: options.refreshAppCache === true
       }) : await assembleWebPackage(shared);
-      const archive = await archivePackage(assembled.packageDir, target, { log });
-      const info = await stat6(archive);
+      const archive = await archivePackage(assembled.packageDir, target, {
+        log,
+        env: outbound.env,
+        threads: options.archiveThreads
+      });
+      const info = await stat8(archive);
       let smoke = null;
       if (options.smoke === false) {
         smoke = { ok: true, status: "skipped", reason: "smoke test disabled for this build", checks: [], screenshots: [] };
       } else if (!full) {
         smoke = { ok: true, status: "skipped", reason: "web-only package has no app/runtime to start", checks: [], screenshots: [] };
       } else {
-        state = await updateState(dir, {
-          phase: "smoke",
-          percent: targetPercent(targets, target, "smoke"),
-          currentTarget: target
-        });
+        await advance(target, "smoke");
         log(`smoke ${target}: starting the packaged DSH under headless Chrome`);
         smoke = await runPackageSmoke({
           packageRoot: assembled.packageDir,
           target,
-          workDir: path12.join(dir, "smoke", target),
-          screenshotDir: path12.join(dir, "smoke", target),
+          workDir: path14.join(dir, "smoke", target),
+          screenshotDir: path14.join(dir, "smoke", target),
           chrome: options.smokeChrome,
           required: options.smokeRequired === true,
           startTimeoutMs: options.smokeStartTimeoutMs,
@@ -4843,23 +5527,47 @@ async function runJob(dir, options) {
       };
       artifacts.push(artifact);
       log(`packaged ${target}: ${archive}`);
+      await advance(target, "end", { artifacts: [...artifacts] });
       if (smoke?.status === "failed") {
-        state = await updateState(dir, {
-          status: "smoke-failed",
-          phase: "smoke",
-          percent: targetPercent(targets, target, "end"),
-          error: `${target} smoke test failed: ${smoke.error ?? "see smoke.log"}`,
-          artifacts
-        });
-        log(`smoke ${target}: failed; stopping before the next target`);
-        return state;
+        throw Object.assign(
+          new Error(`${target} smoke test failed: ${smoke.error ?? "see smoke.log"}`),
+          { smokeFailure: true }
+        );
       }
+    };
+    const queue = [...targets];
+    let stopped = false;
+    const worker = async () => {
+      while (!stopped) {
+        const target = queue.shift();
+        if (target === void 0) return;
+        try {
+          await packageTarget(target);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          failure ??= { message, smoke: error instanceof Error && error.smokeFailure === true };
+          stopped = true;
+          if (concurrency > 1) log(`${target} failed; letting the other target finish`);
+          return;
+        }
+      }
+    };
+    await Promise.all(Array.from(
+      { length: Math.min(concurrency, targets.length) },
+      () => worker()
+    ));
+    artifacts.sort((left, right) => targets.indexOf(left.target) - targets.indexOf(right.target));
+    if (failure !== null) {
       state = await updateState(dir, {
-        phase: "package",
-        percent: targetPercent(targets, target, "end"),
-        currentTarget: target,
+        status: failure.smoke ? "smoke-failed" : "failed",
+        phase: failure.smoke ? "smoke" : "failed",
+        percent: reported,
+        error: failure.message,
         artifacts
       });
+      if (failure.smoke) log(`smoke verification failed: ${failure.message}`);
+      else log(`build failed: ${failure.message}`);
+      return state;
     }
     const unverified = unverifiedBuildReason(artifacts, { full, smoke: options.smoke });
     if (unverified !== null) {
@@ -4922,8 +5630,8 @@ async function runJob(dir, options) {
   }
 }
 async function learnJob(dir, options) {
-  const recipesPath = options.recipesPath ?? path12.join(options.repositoryRoot, "build", "recipes.json");
-  const overlayRoot = options.overlayRoot ?? path12.join(options.repositoryRoot, "build", "overlays");
+  const recipesPath = options.recipesPath ?? path14.join(options.repositoryRoot, "build", "recipes.json");
+  const overlayRoot = options.overlayRoot ?? path14.join(options.repositoryRoot, "build", "overlays");
   const state = await readState(dir);
   if (state.worktree === null) throw new Error("this job has no worktree yet");
   const recipes = await loadRecipes(recipesPath);
@@ -4933,13 +5641,13 @@ async function learnJob(dir, options) {
     overlayRoot,
     mismatches: Array.isArray(state.mismatches) ? state.mismatches : []
   });
-  await writeFile7(recipesPath, JSON.stringify(learned.recipes, null, 2), "utf8");
+  await writeFile8(recipesPath, JSON.stringify(learned.recipes, null, 2), "utf8");
   await appendLog(dir, `learned ${String(learned.learned.length)} overlay(s)`);
   return updateState(dir, { status: "learned", learnedAt: (/* @__PURE__ */ new Date()).toISOString(), learned: learned.learned });
 }
 async function readPluginVersion(repositoryRoot) {
   try {
-    const parsed = JSON.parse(await readFile9(path12.join(repositoryRoot, "package.json"), "utf8"));
+    const parsed = JSON.parse(await readFile10(path14.join(repositoryRoot, "package.json"), "utf8"));
     return typeof parsed?.version === "string" && parsed.version.trim() !== "" ? parsed.version.trim() : null;
   } catch {
     return null;
@@ -4947,11 +5655,11 @@ async function readPluginVersion(repositoryRoot) {
 }
 async function readSourceVersion(worktree) {
   for (const candidate of [
-    path12.join(worktree, "apps", "cli", "package.json"),
-    path12.join(worktree, "package.json")
+    path14.join(worktree, "apps", "cli", "package.json"),
+    path14.join(worktree, "package.json")
   ]) {
     try {
-      const pkg = JSON.parse(await readFile9(candidate, "utf8"));
+      const pkg = JSON.parse(await readFile10(candidate, "utf8"));
       if (typeof pkg.version === "string" && pkg.version !== "") return pkg.version;
     } catch {
     }
@@ -4960,32 +5668,32 @@ async function readSourceVersion(worktree) {
 }
 
 // code/deploy/engine.mjs
-import { createHash as createHash3 } from "node:crypto";
-import { createReadStream as createReadStream4 } from "node:fs";
-import { spawn as spawn5 } from "node:child_process";
-import { existsSync as existsSync8, readFileSync as readFileSync2 } from "node:fs";
-import { copyFile as copyFile2, link, mkdir as mkdir9, mkdtemp as mkdtemp5, readFile as readFile11, readdir as readdir5, rename as rename6, rm as rm9, stat as stat8, writeFile as writeFile8 } from "node:fs/promises";
+import { createHash as createHash4 } from "node:crypto";
+import { createReadStream as createReadStream5 } from "node:fs";
+import { spawn as spawn6 } from "node:child_process";
+import { existsSync as existsSync9, readFileSync as readFileSync2 } from "node:fs";
+import { copyFile as copyFile2, link as link2, mkdir as mkdir10, mkdtemp as mkdtemp5, readFile as readFile12, readdir as readdir6, rename as rename7, rm as rm11, stat as stat10, writeFile as writeFile9 } from "node:fs/promises";
 import { isIP as isIP3 } from "node:net";
 import { homedir as homedir2, hostname, tmpdir as tmpdir3 } from "node:os";
-import path14 from "node:path";
+import path16 from "node:path";
 
 // code/shared/egress.mjs
-import { spawn as spawn4 } from "node:child_process";
-import { existsSync as existsSync7 } from "node:fs";
-import { readFile as readFile10, stat as stat7 } from "node:fs/promises";
-import path13 from "node:path";
+import { spawn as spawn5 } from "node:child_process";
+import { existsSync as existsSync8 } from "node:fs";
+import { readFile as readFile11, stat as stat9 } from "node:fs/promises";
+import path15 from "node:path";
 import { fileURLToPath } from "node:url";
-var HERE = path13.dirname(fileURLToPath(import.meta.url));
+var HERE = path15.dirname(fileURLToPath(import.meta.url));
 function resolveEgressScript(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
-    const candidate = path13.join(current, "code", "shared", "egress-proxy.mjs");
-    if (existsSync7(candidate)) return candidate;
-    const parent = path13.dirname(current);
+    const candidate = path15.join(current, "code", "shared", "egress-proxy.mjs");
+    if (existsSync8(candidate)) return candidate;
+    const parent = path15.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return path13.resolve(start, "..", "..", "code", "shared", "egress-proxy.mjs");
+  return path15.resolve(start, "..", "..", "code", "shared", "egress-proxy.mjs");
 }
 var SCRIPT_PATH = resolveEgressScript(HERE);
 var REMOTE_SCRIPT = "$HOME/.dsh/mesh/egress-proxy.mjs";
@@ -5007,7 +5715,7 @@ function sshOptions(plan) {
 }
 function sshRun(plan, command, input) {
   return new Promise((resolve, reject) => {
-    const child = spawn4("ssh", [...sshOptions(plan), targetOf(plan), command], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    const child = spawn5("ssh", [...sshOptions(plan), targetOf(plan), command], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {
@@ -5063,7 +5771,7 @@ var EgressProxy = class {
       "exit 3",
       ""
     ].join("\n");
-    const child = spawn4("ssh", [...sshOptions(plan), targetOf(plan), "bash -s"], {
+    const child = spawn5("ssh", [...sshOptions(plan), targetOf(plan), "bash -s"], {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true
     });
@@ -5089,8 +5797,8 @@ var EgressProxy = class {
    * @returns {Promise<void>}
    */
   async #install(plan) {
-    const local = await readFile10(SCRIPT_PATH, "utf8");
-    const info = await stat7(SCRIPT_PATH);
+    const local = await readFile11(SCRIPT_PATH, "utf8");
+    const info = await stat9(SCRIPT_PATH);
     const stamp = `${String(info.size)}-${String(info.mtimeMs)}`;
     const check = await sshRun(plan, `test -f ${REMOTE_SCRIPT} && cat ${REMOTE_SCRIPT}`).catch(() => ({ stdout: "" }));
     if (check.stdout === local) return;
@@ -5154,8 +5862,8 @@ var DEFAULT_SERVICES = {
   linux: [
     // The package's start.sh runs the gate, which spawns the private DSH; the
     // split services belong to the hand-installed layout, not to a package.
-    { name: "dsh-wireguard-control.service", role: "control", command: "start-control.sh" },
-    { name: "dsh-web-gate.service", role: "gate", command: "start.sh" }
+    { name: "dsh-wireguard-control.service", role: "control" },
+    { name: "dsh-web-gate.service", role: "gate" }
   ],
   windows: [
     // The supervisor service owns the whole stack: it runs start-stack.ps1
@@ -5163,8 +5871,8 @@ var DEFAULT_SERVICES = {
     // otherwise. The old split DSH-Web-App service duplicated the gate's own
     // DSH spawn and is removed by the deploy. The control panel is its own SCM
     // service so restarting the gateway never takes 51821 down with it.
-    { name: "DSH-WireGuard-Control", role: "control", command: "dsh-wireguard-control-service.exe" },
-    { name: "DSH-Mesh", role: "gate", command: "dsh-mesh-service.exe" }
+    { name: "DSH-WireGuard-Control", role: "control" },
+    { name: "DSH-Mesh", role: "gate" }
   ]
 };
 var ROLE_ORDER = { control: 0, dsh: 1, gate: 2 };
@@ -5176,9 +5884,9 @@ function ps(value) {
 }
 function deployerModelRoute() {
   if (process.env.DSH_DEPLOY_SYNC_MODEL === "0") return null;
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path14.join(homedir2(), ".dsh");
-  const file = path14.join(home, "profiles", "web", "cordis.patch.yml");
-  if (!existsSync8(file)) return null;
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path16.join(homedir2(), ".dsh");
+  const file = path16.join(home, "profiles", "web", "cordis.patch.yml");
+  if (!existsSync9(file)) return null;
   let text;
   try {
     text = readFileSync2(file, "utf8");
@@ -5211,9 +5919,9 @@ function deployerModelRoute() {
 }
 function deployerCredentialsFile() {
   if (process.env.DSH_DEPLOY_SHARE_ACCOUNT === "0") return null;
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path14.join(homedir2(), ".dsh");
-  const file = path14.join(home, ".credentials.yaml");
-  return existsSync8(file) ? file : null;
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path16.join(homedir2(), ".dsh");
+  const file = path16.join(home, ".credentials.yaml");
+  return existsSync9(file) ? file : null;
 }
 function formatBytes2(value) {
   const bytes = Number(value);
@@ -5253,39 +5961,39 @@ function newJobId() {
 function jobPaths(dir) {
   return {
     dir,
-    state: path14.join(dir, "job.json"),
-    log: path14.join(dir, "deploy.log"),
-    runner: path14.join(dir, "runner.json"),
-    request: path14.join(dir, "request.json")
+    state: path16.join(dir, "job.json"),
+    log: path16.join(dir, "deploy.log"),
+    runner: path16.join(dir, "runner.json"),
+    request: path16.join(dir, "request.json")
   };
 }
 async function writeDeployState(dir, state) {
-  const file = path14.join(dir, "job.json");
+  const file = path16.join(dir, "job.json");
   const tmp = `${file}.${process.pid}.tmp`;
-  await mkdir9(dir, { recursive: true });
-  await writeFile8(tmp, `${JSON.stringify(state, null, 2)}
+  await mkdir10(dir, { recursive: true });
+  await writeFile9(tmp, `${JSON.stringify(state, null, 2)}
 `, "utf8");
-  await rename6(tmp, file);
+  await rename7(tmp, file);
 }
 async function readDeployState(dir) {
   try {
-    const parsed = JSON.parse(await readFile11(path14.join(dir, "job.json"), "utf8"));
+    const parsed = JSON.parse(await readFile12(path16.join(dir, "job.json"), "utf8"));
     return parsed !== null && typeof parsed === "object" ? parsed : null;
   } catch {
     return null;
   }
 }
 async function appendDeployLog(dir, line) {
-  await mkdir9(dir, { recursive: true });
-  await writeFile8(path14.join(dir, "deploy.log"), `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
+  await mkdir10(dir, { recursive: true });
+  await writeFile9(path16.join(dir, "deploy.log"), `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
 `, { encoding: "utf8", flag: "a" });
 }
 async function runnerStatus(dir) {
-  const file = path14.join(dir, "runner.json");
+  const file = path16.join(dir, "runner.json");
   let runner = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      runner = JSON.parse(await readFile11(file, "utf8"));
+      runner = JSON.parse(await readFile12(file, "utf8"));
       break;
     } catch {
       runner = null;
@@ -5308,8 +6016,8 @@ async function runnerStatus(dir) {
 }
 function hashFile(file) {
   return new Promise((resolve, reject) => {
-    const hash = createHash3("sha256");
-    const stream = createReadStream4(file);
+    const hash = createHash4("sha256");
+    const stream = createReadStream5(file);
     stream.on("data", (chunk) => hash.update(chunk));
     stream.once("error", reject);
     stream.once("end", () => resolve(hash.digest("hex")));
@@ -5325,7 +6033,7 @@ function normalizeOs(value) {
 function normalizeInstallRoot(value) {
   const text = typeof value === "string" ? value.trim() : "";
   if (text === "") return "";
-  return text.replace(/[\\/]+current$/iu, "").replace(/[\\/]+$/u, "");
+  return text.replace(/[\\/]+$/u, "");
 }
 function inferRole(name) {
   const text = String(name).toLowerCase();
@@ -5333,8 +6041,8 @@ function inferRole(name) {
   if (text.includes("gate")) return "gate";
   return "dsh";
 }
-function normalizeServices(input, os9) {
-  const source = input === void 0 ? DEFAULT_SERVICES[os9] : input;
+function normalizeServices(input, os11) {
+  const source = input === void 0 ? DEFAULT_SERVICES[os11] : input;
   if (!Array.isArray(source) || source.length === 0) {
     throw new Error("at least one service is required");
   }
@@ -5349,8 +6057,7 @@ function normalizeServices(input, os9) {
     seen.add(name);
     const role = raw.role ?? inferRole(name);
     if (!(role in ROLE_ORDER)) throw new Error(`service ${name} has unknown role ${String(role)}`);
-    const command = typeof raw.command === "string" && raw.command.trim() !== "" ? raw.command.trim() : os9 === "linux" ? "start.sh" : "dsh-mesh-service.exe";
-    return { name, role, command };
+    return { name, role };
   });
   if (!services.some((service) => service.role === "gate")) {
     throw new Error('the service list must include one gateway service (role "gate")');
@@ -5364,53 +6071,51 @@ function normalizeServices(input, os9) {
   }
   return services;
 }
-async function findLatestPackage(repositoryRoot, os9) {
-  const dist = path14.join(repositoryRoot, "dist");
-  const suffix = os9 === "linux" ? ".tar.gz" : ".zip";
+async function findLatestPackage(repositoryRoot, os11) {
+  const dist = path16.join(repositoryRoot, "dist");
+  const suffix = os11 === "linux" ? ".tar.gz" : ".zip";
   const prefix = `dsh-mesh-`;
-  const marker = `-${os9 === "linux" ? "linux" : "win"}-x64`;
-  const entries = await readdir5(dist).catch(() => []);
+  const marker = `-${os11 === "linux" ? "linux" : "win"}-x64`;
+  const entries = await readdir6(dist).catch(() => []);
   const candidates = [];
   for (const entry of entries) {
     if (!entry.startsWith(prefix) || !entry.endsWith(suffix) || !entry.includes(marker)) continue;
-    const file = path14.join(dist, entry);
-    const info = await stat8(file).catch(() => null);
+    const file = path16.join(dist, entry);
+    const info = await stat10(file).catch(() => null);
     if (info?.isFile()) candidates.push({ file, mtimeMs: info.mtimeMs });
   }
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   if (candidates.length === 0) {
-    throw new Error(`no ${os9} package found in ${dist}; build one or pass --package`);
+    throw new Error(`no ${os11} package found in ${dist}; build one or pass --package`);
   }
   return candidates[0].file;
 }
-function layoutRootFor(appRoot, os9) {
+function layoutRootFor(appRoot, os11) {
   const root = normalizeInstallRoot(appRoot);
   if (root === "") return root;
-  const separator = os9 === "linux" ? "/" : "\\";
-  const parts = root.split(os9 === "linux" ? /\/+/u : /[\\/]+/u);
+  const separator = os11 === "linux" ? "/" : "\\";
+  const parts = root.split(os11 === "linux" ? /\/+/u : /[\\/]+/u);
   const index = parts.lastIndexOf("releases");
   if (index > 0) {
     const prefix = parts.slice(0, index).join(separator);
     return /^[A-Za-z]:$/u.test(prefix) ? `${prefix}${separator}` : prefix;
   }
-  const base = os9 === "linux" ? path14.posix.basename(root) : path14.win32.basename(root);
-  if (base === ".dsh") return root;
-  return os9 === "linux" ? path14.posix.dirname(root) : path14.win32.dirname(root);
+  return root;
 }
 function archiveSuffix(file) {
-  const name = path14.basename(String(file ?? ""));
+  const name = path16.basename(String(file ?? ""));
   if (name.endsWith(".tar.gz")) return ".tar.gz";
   if (name.endsWith(".tgz")) return ".tgz";
-  const extension = path14.extname(name);
+  const extension = path16.extname(name);
   return extension === "" ? ".tar.gz" : extension;
 }
-function archiveNameFor(file, os9) {
+function archiveNameFor(file, os11) {
   const text = String(file ?? "");
-  return os9 === "windows" ? path14.win32.basename(text) : path14.posix.basename(text);
+  return os11 === "windows" ? path16.win32.basename(text) : path16.posix.basename(text);
 }
 async function buildDeployPlan(options) {
   if (typeof options.host !== "string" || options.host.trim() === "") throw new Error("host is required");
-  const os9 = normalizeOs(options.os ?? "linux");
+  const os11 = normalizeOs(options.os ?? "linux");
   const repositoryRoot = options.repositoryRoot ?? process.cwd();
   const onTarget = options.packageOnTarget !== null && typeof options.packageOnTarget === "object" ? options.packageOnTarget : null;
   const descriptor = options.packageDescriptor !== null && typeof options.packageDescriptor === "object" ? options.packageDescriptor : null;
@@ -5432,14 +6137,14 @@ async function buildDeployPlan(options) {
     packagePath = typeof descriptor.name === "string" ? descriptor.name.trim() : "";
     const bytes = Number(descriptor.bytes);
     sha256 = typeof descriptor.sha256 === "string" ? descriptor.sha256.trim().toLowerCase() : "";
-    if (packagePath === "" || packagePath !== path14.basename(packagePath)) throw new Error("packageDescriptor.name must be an archive name");
+    if (packagePath === "" || packagePath !== path16.basename(packagePath)) throw new Error("packageDescriptor.name must be an archive name");
     if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error("packageDescriptor.bytes must be a positive integer");
     if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error("packageDescriptor.sha256 must be a 64-character hex digest");
     packageInfo2 = { size: bytes };
     packageLocal = descriptor.local !== false;
   } else if (options.skipPackage !== true) {
-    packagePath = options.package ? path14.resolve(options.package) : await findLatestPackage(repositoryRoot, os9);
-    packageInfo2 = await stat8(packagePath);
+    packagePath = options.package ? path16.resolve(options.package) : await findLatestPackage(repositoryRoot, os11);
+    packageInfo2 = await stat10(packagePath);
     if (!packageInfo2.isFile()) throw new Error(`package is not a file: ${packagePath}`);
     sha256 = await hashFile(packagePath);
   }
@@ -5447,9 +6152,9 @@ async function buildDeployPlan(options) {
   if (!/^[A-Za-z0-9._-]{3,80}$/.test(release)) {
     throw new Error("release must be 3-80 chars of letters, digits, dot, underscore or dash");
   }
-  const appRoot = normalizeInstallRoot(options.appRoot) || DEFAULT_APP_ROOT[os9];
-  const layoutRoot = layoutRootFor(appRoot, os9);
-  const services = normalizeServices(options.services, os9);
+  const appRoot = normalizeInstallRoot(options.appRoot) || DEFAULT_APP_ROOT[os11];
+  const layoutRoot = layoutRootFor(appRoot, os11);
+  const services = normalizeServices(options.services, os11);
   const scope = options.scope === "dsh" ? "dsh" : "all";
   const gatePort = String(options.gatePort ?? "80");
   if (!/^\d{1,5}$/.test(gatePort) || Number(gatePort) > 65535) throw new Error("gatePort is invalid");
@@ -5475,11 +6180,11 @@ async function buildDeployPlan(options) {
     gatePassword: typeof options.gatePassword === "string" ? options.gatePassword : "",
     user: typeof options.user === "string" && options.user.trim() !== "" ? options.user.trim() : void 0,
     port: Number.isSafeInteger(options.port) ? options.port : 22,
-    identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path14.resolve(options.identityFile) : void 0,
-    os: os9,
+    identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path16.resolve(options.identityFile) : void 0,
+    os: os11,
     package: {
       path: packagePath,
-      archive: archiveNameFor(packagePath, os9),
+      archive: archiveNameFor(packagePath, os11),
       bytes: packageInfo2?.size ?? 0,
       sha256,
       local: packageLocal,
@@ -5493,10 +6198,6 @@ async function buildDeployPlan(options) {
     appRoot,
     layoutRoot,
     serviceUser,
-    shared: `${appRoot}${os9 === "linux" ? "/shared" : "\\shared"}`,
-    current: `${appRoot}${os9 === "linux" ? "/current" : "\\current"}`,
-    previous: `${appRoot}${os9 === "linux" ? "/previous" : "\\previous"}`,
-    releases: `${appRoot}${os9 === "linux" ? "/releases" : "\\releases"}`,
     services,
     scope,
     gatePort,
@@ -5515,7 +6216,7 @@ async function buildDeployPlan(options) {
     interop: options.interop === false || process.env.DSH_DEPLOY_INTEROP === "0" ? null : interop,
     // Named by content, not by release, so a retried deploy of the same package
     // reuses the upload instead of pushing hundreds of megabytes again.
-    remotePackage: onTarget !== null ? packagePath : os9 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${archiveSuffix(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${archiveSuffix(packagePath)}`,
+    remotePackage: onTarget !== null ? packagePath : os11 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${archiveSuffix(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${archiveSuffix(packagePath)}`,
     // A test upgrade rehearses the *flat* upgrade (the path the gateway uses
     // on itself) in a sandbox on the member before touching it, then runs the
     // normal blue-green upgrade. Without this a member test proves nothing
@@ -5523,7 +6224,7 @@ async function buildDeployPlan(options) {
     test: options.test === true,
     // The deployer's account grants travel with the deploy so a fresh member
     // needs no QR scan of its own.
-    remoteCredentials: os9 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}.account` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}.account`,
+    remoteCredentials: os11 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}.account` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}.account`,
     // When the gateway has a release configured, an upgrade may fetch the
     // archive on the member instead of receiving it through the gateway. The
     // plan carries only URLs and the proxy's SSH coordinates; tokens never
@@ -5533,17 +6234,17 @@ async function buildDeployPlan(options) {
 }
 async function probeTarget(options) {
   if (typeof options.host !== "string" || options.host.trim() === "") throw new Error("host is required");
-  const os9 = normalizeOs(options.os ?? "linux");
+  const os11 = normalizeOs(options.os ?? "linux");
   const user = typeof options.user === "string" && options.user.trim() !== "" ? options.user.trim() : void 0;
   const plan = {
     host: options.host.trim(),
     user,
     port: Number.isSafeInteger(options.port) ? options.port : 22,
-    identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path14.resolve(options.identityFile) : void 0,
-    os: os9
+    identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path16.resolve(options.identityFile) : void 0,
+    os: os11
   };
   const runner = new SshRunner(plan);
-  if (os9 === "windows") {
+  if (os11 === "windows") {
     const script2 = [
       "$ErrorActionPreference = 'SilentlyContinue'",
       `$svc = Get-CimInstance Win32_Service -Filter "Name='DSH-Mesh'"`,
@@ -5552,8 +6253,7 @@ async function probeTarget(options) {
       `  if ($svc.PathName -match '^"([^"]+)"') { $exe = $matches[1] } else { $exe = ($svc.PathName -split ' ')[0] }`,
       "  $root = Split-Path -Parent $exe",
       "}",
-      "if (-not $root) { $root = Join-Path $env:USERPROFILE '.dsh\\dsh-mesh' }",
-      "$root = $root -replace '(?i)\\\\current$', ''",
+      "if (-not $root) { $root = Join-Path $env:USERPROFILE '.dsh' }",
       "Write-Output $root",
       "Write-Output $env:USERNAME"
     ].join("\n");
@@ -5564,7 +6264,7 @@ async function probeTarget(options) {
       `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
     ]);
     const [root2 = ""] = stdout2.split(/\r?\n/u);
-    const appRoot = normalizeInstallRoot(root2) !== "" ? normalizeInstallRoot(root2) : `C:\\Users\\${user ?? "Public"}\\.dsh\\dsh-mesh`;
+    const appRoot = normalizeInstallRoot(root2) !== "" ? normalizeInstallRoot(root2) : `C:\\Users\\${user ?? "Public"}\\.dsh`;
     return { appRoot, serviceUser: void 0 };
   }
   const script = `#!/usr/bin/env bash
@@ -5581,11 +6281,8 @@ for unit in dsh-web-gate.service dsh-web.service dsh-mesh.service; do
   fi
 done
 if [ -z "$root" ]; then
-  root="\${HOME:-/root}/.dsh/dsh-mesh"
+  root="\${HOME:-/root}/.dsh"
 fi
-case "$root" in
-  */current) root=$(dirname "$root") ;;
-esac
 printf '%s\\n%s\\n' "$root" "$runuser"
 `;
   const { stdout } = await runner.runProcess("ssh", [
@@ -5594,7 +6291,7 @@ printf '%s\\n%s\\n' "$root" "$runuser"
     "bash -s"
   ], script);
   const [root = "", serviceUser = ""] = stdout.split(/\r?\n/u);
-  const fallback = user !== void 0 && user !== "root" ? `/home/${user}/.dsh/dsh-mesh` : "/root/.dsh/dsh-mesh";
+  const fallback = user !== void 0 && user !== "root" ? `/home/${user}/.dsh` : "/root/.dsh";
   return {
     appRoot: root.trim() !== "" ? root.trim() : fallback,
     serviceUser: serviceUser.trim() !== "" ? serviceUser.trim() : void 0
@@ -5666,10 +6363,10 @@ STAGE="$LAYOUT_ROOT/.staging/${plan.release}"
 NODE="$STAGE/runtime/node/bin/node"
 [ -x "$NODE" ] || NODE=$(command -v node || true)
 [ -n "$NODE" ] && [ -x "$NODE" ] || { echo 'no usable node on the target' >&2; exit 1; }
-exec "$NODE" "$STAGE/code/deploy/upgrade-local.mjs"   --stage "$STAGE"   --layout-root "$LAYOUT_ROOT"   --release ${sh(plan.release)}   --app-root ${sh(plan.appRoot)}   --port ${sh(plan.gatePort)}   --gate-port ${sh(plan.gatePort)}   --gate-password ${sh(plan.gatePassword || "")}   --services ${sh(serviceList)}${interop}${credentials}${llm}
+exec "$NODE" "$STAGE/code/deploy/upgrade-local.mjs"   --stage "$STAGE"   --layout-root "$LAYOUT_ROOT"   --release ${sh(plan.release)}   --port ${sh(plan.gatePort)}   --gate-port ${sh(plan.gatePort)}   --gate-password ${sh(plan.gatePassword || "")}   --services ${sh(serviceList)}${interop}${credentials}${llm}
 `;
 }
-function buildLinuxRehearseScript(plan) {
+function buildLinuxRehearseScript() {
   return `#!/usr/bin/env bash
 set -euo pipefail
 echo 'test upgrade is retired: the pointer layout rehearses on every real upgrade and rolls back on failure' >&2
@@ -5732,7 +6429,7 @@ $ReleaseDir = Join-Path (Join-Path $LayoutRoot 'releases') ${ps(plan.release)}
 $stageNode = Join-Path $Stage 'runtime\\node\\node.exe'
 if (-not (Test-Path $stageNode)) { $stageNode = (Get-Command node -ErrorAction Stop).Source }
 $port = ${ps(plan.gatePort)}
-& $stageNode (Join-Path $Stage 'code\\deploy\\upgrade-local.mjs') --stage $Stage --layout-root $LayoutRoot --release ${ps(plan.release)} --app-root ${ps(plan.appRoot)} --port $port --gate-port $port --gate-password ${ps(plan.gatePassword || "")} --services ${ps(serviceList)}${interop}${credentials}${llm} --no-restart
+& $stageNode (Join-Path $Stage 'code\\deploy\\upgrade-local.mjs') --stage $Stage --layout-root $LayoutRoot --release ${ps(plan.release)} --port $port --gate-port $port --gate-password ${ps(plan.gatePassword || "")} --services ${ps(serviceList)}${interop}${credentials}${llm} --no-restart
 if ($LASTEXITCODE -ne 0) { throw "pointer switch failed (exit $LASTEXITCODE)" }
 # upgrade-local.mjs moved the staging tree into $ReleaseDir (and deleted it on
 # a rename), so nothing below may resolve through the staging path. Keep a node
@@ -5833,10 +6530,10 @@ function describePlan(plan) {
     services: plan.services,
     scope: plan.scope,
     steps: [
-      plan.packageOnTarget === true ? `use the package already on the target (${plan.package.path}); no download or upload` : `obtain ${plan.package.archive ?? path14.basename(plan.package.path)}: download from the release when configured, else upload to ${plan.remotePackage}`,
-      `extract and prepare ${plan.releases}/${plan.release} (no service switch)`,
-      `update shared config and service definitions for ${plan.appRoot}/current`,
-      `switch ${plan.current} to ${plan.release}`,
+      plan.packageOnTarget === true ? `use the package already on the target (${plan.package.path}); no download or upload` : `obtain ${plan.package.archive ?? path16.basename(plan.package.path)}: download from the release when configured, else upload to ${plan.remotePackage}`,
+      `extract and prepare ${plan.layoutRoot}/.staging/${plan.release} (no service switch)`,
+      `update shared config and service definitions for ${plan.layoutRoot}`,
+      `switch the pointer to ${plan.release}`,
       ...plan.services.filter((service) => plan.scope === "all" || service.role !== "gate").map((service) => `restart ${service.name} (${service.role})`),
       `health check http://127.0.0.1:${plan.gatePort}/__gate/health`,
       ...plan.services.some((service) => service.role === "control") ? ["health check http://127.0.0.1:51821/api/dsh-wireguard/health"] : [],
@@ -5878,7 +6575,7 @@ var SshRunner = class {
    * @returns {Promise<void>}
    */
   async upload(local, remote, onProgress) {
-    const totalBytes = (await stat8(local)).size;
+    const totalBytes = (await stat10(local)).size;
     try {
       await this.#uploadStream(local, remote, totalBytes, onProgress);
     } catch (error) {
@@ -5949,7 +6646,7 @@ var SshRunner = class {
   async remoteFreeBytes(remote) {
     if (this.plan.os !== "linux") return null;
     try {
-      const dir = path14.posix.dirname(remote);
+      const dir = path16.posix.dirname(remote);
       const { stdout } = await this.runProcess("ssh", [...this.sshOptions(), this.target(), `df -Pk -- ${sh(dir)} | awk 'NR==2 {print $4}'`]);
       const kib = Number.parseInt(String(stdout).trim(), 10);
       return Number.isSafeInteger(kib) && kib >= 0 ? kib * 1024 : null;
@@ -5968,8 +6665,8 @@ var SshRunner = class {
    */
   async discardStalePackages(remote) {
     if (this.plan.os !== "linux") return false;
-    const dir = path14.posix.dirname(remote);
-    const keep = path14.posix.basename(remote);
+    const dir = path16.posix.dirname(remote);
+    const keep = path16.posix.basename(remote);
     const script = [
       `cd ${sh(dir)} 2>/dev/null || exit 0`,
       "for f in dsh-mesh-*.gz dsh-mesh-*.tar.gz dsh-mesh-*.zip; do",
@@ -5996,30 +6693,30 @@ var SshRunner = class {
    */
   async #uploadStream(local, remote, totalBytes, onProgress) {
     const windows = this.plan.os === "windows";
-    const remoteCommand = windows ? `tar -xf - -C "${path14.win32.dirname(remote)}"` : `cat > ${sh(remote)}`;
+    const remoteCommand = windows ? `tar -xf - -C "${path16.win32.dirname(remote)}"` : `cat > ${sh(remote)}`;
     const args = [...this.sshOptions(), this.target(), remoteCommand];
     let tarDir = null;
     let tarName = null;
     if (windows) {
-      tarName = path14.win32.basename(remote);
-      tarDir = await mkdtemp5(path14.join(tmpdir3(), "dsh-mesh-upload-"));
-      const staged = path14.join(tarDir, tarName);
+      tarName = path16.win32.basename(remote);
+      tarDir = await mkdtemp5(path16.join(tmpdir3(), "dsh-mesh-upload-"));
+      const staged = path16.join(tarDir, tarName);
       try {
         try {
-          await link(local, staged);
+          await link2(local, staged);
         } catch {
           await copyFile2(local, staged);
         }
       } catch (error) {
-        await rm9(tarDir, { recursive: true, force: true }).catch(() => {
+        await rm11(tarDir, { recursive: true, force: true }).catch(() => {
         });
         throw error;
       }
     }
     return new Promise((resolve, reject) => {
-      const ssh = spawn5("ssh", args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
-      const tar = windows ? spawn5("tar", ["-cf", "-", "-C", tarDir, tarName], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }) : null;
-      const source = tar !== null ? tar.stdout : createReadStream4(local);
+      const ssh = spawn6("ssh", args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      const tar = windows ? spawn6("tar", ["-cf", "-", "-C", tarDir, tarName], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }) : null;
+      const source = tar !== null ? tar.stdout : createReadStream5(local);
       let sent = 0;
       let stderr = "";
       let settled = false;
@@ -6034,7 +6731,7 @@ var SshRunner = class {
         source.destroy();
         tar?.kill("SIGKILL");
         ssh.kill("SIGKILL");
-        if (tarDir !== null) void rm9(tarDir, { recursive: true, force: true }).catch(() => {
+        if (tarDir !== null) void rm11(tarDir, { recursive: true, force: true }).catch(() => {
         });
         if (error) reject(error);
         else resolve();
@@ -6098,7 +6795,7 @@ var SshRunner = class {
    */
   runProcess(command, args, input, onLine, options = {}) {
     return new Promise((resolve, reject) => {
-      const child = spawn5(command, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn6(command, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
       const buffers = { out: "", err: "" };
@@ -6142,17 +6839,17 @@ var SshRunner = class {
    * @param {'linux'|'windows'} os target OS.
    * @returns {Promise<void>}
    */
-  async script(script, os9, onLine) {
+  async script(script, os11, onLine) {
     const base = this.sshOptions();
-    if (os9 === "linux") {
+    if (os11 === "linux") {
       const remote = this.plan.sudo ? "sudo -n bash -s" : "bash -s";
       await this.runProcess("ssh", [...base, this.target(), remote], script, onLine);
       return;
     }
     const name = `dsh-deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.ps1`;
     const remotePath = `C:\\Windows\\Temp\\${name}`;
-    const localPath = path14.join(tmpdir3(), name);
-    await writeFile8(localPath, `\uFEFF${script}`, "utf8");
+    const localPath = path16.join(tmpdir3(), name);
+    await writeFile9(localPath, `\uFEFF${script}`, "utf8");
     try {
       await this.upload(localPath, remotePath);
       await this.runProcess(
@@ -6162,7 +6859,7 @@ var SshRunner = class {
         onLine
       );
     } finally {
-      await rm9(localPath, { force: true }).catch(() => {
+      await rm11(localPath, { force: true }).catch(() => {
       });
       await this.runProcess("ssh", [...base, this.target(), `cmd /c del /f "${remotePath}"`]).catch(() => {
       });
@@ -6171,7 +6868,7 @@ var SshRunner = class {
 };
 function runLocalProcess(command, args, input, onLine) {
   return new Promise((resolve, reject) => {
-    const child = spawn5(command, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn6(command, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     const buffers = { out: "", err: "" };
@@ -6226,8 +6923,8 @@ var LocalRunner = class {
    * @returns {Promise<void>} completion.
    */
   async upload(local, remote, onProgress) {
-    const info = await stat8(local);
-    await mkdir9(path14.dirname(remote), { recursive: true });
+    const info = await stat10(local);
+    await mkdir10(path16.dirname(remote), { recursive: true });
     await copyFile2(local, remote);
     onProgress?.({ bytes: info.size, totalBytes: info.size, percent: 100, speed: 0 });
   }
@@ -6238,7 +6935,7 @@ var LocalRunner = class {
    */
   async remoteSize(remote) {
     try {
-      const info = await stat8(remote);
+      const info = await stat10(remote);
       return info.isFile() ? info.size : null;
     } catch {
       return null;
@@ -6251,18 +6948,17 @@ var LocalRunner = class {
    * @param {(line: string) => void} [onLine] line callback.
    * @returns {Promise<void>} completion.
    */
-  async script(script, os9, onLine) {
-    if (os9 !== "linux") throw new Error("\u672C\u5730\u90E8\u7F72\u53EA\u652F\u6301 Linux\uFF1A\u672C\u673A\u6CA1\u6709\u53EF\u7528\u7684 Windows \u8FD0\u884C\u65F6");
+  async script(script, os11, onLine) {
+    if (os11 !== "linux") throw new Error("\u672C\u5730\u90E8\u7F72\u53EA\u652F\u6301 Linux\uFF1A\u672C\u673A\u6CA1\u6709\u53EF\u7528\u7684 Windows \u8FD0\u884C\u65F6");
     await runLocalProcess("bash", ["-s"], script, onLine);
   }
 };
 function linuxNodeProbeScript(appRoot) {
   const root = String(appRoot ?? "").replace(/[\\/]+$/u, "");
   const candidates = [
-    ...root === "" ? [] : [`${root}/current/runtime/node/bin/node`, `${root}/current/runtime/node/node`, `${root}/runtime/node/bin/node`, `${root}/runtime/node/node`],
-    "$HOME/.dsh/dsh-mesh/current/runtime/node/bin/node",
-    "$HOME/.dsh/dsh-mesh/current/runtime/node/node",
-    "$HOME/.dsh/dsh-person-web/current/runtime/node/bin/node"
+    ...root === "" ? [] : [`${root}/runtime/node/bin/node`, `${root}/runtime/node/node`],
+    "$HOME/.dsh/runtime/node/bin/node",
+    "$HOME/.dsh/runtime/node/node"
   ];
   return [
     "for candidate in \\",
@@ -6277,11 +6973,10 @@ function linuxNodeProbeScript(appRoot) {
 }
 function windowsNodeProbeScript(appRoot) {
   const root = String(appRoot ?? "").replace(/[\\/]+$/u, "");
-  const quoted = root === "" ? [] : [ps(`${root}\\current\\runtime\\node\\node.exe`), ps(`${root}\\runtime\\node\\node.exe`)];
+  const quoted = root === "" ? [] : [ps(`${root}\\runtime\\node\\node.exe`)];
   const candidates = [
     ...quoted,
-    "(Join-Path $env:USERPROFILE '.dsh\\dsh-mesh\\current\\runtime\\node\\node.exe')",
-    "(Join-Path $env:USERPROFILE '.dsh\\dsh-person-web\\current\\runtime\\node\\node.exe')"
+    "(Join-Path $env:USERPROFILE '.dsh\\runtime\\node\\node.exe')"
   ];
   return `$ErrorActionPreference = 'Stop'
 $candidates = @(
@@ -6318,7 +7013,7 @@ function normalizeDownloadManifests(download2) {
   return normalized;
 }
 function releaseDownloadScript(plan, options) {
-  const archive = plan.package.archive ?? path14.basename(plan.package.path);
+  const archive = plan.package.archive ?? path16.basename(plan.package.path);
   const prefer = options.prefer === "gitee" ? "--prefer gitee" : "";
   const manifestArgs = options.manifests.map((entry) => `--manifest-${entry.provider} ${plan.os === "windows" ? ps(entry.url) : sh(entry.url)}`).join(" ");
   if (plan.os === "windows") {
@@ -6365,23 +7060,23 @@ function removeDownloadDirCommand(plan, remoteDir) {
 }
 function cancelCleanupScript(plan) {
   if (plan === null || typeof plan !== "object") return null;
-  const os9 = plan.os === "windows" ? "windows" : "linux";
+  const os11 = plan.os === "windows" ? "windows" : "linux";
   const targets = [];
   const release = String(plan.release ?? "");
   const layoutRoot = String(plan.layoutRoot ?? "");
   if (/^[A-Za-z0-9._-]{3,80}$/u.test(release) && layoutRoot !== "") {
-    targets.push(os9 === "windows" ? `${layoutRoot}\\.staging\\${release}` : `${layoutRoot}/.staging/${release}`);
+    targets.push(os11 === "windows" ? `${layoutRoot}\\.staging\\${release}` : `${layoutRoot}/.staging/${release}`);
   }
   const sha12 = String(plan.package?.sha256 ?? "").slice(0, 12);
   if (/^[a-f0-9]{12}$/u.test(sha12)) {
-    targets.push(os9 === "windows" ? `C:\\Windows\\Temp\\dsh-mesh-release-${sha12}` : `/tmp/dsh-mesh-release-${sha12}`);
+    targets.push(os11 === "windows" ? `C:\\Windows\\Temp\\dsh-mesh-release-${sha12}` : `/tmp/dsh-mesh-release-${sha12}`);
   }
-  const inTemp = (value, prefix) => typeof value === "string" && value !== "" && (os9 === "windows" ? value.toLowerCase().startsWith(prefix.toLowerCase()) : value.startsWith(prefix));
-  const tempPrefix = os9 === "windows" ? "C:\\Windows\\Temp\\dsh-mesh-" : "/tmp/dsh-mesh-";
+  const inTemp = (value, prefix) => typeof value === "string" && value !== "" && (os11 === "windows" ? value.toLowerCase().startsWith(prefix.toLowerCase()) : value.startsWith(prefix));
+  const tempPrefix = os11 === "windows" ? "C:\\Windows\\Temp\\dsh-mesh-" : "/tmp/dsh-mesh-";
   if (plan.packageOnTarget !== true && inTemp(plan.remotePackage, tempPrefix)) targets.push(plan.remotePackage);
   if (inTemp(plan.remoteCredentials, tempPrefix)) targets.push(plan.remoteCredentials, `${plan.remoteCredentials}.mjs`);
   if (targets.length === 0) return null;
-  const script = os9 === "windows" ? [
+  const script = os11 === "windows" ? [
     "$ErrorActionPreference = 'SilentlyContinue'",
     ...targets.map((target) => `Remove-Item -LiteralPath ${ps(target)} -Recurse -Force -ErrorAction SilentlyContinue`),
     "exit 0"
@@ -6390,7 +7085,7 @@ function cancelCleanupScript(plan) {
     ...targets.map((target) => `rm -rf -- ${sh(target)}`),
     "exit 0"
   ].join("\n");
-  return { os: os9, script };
+  return { os: os11, script };
 }
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -6435,7 +7130,7 @@ function runCommandQuiet(command, args, timeoutMs = 2e4) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn5(command, args, { stdio: "ignore", windowsHide: true });
+      child = spawn6(command, args, { stdio: "ignore", windowsHide: true });
     } catch {
       resolve(false);
       return;
@@ -6534,10 +7229,10 @@ var DeployManager = class {
       repositoryRoot: this.repositoryRoot
     });
     const id = typeof request.id === "string" && /^deploy-[A-Za-z0-9-]+$/u.test(request.id) ? request.id : newJobId();
-    const dir = path14.join(this.dataDir, id);
-    await mkdir9(dir, { recursive: true });
-    const stateFile = path14.join(dir, "job.json");
-    const logFile = path14.join(dir, "deploy.log");
+    const dir = path16.join(this.dataDir, id);
+    await mkdir10(dir, { recursive: true });
+    const stateFile = path16.join(dir, "job.json");
+    const logFile = path16.join(dir, "deploy.log");
     const state = {
       id,
       // `install`, `upgrade` and `test` run the same phases; the panel only
@@ -6565,7 +7260,7 @@ var DeployManager = class {
     await writeDeployState(dir, state);
     const log = async (line) => {
       const stamp = (/* @__PURE__ */ new Date()).toISOString();
-      await writeFile8(logFile, `[${stamp}] ${line}
+      await writeFile9(logFile, `[${stamp}] ${line}
 `, { encoding: "utf8", flag: "a" });
       this.logLine(line);
     };
@@ -6678,8 +7373,8 @@ var DeployManager = class {
       if (credentialsFile !== null) {
         try {
           await runner.upload(credentialsFile, plan.remoteCredentials);
-          const helperFile = path14.join(this.repositoryRoot, "code", "shared", "credentials-merge.mjs");
-          if (existsSync8(helperFile)) await runner.upload(helperFile, `${plan.remoteCredentials}.mjs`);
+          const helperFile = path16.join(this.repositoryRoot, "code", "shared", "credentials-merge.mjs");
+          if (existsSync9(helperFile)) await runner.upload(helperFile, `${plan.remoteCredentials}.mjs`);
           await log("shared the deployer's account sign-in");
         } catch (error) {
           await log(`account sign-in was not shared: ${error instanceof Error ? error.message : String(error)}`);
@@ -6747,7 +7442,7 @@ var DeployManager = class {
       state.phase = "activate";
       meter("\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", { percent: 99, indeterminate: true });
       await mark("activate", "running");
-      await log("activate: switch current, restart services with the gateway last");
+      await log("activate: switch the pointer, restart services with the gateway last");
       await runner.script(scripts.activate, plan.os, (line) => note("activate", line));
       await mark("activate", "succeeded");
       meter("\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1", { ...state.progress, percent: 100, indeterminate: false });
@@ -6802,9 +7497,9 @@ var DeployManager = class {
         await log("release download skipped: the target has no Node runtime to run the downloader");
         return false;
       }
-      const localDownloader = path14.join(this.repositoryRoot, "code", "deploy", "release-download.mjs");
-      const localClient = path14.join(this.repositoryRoot, "code", "shared", "http-client.mjs");
-      if (!existsSync8(localDownloader) || !existsSync8(localClient)) {
+      const localDownloader = path16.join(this.repositoryRoot, "code", "deploy", "release-download.mjs");
+      const localClient = path16.join(this.repositoryRoot, "code", "shared", "http-client.mjs");
+      if (!existsSync9(localDownloader) || !existsSync9(localClient)) {
         await log("release download skipped: the downloader files are missing from this plugin installation");
         return false;
       }
@@ -6950,8 +7645,8 @@ var DeployManager = class {
     const previous = this.writes.get(stateFile) ?? Promise.resolve();
     const next = previous.catch(() => {
     }).then(async () => {
-      await writeFile8(tmp, text, "utf8");
-      await rename6(tmp, stateFile);
+      await writeFile9(tmp, text, "utf8");
+      await rename7(tmp, stateFile);
     });
     this.writes.set(stateFile, next.catch(() => {
     }));
@@ -6973,7 +7668,7 @@ var DeployManager = class {
     if (state === null || typeof state !== "object") return state;
     if (state.status !== "running" && state.status !== "queued") return state;
     if (this.running.has(state.id)) return state;
-    const dir = path14.join(this.dataDir, state.id);
+    const dir = path16.join(this.dataDir, state.id);
     const runner = await runnerStatus(dir);
     if (runner.alive) return state;
     if (runner.runner === null) {
@@ -7006,7 +7701,7 @@ var DeployManager = class {
       });
     }
     state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    await this.#save(path14.join(dir, "job.json"), state).catch(() => {
+    await this.#save(path16.join(dir, "job.json"), state).catch(() => {
     });
     return state;
   }
@@ -7038,7 +7733,7 @@ var DeployManager = class {
    */
   async cancel(id) {
     if (typeof id !== "string" || !/^deploy-[A-Za-z0-9-]+$/u.test(id)) return null;
-    const dir = path14.join(this.dataDir, id);
+    const dir = path16.join(this.dataDir, id);
     const state = await readDeployState(dir);
     if (state === null) return null;
     if (state.status !== "running" && state.status !== "queued") return state;
@@ -7049,7 +7744,7 @@ var DeployManager = class {
     if (state.phase === "activate" || activate?.status === "running") {
       throw new Error("\u5347\u7EA7\u5DF2\u7ECF\u8FDB\u5165\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1\u7684\u9636\u6BB5\uFF0C\u4E0D\u80FD\u518D\u53D6\u6D88\uFF1B\u8BF7\u7B49\u5B83\u7ED3\u675F\uFF08\u5065\u5EB7\u68C0\u67E5\u5931\u8D25\u4F1A\u81EA\u52A8\u5207\u56DE\u4E0A\u4E00\u7248\uFF09");
     }
-    const request = await readFile11(jobPaths(dir).request, "utf8").then(JSON.parse).catch(() => null);
+    const request = await readFile12(jobPaths(dir).request, "utf8").then(JSON.parse).catch(() => null);
     await appendDeployLog(dir, "cancel requested by user; stopping the runner");
     const stopped = await this.#stopRunner(id, dir);
     const after = await readDeployState(dir);
@@ -7086,7 +7781,7 @@ var DeployManager = class {
    * @returns {Promise<string[]>} what was stopped.
    */
   async #stopRunner(id, dir) {
-    const runner = await readFile11(path14.join(dir, "runner.json"), "utf8").then(JSON.parse).catch(() => null);
+    const runner = await readFile12(path16.join(dir, "runner.json"), "utf8").then(JSON.parse).catch(() => null);
     const notes = [];
     const unit = typeof runner?.unit === "string" && runner.unit !== "" ? runner.unit : `dsh-mesh-job-${id.replace(/^deploy-/u, "")}`;
     if (await runCommandQuiet("systemctl", ["stop", unit], 3e4)) notes.push(unit);
@@ -7108,25 +7803,25 @@ var DeployManager = class {
     const failures = [];
     const drop = async (target, label) => {
       try {
-        await rm9(target, { recursive: true, force: true });
+        await rm11(target, { recursive: true, force: true });
         cleaned.push(label);
       } catch (error) {
         failures.push(`${label}\uFF1A${error instanceof Error ? error.message : String(error)}`);
       }
     };
-    await drop(path14.join(dir, "stage"), "\u672C\u5730\u89E3\u538B\u76EE\u5F55");
-    await drop(path14.join(dir, "tools"), "\u672C\u5730\u811A\u672C\u526F\u672C");
+    await drop(path16.join(dir, "stage"), "\u672C\u5730\u89E3\u538B\u76EE\u5F55");
+    await drop(path16.join(dir, "tools"), "\u672C\u5730\u811A\u672C\u526F\u672C");
     if (request?.kind === "inplace") {
       const packagePath = String(request.inplace?.package ?? "");
-      if (packagePath !== "") await rm9(`${packagePath}.part`, { force: true }).catch(() => {
+      if (packagePath !== "") await rm11(`${packagePath}.part`, { force: true }).catch(() => {
       });
       const created = Date.parse(String(state.createdAt ?? ""));
       if (Number.isFinite(created)) {
-        const entries = await readdir5(tmpdir3(), { withFileTypes: true }).catch(() => []);
+        const entries = await readdir6(tmpdir3(), { withFileTypes: true }).catch(() => []);
         for (const entry of entries) {
           if (!entry.isDirectory() || !entry.name.startsWith("dsh-mesh-download-")) continue;
-          const full = path14.join(tmpdir3(), entry.name);
-          const info = await stat8(full).catch(() => null);
+          const full = path16.join(tmpdir3(), entry.name);
+          const info = await stat10(full).catch(() => null);
           if (info !== null && info.mtimeMs >= created - 6e4) await drop(full, "\u4E0B\u8F7D\u4E34\u65F6\u76EE\u5F55");
         }
       }
@@ -7137,9 +7832,9 @@ var DeployManager = class {
     const release = String(plan.release ?? "");
     if (plan.local === true) {
       if (/^[A-Za-z0-9._-]{3,80}$/u.test(release) && typeof plan.layoutRoot === "string" && plan.layoutRoot !== "") {
-        await drop(path14.join(plan.layoutRoot, ".staging", release), "\u672C\u673A\u6682\u5B58\u76EE\u5F55");
+        await drop(path16.join(plan.layoutRoot, ".staging", release), "\u672C\u673A\u6682\u5B58\u76EE\u5F55");
       }
-      if (plan.packageOnTarget !== true && typeof plan.remotePackage === "string" && path14.isAbsolute(plan.remotePackage) && plan.remotePackage.startsWith(tmpdir3() + path14.sep)) {
+      if (plan.packageOnTarget !== true && typeof plan.remotePackage === "string" && path16.isAbsolute(plan.remotePackage) && plan.remotePackage.startsWith(tmpdir3() + path16.sep)) {
         await drop(plan.remotePackage, "\u672C\u673A\u4E34\u65F6\u5B89\u88C5\u5305");
       }
       return { cleaned, failures };
@@ -7165,7 +7860,7 @@ var DeployManager = class {
     const live = this.states.get(id);
     if (live !== void 0) return live;
     try {
-      const stored = JSON.parse(await readFile11(path14.join(this.dataDir, id, "job.json"), "utf8"));
+      const stored = JSON.parse(await readFile12(path16.join(this.dataDir, id, "job.json"), "utf8"));
       return await this.#settle(stored);
     } catch {
       return null;
@@ -7180,14 +7875,14 @@ var DeployManager = class {
     const jobs = [];
     let entries = [];
     try {
-      entries = await readdir5(this.dataDir, { withFileTypes: true });
+      entries = await readdir6(this.dataDir, { withFileTypes: true });
     } catch {
       entries = [];
     }
     for (const entry of entries) {
       if (!entry.isDirectory() || !entry.name.startsWith("deploy-")) continue;
       try {
-        const stored = JSON.parse(await readFile11(path14.join(this.dataDir, entry.name, "job.json"), "utf8"));
+        const stored = JSON.parse(await readFile12(path16.join(this.dataDir, entry.name, "job.json"), "utf8"));
         jobs.push(await this.#settle(stored));
       } catch {
       }
@@ -7207,7 +7902,7 @@ var DeployManager = class {
   async logs(id, lines = 80) {
     if (typeof id !== "string" || !/^deploy-[A-Za-z0-9-]+$/.test(id)) return "";
     try {
-      const text = await readFile11(path14.join(this.dataDir, id, "deploy.log"), "utf8");
+      const text = await readFile12(path16.join(this.dataDir, id, "deploy.log"), "utf8");
       return text.split("\n").slice(-Math.max(1, Math.min(lines, 500))).join("\n");
     } catch {
       return "";
@@ -7221,10 +7916,10 @@ var DeployManager = class {
   async rollback(request) {
     const plan = await buildDeployPlan({ ...request, repositoryRoot: this.repositoryRoot, skipPackage: true });
     const id = `deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-    const dir = path14.join(this.dataDir, id);
-    await mkdir9(dir, { recursive: true });
-    const stateFile = path14.join(dir, "job.json");
-    const logFile = path14.join(dir, "deploy.log");
+    const dir = path16.join(this.dataDir, id);
+    await mkdir10(dir, { recursive: true });
+    const stateFile = path16.join(dir, "job.json");
+    const logFile = path16.join(dir, "deploy.log");
     const state = {
       id,
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -7234,11 +7929,11 @@ var DeployManager = class {
       phase: "rollback",
       error: null
     };
-    await writeFile8(stateFile, `${JSON.stringify(state, null, 2)}
+    await writeFile9(stateFile, `${JSON.stringify(state, null, 2)}
 `, "utf8");
     const log = async (line) => {
       const stamp = (/* @__PURE__ */ new Date()).toISOString();
-      await writeFile8(logFile, `[${stamp}] ${line}
+      await writeFile9(logFile, `[${stamp}] ${line}
 `, { encoding: "utf8", flag: "a" });
       this.logLine(line);
     };
@@ -7265,10 +7960,10 @@ var DeployManager = class {
 };
 
 // src/lib/remote-build.mjs
-import { createHash as createHash4 } from "node:crypto";
-import { mkdtemp as mkdtemp6, open as open3, rename as rename7, rm as rm10, stat as stat9, writeFile as writeFile9 } from "node:fs/promises";
+import { createHash as createHash5 } from "node:crypto";
+import { mkdtemp as mkdtemp6, open as open4, rename as rename8, rm as rm12, stat as stat11, writeFile as writeFile10 } from "node:fs/promises";
 import { tmpdir as tmpdir4 } from "node:os";
-import path15 from "node:path";
+import path17 from "node:path";
 var DEFAULT_MESH_REPO = "https://github.com/Cangjier/dsh-mesh.git";
 var REMOTE_SRC = "$HOME/.dsh/mesh/build-src";
 var REMOTE_JOBS = "$HOME/.dsh/mesh/build";
@@ -7478,7 +8173,7 @@ function quotePs(value) {
 }
 function decodeWindowsState(stdout) {
   const runs = String(stdout).match(/[A-Za-z0-9+/=]{16,}/gu) ?? [];
-  const encoded = runs.reduce((best, run2) => run2.length > best.length ? run2 : best, "");
+  const encoded = runs.reduce((best, run3) => run3.length > best.length ? run3 : best, "");
   const text = Buffer.from(encoded, "base64").toString("utf8");
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
@@ -7489,8 +8184,8 @@ function powershellCommand(script) {
   return `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
 }
 async function sha256File3(file) {
-  const hash = createHash4("sha256");
-  const handle = await open3(file, "r");
+  const hash = createHash5("sha256");
+  const handle = await open4(file, "r");
   try {
     const buffer = Buffer.alloc(1024 * 1024);
     while (true) {
@@ -7624,10 +8319,10 @@ var RemoteBuilder = class {
     if (pullBack && directories.length > 0) await this.#update(jobDir, { phase: "fetch", percent: 96, currentTarget: null });
     const pullOne = async (remoteArchive) => {
       const local = await this.#pull(runner, remoteArchive, windows);
-      const info = await stat9(local);
+      const info = await stat11(local);
       const digest = await sha256File3(local);
       await writeSidecar(local, digest);
-      await appendLog(jobDir, `pulled ${path15.basename(local)} (${String(info.size)} bytes)`);
+      await appendLog(jobDir, `pulled ${path17.basename(local)} (${String(info.size)} bytes)`);
       pulled += 1;
       await this.#update(jobDir, { phase: "fetch", percent: 96 + Math.round(3 * pulled / directories.length) });
       return { local, digest, bytes: info.size };
@@ -7655,7 +8350,7 @@ var RemoteBuilder = class {
         if (staged !== null) {
           if (digest === null) digest = staged.sha256;
           if (bytes === null) bytes = staged.bytes;
-          await appendLog(jobDir, `staged ${path15.basename(staged.path)} for the automatic upgrade (${String(staged.bytes)} bytes)`);
+          await appendLog(jobDir, `staged ${path17.basename(staged.path)} for the automatic upgrade (${String(staged.bytes)} bytes)`);
         } else if (local === null) {
           await appendLog(jobDir, "staging failed; pulling the archive back so the build result is preserved");
           try {
@@ -7719,13 +8414,13 @@ var RemoteBuilder = class {
    * @returns {Promise<void>} completion.
    */
   async #uploadReleaseConfig(runner, config, remote, windows) {
-    const dir = await mkdtemp6(path15.join(tmpdir4(), "dsh-mesh-release-config-"));
-    const local = path15.join(dir, "release.json");
-    await writeFile9(local, `${JSON.stringify(config, null, 2)}
+    const dir = await mkdtemp6(path17.join(tmpdir4(), "dsh-mesh-release-config-"));
+    const local = path17.join(dir, "release.json");
+    await writeFile10(local, `${JSON.stringify(config, null, 2)}
 `, { encoding: "utf8", mode: 384 });
     try {
       if (windows) {
-        const dir2 = path15.win32.dirname(remote);
+        const dir2 = path17.win32.dirname(remote);
         await runner.runProcess("ssh", [...runner.sshOptions(), runner.target(), `cmd /c if not exist "${dir2}" mkdir "${dir2}"`]);
       } else {
         await runner.runProcess("ssh", [...runner.sshOptions(), runner.target(), `umask 077; : > '${remote.replace(/'/gu, `'\\''`)}'`]);
@@ -7735,7 +8430,7 @@ var RemoteBuilder = class {
         await runner.runProcess("ssh", [...runner.sshOptions(), runner.target(), `chmod 600 '${remote.replace(/'/gu, `'\\''`)}'`]);
       }
     } finally {
-      await rm10(dir, { recursive: true, force: true }).catch(() => {
+      await rm12(dir, { recursive: true, force: true }).catch(() => {
       });
     }
   }
@@ -7794,15 +8489,15 @@ var RemoteBuilder = class {
    * @returns {Promise<string>} local path.
    */
   async #pull(runner, remote, windows = false) {
-    const name = remote.split(/[\\/]/u).pop() ?? path15.basename(remote);
-    const local = path15.join(this.packagesDir, name);
+    const name = remote.split(/[\\/]/u).pop() ?? path17.basename(remote);
+    const local = path17.join(this.packagesDir, name);
     const temporary = `${local}.part`;
     const args = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-P", String(runner.plan.port ?? 22)];
     if (runner.plan.identityFile) args.push("-i", runner.plan.identityFile);
     args.push(`${runner.target()}:${windows ? remote.replace(/\\/gu, "/") : remote}`, temporary);
     await runner.runProcess("scp", args);
-    await rm10(local, { force: true });
-    await rename7(temporary, local);
+    await rm12(local, { force: true });
+    await rename8(temporary, local);
     return local;
   }
   /**
@@ -7822,7 +8517,7 @@ var RemoteBuilder = class {
    * @returns {Promise<{path: string, bytes: number, sha256: string}|null>} staged archive, or null.
    */
   async #stageArtifact(runner, jobDir, jobId, remoteArchive, windows) {
-    const name = remoteArchive.split(/[\\/]/u).pop() ?? path15.basename(remoteArchive);
+    const name = remoteArchive.split(/[\\/]/u).pop() ?? path17.basename(remoteArchive);
     const command = windows ? powershellCommand([
       "$ProgressPreference = 'SilentlyContinue'",
       `$stage = Join-Path $env:USERPROFILE '.dsh\\mesh\\upgrade\\${jobId}'`,
@@ -7896,15 +8591,15 @@ var RemoteBuilder = class {
   }
 };
 async function writeSidecar(file, digest) {
-  await writeFile9(`${file}.sha256`, `${digest}  ${path15.basename(file)}
+  await writeFile10(`${file}.sha256`, `${digest}  ${path17.basename(file)}
 `, "utf8");
 }
 
 // code/shared/cluster.mjs
-import { createHash as createHash5, createHmac, randomBytes as randomBytes2, timingSafeEqual } from "node:crypto";
+import { createHash as createHash6, createHmac, randomBytes as randomBytes2, timingSafeEqual } from "node:crypto";
 function deriveClusterSecret(password) {
   if (typeof password !== "string" || password === "") return "";
-  return createHash5("sha256").update("dsh-mesh/cluster/v1\0").update(password, "utf8").digest("hex");
+  return createHash6("sha256").update("dsh-mesh/cluster/v1\0").update(password, "utf8").digest("hex");
 }
 var CLUSTER_HEADER = "x-dsh-cluster";
 var VERSION = "v1";
@@ -7918,84 +8613,84 @@ function signClusterRequest(secret, request) {
   const signature = createHmac("sha256", secret).update(payload).digest("base64url");
   return `${VERSION}.${String(timestamp)}.${nonce}.${signature}`;
 }
-function payloadOf(method, path26, timestamp, nonce) {
-  return [VERSION, String(method).toUpperCase(), path26, String(timestamp), nonce].join("\n");
+function payloadOf(method, path28, timestamp, nonce) {
+  return [VERSION, String(method).toUpperCase(), path28, String(timestamp), nonce].join("\n");
 }
 
 // code/build/repack.mjs
 import { execFile } from "node:child_process";
-import { createHash as createHash6 } from "node:crypto";
-import { cp as cp2, mkdir as mkdir10, mkdtemp as mkdtemp7, readFile as readFile12, readdir as readdir6, rm as rm11, stat as stat10, writeFile as writeFile10 } from "node:fs/promises";
-import { createReadStream as createReadStream5, existsSync as existsSync9 } from "node:fs";
-import path16 from "node:path";
+import { createHash as createHash7 } from "node:crypto";
+import { cp as cp3, mkdir as mkdir11, mkdtemp as mkdtemp7, readFile as readFile13, readdir as readdir7, rm as rm13, stat as stat12, writeFile as writeFile11 } from "node:fs/promises";
+import { createReadStream as createReadStream6, existsSync as existsSync10 } from "node:fs";
+import path18 from "node:path";
 import { promisify } from "node:util";
-var run = promisify(execFile);
-var CODE_SCRIPTS = ["install.sh", "start.sh", "stop.sh", "status.sh", "doctor.sh", "install.ps1", "start.ps1", "stop.ps1", "start.cmd", "stop.cmd", "start-stack.ps1"];
+var run2 = promisify(execFile);
+var CODE_SCRIPTS = ["install.sh", "install.ps1"];
 var ROOT_SCRIPTS = ["start-interop.sh", "install-interop-service.sh", "uninstall-interop-service.sh", "dsh-mesh.mjs"];
 var PLUGIN_FILES = ["index.js", "client.js", "cordis.patch.yml", "package.json"];
 var PLUGIN_DIRS = ["locale", "build", "code/build", "code/shared", "code/deploy", "code/install"];
 var CODE_DIRS = ["windows-service", "interop-service", "wireguard", "dsh-service", "deploy", "install", "shared"];
 async function clear(target) {
-  await rm11(target, { recursive: true, force: true });
+  await rm13(target, { recursive: true, force: true });
 }
 async function replaceDirectory(from, to) {
-  if (!existsSync9(from)) return;
+  if (!existsSync10(from)) return;
   await clear(to);
-  await cp2(from, to, { recursive: true });
+  await cp3(from, to, { recursive: true });
 }
 async function replaceFile(from, to) {
-  if (!existsSync9(from)) return;
+  if (!existsSync10(from)) return;
   await clear(to);
-  await cp2(from, to);
+  await cp3(from, to);
 }
 async function countFiles(dir) {
   let total = 0;
-  for (const entry of await readdir6(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) total += await countFiles(path16.join(dir, entry.name));
+  for (const entry of await readdir7(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) total += await countFiles(path18.join(dir, entry.name));
     else if (entry.isFile()) total += 1;
   }
   return total;
 }
 async function repackDirectory(packageDir, repositoryRoot) {
-  const manifestFile = path16.join(packageDir, "manifest.json");
-  if (!existsSync9(manifestFile)) throw new Error(`${packageDir} is not an extracted package (no manifest.json)`);
-  await replaceDirectory(path16.join(repositoryRoot, "code", "gate"), path16.join(packageDir, "gate"));
-  await replaceDirectory(path16.join(repositoryRoot, "code", "shared"), path16.join(packageDir, "shared"));
-  await replaceDirectory(path16.join(repositoryRoot, "code", "config"), path16.join(packageDir, "config"));
+  const manifestFile = path18.join(packageDir, "manifest.json");
+  if (!existsSync10(manifestFile)) throw new Error(`${packageDir} is not an extracted package (no manifest.json)`);
+  await replaceDirectory(path18.join(repositoryRoot, "code", "gate"), path18.join(packageDir, "gate"));
+  await replaceDirectory(path18.join(repositoryRoot, "code", "shared"), path18.join(packageDir, "shared"));
+  await replaceDirectory(path18.join(repositoryRoot, "code", "config"), path18.join(packageDir, "config"));
   for (const name of CODE_DIRS) {
-    await replaceDirectory(path16.join(repositoryRoot, "code", name), path16.join(packageDir, "code", name));
+    await replaceDirectory(path18.join(repositoryRoot, "code", name), path18.join(packageDir, "code", name));
   }
-  await replaceDirectory(path16.join(repositoryRoot, "docs"), path16.join(packageDir, "docs"));
+  await replaceDirectory(path18.join(repositoryRoot, "docs"), path18.join(packageDir, "docs"));
   for (const name of CODE_SCRIPTS) {
-    await replaceFile(path16.join(repositoryRoot, "code", name), path16.join(packageDir, name));
+    await replaceFile(path18.join(repositoryRoot, "code", name), path18.join(packageDir, name));
   }
   for (const name of ROOT_SCRIPTS) {
-    await replaceFile(path16.join(repositoryRoot, name), path16.join(packageDir, name));
+    await replaceFile(path18.join(repositoryRoot, name), path18.join(packageDir, name));
   }
   for (const name of PLUGIN_FILES) {
-    await replaceFile(path16.join(repositoryRoot, name), path16.join(packageDir, "plugins", "dsh-mesh", name));
+    await replaceFile(path18.join(repositoryRoot, name), path18.join(packageDir, "plugins", "dsh-mesh", name));
   }
   for (const name of PLUGIN_DIRS) {
-    await replaceDirectory(path16.join(repositoryRoot, name), path16.join(packageDir, "plugins", "dsh-mesh", name));
+    await replaceDirectory(path18.join(repositoryRoot, name), path18.join(packageDir, "plugins", "dsh-mesh", name));
   }
-  const manifest = JSON.parse(await readFile12(manifestFile, "utf8"));
+  const manifest = JSON.parse(await readFile13(manifestFile, "utf8"));
   const features = new Set(Array.isArray(manifest.features) ? manifest.features : []);
   features.add("embedded-interop");
   manifest.features = [...features];
-  const staticAssets = await collectStaticAssets(path16.join(packageDir, "gate"));
+  const staticAssets = await collectStaticAssets(path18.join(packageDir, "gate"));
   manifest.staticAssets = staticAssets;
   manifest.builtAt = (/* @__PURE__ */ new Date()).toISOString();
   manifest.repackedFrom = "code/build/repack.mjs";
   manifest.files = await countFiles(packageDir);
-  await writeFile10(manifestFile, `${JSON.stringify(manifest, null, 2)}
+  await writeFile11(manifestFile, `${JSON.stringify(manifest, null, 2)}
 `, "utf8");
-  const clientBytes = (await stat10(path16.join(packageDir, "plugins", "dsh-mesh", "client.js"))).size;
+  const clientBytes = (await stat12(path18.join(packageDir, "plugins", "dsh-mesh", "client.js"))).size;
   return { packageDir, version: manifest.version, target: manifest.target, files: manifest.files, clientBytes };
 }
 async function sha256File4(file) {
-  const hash = createHash6("sha256");
+  const hash = createHash7("sha256");
   await new Promise((resolve, reject) => {
-    const stream = createReadStream5(file);
+    const stream = createReadStream6(file);
     stream.on("data", (chunk) => hash.update(chunk));
     stream.on("end", resolve);
     stream.on("error", reject);
@@ -8003,22 +8698,22 @@ async function sha256File4(file) {
   return hash.digest("hex");
 }
 function archiveRootName(file) {
-  return path16.basename(file).replace(/\.(tar\.gz|tgz|zip)$/u, "");
+  return path18.basename(file).replace(/\.(tar\.gz|tgz|zip)$/u, "");
 }
 async function extractArchive(file, directory) {
-  await mkdir10(directory, { recursive: true });
+  await mkdir11(directory, { recursive: true });
   if (file.endsWith(".zip")) {
     try {
-      await run("unzip", ["-q", file, "-d", directory]);
+      await run2("unzip", ["-q", file, "-d", directory]);
     } catch {
-      await run("tar", ["-xf", file, "-C", directory]);
+      await run2("tar", ["-xf", file, "-C", directory]);
     }
   } else {
-    await run("tar", ["-xzf", file, "-C", directory]);
+    await run2("tar", ["-xzf", file, "-C", directory]);
   }
-  const root = path16.join(directory, archiveRootName(file));
-  if (!existsSync9(path16.join(root, "manifest.json"))) {
-    throw new Error(`archive ${path16.basename(file)} has no ${archiveRootName(file)}/manifest.json`);
+  const root = path18.join(directory, archiveRootName(file));
+  if (!existsSync10(path18.join(root, "manifest.json"))) {
+    throw new Error(`archive ${path18.basename(file)} has no ${archiveRootName(file)}/manifest.json`);
   }
   return root;
 }
@@ -8026,41 +8721,41 @@ async function compressDirectory(parent, name, file) {
   await clear(file);
   if (file.endsWith(".zip")) {
     try {
-      await run("zip", ["-qr", "-X", file, name], { cwd: parent });
+      await run2("zip", ["-qr", "-X", file, name], { cwd: parent });
     } catch {
-      await run("tar", ["-a", "-cf", file, name], { cwd: parent });
+      await run2("tar", ["-a", "-cf", file, name], { cwd: parent });
     }
   } else {
-    await run("tar", ["-czf", file, name], { cwd: parent });
+    await run2("tar", ["-czf", file, name], { cwd: parent });
   }
 }
 async function repackArchive(file, { repositoryRoot, log = () => {
 } }) {
-  const work = await mkdtemp7(path16.join(path16.dirname(file), ".repack-"));
+  const work = await mkdtemp7(path18.join(path18.dirname(file), ".repack-"));
   try {
-    log(`extracting ${path16.basename(file)}`);
+    log(`extracting ${path18.basename(file)}`);
     const packageDir = await extractArchive(file, work);
     const summary = await repackDirectory(packageDir, repositoryRoot);
     log(`replaced gateway, scripts and plugin files (${String(summary.files)} files in the package)`);
-    const parent = path16.dirname(packageDir);
-    const name = path16.basename(packageDir);
+    const parent = path18.dirname(packageDir);
+    const name = path18.basename(packageDir);
     await compressDirectory(parent, name, file);
-    const bytes = (await stat10(file)).size;
+    const bytes = (await stat12(file)).size;
     const sha256 = await sha256File4(file);
-    await writeFile10(`${file}.sha256`, `${sha256}  ${path16.basename(file)}
+    await writeFile11(`${file}.sha256`, `${sha256}  ${path18.basename(file)}
 
 `, "utf8");
-    log(`wrote ${path16.basename(file)} (${String(bytes)} bytes)`);
+    log(`wrote ${path18.basename(file)} (${String(bytes)} bytes)`);
     return { package: file, version: summary.version, target: summary.target, bytes, sha256, files: summary.files };
   } finally {
-    await rm11(work, { recursive: true, force: true });
+    await rm13(work, { recursive: true, force: true });
   }
 }
 
 // code/shared/system-info.mjs
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync10, readFileSync as readFileSync3, statfsSync } from "node:fs";
-import os7 from "node:os";
+import { existsSync as existsSync11, readFileSync as readFileSync3, statfsSync } from "node:fs";
+import os9 from "node:os";
 import { promisify as promisify2 } from "node:util";
 var execFileAsync = promisify2(execFile2);
 var PSEUDO_FILESYSTEMS = /* @__PURE__ */ new Set([
@@ -8141,7 +8836,7 @@ function windowsDisks() {
   const result = [];
   for (let code = 65; code <= 90; code += 1) {
     const root = `${String.fromCharCode(code)}:\\`;
-    if (!existsSync10(root)) continue;
+    if (!existsSync11(root)) continue;
     const entry = diskEntry(root, "", "");
     if (entry !== null) result.push(entry);
   }
@@ -8174,7 +8869,7 @@ async function collectDisks() {
   return posixDisks();
 }
 function cpuSnapshot() {
-  return os7.cpus().map((cpu) => ({ ...cpu.times }));
+  return os9.cpus().map((cpu) => ({ ...cpu.times }));
 }
 function cpuUsage(before, after) {
   let idleDelta = 0;
@@ -8203,7 +8898,7 @@ function cpuUsage(before, after) {
 }
 function networkInfo() {
   const result = [];
-  for (const [name, addresses] of Object.entries(os7.networkInterfaces())) {
+  for (const [name, addresses] of Object.entries(os9.networkInterfaces())) {
     for (const address of addresses ?? []) {
       result.push({
         name,
@@ -8218,9 +8913,9 @@ function networkInfo() {
   return result;
 }
 function quickSystemInfo(options = {}) {
-  const cpus = os7.cpus();
-  const total = os7.totalmem();
-  const free = os7.freemem();
+  const cpus = os9.cpus();
+  const total = os9.totalmem();
+  const free = os9.freemem();
   const used = Math.max(0, total - free);
   let cpuTotal = 0;
   let cpuIdle = 0;
@@ -8251,12 +8946,12 @@ function quickSystemInfo(options = {}) {
   }
   return {
     sampledAt: (/* @__PURE__ */ new Date()).toISOString(),
-    hostname: os7.hostname(),
+    hostname: os9.hostname(),
     platform: process.platform,
     arch: process.arch,
-    home: options.home ?? os7.homedir(),
+    home: options.home ?? os9.homedir(),
     appRoot: options.appRoot ?? installRoot(),
-    user: os7.userInfo().username,
+    user: os9.userInfo().username,
     cpu: { model: cpus[0]?.model ?? "unknown", cores: cpus.length, usagePercent: cpuUsage2 },
     memory: {
       totalBytes: total,
@@ -8280,21 +8975,21 @@ async function collectSystemInfo(options = {}) {
   await new Promise((resolve) => setTimeout(resolve, sampleMs));
   const after = cpuSnapshot();
   const cpuTimes = cpuUsage(before, after);
-  const cpus = os7.cpus();
-  const totalMemory = os7.totalmem();
-  const freeMemory = os7.freemem();
+  const cpus = os9.cpus();
+  const totalMemory = os9.totalmem();
+  const freeMemory = os9.freemem();
   const memoryUsed = Math.max(0, totalMemory - freeMemory);
-  const load = os7.loadavg();
+  const load = os9.loadavg();
   return {
     sampledAt: (/* @__PURE__ */ new Date()).toISOString(),
-    hostname: os7.hostname(),
+    hostname: os9.hostname(),
     platform: process.platform,
     arch: process.arch,
-    release: os7.release(),
-    home: options.home ?? os7.homedir(),
+    release: os9.release(),
+    home: options.home ?? os9.homedir(),
     appRoot: options.appRoot ?? installRoot(),
-    user: os7.userInfo().username,
-    uptimeSeconds: Math.floor(os7.uptime()),
+    user: os9.userInfo().username,
+    uptimeSeconds: Math.floor(os9.uptime()),
     node: process.version,
     cpu: {
       model: cpus[0]?.model ?? "unknown",
@@ -8321,7 +9016,7 @@ async function collectSystemInfo(options = {}) {
 }
 
 // src/lib/schedule.mjs
-import path17 from "node:path";
+import path19 from "node:path";
 var SCHEDULE_FORMAT = 3;
 var DEFAULT_BUILD_SCHEDULE = Object.freeze({ enabled: false, time: "04:00" });
 var DEFAULT_UPGRADE_SCHEDULE = Object.freeze({ enabled: false, time: "06:00" });
@@ -8421,18 +9116,18 @@ function latestPackagesByOs(packages) {
   const latest = {};
   for (const item of Array.isArray(packages) ? packages : []) {
     const parsed = packageInfo(item.name);
-    const os9 = parsed?.os ?? (item.target === "windows" ? "windows" : item.target === "linux" ? "linux" : null);
-    if (os9 === null) continue;
-    const current = latest[os9];
+    const os11 = parsed?.os ?? (item.target === "windows" ? "windows" : item.target === "linux" ? "linux" : null);
+    if (os11 === null) continue;
+    const current = latest[os11];
     if (current === void 0) {
-      latest[os9] = item;
+      latest[os11] = item;
       continue;
     }
     const currentInfo = packageInfo(current.name);
     if (parsed !== null && currentInfo !== null) {
-      if (compareBuildStamps(parsed.buildStamp, currentInfo.buildStamp) > 0) latest[os9] = item;
+      if (compareBuildStamps(parsed.buildStamp, currentInfo.buildStamp) > 0) latest[os11] = item;
     } else if (String(item.mtime ?? "") > String(current.mtime ?? "")) {
-      latest[os9] = item;
+      latest[os11] = item;
     }
   }
   return latest;
@@ -8485,10 +9180,10 @@ function planUpgrades(members, packages) {
       skipped2.push({ member, reason: "\u79BB\u7EBF" });
       continue;
     }
-    const os9 = memberOs(member);
-    const candidate = latest[os9];
+    const os11 = memberOs(member);
+    const candidate = latest[os11];
     if (candidate === void 0) {
-      skipped2.push({ member, reason: `\u6CA1\u6709 ${os9 === "windows" ? "Windows" : "Linux"} \u90E8\u7F72\u5305` });
+      skipped2.push({ member, reason: `\u6CA1\u6709 ${os11 === "windows" ? "Windows" : "Linux"} \u90E8\u7F72\u5305` });
       continue;
     }
     const decision = shouldUpgrade(deployment, candidate);
@@ -8526,7 +9221,7 @@ function buildUpdateReasons(input) {
   return reasons;
 }
 function scheduleFile(dataDir) {
-  return path17.join(dataDir, "schedule.json");
+  return path19.join(dataDir, "schedule.json");
 }
 
 // src/lib/build-defaults.mjs
@@ -8620,27 +9315,27 @@ function pickArtifactForMember(artifacts, member) {
 // src/lib/egress-plan.mjs
 function linkFor(links, member) {
   if (member === null || member === void 0 || !Array.isArray(links)) return null;
-  return links.find((link2) => link2?.client?.ip === member.ip || member.id !== void 0 && link2?.client?.id === member.id || member.name !== void 0 && link2?.client?.name === member.name) ?? null;
+  return links.find((link3) => link3?.client?.ip === member.ip || member.id !== void 0 && link3?.client?.id === member.id || member.name !== void 0 && link3?.client?.name === member.name) ?? null;
 }
-function linkHasProxy(link2) {
-  return link2 !== null && link2 !== void 0 && typeof link2.httpProxy === "string" && link2.httpProxy !== "";
+function linkHasProxy(link3) {
+  return link3 !== null && link3 !== void 0 && typeof link3.httpProxy === "string" && link3.httpProxy !== "";
 }
-function isLinkServer(proxyMember, link2) {
+function isLinkServer(proxyMember, link3) {
   if (proxyMember === null || proxyMember === void 0) return false;
-  return proxyMember.id === link2?.server?.id || proxyMember.ip === link2?.server?.ip || proxyMember.name === link2?.server?.name;
+  return proxyMember.id === link3?.server?.id || proxyMember.ip === link3?.server?.ip || proxyMember.name === link3?.server?.name;
 }
 function resolveBuildEgress(options) {
   const proxyUrl = typeof options.proxyUrl === "string" ? options.proxyUrl.trim() : "";
   const proxyMember = options.proxyMember ?? null;
   if (proxyUrl !== "") return { kind: "explicit", url: proxyUrl, reason: "\u663E\u5F0F\u4EE3\u7406" };
   if (options.direct === true) return { kind: "direct", reason: "direct=true" };
-  const link2 = linkFor(options.links ?? [], options.member ?? null);
-  if (linkHasProxy(link2) && (proxyMember === null || isLinkServer(proxyMember, link2))) {
+  const link3 = linkFor(options.links ?? [], options.member ?? null);
+  if (linkHasProxy(link3) && (proxyMember === null || isLinkServer(proxyMember, link3))) {
     return {
       kind: "link",
-      url: link2.httpProxy,
-      link: link2,
-      reason: `\u76F4\u8FDE ${link2.server?.name ?? link2.server?.ip}\uFF08hysteria2/${link2.mode ?? "socks"}\uFF0CHTTP ${link2.httpProxy}\uFF09`
+      url: link3.httpProxy,
+      link: link3,
+      reason: `\u76F4\u8FDE ${link3.server?.name ?? link3.server?.ip}\uFF08hysteria2/${link3.mode ?? "socks"}\uFF0CHTTP ${link3.httpProxy}\uFF09`
     };
   }
   if (proxyMember !== null) return { kind: "proxyMember", proxyMember, reason: `\u4EE3\u7406\u6210\u5458 ${proxyMember.name}` };
@@ -8650,33 +9345,33 @@ function resolveDeployLinkProxy(options) {
   const target = options.target ?? null;
   const wanted = typeof options.wanted === "string" ? options.wanted.trim() : "";
   if (target === null) return null;
-  const link2 = linkFor(options.links ?? [], target);
-  if (!linkHasProxy(link2)) return null;
+  const link3 = linkFor(options.links ?? [], target);
+  if (!linkHasProxy(link3)) return null;
   if (wanted === "" || wanted === "auto") {
-    return { kind: "link", url: link2.httpProxy, name: link2.server?.name ?? link2.server?.ip ?? "direct link" };
+    return { kind: "link", url: link3.httpProxy, name: link3.server?.name ?? link3.server?.ip ?? "direct link" };
   }
-  const server = link2.server ?? {};
+  const server = link3.server ?? {};
   if (wanted === server.id || wanted === server.ip || wanted === server.name) {
-    return { kind: "link", url: link2.httpProxy, name: server.name ?? server.ip ?? "direct link" };
+    return { kind: "link", url: link3.httpProxy, name: server.name ?? server.ip ?? "direct link" };
   }
   return null;
 }
 
 // src/lib/package-sources.mjs
-import path18 from "node:path";
+import path20 from "node:path";
 var PACKAGE_ARCHIVE_RE = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(x64|arm64)\.(tar\.gz|tgz|zip)$/u;
 var RELEASE_TARGET_RE = /^(linux|win)-(x64|arm64)$/u;
 function packageTargetFromName(name) {
   const match = PACKAGE_ARCHIVE_RE.exec(String(name ?? ""));
   if (match === null) return null;
-  const os9 = match[3].startsWith("win") ? "windows" : "linux";
+  const os11 = match[3].startsWith("win") ? "windows" : "linux";
   const arch = match[4];
   return {
     version: match[1],
     buildStamp: match[2],
-    os: os9,
+    os: os11,
     arch,
-    target: `${os9 === "windows" ? "win" : "linux"}-${arch}`
+    target: `${os11 === "windows" ? "win" : "linux"}-${arch}`
   };
 }
 function normalizeLatestManifest(manifest, options = {}) {
@@ -8722,22 +9417,22 @@ function normalizeTarget(value) {
   if (match === null) return "";
   return `${match[1].startsWith("linux") ? "linux" : "win"}-${match[2]}`;
 }
-function packageRoots(home, os9) {
+function packageRoots(home, os11) {
   const base = String(home ?? "").replace(/[\\/]+$/u, "");
   if (base === "") return [];
-  const join = os9 === "windows" ? path18.win32.join : path18.posix.join;
+  const join = os11 === "windows" ? path20.win32.join : path20.posix.join;
   return [join(base, ".dsh", "packages"), join(base, ".dsh", "mesh", "upgrade")];
 }
-function isAllowedPackagePath(candidate, home, os9) {
+function isAllowedPackagePath(candidate, home, os11) {
   const text = String(candidate ?? "").trim();
   if (text === "") return false;
-  const p = os9 === "windows" ? path18.win32 : path18.posix;
+  const p = os11 === "windows" ? path20.win32 : path20.posix;
   const normalized = p.normalize(text);
   if (packageTargetFromName(p.basename(normalized)) === null) return false;
-  const roots = packageRoots(home, os9).map((root) => p.normalize(root));
-  const comparand = os9 === "windows" ? normalized.toLowerCase() : normalized;
+  const roots = packageRoots(home, os11).map((root) => p.normalize(root));
+  const comparand = os11 === "windows" ? normalized.toLowerCase() : normalized;
   return roots.some((root) => {
-    const prefix = os9 === "windows" ? root.toLowerCase() : root;
+    const prefix = os11 === "windows" ? root.toLowerCase() : root;
     return comparand === prefix || comparand.startsWith(`${prefix}${p.sep}`);
   });
 }
@@ -8769,9 +9464,9 @@ function normalizeMtime(value) {
   const parsed = Date.parse(text);
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : "";
 }
-function listPackagesScript(os9, home = "") {
+function listPackagesScript(os11, home = "") {
   const homeDir = String(home ?? "").trim();
-  if (os9 === "windows") {
+  if (os11 === "windows") {
     const base2 = homeDir === "" ? "$env:USERPROFILE" : powershellQuote(homeDir);
     return `$ErrorActionPreference = 'SilentlyContinue'
 $base = ${base2}
@@ -8819,7 +9514,7 @@ function powershellQuote(value) {
 }
 
 // src/lib/service.mjs
-var HERE2 = path19.dirname(fileURLToPath2(import.meta.url));
+var HERE2 = path21.dirname(fileURLToPath2(import.meta.url));
 var PROBE_GRACE_MS = 10 * 6e4;
 var PROBE_TIMEOUT_MS = 4500;
 var PROBE_RETRY_MS = 4500;
@@ -8827,19 +9522,19 @@ var PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 6e4;
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync11(path19.join(current, "build", "recipes.json")) && existsSync11(path19.join(current, "code", "build"))) {
+    if (existsSync12(path21.join(current, "build", "recipes.json")) && existsSync12(path21.join(current, "code", "build"))) {
       return current;
     }
-    const parent = path19.dirname(current);
+    const parent = path21.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return path19.resolve(start, "..", "..");
+  return path21.resolve(start, "..", "..");
 }
 var REPOSITORY_ROOT = findRepositoryRoot(HERE2);
 function packageVersion() {
   try {
-    const parsed = JSON.parse(readFileSync4(path19.join(REPOSITORY_ROOT, "package.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync4(path21.join(REPOSITORY_ROOT, "package.json"), "utf8"));
     return typeof parsed.version === "string" ? parsed.version : "0.0.0";
   } catch {
     return "0.0.0";
@@ -8870,22 +9565,22 @@ var MeshService = class {
     this.config = options.config ?? {};
     this.logLine = options.log ?? (() => {
     });
-    this.jobRoot = path19.join(this.dataDir, "build");
-    this.cacheDir = path19.join(this.dataDir, "cache");
+    this.jobRoot = path21.join(this.dataDir, "build");
+    this.cacheDir = path21.join(this.dataDir, "cache");
     this.version = packageVersion();
     this.repositoryRoot = REPOSITORY_ROOT;
-    this.recipesPath = path19.join(REPOSITORY_ROOT, "build", "recipes.json");
-    this.overlayRoot = path19.join(REPOSITORY_ROOT, "build", "overlays");
-    this.home = path19.dirname(this.dataDir);
-    this.deployRoot = path19.join(this.dataDir, "deploy");
-    this.memberTagsFile = path19.join(this.dataDir, "member-tags.json");
-    this.packagesDir = path19.join(os8.homedir(), ".dsh", "packages");
-    this.releaseConfigFile = path19.join(this.dataDir, "release.json");
+    this.recipesPath = path21.join(REPOSITORY_ROOT, "build", "recipes.json");
+    this.overlayRoot = path21.join(REPOSITORY_ROOT, "build", "overlays");
+    this.home = path21.dirname(this.dataDir);
+    this.deployRoot = path21.join(this.dataDir, "deploy");
+    this.memberTagsFile = path21.join(this.dataDir, "member-tags.json");
+    this.packagesDir = path21.join(os10.homedir(), ".dsh", "packages");
+    this.releaseConfigFile = path21.join(this.dataDir, "release.json");
     this.latestReleaseCache = null;
     const geoConfig = this.config.geo === false ? { enabled: false } : this.config.geo !== null && typeof this.config.geo === "object" ? this.config.geo : {};
     this.geo = options.geoLookup ?? new GeoLookup({
       enabled: geoConfig.enabled !== false,
-      cacheFile: path19.join(this.dataDir, "geo-cache.json"),
+      cacheFile: path21.join(this.dataDir, "geo-cache.json"),
       provider: typeof geoConfig.provider === "string" && geoConfig.provider !== "" ? geoConfig.provider : void 0,
       timeoutMs: typeof geoConfig.timeoutMs === "number" ? geoConfig.timeoutMs : void 0,
       fetchImpl: typeof geoConfig.fetchImpl === "function" ? geoConfig.fetchImpl : void 0,
@@ -8902,7 +9597,7 @@ var MeshService = class {
     this.remoteBuilder = new RemoteBuilder({ packagesDir: this.packagesDir, log: (line) => this.logLine(line) });
     this.systemCache = null;
     this.probes = /* @__PURE__ */ new Map();
-    this.probeCacheFile = path19.join(this.dataDir, "probe-cache.json");
+    this.probeCacheFile = path21.join(this.dataDir, "probe-cache.json");
     this.probeCacheLoaded = false;
     this.fetchImpl = options.fetchImpl;
   }
@@ -8918,7 +9613,7 @@ var MeshService = class {
     if (this.probeCacheLoaded) return;
     this.probeCacheLoaded = true;
     try {
-      const parsed = JSON.parse(await readFile13(this.probeCacheFile, "utf8"));
+      const parsed = JSON.parse(await readFile14(this.probeCacheFile, "utf8"));
       if (parsed === null || typeof parsed !== "object") return;
       const now = Date.now();
       for (const [ip, entry] of Object.entries(parsed)) {
@@ -8942,8 +9637,8 @@ var MeshService = class {
   /** Persist the probe map; a failed write is not worth reporting. */
   async #saveProbes() {
     try {
-      await mkdir11(path19.dirname(this.probeCacheFile), { recursive: true });
-      await writeFile11(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.probes)), "utf8");
+      await mkdir12(path21.dirname(this.probeCacheFile), { recursive: true });
+      await writeFile12(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.probes)), "utf8");
     } catch {
     }
   }
@@ -8964,13 +9659,13 @@ var MeshService = class {
    * @returns {Promise<object>} status.
    */
   async status() {
-    const stateFile = path19.join(this.home, "wireguard", "state.json");
+    const stateFile = path21.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     return {
       ok: true,
       host: {
-        hostname: os8.hostname(),
+        hostname: os10.hostname(),
         platform: process.platform,
         arch: process.arch,
         version: this.version,
@@ -9029,10 +9724,10 @@ var MeshService = class {
     let host = String(member.ip ?? "");
     if (host === "") throw new Error(`member ${member.id} has no VPN address`);
     if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
-    const path26 = "/__gate/cluster/__gate/session/promote";
-    const response = await fetch(`http://${host}${path26}`, {
+    const path28 = "/__gate/cluster/__gate/session/promote";
+    const response = await fetch(`http://${host}${path28}`, {
       method: "POST",
-      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path26 }) }
+      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path28 }) }
     });
     const text = await response.text();
     if (!response.ok) throw new Error(`member ${member.name} refused the request: HTTP ${String(response.status)} ${text.slice(0, 120)}`);
@@ -9045,13 +9740,13 @@ var MeshService = class {
   }
   async members() {
     await this.#loadProbes();
-    const stateFile = path19.join(this.home, "wireguard", "state.json");
+    const stateFile = path21.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     const self = {
       id: "local",
       kind: "self",
-      name: identity?.selfName ?? os8.hostname(),
+      name: identity?.selfName ?? os10.hostname(),
       ip: identity?.selfIp ?? "",
       online: true,
       dsh: true,
@@ -9147,7 +9842,7 @@ var MeshService = class {
    */
   async memberTags() {
     try {
-      const parsed = JSON.parse(await readFile13(this.memberTagsFile, "utf8"));
+      const parsed = JSON.parse(await readFile14(this.memberTagsFile, "utf8"));
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
       const tags = {};
       for (const [id, tag] of Object.entries(parsed)) {
@@ -9171,8 +9866,8 @@ var MeshService = class {
     const tags = await this.memberTags();
     if (label === "") delete tags[memberId];
     else tags[memberId] = label;
-    await mkdir11(this.dataDir, { recursive: true });
-    await writeFile11(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
+    await mkdir12(this.dataDir, { recursive: true });
+    await writeFile12(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
 `, "utf8");
     return { ok: true, tags };
   }
@@ -9196,12 +9891,12 @@ var MeshService = class {
    * @returns {Promise<string[]>} ids whose temporary files were removed.
    */
   async cleanupBuilds(options = {}) {
-    if (!existsSync11(this.jobRoot)) return [];
-    const entries = await readdir7(this.jobRoot, { withFileTypes: true });
+    if (!existsSync12(this.jobRoot)) return [];
+    const entries = await readdir8(this.jobRoot, { withFileTypes: true });
     const removed = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path19.join(this.jobRoot, entry.name);
+      const dir = path21.join(this.jobRoot, entry.name);
       let state;
       try {
         state = await readState(dir);
@@ -9210,12 +9905,12 @@ var MeshService = class {
       }
       if (this.running.has(state.id) && state.id !== options.keep) continue;
       if (state.status === "created" || state.status === "needs-fix" || state.status === "learned") continue;
-      await rm12(path19.join(dir, "src"), { recursive: true, force: true });
-      if (state.id !== options.keep) await rm12(path19.join(dir, "smoke"), { recursive: true, force: true });
-      await rm12(path19.join(dir, "work-order"), { recursive: true, force: true });
+      await rm14(path21.join(dir, "src"), { recursive: true, force: true });
+      if (state.id !== options.keep) await rm14(path21.join(dir, "smoke"), { recursive: true, force: true });
+      await rm14(path21.join(dir, "work-order"), { recursive: true, force: true });
       if (options.keepDist !== true) {
-        if (state.status === "done") await this.#pruneDist(path19.join(dir, "dist"));
-        else await rm12(path19.join(dir, "dist"), { recursive: true, force: true });
+        if (state.status === "done") await this.#pruneDist(path21.join(dir, "dist"));
+        else await rm14(path21.join(dir, "dist"), { recursive: true, force: true });
       }
       removed.push(state.id);
     }
@@ -9231,10 +9926,10 @@ var MeshService = class {
    * @returns {Promise<void>} completion.
    */
   async #pruneDist(distDir) {
-    const entries = await readdir7(distDir, { withFileTypes: true }).catch(() => []);
+    const entries = await readdir8(distDir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      await rm12(path19.join(distDir, entry.name), { recursive: true, force: true });
+      await rm14(path21.join(distDir, entry.name), { recursive: true, force: true });
     }
   }
   /**
@@ -9248,7 +9943,7 @@ var MeshService = class {
    */
   async #directLinks() {
     try {
-      const raw = JSON.parse(await readFile13(path19.join(this.home, "hysteria", "links.json"), "utf8"));
+      const raw = JSON.parse(await readFile14(path21.join(this.home, "hysteria", "links.json"), "utf8"));
       return Array.isArray(raw.links) ? raw.links : [];
     } catch {
       return [];
@@ -9322,8 +10017,8 @@ var MeshService = class {
     if (request.planOnly === true && member !== null) throw new Error("plan-only builds run on the local host");
     let proxyMember = null;
     if (proxyMemberId === "auto") {
-      const link2 = await this.#linkFor(member);
-      proxyMember = link2 === null ? null : everyone.find((candidate) => candidate.ip === link2.server?.ip) ?? null;
+      const link3 = await this.#linkFor(member);
+      proxyMember = link3 === null ? null : everyone.find((candidate) => candidate.ip === link3.server?.ip) ?? null;
       if (proxyMember === null) {
         const picked = pickProxyMember(everyone);
         proxyMember = picked === null ? null : everyone.find((candidate) => candidate.id === picked) ?? null;
@@ -9345,7 +10040,7 @@ var MeshService = class {
       direct: request.direct === true
     });
     const buildStamp = await nextBuildStamp({
-      stateFile: path19.join(this.dataDir, "build-stamp.json"),
+      stateFile: path21.join(this.dataDir, "build-stamp.json"),
       packagesDir: this.packagesDir
     });
     const job = await createJob({
@@ -9577,15 +10272,15 @@ var MeshService = class {
     let user = "root";
     let identityFile;
     let port = 22;
-    const { state } = await readWireGuardState({ file: path19.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path21.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (Number.isSafeInteger(peer.sshPort)) port = peer.sshPort;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
-        const digest = createHash7("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path19.join(this.home, "wireguard", "ssh", `${digest}.key`);
-        if (existsSync11(candidate)) identityFile = candidate;
+        const digest = createHash8("sha256").update(peer.publicKey).digest("hex");
+        const candidate = path21.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        if (existsSync12(candidate)) identityFile = candidate;
       }
     }
     const platform = String(member.system?.platform ?? "").toLowerCase();
@@ -9672,8 +10367,8 @@ var MeshService = class {
     const state = await readState(dir);
     return {
       ...state,
-      logFile: path19.join(dir, "build.log"),
-      stateFile: path19.join(dir, "state.json"),
+      logFile: path21.join(dir, "build.log"),
+      stateFile: path21.join(dir, "state.json"),
       logTail: await readLogTail(dir, 60),
       running: this.running.has(id),
       workOrderMarkdown: state.workOrder?.markdown ?? null,
@@ -9685,13 +10380,13 @@ var MeshService = class {
    * @returns {Promise<object[]>} jobs.
    */
   async jobs() {
-    if (!existsSync11(this.jobRoot)) return [];
-    const entries = await readdir7(this.jobRoot, { withFileTypes: true });
+    if (!existsSync12(this.jobRoot)) return [];
+    const entries = await readdir8(this.jobRoot, { withFileTypes: true });
     const jobs = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       try {
-        const state = await readState(path19.join(this.jobRoot, entry.name));
+        const state = await readState(path21.join(this.jobRoot, entry.name));
         jobs.push(this.#summary(state));
       } catch {
       }
@@ -9773,7 +10468,7 @@ var MeshService = class {
    * @returns {Promise<object>} recipes.
    */
   async recipes() {
-    const parsed = JSON.parse(await readFile13(this.recipesPath, "utf8"));
+    const parsed = JSON.parse(await readFile14(this.recipesPath, "utf8"));
     return {
       source: parsed.source,
       ref: parsed.ref,
@@ -9859,9 +10554,9 @@ var MeshService = class {
     const seen = /* @__PURE__ */ new Set();
     const walk = async (dir, depth) => {
       if (depth < 0) return;
-      const entries = await readdir7(dir, { withFileTypes: true }).catch(() => []);
+      const entries = await readdir8(dir, { withFileTypes: true }).catch(() => []);
       for (const entry of entries) {
-        const file = path19.join(dir, entry.name);
+        const file = path21.join(dir, entry.name);
         if (entry.isDirectory()) {
           if (depth > 0) await walk(file, depth - 1);
           continue;
@@ -9869,16 +10564,16 @@ var MeshService = class {
         if (!entry.isFile()) continue;
         const parsed = packageTargetFromName(entry.name);
         if (parsed === null || seen.has(file)) continue;
-        const info = await stat11(file).catch(() => null);
+        const info = await stat13(file).catch(() => null);
         if (info === null) continue;
         seen.add(file);
-        const sidecar = await readFile13(`${file}.sha256`, "utf8").catch(() => "");
+        const sidecar = await readFile14(`${file}.sha256`, "utf8").catch(() => "");
         const sha256 = /^([a-f0-9]{64})\b/iu.exec(sidecar)?.[1]?.toLowerCase() ?? null;
         packages.push({ name: entry.name, path: file, bytes: info.size, mtime: info.mtime.toISOString(), sha256, ...parsed });
       }
     };
     await walk(this.packagesDir, 0);
-    await walk(path19.join(this.dataDir, "upgrade"), 2);
+    await walk(path21.join(this.dataDir, "upgrade"), 2);
     packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
     return packages;
   }
@@ -9938,15 +10633,15 @@ var MeshService = class {
     const file = typeof request?.path === "string" ? request.path.trim() : "";
     if (file === "") throw new Error("targetPackage.path is required");
     const plan = await this.#memberSshPlan(member);
-    const os9 = plan.os === "windows" ? "windows" : "linux";
+    const os11 = plan.os === "windows" ? "windows" : "linux";
     const home = this.#memberHome(member, plan);
-    if (!isAllowedPackagePath(file, home, os9)) {
+    if (!isAllowedPackagePath(file, home, os11)) {
       throw new Error("\u76EE\u6807\u5305\u4E0D\u5728\u8BE5\u6210\u5458\u7684 ~/.dsh/packages \u6216 ~/.dsh/mesh/upgrade \u76EE\u5F55\u5185");
     }
     const name = file.split(/[\\/]/u).pop() ?? "";
     const parsed = packageTargetFromName(name);
     if (parsed === null) throw new Error(`\u4E0D\u662F\u53EF\u8BC6\u522B\u7684\u90E8\u7F72\u5305\uFF1A${name}`);
-    if (parsed.os !== os9) throw new Error(`\u5305\u5E73\u53F0 ${parsed.os} \u4E0E\u6210\u5458 ${os9} \u4E0D\u5339\u914D`);
+    if (parsed.os !== os11) throw new Error(`\u5305\u5E73\u53F0 ${parsed.os} \u4E0E\u6210\u5458 ${os11} \u4E0D\u5339\u914D`);
     const memberTarget = memberBuildTarget(member);
     if (memberTarget !== null && memberTarget !== parsed.target) {
       throw new Error(`\u5305\u5E73\u53F0 ${parsed.target} \u4E0E\u6210\u5458 ${memberTarget} \u4E0D\u5339\u914D`);
@@ -9954,16 +10649,16 @@ var MeshService = class {
     let bytes = 0;
     let sha256 = "";
     if (member.id === "local" || member.kind === "self") {
-      const info = await stat11(file).catch(() => null);
+      const info = await stat13(file).catch(() => null);
       if (info === null || !info.isFile()) throw new Error(`\u76EE\u6807\u5305\u4E0D\u5B58\u5728\uFF1A${file}`);
       bytes = info.size;
       sha256 = await sha256File(file);
     } else {
-      const runner = new SshRunner({ ...plan, os: os9 });
+      const runner = new SshRunner({ ...plan, os: os11 });
       const size = await runner.remoteSize(file);
       if (size === null) throw new Error(`\u76EE\u6807\u5305\u4E0D\u5B58\u5728\uFF1A${file}`);
       bytes = size;
-      if (os9 === "windows") {
+      if (os11 === "windows") {
         const { stdout } = await runner.runProcess("ssh", [
           ...runner.sshOptions(),
           runner.target(),
@@ -9986,20 +10681,20 @@ var MeshService = class {
     }
     const expected = typeof request?.sha256 === "string" ? request.sha256.trim().toLowerCase() : "";
     if (expected !== "" && expected !== sha256) throw new Error("\u76EE\u6807\u5305\u7684\u6821\u9A8C\u548C\u4E0E\u5217\u8868\u4E0D\u4E00\u81F4\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5");
-    return { path: file, bytes, sha256, name, os: os9 };
+    return { path: file, bytes, sha256, name, os: os11 };
   }
   /**
    * Local deployment packages. The fixed directory is `~/.dsh/packages`.
    * @returns {Promise<object>} package list.
    */
   async packages() {
-    const entries = await readdir7(this.packagesDir, { withFileTypes: true }).catch(() => []);
+    const entries = await readdir8(this.packagesDir, { withFileTypes: true }).catch(() => []);
     const packages = [];
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(entry.name)) continue;
-      const file = path19.join(this.packagesDir, entry.name);
-      const info = await stat11(file).catch(() => null);
+      const file = path21.join(this.packagesDir, entry.name);
+      const info = await stat13(file).catch(() => null);
       if (info === null) continue;
       packages.push({
         name: entry.name,
@@ -10113,7 +10808,7 @@ var MeshService = class {
   #applyInferredDeployment(member, deployJobs) {
     if (memberDeployment(member) !== null) return;
     const job = deployJobs.find((candidate) => candidate.status === "succeeded" && candidate.package !== void 0 && (candidate.member === member.id || candidate.target?.host === member.ip));
-    const parsed = packageInfo(path19.basename(job?.package ?? ""));
+    const parsed = packageInfo(path21.basename(job?.package ?? ""));
     if (parsed === null) return;
     member.deployment = { version: parsed.version, buildStamp: parsed.buildStamp, inferred: true };
   }
@@ -10297,19 +10992,19 @@ var MeshService = class {
    */
   async removePackage(request) {
     const name = typeof request?.name === "string" ? request.name.trim() : "";
-    if (name === "" || name !== path19.basename(name) || name.startsWith(".")) {
+    if (name === "" || name !== path21.basename(name) || name.startsWith(".")) {
       throw new Error("package name is invalid");
     }
     if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`);
-    const file = path19.join(this.packagesDir, name);
-    const info = await stat11(file).catch(() => null);
+    const file = path21.join(this.packagesDir, name);
+    const info = await stat13(file).catch(() => null);
     if (info === null || !info.isFile()) throw new Error(`package not found: ${name}`);
     const removed = [];
-    await rm12(file, { force: true });
+    await rm14(file, { force: true });
     removed.push(file);
     const sidecar = `${file}.sha256`;
-    if (existsSync11(sidecar)) {
-      await rm12(sidecar, { force: true });
+    if (existsSync12(sidecar)) {
+      await rm14(sidecar, { force: true });
       removed.push(sidecar);
     }
     this.logLine(`removed package ${name}`);
@@ -10324,9 +11019,9 @@ var MeshService = class {
   async resolvePackage(input) {
     const raw = typeof input === "string" ? input.trim() : "";
     if (raw === "") throw new Error("package is required");
-    const candidates = path19.isAbsolute(raw) ? [raw] : [path19.join(this.packagesDir, raw), path19.join(this.repositoryRoot, "dist", raw)];
+    const candidates = path21.isAbsolute(raw) ? [raw] : [path21.join(this.packagesDir, raw), path21.join(this.repositoryRoot, "dist", raw)];
     for (const file of candidates) {
-      const info = await stat11(file).catch(() => null);
+      const info = await stat13(file).catch(() => null);
       if (info?.isFile()) return file;
     }
     throw new Error(`package not found: ${raw}`);
@@ -10365,7 +11060,7 @@ var MeshService = class {
       );
     }
     let packagePath = "";
-    let os9 = "linux";
+    let os11 = "linux";
     let packageDescriptor = null;
     let acquire = null;
     let downloadRequest = request;
@@ -10373,7 +11068,7 @@ var MeshService = class {
       if (member === void 0) throw new Error("\u76EE\u6807\u6210\u5458\u5DF2\u6709\u5305\u9700\u8981\u4E00\u4E2A\u6210\u5458");
       const resolved = await this.#resolveTargetPackage(member, targetPackageRequest);
       packagePath = resolved.path;
-      os9 = resolved.os;
+      os11 = resolved.os;
       packageOnTarget = { path: resolved.path, bytes: resolved.bytes, sha256: resolved.sha256, keep: true };
     } else if (releaseRequest !== null) {
       if (member === void 0) throw new Error("latest tag \u9700\u8981\u6307\u5B9A\u4E00\u4E2A\u6210\u5458");
@@ -10392,7 +11087,7 @@ var MeshService = class {
       if (asset === null) throw new Error(`latest tag \u91CC\u6CA1\u6709 ${target} \u7684\u90E8\u7F72\u5305`);
       const manifests = latest.manifests ?? latest.manifestUrls;
       if (member.id === "local" || member.kind === "self") {
-        const link2 = request.direct === true ? null : resolveDeployLinkProxy({
+        const link3 = request.direct === true ? null : resolveDeployLinkProxy({
           links: await this.#directLinks(),
           target: member,
           wanted: typeof request.proxyMember === "string" ? request.proxyMember : ""
@@ -10403,13 +11098,13 @@ var MeshService = class {
           sha256: asset.sha256,
           manifests,
           prefer: "gitee",
-          ...link2 === null || typeof link2.url !== "string" || link2.url === "" ? {} : { proxy: link2.url }
+          ...link3 === null || typeof link3.url !== "string" || link3.url === "" ? {} : { proxy: link3.url }
         };
-        packagePath = path19.join(this.packagesDir, asset.name);
-        os9 = asset.os;
+        packagePath = path21.join(this.packagesDir, asset.name);
+        os11 = asset.os;
       } else {
         packagePath = asset.name;
-        os9 = asset.os;
+        os11 = asset.os;
         packageDescriptor = { name: asset.name, bytes: asset.bytes, sha256: asset.sha256, local: false };
         downloadRequest = {
           ...request,
@@ -10419,18 +11114,18 @@ var MeshService = class {
     } else if (packageOnTarget !== null) {
       packagePath = String(packageOnTarget.path ?? "").trim();
       if (packagePath === "") throw new Error("packageOnTarget.path is required");
-      os9 = /win(?:dows)?/iu.test(path19.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+      os11 = /win(?:dows)?/iu.test(path21.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
     } else {
       packagePath = await this.resolvePackage(request.package);
-      os9 = /win(?:dows)?/iu.test(path19.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+      os11 = /win(?:dows)?/iu.test(path21.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
     }
     if (member !== void 0) {
       const identity = { id: member.id, name: member.name, ip: member.ip };
-      if (test) assertTestUpgradeTarget(member, { packageOs: os9 });
+      if (test) assertTestUpgradeTarget(member, { packageOs: os11 });
       if (member.kind === "self" || member.id === "local") {
-        return this.#startLocalJob({ member, packagePath, os: os9, mode, identity, ...acquire === null ? {} : { acquire } });
+        return this.#startLocalJob({ member, packagePath, os: os11, mode, identity, ...acquire === null ? {} : { acquire } });
       }
-      const deployRequest = await this.#memberDeployRequest(member, packagePath, os9);
+      const deployRequest = await this.#memberDeployRequest(member, packagePath, os11);
       const download3 = mode === "install" || packageOnTarget !== null ? null : await this.#deployDownload(downloadRequest, member, all);
       const job2 = await this.#startEngineJob({
         request: {
@@ -10444,19 +11139,19 @@ var MeshService = class {
         member: member.id,
         mode
       });
-      return { ok: true, job: job2, member: identity, packagePath, layout: "bluegreen" };
+      return { ok: true, job: job2, member: identity, packagePath, layout: "pointer" };
     }
     if (host === "") throw new Error("host is required");
     if (test) throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u9700\u8981\u4E00\u4E2A\u6210\u5458\uFF08\u8981\u5728\u6210\u5458\u7684\u5B89\u88C5\u4E0A\u6F14\u7EC3\uFF09\uFF0C\u4E0D\u80FD\u76F4\u63A5\u7ED9\u88F8 SSH \u4E3B\u673A");
     if (packageDescriptor !== null) throw new Error("latest tag \u9700\u8981\u4E00\u4E2A\u5DF2\u53D1\u73B0\u7684\u6210\u5458\uFF0C\u4E0D\u80FD\u76F4\u63A5\u7ED9\u88F8 SSH \u4E3B\u673A");
-    const appRoot = os9 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
+    const appRoot = os11 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
     const download2 = mode === "install" || packageOnTarget !== null ? null : await this.#deployDownload(request, null, all);
     const job = await this.#startEngineJob({
-      request: { host, package: packagePath, os: os9, appRoot, download: download2, ...packageOnTarget === null ? {} : { packageOnTarget } },
+      request: { host, package: packagePath, os: os11, appRoot, download: download2, ...packageOnTarget === null ? {} : { packageOnTarget } },
       member: null,
       mode
     });
-    return { ok: true, job, member: null, packagePath, layout: "bluegreen" };
+    return { ok: true, job, member: null, packagePath, layout: "pointer" };
   }
   /**
    * Deploy one local package to a discovered member, without waiting.
@@ -10550,7 +11245,7 @@ var MeshService = class {
     return {
       job,
       member: started.member,
-      logFile: path19.join(this.deployRoot, started.job.id, "deploy.log"),
+      logFile: path21.join(this.deployRoot, started.job.id, "deploy.log"),
       log: await this.deployLogs(started.job.id, 80)
     };
   }
@@ -10585,7 +11280,7 @@ var MeshService = class {
     }
   }
   /**
-   * Start one job for a blue-green target (blue-green members and plain hosts).
+   * Start one job for a member or a plain SSH host.
    *
    * The plan is built here, once: the queued job needs its release name and
    * size, and the runner must not hash a 300 MB package a second time.
@@ -10606,52 +11301,40 @@ var MeshService = class {
     });
   }
   /**
-   * Start the local upgrade, or a local blue-green deploy, whichever the
-   * install layout supports.
+   * Start the local upgrade.
    *
-   * A flat install (gateway) has no release symlink to switch: the package's
-   * own `upgrade-local.sh` copies the new tree over it. A blue-green install
-   * upgrades exactly like a member, using a local runner instead of SSH.
+   * The host runs the same in-place orchestrator as a member: the package's
+   * `upgrade-local.mjs` moves the tree into `releases/<id>`, rewrites the
+   * pointer and restarts the launcher-backed units.
    * @param {{member: object, packagePath: string, os: string, mode: 'install'|'upgrade', identity: object, acquire?: object}} input target.
    * @returns {Promise<object>} queued job and its layout.
    */
   async #startLocalJob(input) {
     const install = this.#localAppRoot();
     if (install === null) {
-      throw new Error("\u672C\u673A\u6CA1\u6709\u53EF\u8BC6\u522B\u7684 dsh-mesh \u5B89\u88C5\u76EE\u5F55\uFF08\u627E\u4E0D\u5230 config/gate.env\uFF09\uFF0C\u65E0\u6CD5\u5347\u7EA7\u672C\u673A");
+      throw new Error("\u672C\u673A\u6CA1\u6709\u53EF\u8BC6\u522B\u7684 dsh-mesh \u5B89\u88C5\u76EE\u5F55\uFF08\u627E\u4E0D\u5230 dsh-mesh.json\uFF09\uFF0C\u65E0\u6CD5\u5347\u7EA7\u672C\u673A");
     }
-    if (input.os === "windows" && (install.layout === "flat" || install.layout === "pointer")) {
+    if (input.os === "windows") {
       throw new Error("\u672C\u673A\u662F Linux \u7F51\u5173\uFF0C\u4E0D\u80FD\u5B89\u88C5 Windows \u90E8\u7F72\u5305");
     }
-    if (install.layout === "flat" || install.layout === "pointer") {
-      const job2 = await this.#queueJob({
-        mode: input.mode,
-        member: "local",
-        plan: null,
-        request: {
-          kind: "inplace",
-          inplace: {
-            package: input.packagePath,
-            appRoot: install.appRoot,
-            ...input.acquire === void 0 ? {} : { acquire: input.acquire }
-          }
-        },
-        target: { host: "127.0.0.1", user: os8.userInfo().username, port: null, os: "linux", appRoot: install.appRoot },
-        services: ["dsh-web-app.service", "dsh-web-gate.service", "dsh-wireguard-control.service", "dsh-interop.service"],
-        packagePath: input.packagePath,
-        release: typeof input.acquire?.name === "string" ? input.acquire.name : path19.basename(input.packagePath)
-      });
-      return { ok: true, job: job2, member: input.identity, packagePath: input.packagePath, layout: install.layout };
-    }
-    if (input.acquire !== void 0) {
-      throw new Error("\u672C\u673A\u662F\u84DD\u7EFF\u5E03\u5C40\uFF0Clatest tag \u672C\u673A\u5347\u7EA7\u6682\u672A\u652F\u6301\uFF1B\u8BF7\u6539\u7528\u672C\u673A\u90E8\u7F72\u5305");
-    }
-    const job = await this.#startEngineJob({
-      request: { host: "127.0.0.1", local: true, package: input.packagePath, os: input.os, appRoot: install.appRoot, member: input.member.id },
-      member: input.member.id,
-      mode: input.mode
+    const job = await this.#queueJob({
+      mode: input.mode,
+      member: "local",
+      plan: null,
+      request: {
+        kind: "inplace",
+        inplace: {
+          package: input.packagePath,
+          appRoot: install.appRoot,
+          ...input.acquire === void 0 ? {} : { acquire: input.acquire }
+        }
+      },
+      target: { host: "127.0.0.1", user: os10.userInfo().username, port: null, os: "linux", appRoot: install.appRoot },
+      services: ["dsh-web-app.service", "dsh-web-gate.service", "dsh-wireguard-control.service"],
+      packagePath: input.packagePath,
+      release: typeof input.acquire?.name === "string" ? input.acquire.name : path21.basename(input.packagePath)
     });
-    return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: "bluegreen" };
+    return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: "pointer" };
   }
   /**
    * Write one queued job directory and spawn its detached runner.
@@ -10660,10 +11343,10 @@ var MeshService = class {
    */
   async #queueJob(job) {
     const id = newJobId();
-    const dir = path19.join(this.deployRoot, id);
-    await mkdir11(dir, { recursive: true });
+    const dir = path21.join(this.deployRoot, id);
+    await mkdir12(dir, { recursive: true });
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    const bytes = job.plan?.package?.bytes ?? (await stat11(job.packagePath).catch(() => null))?.size ?? 0;
+    const bytes = job.plan?.package?.bytes ?? (await stat13(job.packagePath).catch(() => null))?.size ?? 0;
     const state = {
       id,
       mode: job.mode,
@@ -10683,7 +11366,7 @@ var MeshService = class {
     };
     await writeDeployState(dir, state);
     const requestFile = jobPaths(dir).request;
-    await writeFile11(requestFile, `${JSON.stringify({ ...job.request, id, member: job.member }, null, 2)}
+    await writeFile12(requestFile, `${JSON.stringify({ ...job.request, id, member: job.member }, null, 2)}
 `, { encoding: "utf8", mode: 384 });
     const spawned = await this.spawnRunner(dir, id);
     await appendDeployLog(dir, `job queued; runner ${spawned.mode}${spawned.unit === null ? "" : ` (${spawned.unit})`}`);
@@ -10702,14 +11385,14 @@ var MeshService = class {
    * @returns {Promise<{mode: string, unit: string|null}>} how it was started.
    */
   async #spawnRunner(dir, id) {
-    const script = path19.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
-    if (!existsSync11(script)) throw new Error(`deploy runner is missing: ${script}`);
+    const script = path21.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
+    if (!existsSync12(script)) throw new Error(`deploy runner is missing: ${script}`);
     const node = process.execPath;
     const unit = `dsh-mesh-job-${id.replace(/^deploy-/u, "")}`;
-    const systemdRun = ["/usr/bin/systemd-run", "/bin/systemd-run"].find((file) => existsSync11(file));
+    const systemdRun = ["/usr/bin/systemd-run", "/bin/systemd-run"].find((file) => existsSync12(file));
     if (systemdRun !== void 0 && process.platform === "linux" && process.getuid?.() === 0) {
       const result = await new Promise((resolve) => {
-        const child2 = spawn6(systemdRun, [
+        const child2 = spawn7(systemdRun, [
           "--unit",
           unit,
           "--collect",
@@ -10732,7 +11415,7 @@ var MeshService = class {
       if (result.ok) return { mode: "systemd-run", unit };
       await appendDeployLog(dir, `systemd-run failed, falling back to a detached process: ${result.detail}`);
     }
-    const child = spawn6(node, [script, "--job", dir], {
+    const child = spawn7(node, [script, "--job", dir], {
       cwd: this.repositoryRoot,
       detached: true,
       stdio: "ignore",
@@ -10744,38 +11427,31 @@ var MeshService = class {
   }
   /**
    * Locate the install that owns this plugin.
-   * @returns {{appRoot: string, layout: 'flat'|'bluegreen'|'pointer'}|null} install, or null in a source checkout.
+   * @returns {{appRoot: string, layout: 'pointer'}|null} install, or null in a source checkout.
    */
   #localAppRoot() {
     const inspect = (candidate2) => {
       try {
-        const current = path19.join(candidate2, "current");
-        if (existsSync11(current) && existsSync11(path19.join(candidate2, "releases"))) {
-          return { appRoot: candidate2, layout: "bluegreen" };
-        }
-        if (existsSync11(path19.join(candidate2, "dsh-mesh.json")) && existsSync11(path19.join(candidate2, "releases"))) {
+        if (existsSync12(path21.join(candidate2, "dsh-mesh.json")) && existsSync12(path21.join(candidate2, "releases"))) {
           return { appRoot: candidate2, layout: "pointer" };
-        }
-        if (existsSync11(path19.join(candidate2, "config", "gate.env")) && existsSync11(path19.join(candidate2, "plugins", "dsh-mesh"))) {
-          return { appRoot: candidate2, layout: "flat" };
         }
       } catch {
       }
       return null;
     };
-    let candidate = path19.resolve(this.repositoryRoot, "..");
+    let candidate = path21.resolve(this.repositoryRoot, "..");
     for (let depth = 0; depth < 5; depth += 1) {
       const found = inspect(candidate);
       if (found !== null) return found;
-      const parent = path19.dirname(candidate);
+      const parent = path21.dirname(candidate);
       if (parent === candidate) break;
       candidate = parent;
     }
-    candidate = path19.resolve(this.home);
+    candidate = path21.resolve(this.home);
     for (let depth = 0; depth < 5; depth += 1) {
       const found = inspect(candidate);
       if (found !== null) return found;
-      const parent = path19.dirname(candidate);
+      const parent = path21.dirname(candidate);
       if (parent === candidate) break;
       candidate = parent;
     }
@@ -10793,7 +11469,7 @@ var MeshService = class {
     if (this.running.has(state.id) || state.status === "running") {
       throw new Error("\u7F16\u8BD1\u8FD8\u5728\u8FD0\u884C\uFF0C\u7ED3\u675F\u540E\u518D\u6E05\u7A7A\u65E5\u5FD7");
     }
-    await writeFile11(path19.join(dir, "build.log"), "", "utf8");
+    await writeFile12(path21.join(dir, "build.log"), "", "utf8");
     return { ok: true, id: state.id };
   }
   /**
@@ -10808,14 +11484,14 @@ var MeshService = class {
    */
   async clearFinishedBuilds() {
     const cleared = [];
-    const entries = await readdir7(this.jobRoot, { withFileTypes: true }).catch(() => []);
+    const entries = await readdir8(this.jobRoot, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path19.join(this.jobRoot, entry.name);
+      const dir = path21.join(this.jobRoot, entry.name);
       const state = await readState(dir).catch(() => null);
       if (state === null) continue;
       if (this.running.has(state.id) || state.status === "running" || state.status === "queued") continue;
-      await rm12(dir, { recursive: true, force: true });
+      await rm14(dir, { recursive: true, force: true });
       cleared.push(state.id);
     }
     return { ok: true, cleared };
@@ -10895,18 +11571,18 @@ var MeshService = class {
    * @param {'linux'|'windows'} os target OS.
    * @returns {Promise<object>} deploy request.
    */
-  async #memberDeployRequest(member, packagePath, os9) {
+  async #memberDeployRequest(member, packagePath, os11) {
     if (member.ip === "") throw new Error(`member ${member.id} has no VPN address`);
     let user = "root";
     let identityFile;
-    const { state } = await readWireGuardState({ file: path19.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path21.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
-        const digest = createHash7("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path19.join(this.home, "wireguard", "ssh", `${digest}.key`);
-        if (existsSync11(candidate)) identityFile = candidate;
+        const digest = createHash8("sha256").update(peer.publicKey).digest("hex");
+        const candidate = path21.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        if (existsSync12(candidate)) identityFile = candidate;
       }
     }
     const system = member.system;
@@ -10914,7 +11590,7 @@ var MeshService = class {
     let serviceUser = typeof system?.user === "string" && system.user.trim() !== "" ? system.user.trim() : void 0;
     if (appRoot === void 0) {
       try {
-        const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os: os9 });
+        const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os: os11 });
         appRoot = detected.appRoot;
         serviceUser = serviceUser ?? detected.serviceUser;
       } catch {
@@ -10922,17 +11598,17 @@ var MeshService = class {
     }
     if (appRoot === void 0 && typeof system?.home === "string" && system.home.trim() !== "") {
       const home = system.home.trim().replace(/[\\/]+$/u, "");
-      appRoot = os9 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
+      appRoot = os11 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
     }
     if (appRoot === void 0) {
-      const home = os9 === "windows" ? `C:\\Users\\${user}` : user === "root" ? "/root" : `/home/${user}`;
-      appRoot = os9 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
+      const home = os11 === "windows" ? `C:\\Users\\${user}` : user === "root" ? "/root" : `/home/${user}`;
+      appRoot = os11 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
     }
     return {
       host: member.ip,
       user,
       identityFile,
-      os: os9,
+      os: os11,
       appRoot,
       serviceUser,
       package: packagePath
@@ -10956,7 +11632,7 @@ var MeshService = class {
     return { ok: true, ...summary };
   }
   /**
-   * Plan an SSH blue-green deployment without touching the network.
+   * Plan an SSH deployment without touching the network.
    * @param {object} request deploy options.
    * @returns {Promise<object>} plan.
    */
@@ -10964,7 +11640,7 @@ var MeshService = class {
     return this.deploy.plan(request);
   }
   /**
-   * Start an SSH blue-green deployment.
+   * Start an SSH deployment.
    * @param {object} request deploy options.
    * @returns {Promise<object>} job.
    */
@@ -11024,8 +11700,8 @@ var MeshService = class {
    *
    * This is the escape hatch for "the upgrade came up broken": the panel that
    * started the upgrade is still alive (it is a different machine), so it can
-   * put the member back without a shell. A flat install has no blue-green
-   * `previous`, so it is refused with a pointer at its upgrade backup.
+   * put the member back without a shell. The local gateway rolls back through
+   * `rollback-local.mjs`.
    * @param {{member: string}} request member id, VPN address, or name.
    * @returns {Promise<object>} rollback job.
    */
@@ -11036,14 +11712,14 @@ var MeshService = class {
     const found = everyone.find((entry) => entry.id === member || entry.name === member || entry.ip === member);
     if (found === void 0) throw new Error(`member not found: ${member}`);
     if (found.kind === "self") {
-      throw new Error("\u672C\u673A\u662F\u5E73\u94FA\u5B89\u88C5\uFF0C\u6CA1\u6709 blue-green \u7684\u4E0A\u4E00\u7248\u53EF\u5207\uFF1B\u56DE\u6EDA\u7528 .upgrade-backup \u91CC\u7684\u5907\u4EFD\u6062\u590D");
+      throw new Error("\u672C\u673A\u56DE\u6EDA\u8BF7\u6267\u884C\uFF1Anode <\u5B89\u88C5\u6839>/rollback-local.mjs --root <\u5B89\u88C5\u6839>");
     }
     if (found.dsh !== true) {
       throw new Error(`\u6210\u5458 ${found.name} \u7684\u7F51\u5173\u6CA1\u6709\u5E94\u7B54\uFF0C\u65E0\u6CD5\u5728\u7EBF\u56DE\u6EDA\uFF1BSSH \u4E0A\u53BB\u6267\u884C code/deploy/cli.mjs rollback`);
     }
-    const os9 = String(found.system?.platform ?? "").toLowerCase().startsWith("win") ? "windows" : "linux";
-    const request = await this.#memberDeployRequest(found, "", os9);
-    const rolled = await this.deploy.rollback({ ...request, os: os9, skipPackage: true });
+    const os11 = String(found.system?.platform ?? "").toLowerCase().startsWith("win") ? "windows" : "linux";
+    const request = await this.#memberDeployRequest(found, "", os11);
+    const rolled = await this.deploy.rollback({ ...request, os: os11, skipPackage: true });
     return { ok: true, job: rolled.job ?? rolled, member: found };
   }
   /**
@@ -11053,15 +11729,15 @@ var MeshService = class {
    */
   _jobDir(id) {
     if (typeof id !== "string" || !/^[A-Za-z0-9._-]+$/u.test(id)) throw new Error("invalid job id");
-    const dir = path19.resolve(this.jobRoot, id);
-    if (!dir.startsWith(`${path19.resolve(this.jobRoot)}${path19.sep}`)) throw new Error("invalid job id");
+    const dir = path21.resolve(this.jobRoot, id);
+    if (!dir.startsWith(`${path21.resolve(this.jobRoot)}${path21.sep}`)) throw new Error("invalid job id");
     return dir;
   }
 };
 
 // code/shared/event-stream.mjs
 import { mkdirSync, readdirSync, watch } from "node:fs";
-import path20 from "node:path";
+import path22 from "node:path";
 var HEARTBEAT_MS = 15e3;
 var DEBOUNCE_MS = 120;
 var EventHub = class {
@@ -11216,7 +11892,7 @@ var JobDirectoryWatcher = class {
     for (const entry of entries) {
       if (!entry.isDirectory() || this.watchers.has(entry.name)) continue;
       try {
-        const watcher = watch(path20.join(this.root, entry.name), { persistent: false }, (_event, file) => {
+        const watcher = watch(path22.join(this.root, entry.name), { persistent: false }, (_event, file) => {
           this.#queue(entry.name, String(file ?? ""));
         });
         watcher.on("error", () => {
@@ -11254,7 +11930,7 @@ var JobDirectoryWatcher = class {
 };
 
 // src/lib/job-events.mjs
-import path21 from "node:path";
+import path23 from "node:path";
 var LOG_THROTTLE_MS = 400;
 var LOG_LINES = 300;
 var JOB_ID = /^[A-Za-z0-9._-]+$/u;
@@ -11271,12 +11947,12 @@ function startJobEvents(options) {
   }
   const watchers = [
     new JobDirectoryWatcher({
-      root: path21.join(service.dataDir, "build"),
+      root: path23.join(service.dataDir, "build"),
       log,
       onChange: (dir, file) => handle("build", dir, file)
     }),
     new JobDirectoryWatcher({
-      root: path21.join(service.dataDir, "deploy"),
+      root: path23.join(service.dataDir, "deploy"),
       log,
       onChange: (dir, file) => handle("deploy", dir, file)
     })
@@ -11380,20 +12056,20 @@ function registerApi(ctx, service, scheduler = null) {
       try {
         const method = request.method ?? "GET";
         const url = new URL(request.url ?? "/", "http://local.invalid");
-        const path26 = url.pathname.slice(API_PREFIX.length) || "/";
-        if (method === "GET" && path26 === "/status") {
+        const path28 = url.pathname.slice(API_PREFIX.length) || "/";
+        if (method === "GET" && path28 === "/status") {
           writeJson(response, 200, await service.status());
           return;
         }
-        if (method === "GET" && path26 === "/members") {
+        if (method === "GET" && path28 === "/members") {
           writeJson(response, 200, await service.members());
           return;
         }
-        if (method === "GET" && path26 === "/member-tags") {
+        if (method === "GET" && path28 === "/member-tags") {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() });
           return;
         }
-        if (method === "GET" && path26 === "/schedule") {
+        if (method === "GET" && path28 === "/schedule") {
           if (scheduler === null) {
             writeJson(response, 503, { ok: false, error: { code: "unavailable", message: "\u5B9A\u65F6\u4EFB\u52A1\u8FD8\u6CA1\u6709\u542F\u52A8\u3002" } });
             return;
@@ -11402,43 +12078,43 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, { ok: true, schedule: scheduler.status(member === "" ? void 0 : member) });
           return;
         }
-        if (method === "POST" && path26 === "/packages/delete") {
+        if (method === "POST" && path28 === "/packages/delete") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.removePackage({ name: typeof body.name === "string" ? body.name : "" }));
           return;
         }
-        if (method === "GET" && path26 === "/events") {
+        if (method === "GET" && path28 === "/events") {
           hub.subscribe(request, response);
           return;
         }
-        if (method === "GET" && path26 === "/jobs") {
+        if (method === "GET" && path28 === "/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() });
           return;
         }
-        if (method === "GET" && path26 === "/packages") {
+        if (method === "GET" && path28 === "/packages") {
           writeJson(response, 200, await service.packages());
           return;
         }
-        if (method === "GET" && path26 === "/release/latest") {
+        if (method === "GET" && path28 === "/release/latest") {
           writeJson(response, 200, await service.latestRelease({
             refresh: url.searchParams.get("refresh") === "1"
           }));
           return;
         }
-        if (method === "GET" && path26 === "/member-packages") {
+        if (method === "GET" && path28 === "/member-packages") {
           writeJson(response, 200, await service.memberPackages(url.searchParams.get("member") ?? ""));
           return;
         }
-        if (method === "GET" && path26 === "/release") {
+        if (method === "GET" && path28 === "/release") {
           writeJson(response, 200, await service.releaseSettings());
           return;
         }
-        if (method === "GET" && path26 === "/deploy/jobs") {
+        if (method === "GET" && path28 === "/deploy/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) });
           return;
         }
         if (method === "GET") {
-          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path26);
+          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path28);
           if (deployRead !== null) {
             const lines = Number.parseInt(url.searchParams.get("lines") ?? "200", 10);
             const job = await service.deployStatus(deployRead[1]);
@@ -11455,7 +12131,7 @@ function registerApi(ctx, service, scheduler = null) {
             });
             return;
           }
-          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path26);
+          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path28);
           if (read !== null) {
             if (read[2] === "/log") {
               const lines = Number.parseInt(url.searchParams.get("lines") ?? "80", 10);
@@ -11477,12 +12153,12 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 403, { ok: false, error: { code: "forbidden", message: `Missing the ${AGENT_HEADER} header.` } });
           return;
         }
-        if (method === "POST" && path26 === "/release") {
+        if (method === "POST" && path28 === "/release") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.saveReleaseSettings(body));
           return;
         }
-        if (path26 === "/deploy") {
+        if (path28 === "/deploy") {
           const body = await readJson2(request);
           const result = await service.deployMember({
             member: typeof body.member === "string" ? body.member : void 0,
@@ -11493,12 +12169,12 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 202, result);
           return;
         }
-        if (path26 === "/session/promote") {
+        if (path28 === "/session/promote") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.promoteSession(String(body.member ?? "")));
           return;
         }
-        if (path26 === "/member-tags") {
+        if (path28 === "/member-tags") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.setMemberTag(
             typeof body.id === "string" ? body.id : "",
@@ -11506,16 +12182,16 @@ function registerApi(ctx, service, scheduler = null) {
           ));
           return;
         }
-        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path26);
+        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path28);
         if (clearLog !== null) {
           writeJson(response, 200, await service.clearBuildLog(clearLog[1]));
           return;
         }
-        if (path26 === "/build/logs/clear") {
+        if (path28 === "/build/logs/clear") {
           writeJson(response, 200, await service.clearFinishedBuilds());
           return;
         }
-        if (path26 === "/deploy/cancel") {
+        if (path28 === "/deploy/cancel") {
           const body = await readJson2(request);
           const job = await service.cancelDeploy(typeof body.id === "string" ? body.id : "");
           if (job === null) {
@@ -11525,14 +12201,14 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, { ok: true, job });
           return;
         }
-        if (path26 === "/deploy/rollback") {
+        if (path28 === "/deploy/rollback") {
           const body = await readJson2(request);
           writeJson(response, 202, await service.rollbackMember({
             member: typeof body.member === "string" ? body.member : ""
           }));
           return;
         }
-        if (path26 === "/upgrade" || path26 === "/test-upgrade") {
+        if (path28 === "/upgrade" || path28 === "/test-upgrade") {
           const body = await readJson2(request);
           const request_ = {
             member: typeof body.member === "string" ? body.member : void 0,
@@ -11546,11 +12222,11 @@ function registerApi(ctx, service, scheduler = null) {
             ...typeof body.proxyMember === "string" && body.proxyMember.trim() !== "" ? { proxyMember: body.proxyMember.trim() } : {},
             ...body.direct === true ? { direct: true } : {}
           };
-          const test = path26 === "/test-upgrade" || body.test === true;
+          const test = path28 === "/test-upgrade" || body.test === true;
           writeJson(response, 202, test ? await service.testUpgradeMember(request_) : await service.upgradeMember(request_));
           return;
         }
-        if (path26 === "/schedule") {
+        if (path28 === "/schedule") {
           if (scheduler === null) {
             writeJson(response, 503, { ok: false, error: { code: "unavailable", message: "\u5B9A\u65F6\u4EFB\u52A1\u8FD8\u6CA1\u6709\u542F\u52A8\u3002" } });
             return;
@@ -11572,7 +12248,7 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, { ok: true, schedule: await scheduler.update(patch) });
           return;
         }
-        if (path26 === "/build") {
+        if (path28 === "/build") {
           const body = await readJson2(request);
           const job = await service.startBuild({
             source: typeof body.source === "string" ? body.source : void 0,
@@ -11590,12 +12266,12 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 202, { ok: true, job });
           return;
         }
-        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path26);
+        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path28);
         if (resume !== null) {
           writeJson(response, 202, { ok: true, job: await service.resumeBuild(resume[1]) });
           return;
         }
-        const match = /^\/build\/([^/]+)\/learn$/u.exec(path26);
+        const match = /^\/build\/([^/]+)\/learn$/u.exec(path28);
         if (match !== null) {
           writeJson(response, 200, { ok: true, job: await service.learn(match[1]) });
           return;
@@ -11615,8 +12291,8 @@ function registerApi(ctx, service, scheduler = null) {
 }
 
 // src/lib/scheduler.mjs
-import { mkdir as mkdir12, readFile as readFile14, writeFile as writeFile12 } from "node:fs/promises";
-import path22 from "node:path";
+import { mkdir as mkdir13, readFile as readFile15, writeFile as writeFile13 } from "node:fs/promises";
+import path24 from "node:path";
 var TICK_TOLERANCE_MS = 9e4;
 var DUPLICATE_WINDOW_MS = 10 * 6e4;
 var Scheduler = class {
@@ -11728,7 +12404,7 @@ var Scheduler = class {
     if (this.loading !== null) return this.loading;
     this.loading = (async () => {
       try {
-        const parsed = JSON.parse(await readFile14(this.file, "utf8"));
+        const parsed = JSON.parse(await readFile15(this.file, "utf8"));
         const normalized = migrateSchedules(parsed);
         this.schedule = normalized;
         this.upgrades = new Map(Object.entries(normalized.upgrades));
@@ -11747,8 +12423,8 @@ var Scheduler = class {
   /** Persist the current settings and last outcomes. */
   async #save() {
     try {
-      await mkdir12(path22.dirname(this.file), { recursive: true });
-      await writeFile12(this.file, `${JSON.stringify({
+      await mkdir13(path24.dirname(this.file), { recursive: true });
+      await writeFile13(this.file, `${JSON.stringify({
         format: SCHEDULE_FORMAT,
         build: this.schedule.build,
         upgrade: this.schedule.upgrade,
@@ -11916,9 +12592,9 @@ function registerWireGuardApi(ctx) {
 
 // src/lib/member-tasks.mjs
 import { randomUUID } from "node:crypto";
-import { mkdir as mkdir13, readFile as readFile15, readdir as readdir8, rename as rename8, writeFile as writeFile13 } from "node:fs/promises";
-import { existsSync as existsSync12, readFileSync as readFileSync5 } from "node:fs";
-import path23 from "node:path";
+import { mkdir as mkdir14, readFile as readFile16, readdir as readdir9, rename as rename9, writeFile as writeFile14 } from "node:fs/promises";
+import { existsSync as existsSync13, readFileSync as readFileSync5 } from "node:fs";
+import path25 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
@@ -11927,7 +12603,7 @@ var EMPTY_TURN = "\u76EE\u6807\u7684 DSH \u5728\u4EFB\u52A1\u6267\u884C\u671F\u9
 var EMPTY_WAIT_RETRIES = 3;
 function envFile(file) {
   const values = {};
-  if (!existsSync12(file)) return values;
+  if (!existsSync13(file)) return values;
   for (const raw of readFileSync5(file, "utf8").split(/\r?\n/)) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;
@@ -11951,7 +12627,7 @@ var MemberTaskService = class {
     this.dataDir = options.dataDir;
     this.logLine = options.log ?? (() => {
     });
-    this.taskRoot = path23.join(this.dataDir, "member-tasks");
+    this.taskRoot = path25.join(this.dataDir, "member-tasks");
     this.tasks = /* @__PURE__ */ new Map();
     this.monitors = /* @__PURE__ */ new Map();
     this.controllers = /* @__PURE__ */ new Map();
@@ -11981,16 +12657,16 @@ var MemberTaskService = class {
   async #ensureLoaded() {
     if (this.loaded) return;
     this.loaded = true;
-    await mkdir13(this.taskRoot, { recursive: true });
+    await mkdir14(this.taskRoot, { recursive: true });
     let files = [];
     try {
-      files = await readdir8(this.taskRoot);
+      files = await readdir9(this.taskRoot);
     } catch {
     }
     for (const file of files) {
       if (!file.endsWith(".json")) continue;
       try {
-        const task = JSON.parse(await readFile15(path23.join(this.taskRoot, file), "utf8"));
+        const task = JSON.parse(await readFile16(path25.join(this.taskRoot, file), "utf8"));
         if (task?.id === void 0) continue;
         if (task.status === "running" || task.status === "starting") {
           task.status = "interrupted";
@@ -12007,18 +12683,18 @@ var MemberTaskService = class {
   }
   async #save(task) {
     task.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const file = path23.join(this.taskRoot, `${task.id}.json`);
+    const file = path25.join(this.taskRoot, `${task.id}.json`);
     const temporary = `${file}.${process.pid}.tmp`;
-    await mkdir13(this.taskRoot, { recursive: true });
-    await writeFile13(temporary, `${JSON.stringify(task, null, 2)}
+    await mkdir14(this.taskRoot, { recursive: true });
+    await writeFile14(temporary, `${JSON.stringify(task, null, 2)}
 `, "utf8");
-    await rename8(temporary, file);
+    await rename9(temporary, file);
   }
   async #log(task, line) {
     const text = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
 `;
     try {
-      await writeFile13(path23.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
+      await writeFile14(path25.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
     } catch {
     }
     try {
@@ -12038,9 +12714,9 @@ var MemberTaskService = class {
     if (this.service.config?.interopUseGatePassword !== false) {
       if (process.env.DSH_GATE_PASSWORD) return process.env.DSH_GATE_PASSWORD;
       const candidates = [
-        path23.join(this.service.repositoryRoot, "..", "config", "gate.env"),
-        path23.join(this.service.repositoryRoot, "config", "gate.env"),
-        path23.join(this.service.dataDir, "..", "..", "config", "gate.env")
+        path25.join(this.service.repositoryRoot, "..", "config", "gate.env"),
+        path25.join(this.service.repositoryRoot, "config", "gate.env"),
+        path25.join(this.service.dataDir, "..", "..", "config", "gate.env")
       ];
       for (const file of candidates) {
         const password = envFile(file).DSH_GATE_PASSWORD;
@@ -12568,7 +13244,7 @@ var MemberTaskService = class {
     const task = this.tasks.get(String(taskId));
     if (task === void 0) return "";
     try {
-      const text = await readFile15(path23.join(this.taskRoot, `${task.id}.log`), "utf8");
+      const text = await readFile16(path25.join(this.taskRoot, `${task.id}.log`), "utf8");
       return text.split("\n").slice(-Math.max(1, Math.min(lines, 500))).join("\n");
     } catch {
       return "";
@@ -12580,7 +13256,7 @@ var MemberTaskService = class {
    * @returns {string} log path.
    */
   logPath(taskId) {
-    return path23.join(this.taskRoot, `${String(taskId)}.log`);
+    return path25.join(this.taskRoot, `${String(taskId)}.log`);
   }
 };
 
@@ -13045,11 +13721,11 @@ function formatBytes3(value) {
 
 // src/lib/interop-service.mjs
 import { execFile as execFile3 } from "node:child_process";
-import { createHash as createHash8, randomBytes as randomBytes3, randomUUID as randomUUID2, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
-import { existsSync as existsSync13, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, writeFileSync } from "node:fs";
+import { createHash as createHash9, randomBytes as randomBytes3, randomUUID as randomUUID2, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { existsSync as existsSync14, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, writeFileSync } from "node:fs";
 import http3 from "node:http";
 import { homedir as homedir3 } from "node:os";
-import path24 from "node:path";
+import path26 from "node:path";
 import { promisify as promisify3 } from "node:util";
 
 // code/shared/conversation-meta.mjs
@@ -13214,7 +13890,7 @@ var MAX_BODY = 1024 * 1024;
 var SETTLE_MS = 300;
 function readEnvFile(file) {
   const values = {};
-  if (!existsSync13(file)) return values;
+  if (!existsSync14(file)) return values;
   for (const raw of readFileSync6(file, "utf8").split(/\r?\n/u)) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;
@@ -13232,20 +13908,20 @@ function readEnvFile(file) {
 function configCandidates() {
   const candidates = [];
   const explicit = process.env.DSH_INTEROP_CONFIG;
-  if (typeof explicit === "string" && explicit.trim() !== "") candidates.push(path24.resolve(explicit));
+  if (typeof explicit === "string" && explicit.trim() !== "") candidates.push(path26.resolve(explicit));
   const packageRoot = process.env.DSH_PACKAGE_ROOT;
   if (typeof packageRoot === "string" && packageRoot.trim() !== "") {
-    candidates.push(path24.join(packageRoot, "config", "interop.env"));
+    candidates.push(path26.join(packageRoot, "config", "interop.env"));
   }
   const home = process.env.DSH_HOME;
   if (typeof home === "string" && home.trim() !== "") {
-    candidates.push(path24.join(path24.dirname(home), "config", "interop.env"));
-    candidates.push(path24.join(home, "config", "interop.env"));
+    candidates.push(path26.join(path26.dirname(home), "config", "interop.env"));
+    candidates.push(path26.join(home, "config", "interop.env"));
   }
   let current = process.cwd();
   for (let depth = 0; depth < 7; depth += 1) {
-    candidates.push(path24.join(current, "config", "interop.env"));
-    const parent = path24.dirname(current);
+    candidates.push(path26.join(current, "config", "interop.env"));
+    const parent = path26.dirname(current);
     if (parent === current) break;
     current = parent;
   }
@@ -13253,7 +13929,7 @@ function configCandidates() {
 }
 function findInteropConfig() {
   for (const candidate of configCandidates()) {
-    if (existsSync13(candidate)) return candidate;
+    if (existsSync14(candidate)) return candidate;
   }
   return null;
 }
@@ -13264,7 +13940,7 @@ function asBool(value, fallback) {
 }
 function resolveInteropSettings(config = {}) {
   const file = findInteropConfig();
-  const root = file === null ? null : path24.dirname(path24.dirname(file));
+  const root = file === null ? null : path26.dirname(path26.dirname(file));
   const values = file === null ? {} : readEnvFile(file);
   const setting = (name, fallback) => {
     const fromEnv = process.env[name];
@@ -13276,11 +13952,11 @@ function resolveInteropSettings(config = {}) {
     setting("DSH_INTEROP_USE_GATE_PASSWORD", config.interopUseGatePassword === true ? "1" : "0"),
     false
   );
-  const dataDir = root === null ? path24.join(process.env.DSH_HOME ?? path24.join(process.cwd(), ".dsh"), "mesh", "interop") : path24.join(root, "data");
-  const tokenFile = path24.join(dataDir, "interop-token");
+  const dataDir = root === null ? path26.join(process.env.DSH_HOME ?? path26.join(process.cwd(), ".dsh"), "mesh", "interop") : path26.join(root, "data");
+  const tokenFile = path26.join(dataDir, "interop-token");
   let gatePassword = typeof process.env.DSH_GATE_PASSWORD === "string" ? process.env.DSH_GATE_PASSWORD : "";
   if (useGatePassword && gatePassword === "" && root !== null) {
-    gatePassword = readEnvFile(path24.join(root, "config", "gate.env")).DSH_GATE_PASSWORD ?? "";
+    gatePassword = readEnvFile(path26.join(root, "config", "gate.env")).DSH_GATE_PASSWORD ?? "";
   }
   let token = "";
   if (useGatePassword) {
@@ -13288,7 +13964,7 @@ function resolveInteropSettings(config = {}) {
   } else {
     token = setting("DSH_INTEROP_TOKEN", "");
     if (token === "" && typeof config.interopToken === "string") token = config.interopToken;
-    if (token === "" && existsSync13(tokenFile)) {
+    if (token === "" && existsSync14(tokenFile)) {
       const saved = readFileSync6(tokenFile, "utf8").trim();
       if (saved.length >= 32) token = saved;
     }
@@ -13312,15 +13988,15 @@ function resolveInteropSettings(config = {}) {
   const reasoning = setting("DSH_INTEROP_REASONING_EFFORT", "");
   const workdir = setting(
     "DSH_WORKDIR",
-    root === null ? process.cwd() : path24.join(root, "workspace")
+    root === null ? process.cwd() : path26.join(root, "workspace")
   );
   return {
     file,
     root,
     dataDir,
     tokenFile,
-    logFile: path24.join(dataDir, "interop-service.log"),
-    stateFile: path24.join(dataDir, "conversations.json"),
+    logFile: path26.join(dataDir, "interop-service.log"),
+    stateFile: path26.join(dataDir, "conversations.json"),
     token,
     useGatePassword,
     tokenSource: useGatePassword ? "gate password" : file === null ? "generated token file" : "interop.env",
@@ -13332,10 +14008,10 @@ function resolveInteropSettings(config = {}) {
     approve: asBool(setting("DSH_INTEROP_APPROVE", "0"), false),
     preset,
     agentPreset,
-    workdir: path24.resolve(workdir),
+    workdir: path26.resolve(workdir),
     // Task workspaces are always below this root, so a workspace name sent by
     // the panel can never address an arbitrary directory on the member.
-    workspaceRoot: path24.resolve(setting("DSH_WORKSPACES_DIR", path24.join(homedir3(), ".dsh", "workspaces"))),
+    workspaceRoot: path26.resolve(setting("DSH_WORKSPACES_DIR", path26.join(homedir3(), ".dsh", "workspaces"))),
     requestTimeoutMs: Number.parseInt(setting("DSH_INTEROP_REQUEST_TIMEOUT_MS", "180000"), 10)
   };
 }
@@ -13349,11 +14025,11 @@ function normalizeWorkspaceName(value) {
   return name;
 }
 function workspacePath(settings, name) {
-  return path24.join(workspaceRootOf(settings), name);
+  return path26.join(workspaceRootOf(settings), name);
 }
 function workspaceRootOf(settings) {
   const root = settings.workspaceRoot;
-  return typeof root === "string" && root.trim() !== "" ? path24.resolve(root) : path24.join(homedir3(), ".dsh", "workspaces");
+  return typeof root === "string" && root.trim() !== "" ? path26.resolve(root) : path26.join(homedir3(), ".dsh", "workspaces");
 }
 function listWorkspaces(settings) {
   const dir = workspaceRootOf(settings);
@@ -13365,7 +14041,7 @@ function listWorkspaces(settings) {
   try {
     for (const entry of readdirSync2(dir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      workspaces.push({ name: entry.name, path: path24.join(dir, entry.name) });
+      workspaces.push({ name: entry.name, path: path26.join(dir, entry.name) });
     }
   } catch {
   }
@@ -13470,13 +14146,13 @@ function createInteropService(options) {
     }
     logLine(text);
   }
-  const tokenDigest = settings.token === "" ? null : createHash8("sha256").update(settings.token).digest();
+  const tokenDigest = settings.token === "" ? null : createHash9("sha256").update(settings.token).digest();
   function authorized(request) {
     if (tokenDigest === null) return false;
     const header = request.headers.authorization ?? "";
     const raw = header.startsWith("Bearer ") ? header.slice(7).trim() : String(request.headers["x-dsh-interop-token"] ?? "");
     if (raw === "") return false;
-    const digest = createHash8("sha256").update(raw).digest();
+    const digest = createHash9("sha256").update(raw).digest();
     return digest.length === tokenDigest.length && timingSafeEqual2(digest, tokenDigest);
   }
   function publicConversation(conversation) {
@@ -13555,7 +14231,7 @@ data: ${JSON.stringify(payload)}
     saveTimer.unref?.();
   }
   function loadState() {
-    if (!existsSync13(settings.stateFile)) return;
+    if (!existsSync14(settings.stateFile)) return;
     try {
       const parsed = JSON.parse(readFileSync6(settings.stateFile, "utf8"));
       const records = Array.isArray(parsed?.conversations) ? parsed.conversations : [];
@@ -13738,7 +14414,7 @@ data: ${JSON.stringify(payload)}
     }
     const id = randomUUID2();
     const workspace = normalizeWorkspaceName(request.workspace);
-    const cwd = workspace !== "" ? workspacePath(settings, workspace) : typeof request.cwd === "string" && request.cwd !== "" ? path24.resolve(request.cwd) : settings.workdir;
+    const cwd = workspace !== "" ? workspacePath(settings, workspace) : typeof request.cwd === "string" && request.cwd !== "" ? path26.resolve(request.cwd) : settings.workdir;
     const prompt = request.prompt;
     try {
       mkdirSync2(cwd, { recursive: true });
@@ -14251,8 +14927,8 @@ data: ${JSON.stringify(event)}
 // src/index.ts
 var inject = ["webServer"];
 function dataDirectory() {
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path25.join(homedir4(), ".dsh");
-  return path25.join(home, "mesh");
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path27.join(homedir4(), ".dsh");
+  return path27.join(home, "mesh");
 }
 async function apply(ctx, config = {}) {
   const service = new MeshService({

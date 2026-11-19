@@ -16,9 +16,18 @@ import { createWriteStream, existsSync } from 'node:fs'
 import { chmod, cp, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { gzipSync, gunzipSync } from 'node:zlib'
 import os from 'node:os'
 import path from 'node:path'
+import { archiveThreads, createTarGz } from './archive.mjs'
+import {
+  appCacheDir,
+  appCacheMetaFile,
+  cloneTree,
+  readAppCache,
+  writeAppCacheMeta,
+  readWebCache,
+  writeWebCache,
+} from './cache.mjs'
 import { collectStaticAssets } from './static-assets.mjs'
 import { createProxyFetch, proxyEnv } from './proxy.mjs'
 
@@ -30,6 +39,16 @@ export const DEFAULT_REF = 'master'
 
 /** Default target matrix. */
 export const DEFAULT_TARGETS = Object.freeze(['linux-x64', 'win-x64'])
+
+/**
+ * Where build downloads and caches live when a caller names no directory.
+ * `job.mjs` exports the same layout; the engine keeps its own copy so the two
+ * modules do not have to import each other.
+ * @returns {string} absolute directory.
+ */
+function defaultCacheDir() {
+  return path.join(os.homedir(), '.dsh', 'mesh', 'cache')
+}
 
 /**
  * The fetch and environment a build needs for one outbound proxy.
@@ -568,14 +587,30 @@ export async function buildWebWorkerPackages(options) {
 
 /**
  * Run the web build.
- * @param {{dir: string, log?: (line: string) => void, install?: string[]|null, build?: string[], prepare?: string[][]|null, env?: NodeJS.ProcessEnv, prebuild?: boolean, onProgress?: (update: {phase: string, percent: number}) => void|Promise<void>}} options build input.
- * @returns {Promise<{ok: boolean, dist: string|null, error?: string}>} outcome.
+ *
+ * A source revision builds the same shell every time, and a rebuild of the same
+ * commit is the normal case. With `cacheDir` and `cacheKey` (built by `cache.mjs`) a previously built `apps/web/dist` is reused and the
+ * whole `pnpm install` + TypeScript project builds + `vite build` chain is
+ * skipped. The cache key covers the source bytes, the overlays, the recipe
+ * commands, and the platform, so a changed input cannot hit a stale shell.
+ * @param {{dir: string, log?: (line: string) => void, install?: string[]|null, build?: string[], prepare?: string[][]|null, env?: NodeJS.ProcessEnv, prebuild?: boolean, cacheDir?: string|null, cacheKey?: string|null, cacheMeta?: object, refreshCache?: boolean, onProgress?: (update: {phase: string, percent: number}) => void|Promise<void>}} options build input.
+ * @returns {Promise<{ok: boolean, dist: string|null, cached?: boolean, error?: string}>} outcome.
  */
 export async function runWebBuild(options) {
   const log = options.log ?? (() => {})
   const progress = async (phase, percent) => { await options.onProgress?.({ phase, percent }) }
   const install = options.install === undefined ? ['pnpm', 'install', '--frozen-lockfile'] : options.install
   const build = options.build ?? ['pnpm', 'run', 'build:web']
+  const cacheDir = typeof options.cacheDir === 'string' && options.cacheDir !== '' ? options.cacheDir : null
+  const cacheKey = typeof options.cacheKey === 'string' && options.cacheKey !== '' ? options.cacheKey : null
+  if (cacheDir !== null && cacheKey !== null && options.refreshCache !== true) {
+    const cached = await readWebCache(cacheDir, cacheKey)
+    if (cached !== null) {
+      log(`web build cache hit ${cacheKey.slice(0, 12)}: skipping pnpm install and the web build`)
+      await progress('build', 62)
+      return { ok: true, dist: cached.dist, cached: true }
+    }
+  }
   if (install !== null && install.length > 0) {
     await progress('build', 16)
     log(`$ ${install.join(' ')}`)
@@ -634,7 +669,18 @@ export async function runWebBuild(options) {
     path.join(options.dir, 'dist'),
   ]
   for (const candidate of candidates) {
-    if (existsSync(path.join(candidate, 'index.html'))) return { ok: true, dist: candidate }
+    if (!existsSync(path.join(candidate, 'index.html'))) continue
+    if (cacheDir !== null && cacheKey !== null) {
+      // A cache write is an optimisation: it must never fail a good build.
+      await writeWebCache({
+        cacheDir,
+        key: cacheKey,
+        dist: candidate,
+        meta: options.cacheMeta ?? {},
+        log,
+      })
+    }
+    return { ok: true, dist: candidate, cached: false }
   }
   return { ok: false, dist: null, error: 'the build finished but no dist/index.html was found' }
 }
@@ -733,6 +779,9 @@ export async function readExtraPlugins(repositoryRoot) {
     .map(entry => ({ ...entry, dir: entry.dir !== '' ? entry.dir : path.join('plugins', entry.name) }))
 }
 
+/** Serialises {@link copyExtraPlugins} calls inside one build process. */
+let extraPluginsGate = Promise.resolve()
+
 /**
  * Download every extra plugin and copy it into the package.
  *
@@ -743,6 +792,22 @@ export async function readExtraPlugins(repositoryRoot) {
  * @returns {Promise<object[]>} manifest records.
  */
 export async function copyExtraPlugins(options) {
+  // Targets are packaged concurrently now, and every one of them fetches the
+  // same plugin tarball into the same cache path. The download rewrites that
+  // file (and its `.part` sibling), so the fetches are serialised instead of
+  // racing each other.
+  const run = extraPluginsGate.then(() => copyExtraPluginsOnce(options))
+  extraPluginsGate = run.then(() => {}, () => {})
+  return run
+}
+
+/**
+ * Download and copy the extra plugins once; callers must go through
+ * {@link copyExtraPlugins} so concurrent targets cannot race the cache file.
+ * @param {{packageDir: string, repositoryRoot: string, cacheDir?: string, fetchImpl?: typeof fetch, log?: (line: string) => void}} options copy input.
+ * @returns {Promise<object[]>} manifest records.
+ */
+async function copyExtraPluginsOnce(options) {
   const plugins = await readExtraPlugins(options.repositoryRoot)
   if (plugins.length === 0) return []
   const cacheDir = options.cacheDir ?? defaultCacheDir()
@@ -883,39 +948,17 @@ export async function assembleWebPackage(options) {
 }
 
 /**
- * Windows' bsdtar writes every entry with mode 0666. A Linux package built on
- * Windows therefore loses the executable bit on `install.sh` and
- * `runtime/node/bin/node`. Rewrite the tar headers to 0755 before re-gzipping.
- * This runs only when a non-Windows target is archived from Windows.
- * @param {string} archive `.tar.gz` path, rewritten in place.
- * @returns {Promise<void>}
- */
-export async function fixTarExecutableModes(archive) {
-  const raw = gunzipSync(await readFile(archive))
-  let offset = 0
-  while (offset + 512 <= raw.length) {
-    const header = raw.subarray(offset, offset + 512)
-    if (header.every(byte => byte === 0)) break
-    const type = String.fromCharCode(header[156] || 0)
-    const sizeText = header.subarray(124, 136).toString('ascii').replace(/\0.*$/u, '').trim()
-    const size = sizeText === '' ? 0 : Number.parseInt(sizeText, 8)
-    if (type === '0' || type === '\0' || type === '5' || type === '2') {
-      header.write('0000755\0', 100, 8, 'ascii')
-    }
-    header.fill(0x20, 148, 156)
-    let checksum = 0
-    for (const byte of header) checksum += byte
-    header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii')
-    offset += 512 + (Number.isFinite(size) ? Math.ceil(size / 512) * 512 : 0)
-  }
-  await writeFile(archive, gzipSync(raw, { level: 9 }))
-}
-
-/**
  * Create a `.tar.gz` for Linux or a `.zip` for Windows.
+ *
+ * Linux archives are written by {@link createTarGz}: the tar is created
+ * uncompressed, header modes are patched while streaming (Windows' bsdtar
+ * writes every entry as 0666, which would strip the executable bit from
+ * `install.sh` and the bundled node), and independent chunks are compressed on
+ * worker threads. That replaces both the single-threaded `tar -czf` and the
+ * old gunzip-patch-regzip pass that held the whole tree in memory.
  * @param {string} packageDir directory to archive.
  * @param {string} target target descriptor.
- * @param {{log?: (line: string) => void}} [options] dependencies.
+ * @param {{log?: (line: string) => void, threads?: number, env?: NodeJS.ProcessEnv}} [options] dependencies.
  * @returns {Promise<string>} archive path.
  */
 export async function archivePackage(packageDir, target, options = {}) {
@@ -924,25 +967,38 @@ export async function archivePackage(packageDir, target, options = {}) {
     ? `${packageDir}.zip`
     : `${packageDir}.tar.gz`
   await rm(archive, { force: true })
-  // Compressing a ~1 GiB package tree is one of the long silent steps (one
-  // core, several minutes on a member); the marker keeps the panel moving and
-  // says which target owns the time.
+  // Compressing a ~1 GiB package tree is one of the long silent steps; the
+  // marker keeps the panel moving and says which target owns the time.
   options.log?.(`archiving ${target}`)
-  let result
-  if (targetOs === 'win' && process.platform !== 'win32') {
-    // GNU tar cannot create a zip; a Linux build host needs the `zip` tool.
-    result = await runCommand('zip', ['-qr', archive, path.basename(packageDir)], {
-      cwd: path.dirname(packageDir),
+  if (targetOs === 'win') {
+    let result
+    if (process.platform !== 'win32') {
+      // GNU tar cannot create a zip; a Linux build host needs the `zip` tool.
+      result = await runCommand('zip', ['-qr', archive, path.basename(packageDir)], {
+        cwd: path.dirname(packageDir),
+        log: options.log,
+      })
+    } else {
+      result = await runCommand('tar', ['-a', '-c', '-f', archive, '-C', path.dirname(packageDir), path.basename(packageDir)], {
+        log: options.log,
+      })
+    }
+    if (!result.ok) throw new Error(`cannot archive ${packageDir}: ${result.tail.join('\n')}`)
+    return archive
+  }
+  try {
+    await createTarGz({
+      packageDir,
+      destination: archive,
+      // On a Windows host the tar header modes are wrong for a Linux target;
+      // patching them is part of the streaming compressor now.
+      patchModes: process.platform === 'win32',
+      threads: options.threads ?? archiveThreads({ env: options.env }),
       log: options.log,
     })
-  } else {
-    const args = targetOs === 'win'
-      ? ['-a', '-c', '-f', archive, '-C', path.dirname(packageDir), path.basename(packageDir)]
-      : ['-czf', archive, '-C', path.dirname(packageDir), path.basename(packageDir)]
-    result = await runCommand('tar', args, { log: options.log })
+  } catch (error) {
+    throw new Error(`cannot archive ${packageDir}: ${error instanceof Error ? error.message : String(error)}`)
   }
-  if (!result.ok) throw new Error(`cannot archive ${packageDir}: ${result.tail.join('\n')}`)
-  if (targetOs !== 'win' && process.platform === 'win32') await fixTarExecutableModes(archive)
   return archive
 }
 
@@ -1286,6 +1342,124 @@ export async function patchInstalledClient(options) {
 }
 
 /**
+ * Format of the cached app tree. Bump when the install or patch semantics
+ * change, so an old cache cannot silently keep a stale tree.
+ */
+export const APP_CACHE_FORMAT = 1
+
+/**
+ * Hash the client-bundle patch scripts that are applied to a cached app.
+ *
+ * The app cache is keyed by DSH version and target, but the picker/login
+ * patches come from this repository and change with it. Without them in the
+ * key, editing a patch would keep serving the old patched bundle for the same
+ * DSH version.
+ * @param {string} repositoryRoot dsh-mesh root.
+ * @returns {Promise<string>} hex digest.
+ */
+export async function patchBundleFingerprint(repositoryRoot) {
+  const hash = createHash('sha256')
+  hash.update(`format:${String(APP_CACHE_FORMAT)}`)
+  for (const name of ['patch-picker.mjs', 'patch-login.mjs']) {
+    hash.update(`\0${name}\0`)
+    try {
+      hash.update(await readFile(path.join(repositoryRoot, 'code', 'gate', name)))
+    } catch {
+      hash.update('missing')
+    }
+  }
+  return hash.digest('hex')
+}
+
+/**
+ * Install (or reuse) the npm app tree for one DSH version and target.
+ *
+ * `npm install @deepseek-ai/dsh` resolves a tree of ~1.4k packages and downloads
+ * several hundred MiB. That tree depends only on the exact version and the
+ * target platform, not on the dsh-mesh plugin or the source commit, so it is
+ * cached under `<cacheDir>/app/<version>-<target>/` with the picker/login
+ * patches already applied. A rebuild of the same version then costs a hard-link
+ * clone instead of another npm run.
+ *
+ * The cache is a snapshot, never the tree a package ships: {@link materializeApp}
+ * clones it, so overlaying the frontend or deleting a job cannot corrupt it.
+ * @param {{cacheDir?: string|null, version: string, target: string, repositoryRoot: string, env?: NodeJS.ProcessEnv, log?: (line: string) => void, refresh?: boolean}} options input.
+ * @returns {Promise<{dir: string, meta: object, cached: boolean}>} cached app tree.
+ */
+export async function ensureAppCache(options) {
+  const log = options.log ?? (() => {})
+  if (typeof options.cacheDir !== 'string' || options.cacheDir === '') {
+    throw new Error('ensureAppCache needs a cacheDir')
+  }
+  const patchFingerprint = await patchBundleFingerprint(options.repositoryRoot)
+  if (options.refresh !== true) {
+    const cached = await readAppCache(options.cacheDir, options.version, options.target)
+    if (cached !== null && cached.patchFingerprint === patchFingerprint) {
+      log(`app cache hit ${options.target} (@deepseek-ai/dsh@${options.version})`)
+      return { dir: appCacheDir(options.cacheDir, options.version, options.target), meta: cached, cached: true }
+    }
+    if (cached !== null) log(`app cache stale ${options.target}: the client patch scripts changed; reinstalling`)
+  }
+  const dir = appCacheDir(options.cacheDir, options.version, options.target)
+  log(`app cache miss ${options.target}: installing @deepseek-ai/dsh@${options.version}`)
+  await rm(dir, { recursive: true, force: true })
+  await rm(appCacheMetaFile(options.cacheDir, options.version, options.target), { force: true })
+  await installAppDependencies({
+    appDir: dir,
+    version: options.version,
+    target: options.target,
+    env: options.env,
+    log,
+  })
+  await patchInstalledClient({ appDir: dir, repositoryRoot: options.repositoryRoot, log })
+  const meta = {
+    format: APP_CACHE_FORMAT,
+    version: options.version,
+    target: options.target,
+    patchFingerprint,
+    installedAt: new Date().toISOString(),
+    npm: process.env.npm_config_user_agent ?? null,
+    node: process.versions.node,
+  }
+  await writeAppCacheMeta({
+    cacheDir: options.cacheDir,
+    version: options.version,
+    target: options.target,
+    meta,
+    log,
+  })
+  log(`app cache stored ${options.target}`)
+  return { dir, meta, cached: false }
+}
+
+/**
+ * Put the app tree for one target into a package directory.
+ *
+ * With a cache dir this is a clone of the cached tree; without one (the
+ * prebuilt-package tool, unit tests) it falls back to a direct npm install,
+ * which is the behaviour every caller had before the cache existed.
+ * @param {{cacheDir?: string|null, version: string, target: string, appDir: string, repositoryRoot: string, env?: NodeJS.ProcessEnv, log?: (line: string) => void, refresh?: boolean}} options input.
+ * @returns {Promise<{cached: boolean, meta: object|null}>} how the app was produced.
+ */
+export async function materializeApp(options) {
+  const log = options.log ?? (() => {})
+  if (typeof options.cacheDir !== 'string' || options.cacheDir === '') {
+    await installAppDependencies({
+      appDir: options.appDir,
+      version: options.version,
+      target: options.target,
+      env: options.env,
+      log,
+    })
+    await patchInstalledClient({ appDir: options.appDir, repositoryRoot: options.repositoryRoot, log })
+    return { cached: false, meta: null }
+  }
+  const cached = await ensureAppCache({ ...options, log })
+  await cloneTree(cached.dir, options.appDir, { log })
+  return { cached: true, meta: cached.meta }
+}
+
+/**
  * Full target package: web payload, gate, plugin, npm app, and Node runtime.
  * This is the package the install scripts expect.
  * @param {{dist: string, target: string, outputDir: string, version: string, buildStamp?: string|null, dshVersion: string, repositoryRoot: string, source: string, ref: string, tree: string|null, nodeVersion: string, cacheDir: string, fetchImpl?: typeof fetch, log?: (line: string) => void}} options package input.
@@ -1295,15 +1469,18 @@ export async function assembleRuntimePackage(options) {
   const log = options.log ?? (() => {})
   const { packageDir, manifest } = await assembleWebPackage(options)
   const appDir = path.join(packageDir, 'app')
-  await mkdir(appDir, { recursive: true })
-  await installAppDependencies({
-    appDir,
+  const app = await materializeApp({
+    // `appCacheDir` lets a build disable the app cache while still using
+    // `cacheDir` for the Node runtime and the extra plugin tarballs.
+    cacheDir: options.appCacheDir === undefined ? options.cacheDir : options.appCacheDir,
     version: options.dshVersion,
     target: options.target,
+    appDir,
+    repositoryRoot: options.repositoryRoot,
     env: options.env,
     log,
+    refresh: options.refreshAppCache,
   })
-  await patchInstalledClient({ appDir, repositoryRoot: options.repositoryRoot, log })
   // The source-built shell and the npm app must agree on the client module
   // contract; a mismatch installs, starts, passes health, and then shows
   // "Failed to load plugins" in every browser. Prefer the built shell when it
@@ -1344,6 +1521,9 @@ export async function assembleRuntimePackage(options) {
     // shipped in the app because the two revisions disagreed. `reason` keeps
     // the drift visible on the package instead of only in the build log.
     frontend: frontend.reason === null ? { source: frontend.source } : { source: frontend.source, reason: frontend.reason },
+    // Where the installed app came from: the cache (the version and target
+    // were installed before) or a fresh npm install during this build.
+    app: { source: app.cached ? 'cache' : 'npm', installedAt: app.meta?.installedAt ?? null },
     files: (await listFiles(packageDir)).length,
   }
   await writeFile(path.join(packageDir, 'manifest.json'), JSON.stringify(updated, null, 2), 'utf8')

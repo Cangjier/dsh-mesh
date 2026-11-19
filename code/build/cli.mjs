@@ -114,6 +114,21 @@ async function publishOptions(values) {
   return { config, proxy: typeof values.get('proxy') === 'string' ? values.get('proxy') : null }
 }
 
+/**
+ * Cache and parallelism switches shared by `build` and `resume`.
+ * @param {Map<string, string|true>} values parsed arguments.
+ * @returns {{cache?: boolean, refreshAppCache: boolean, refreshWebCache: boolean, concurrency?: number, archiveThreads?: number}} options.
+ */
+function speedOptions(values) {
+  return {
+    cache: values.get('no-cache') === true ? false : undefined,
+    refreshAppCache: values.get('refresh-app-cache') === true,
+    refreshWebCache: values.get('refresh-web-cache') === true,
+    concurrency: numberArg(values, 'concurrency'),
+    archiveThreads: numberArg(values, 'archive-threads'),
+  }
+}
+
 async function main() {
   const { command, values } = parseArgs(process.argv.slice(2))
   const defaults = await recipeDefaults()
@@ -150,6 +165,7 @@ async function main() {
       smokeChrome: typeof values.get('smoke-chrome') === 'string' ? values.get('smoke-chrome') : undefined,
       smokeStartTimeoutMs: numberArg(values, 'smoke-start-timeout'),
       smokePageTimeoutMs: numberArg(values, 'smoke-page-timeout'),
+      ...speedOptions(values),
     })
     process.stdout.write(`${JSON.stringify(state, null, 2)}\n`)
     return
@@ -196,6 +212,7 @@ async function main() {
       smokeChrome: typeof values.get('smoke-chrome') === 'string' ? values.get('smoke-chrome') : undefined,
       smokeStartTimeoutMs: numberArg(values, 'smoke-start-timeout'),
       smokePageTimeoutMs: numberArg(values, 'smoke-page-timeout'),
+      ...speedOptions(values),
     })
     process.stdout.write(`${JSON.stringify(state, null, 2)}\n`)
     return
@@ -232,6 +249,11 @@ async function main() {
     '  --smoke-chrome <path>    Chrome/Chromium/Edge used by the smoke test',
     '  --smoke-start-timeout <ms>  DSH startup budget (default 180000)',
     '  --smoke-page-timeout <ms>   browser boot budget (default 180000)',
+    '  --concurrency <n>        targets packaged in parallel (default: auto by CPU/memory)',
+    '  --archive-threads <n>    gzip worker threads (default: CPU count, max 8)',
+    '  --no-cache               do not reuse the built web shell or the app tree',
+    '  --refresh-app-cache      re-run npm install for the target app instead of cloning the cache',
+    '  --refresh-web-cache      rebuild the web shell even when the cache matches',
     '',
   ].join('\n'))
   process.exitCode = 1

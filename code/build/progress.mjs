@@ -70,6 +70,11 @@ export function phaseFromLine(line, targets = ['linux-x64'], context = {}) {
   if (text.includes('needs-fix')) return { phase: 'apply', percent: 14, status: 'needs-fix' }
   if (/^(?:applied|skipped) /u.test(text)) return { phase: 'apply', percent: 11 }
   if (text.includes('$ pnpm install') || text.includes('$ pnpm i')) return { phase: 'build', percent: 18 }
+  // The per-target app installs now run while the web build runs; they are
+  // still part of the build phase, so the bar keeps moving instead of
+  // dropping back to a packaging percentage.
+  if (text.startsWith('prefetch app ')) return { phase: 'build', percent: 20 }
+  if (text.includes('web build cache hit')) return { phase: 'build', percent: 62 }
   // pnpm's own progress lines keep the install visible: linking 1400+ packages
   // from the store takes minutes and used to happen entirely at 18%.
   if (text.startsWith('Progress: resolved')) return { phase: 'build', percent: 30 }

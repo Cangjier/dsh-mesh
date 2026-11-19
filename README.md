@@ -92,6 +92,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - **编译**：选择编译成员、外网代理（直连 / 经成员 / 自定义 URL）、源码引用（默认 `master`，可填提交号）和目标平台。默认值按当前成员自动选：编译成员取 CPU/内存最多的在线成员（Windows 和 Linux 都行），外网代理取公网 IP 在国外（非 CN）的 Linux 成员；目标平台默认 Linux x64 + Windows x64。成员的公网 IP 来自 WireGuard endpoint，国家查询结果缓存 30 天；查不到国家时保留直连，也认成员标签里的「国外 / 海外」。点「编译」后任务在后台跑，页面按阶段显示进度。
 - **拉回服务**：编译卡片里的开关，默认关闭。关闭时产物留在编译机的 `~/.dsh/mesh/upgrade/<job>/`，编译成功后自动在该成员上升级；打开后额外把包拉回网关 `~/.dsh/packages`，部署包列表里就能拿它部署到其他成员。默认值来自部署包内 `cordis.patch.yml` 的 `build.pullBack`；`build.autoUpgrade: false` 可关闭编译后的自动升级（本机编译始终不自动升级）。
 - **自动编译**：默认关闭；打开后默认每天 04:00 触发，可在「编译」卡片下开关和改时间。触发前比较最近一次**已完成**编译的清单：DSH 源码 tarball 的 ETag、dsh-mesh 构建输入的内容指纹、`build/plugins.json` 里每个随包插件（当前是 xl）的 tarball ETag。三者都没有变化就跳过，不产生新包；有变化才用和面板相同的默认成员/代理策略启动后台编译。配置和上次结果写在 `<dataDir>/schedule.json`，不依赖浏览器开着。旧版本留下的、仍等于 04:00 开启默认值的设置会在升级时一次性迁移为关闭；手动改过时间或单独给成员开启的设置保持不变。
+- **构建加速**：同一源码 + 覆盖层的重编直接复用上一次的前端构建产物（整段 `pnpm install`、两个 `tsc`、`tsdown`、`vite` 都跳过）；每个目标的 app 安装按「DSH 版本 + 目标」缓存，之后用硬链接克隆（秒级，补丁只打一次）。app 安装与 Web 构建重叠执行，`linux-x64` 和 `win-x64` 默认并行装配（按 CPU/内存自动定并行度），Linux 包的 gzip 改成 worker 线程并行、tar header mode 流式改写。缓存放在 `~/.dsh/mesh/cache/{web,app}`，`--no-cache` / `--refresh-app-cache` / `--refresh-web-cache` / `--concurrency` / `--archive-threads` 可控制。实测见 [Step 010](docs/Step%20010%20从源码构建多平台Web包.md) 的「构建加速」。
 - **编译任务**：保留最近任务的成员、引用、目标、进度和时间；「日志」弹层实时跟随 `build.log`。
 - **包里带什么**：每个产物固定携带 `dsh-mesh` 与 `xl` 两个插件。`dsh-mesh` 是当前仓库；`xl` 来自 `Cangjier/xl` 的 `main`，每次编译现拉，来源与归档哈希记在包的 `manifest.json`（`extraPlugins`）里。清单在 `build/plugins.json`，加插件只要加一条。
 - **部署包**：列出 `~/.dsh/packages` 里的包（平台、大小、时间），可直接删除；成员编译出的产物也会出现在这里，接着就能对成员「部署」。
@@ -244,6 +245,9 @@ node code/build/cli.mjs resume --job <job-dir>     # 复用工作树继续构建
 node code/build/cli.mjs build --no-smoke            # 跳过构建后的 Chrome 抓屏
 node code/build/cli.mjs build --release-config /path/release.json  # 指定发布配置
 node code/build/cli.mjs build --no-publish          # 只编译，不上传 Release
+node code/build/cli.mjs build --no-cache             # 不复用前端/app 缓存，强制全量重建
+node code/build/cli.mjs build --refresh-app-cache    # 强制重新 npm install 目标 app
+node code/build/cli.mjs build --concurrency 1        # 两个目标串行装配（旧行为）
 node code/build/smoke-cli.mjs --root <package> --screenshot-dir /tmp/smoke  # 单独复跑一个包
 ```
 

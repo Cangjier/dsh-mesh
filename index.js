@@ -3522,9 +3522,9 @@ async function uploadFile(url, options) {
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     if (attempt > 0) {
-      const delay = 1e3 * 2 ** (attempt - 1);
-      log(`upload retry ${String(attempt)}/${String(retries)} in ${String(delay)}ms: ${lastError === null ? "" : lastError.message}`);
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      const delay2 = 1e3 * 2 ** (attempt - 1);
+      log(`upload retry ${String(attempt)}/${String(retries)} in ${String(delay2)}ms: ${lastError === null ? "" : lastError.message}`);
+      await new Promise((resolve) => setTimeout(resolve, delay2));
     }
     let sent = 0;
     let lastReport = 0;
@@ -3853,9 +3853,9 @@ async function withRetry(run2, options = {}) {
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     if (attempt > 0) {
-      const delay = 1e3 * 2 ** (attempt - 1);
-      log(`${options.label ?? "request"} retry ${String(attempt)}/${String(retries)} in ${String(delay)}ms (${lastError === null ? "" : lastError.message})`);
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      const delay2 = 1e3 * 2 ** (attempt - 1);
+      log(`${options.label ?? "request"} retry ${String(attempt)}/${String(retries)} in ${String(delay2)}ms (${lastError === null ? "" : lastError.message})`);
+      await new Promise((resolve) => setTimeout(resolve, delay2));
     }
     try {
       return await run2();
@@ -4180,6 +4180,9 @@ var GiteeRelease = class {
     const repository = found.status === 200 && found.json !== null && typeof found.json === "object" && Object.keys(found.json).length > 0 ? found.json : null;
     if (repository !== null) {
       this.defaultBranch = typeof repository.default_branch === "string" && repository.default_branch !== "" ? repository.default_branch : null;
+      if (repository.private === true) {
+        this.log(`gitee repository ${this.owner}/${this.repo} is private; member downloads will get 403 \u2014 make it public in the repository settings`);
+      }
       return { created: false };
     }
     if (found.status !== 404 && !(found.status === 200 && repository === null)) {
@@ -4209,7 +4212,21 @@ var GiteeRelease = class {
       throw new Error(`Gitee \u4ED3\u5E93 ${this.owner}/${this.repo} \u4E0D\u5B58\u5728\u4E14\u81EA\u52A8\u521B\u5EFA\u5931\u8D25\uFF1AHTTP ${String(created?.status)} ${detail}${hint}`);
     }
     this.defaultBranch = typeof created.json?.default_branch === "string" && created.json.default_branch !== "" ? created.json.default_branch : null;
-    this.log(`gitee repository ${this.owner}/${this.repo} created`);
+    const patched = await this.#raw(`${this.apiBase}/repos/${this.owner}/${this.repo}`, {
+      method: "PATCH",
+      json: { name: this.repo, private: false },
+      label: `/repos patch ${this.owner}/${this.repo}`
+    });
+    if (!isSuccess(patched.status)) {
+      this.log(`gitee repository ${this.owner}/${this.repo} was created but switching it to public failed (HTTP ${String(patched.status)}); member downloads will get 403 until it is public`);
+      return { created: true };
+    }
+    const visible = await this.#api("");
+    if (visible.status === 200 && visible.json !== null && visible.json.private === false) {
+      this.log(`gitee repository ${this.owner}/${this.repo} created (public)`);
+    } else {
+      this.log(`gitee repository ${this.owner}/${this.repo} created but still private; member downloads will get 403 until it is public`);
+    }
     return { created: true };
   }
   /**
@@ -4263,9 +4280,9 @@ var GiteeRelease = class {
     let lastError = null;
     for (let attempt = 0; attempt <= 2; attempt += 1) {
       if (attempt > 0) {
-        const delay = 1e3 * 2 ** (attempt - 1);
-        this.log(`gitee upload retry ${String(attempt)}/2 in ${String(delay)}ms (${lastError === null ? "" : lastError.message})`);
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        const delay2 = 1e3 * 2 ** (attempt - 1);
+        this.log(`gitee upload retry ${String(attempt)}/2 in ${String(delay2)}ms (${lastError === null ? "" : lastError.message})`);
+        await new Promise((resolve) => setTimeout(resolve, delay2));
       }
       const body = attempt === 0 ? form : await multipartFileBody({ name, file });
       try {
@@ -5249,6 +5266,14 @@ async function writeDeployState(dir, state) {
   await writeFile8(tmp, `${JSON.stringify(state, null, 2)}
 `, "utf8");
   await rename6(tmp, file);
+}
+async function readDeployState(dir) {
+  try {
+    const parsed = JSON.parse(await readFile11(path14.join(dir, "job.json"), "utf8"));
+    return parsed !== null && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 async function appendDeployLog(dir, line) {
   await mkdir9(dir, { recursive: true });
@@ -6338,6 +6363,101 @@ function ensureDownloadDirScript(plan, remoteDir) {
 function removeDownloadDirCommand(plan, remoteDir) {
   return plan.os === "windows" ? `cmd /c rmdir /s /q "${remoteDir}"` : `rm -rf ${sh(remoteDir)}`;
 }
+function cancelCleanupScript(plan) {
+  if (plan === null || typeof plan !== "object") return null;
+  const os9 = plan.os === "windows" ? "windows" : "linux";
+  const targets = [];
+  const release = String(plan.release ?? "");
+  const layoutRoot = String(plan.layoutRoot ?? "");
+  if (/^[A-Za-z0-9._-]{3,80}$/u.test(release) && layoutRoot !== "") {
+    targets.push(os9 === "windows" ? `${layoutRoot}\\.staging\\${release}` : `${layoutRoot}/.staging/${release}`);
+  }
+  const sha12 = String(plan.package?.sha256 ?? "").slice(0, 12);
+  if (/^[a-f0-9]{12}$/u.test(sha12)) {
+    targets.push(os9 === "windows" ? `C:\\Windows\\Temp\\dsh-mesh-release-${sha12}` : `/tmp/dsh-mesh-release-${sha12}`);
+  }
+  const inTemp = (value, prefix) => typeof value === "string" && value !== "" && (os9 === "windows" ? value.toLowerCase().startsWith(prefix.toLowerCase()) : value.startsWith(prefix));
+  const tempPrefix = os9 === "windows" ? "C:\\Windows\\Temp\\dsh-mesh-" : "/tmp/dsh-mesh-";
+  if (plan.packageOnTarget !== true && inTemp(plan.remotePackage, tempPrefix)) targets.push(plan.remotePackage);
+  if (inTemp(plan.remoteCredentials, tempPrefix)) targets.push(plan.remoteCredentials, `${plan.remoteCredentials}.mjs`);
+  if (targets.length === 0) return null;
+  const script = os9 === "windows" ? [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    ...targets.map((target) => `Remove-Item -LiteralPath ${ps(target)} -Recurse -Force -ErrorAction SilentlyContinue`),
+    "exit 0"
+  ].join("\n") : [
+    "set +e",
+    ...targets.map((target) => `rm -rf -- ${sh(target)}`),
+    "exit 0"
+  ].join("\n");
+  return { os: os9, script };
+}
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+async function terminateProcess(pid) {
+  if (!pidAlive(pid)) return false;
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+    }
+  }
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (!pidAlive(pid)) return true;
+    await delay(100);
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+    }
+  }
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (!pidAlive(pid)) return true;
+    await delay(100);
+  }
+  return false;
+}
+function runCommandQuiet(command, args, timeoutMs = 2e4) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn5(command, args, { stdio: "ignore", windowsHide: true });
+    } catch {
+      resolve(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+      }
+      resolve(false);
+    }, timeoutMs);
+    timer.unref?.();
+    child.once("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+  });
+}
 var DeployManager = class {
   /**
    * @param {{repositoryRoot: string, dataDir: string, log?: (line:string)=>void, runnerFactory?: Function}} options options.
@@ -6899,6 +7019,141 @@ var DeployManager = class {
     const running = this.running.get(id);
     if (running !== void 0) await running;
     return this.status(id);
+  }
+  /**
+   * Stop one queued or running deployment job and clean up its leftovers.
+   *
+   * The panel starts every job in a detached runner, so cancelling means
+   * stopping that process (and its systemd transient unit), then removing only
+   * what this job created: the staging tree, the downloader's temp directory,
+   * the temporary archive, the ephemeral credentials copy, and a detached
+   * in-place job's extracted tree. The install itself is never touched, so the
+   * member keeps the release it is running.
+   *
+   * Once the activate step has started the services are being switched and a
+   * kill could leave a half-restarted host; that state is refused and left to
+   * the job's own rollback instead.
+   * @param {string} id job id.
+   * @returns {Promise<object|null>} settled job state (null when unknown).
+   */
+  async cancel(id) {
+    if (typeof id !== "string" || !/^deploy-[A-Za-z0-9-]+$/u.test(id)) return null;
+    const dir = path14.join(this.dataDir, id);
+    const state = await readDeployState(dir);
+    if (state === null) return null;
+    if (state.status !== "running" && state.status !== "queued") return state;
+    if (this.running.has(id)) {
+      throw new Error("\u8FD9\u4E2A\u4EFB\u52A1\u5728\u5F53\u524D\u670D\u52A1\u8FDB\u7A0B\u5185\u8FD0\u884C\uFF0C\u65E0\u6CD5\u53D6\u6D88\uFF1B\u8BF7\u7B49\u5B83\u7ED3\u675F");
+    }
+    const activate = (state.steps ?? []).find((step) => step?.key === "activate");
+    if (state.phase === "activate" || activate?.status === "running") {
+      throw new Error("\u5347\u7EA7\u5DF2\u7ECF\u8FDB\u5165\u5207\u6362\u5E76\u91CD\u542F\u670D\u52A1\u7684\u9636\u6BB5\uFF0C\u4E0D\u80FD\u518D\u53D6\u6D88\uFF1B\u8BF7\u7B49\u5B83\u7ED3\u675F\uFF08\u5065\u5EB7\u68C0\u67E5\u5931\u8D25\u4F1A\u81EA\u52A8\u5207\u56DE\u4E0A\u4E00\u7248\uFF09");
+    }
+    const request = await readFile11(jobPaths(dir).request, "utf8").then(JSON.parse).catch(() => null);
+    await appendDeployLog(dir, "cancel requested by user; stopping the runner");
+    const stopped = await this.#stopRunner(id, dir);
+    const after = await readDeployState(dir);
+    if (after !== null && after.status !== "running" && after.status !== "queued") {
+      await appendDeployLog(dir, `cancel ignored: the job already finished with ${after.status}`);
+      return after;
+    }
+    const cleanup = await this.#cleanupCancelledJob(dir, request, after ?? state).catch((error) => ({ cleaned: [], failures: [error instanceof Error ? error.message : String(error)] }));
+    const stamp = (/* @__PURE__ */ new Date()).toISOString();
+    const cancelled = after ?? state;
+    cancelled.status = "cancelled";
+    cancelled.phase = "cancelled";
+    for (const step of cancelled.steps ?? []) {
+      if (step.status === "running") {
+        step.status = "cancelled";
+        step.finishedAt = stamp;
+      }
+    }
+    cancelled.progress = { ...cancelled.progress ?? {}, label: "\u5DF2\u53D6\u6D88", percent: 0, indeterminate: false, speed: 0 };
+    cancelled.error = cleanup.failures.length === 0 ? "\u5DF2\u53D6\u6D88\uFF1A\u5347\u7EA7\u8FDB\u7A0B\u5DF2\u505C\u6B62\uFF0C\u4E34\u65F6\u6587\u4EF6\u5DF2\u6E05\u7406\uFF0C\u6210\u5458\u4FDD\u6301\u5728\u539F\u7248\u672C" : `\u5DF2\u53D6\u6D88\uFF1A\u5347\u7EA7\u8FDB\u7A0B\u5DF2\u505C\u6B62\uFF1B\u6E05\u7406\u672A\u5B8C\u6210\uFF1A${cleanup.failures.join("\uFF1B")}\uFF08\u4E0B\u6B21\u5347\u7EA7\u4F1A\u81EA\u52A8\u8986\u76D6\uFF09`;
+    cancelled.updatedAt = stamp;
+    await writeDeployState(dir, cancelled);
+    const stoppedText = stopped.length === 0 ? "\u5347\u7EA7\u8FDB\u7A0B\u5DF2\u4E0D\u5728\u8FD0\u884C" : `\u5DF2\u505C\u6B62 ${stopped.join("\u3001")}`;
+    const cleanupText = cleanup.failures.length === 0 ? cleanup.cleaned.length === 0 ? "\u6CA1\u6709\u9700\u8981\u6E05\u7406\u7684\u4E34\u65F6\u6587\u4EF6" : `\u5DF2\u6E05\u7406 ${cleanup.cleaned.join("\u3001")}` : `\u6E05\u7406\u672A\u5B8C\u6210\uFF1A${cleanup.failures.join("\uFF1B")}`;
+    await appendDeployLog(dir, `cancelled by user; ${stoppedText}; ${cleanupText}`);
+    this.states.set(id, cancelled);
+    this.logLine(`mesh deploy ${id} cancelled by user`);
+    return cancelled;
+  }
+  /**
+   * Stop the detached runner that owns one job.
+   * @param {string} id job id.
+   * @param {string} dir job directory.
+   * @returns {Promise<string[]>} what was stopped.
+   */
+  async #stopRunner(id, dir) {
+    const runner = await readFile11(path14.join(dir, "runner.json"), "utf8").then(JSON.parse).catch(() => null);
+    const notes = [];
+    const unit = typeof runner?.unit === "string" && runner.unit !== "" ? runner.unit : `dsh-mesh-job-${id.replace(/^deploy-/u, "")}`;
+    if (await runCommandQuiet("systemctl", ["stop", unit], 3e4)) notes.push(unit);
+    const pid = Number(runner?.pid);
+    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
+      if (await terminateProcess(pid)) notes.push(`\u8FDB\u7A0B ${String(pid)}`);
+    }
+    return notes;
+  }
+  /**
+   * Remove the temporary files one cancelled job created.
+   * @param {string} dir job directory.
+   * @param {object|null} request job request.
+   * @param {object} state job state (for the creation time).
+   * @returns {Promise<{cleaned: string[], failures: string[]}>} what was removed and what failed.
+   */
+  async #cleanupCancelledJob(dir, request, state) {
+    const cleaned = [];
+    const failures = [];
+    const drop = async (target, label) => {
+      try {
+        await rm9(target, { recursive: true, force: true });
+        cleaned.push(label);
+      } catch (error) {
+        failures.push(`${label}\uFF1A${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
+    await drop(path14.join(dir, "stage"), "\u672C\u5730\u89E3\u538B\u76EE\u5F55");
+    await drop(path14.join(dir, "tools"), "\u672C\u5730\u811A\u672C\u526F\u672C");
+    if (request?.kind === "inplace") {
+      const packagePath = String(request.inplace?.package ?? "");
+      if (packagePath !== "") await rm9(`${packagePath}.part`, { force: true }).catch(() => {
+      });
+      const created = Date.parse(String(state.createdAt ?? ""));
+      if (Number.isFinite(created)) {
+        const entries = await readdir5(tmpdir3(), { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+          if (!entry.isDirectory() || !entry.name.startsWith("dsh-mesh-download-")) continue;
+          const full = path14.join(tmpdir3(), entry.name);
+          const info = await stat8(full).catch(() => null);
+          if (info !== null && info.mtimeMs >= created - 6e4) await drop(full, "\u4E0B\u8F7D\u4E34\u65F6\u76EE\u5F55");
+        }
+      }
+      return { cleaned, failures };
+    }
+    const plan = request?.options?.plan;
+    if (plan === null || plan === void 0 || typeof plan !== "object") return { cleaned, failures };
+    const release = String(plan.release ?? "");
+    if (plan.local === true) {
+      if (/^[A-Za-z0-9._-]{3,80}$/u.test(release) && typeof plan.layoutRoot === "string" && plan.layoutRoot !== "") {
+        await drop(path14.join(plan.layoutRoot, ".staging", release), "\u672C\u673A\u6682\u5B58\u76EE\u5F55");
+      }
+      if (plan.packageOnTarget !== true && typeof plan.remotePackage === "string" && path14.isAbsolute(plan.remotePackage) && plan.remotePackage.startsWith(tmpdir3() + path14.sep)) {
+        await drop(plan.remotePackage, "\u672C\u673A\u4E34\u65F6\u5B89\u88C5\u5305");
+      }
+      return { cleaned, failures };
+    }
+    const cleanup = cancelCleanupScript(plan);
+    if (cleanup === null) return { cleaned, failures };
+    try {
+      const runner = this.runnerFactory(plan);
+      await runner.script(cleanup.script, cleanup.os);
+      cleaned.push("\u6210\u5458\u4E0A\u7684\u6682\u5B58\u76EE\u5F55\u4E0E\u4E34\u65F6\u5B89\u88C5\u5305");
+    } catch (error) {
+      failures.push(`\u6210\u5458\u4E0A\u7684\u4E34\u65F6\u6587\u4EF6\uFF1A${error instanceof Error ? error.message : String(error)}`);
+    }
+    return { cleaned, failures };
   }
   /**
    * Read a job.
@@ -10725,6 +10980,20 @@ var MeshService = class {
     return this.deploy.status(id);
   }
   /**
+   * Cancel one queued or running deployment job and clean up after it.
+   *
+   * The job is owned by a detached runner, so this stops the runner (and, on
+   * the member, only the staging/temp files that job made) instead of waiting
+   * for the next phase. A job already switching services is refused.
+   * @param {string} id job id.
+   * @returns {Promise<object|null>} cancelled job, or null when unknown.
+   */
+  async cancelDeploy(id) {
+    const job = await this.deploy.cancel(id);
+    this.logLine(`mesh cancel ${typeof id === "string" ? id : ""}: ${job === null ? "unknown job" : job.status}`);
+    return job;
+  }
+  /**
    * List recent deployment jobs, newest first.
    * @param {number} [limit] maximum count.
    * @returns {Promise<object[]>} jobs.
@@ -11246,6 +11515,16 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, await service.clearFinishedBuilds());
           return;
         }
+        if (path26 === "/deploy/cancel") {
+          const body = await readJson2(request);
+          const job = await service.cancelDeploy(typeof body.id === "string" ? body.id : "");
+          if (job === null) {
+            writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown deploy job." } });
+            return;
+          }
+          writeJson(response, 200, { ok: true, job });
+          return;
+        }
         if (path26 === "/deploy/rollback") {
           const body = await readJson2(request);
           writeJson(response, 202, await service.rollbackMember({
@@ -11510,11 +11789,11 @@ var Scheduler = class {
     if (candidates.length === 0) return;
     candidates.sort((left, right) => left.at.getTime() - right.at.getTime());
     const next = candidates[0];
-    const delay = Math.max(0, next.at.getTime() - at.getTime());
+    const delay2 = Math.max(0, next.at.getTime() - at.getTime());
     this.timer = this.setTimer(() => {
       this.timer = null;
       void this.#tick();
-    }, delay);
+    }, delay2);
     if (typeof this.timer?.unref === "function") this.timer.unref();
     this.log(`next ${next.kind}${next.memberId === void 0 ? "" : ` ${next.memberId}`} at ${next.at.toISOString()}`);
   }

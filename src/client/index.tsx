@@ -37,6 +37,7 @@ import {
   InfoCircleOutlined,
   LoadingOutlined,
   ReloadOutlined,
+  StopOutlined,
   SwapOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
@@ -271,6 +272,11 @@ const DEPLOY_STEP_SHARE: Record<string, [number, number]> = {
   activate: [92, 100],
 }
 
+/** The operator-facing name of a deploy job: 升级 / 测试升级 / 部署. */
+function deployAction(job: DeployJob): string {
+  return job.mode === 'upgrade' ? '升级' : job.mode === 'test' ? '测试升级' : '部署'
+}
+
 /**
  * Overall percentage of a deploy job.
  *
@@ -321,7 +327,8 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
   const speed = progress?.speed ?? 0
   const indeterminate = progress?.indeterminate === true
   const percent = indeterminate ? 100 : Math.max(0, Math.min(100, progress?.percent ?? 0))
-  const running = job.status === 'running'
+  const active = job.status === 'running' || job.status === 'queued'
+  const cancelled = job.status === 'cancelled'
   // The meter is shared by the upload and the extraction: same bar, different
   // unit. `label` comes from the deploy engine, which is the only place that
   // knows which phase is running.
@@ -335,11 +342,13 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
   return (
     <Space direction="vertical" size={14} style={{ width: '100%' }}>
       <Space size={8} wrap>
-        {running
+        {active
           ? <Tag color="processing">{action}中 {deployPercent(job)}%</Tag>
           : job.status === 'succeeded'
             ? <Tag color="success">{action}成功</Tag>
-            : <Tag color="error">{action}失败</Tag>}
+            : cancelled
+              ? <Tag>{action}已取消</Tag>
+              : <Tag color="error">{action}失败</Tag>}
         <Typography.Text type="secondary" className="dsh-pw-mono">{job.id}</Typography.Text>
         <Typography.Text type="secondary">
           {job.target.os === 'windows' ? 'Windows' : 'Linux'} · {job.target.host}
@@ -361,7 +370,7 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
         <Typography.Text strong>{meterLabel}</Typography.Text>
         <Progress
           percent={percent}
-          status={job.status === 'failed' ? 'exception' : percent >= 100 ? 'success' : 'active'}
+          status={cancelled ? 'normal' : job.status === 'failed' ? 'exception' : percent >= 100 ? 'success' : 'active'}
           showInfo={!indeterminate}
         />
         {meterText === '' ? null : (
@@ -371,7 +380,7 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
       <Steps
         direction="vertical"
         size="small"
-        status={job.status === 'failed' ? 'error' : job.status === 'succeeded' ? 'finish' : 'process'}
+        status={cancelled ? 'wait' : job.status === 'failed' ? 'error' : job.status === 'succeeded' ? 'finish' : 'process'}
         items={(job.steps ?? []).map(step => {
           const duration = durationText(step.startedAt, step.finishedAt)
           return {
@@ -394,6 +403,7 @@ function DeployProgressView({ job, lines }: { job: DeployJob; lines: string[] })
         })}
       />
       {job.status === 'failed' ? <Alert type="error" showIcon message={`${action}失败`} description={job.error ?? '未知错误'} /> : null}
+      {cancelled ? <Alert type="warning" showIcon message={`${action}已取消`} description={job.error ?? '升级进程已停止，临时文件已清理'} /> : null}
       {job.status === 'succeeded' ? <Alert type="success" showIcon message={`${action}完成`} description={`健康检查通过，发布 ${job.release}`} /> : null}
       <div>
         <Typography.Text strong>日志</Typography.Text>
@@ -437,6 +447,8 @@ function Panel({ ctx }: { ctx: any }) {
   const [deployJobs, setDeployJobs] = useState<DeployJob[]>([])
   const [progressJob, setProgressJob] = useState<DeployJob | null>(null)
   const [progressLog, setProgressLog] = useState<string[]>([])
+  // One cancel request at a time; the id keeps the button's spinner on its job.
+  const [cancelling, setCancelling] = useState('')
   const deployStatusRef = useRef<Record<string, string>>({})
   const [panelTab, setPanelTab] = useState<'members' | 'network' | 'packages'>('members')
   const [networkRefresh, setNetworkRefresh] = useState(0)
@@ -565,6 +577,10 @@ function Panel({ ctx }: { ctx: any }) {
         messageApi.error(`${job.mode === 'upgrade' ? '升级' : job.mode === 'test' ? '测试升级' : '部署'}失败：${job.error ?? job.id}`)
         finished = true
       }
+      if ((previous === 'running' || previous === 'queued') && job.status === 'cancelled') {
+        messageApi.info(`${job.mode === 'upgrade' ? '升级' : job.mode === 'test' ? '测试升级' : '部署'}已取消`)
+        finished = true
+      }
     }
     if (finished) void load()
   }, [deployJobs, load, messageApi])
@@ -573,6 +589,30 @@ function Panel({ ctx }: { ctx: any }) {
     setProgressLog([])
     setProgressJob(job)
   }, [])
+
+  /**
+   * Stop a queued/running upgrade and let the server clean up.
+   *
+   * The button is only offered while the job is queued or running; the server
+   * refuses once the activate step starts switching the member's services.
+   */
+  const cancelDeployJob = useCallback(async (job: DeployJob) => {
+    setCancelling(job.id)
+    try {
+      const result = await api.cancelDeploy(job.id)
+      setProgressJob(current => (current !== null && current.id === job.id ? result.job : current))
+      setDeployJobs(current => [result.job, ...current.filter(item => item.id !== job.id)])
+      if (result.job.status === 'cancelled') {
+        messageApi.success('已取消：升级进程已停止，临时文件已清理')
+      } else {
+        messageApi.info(`任务已经结束（${result.job.status}），无需取消`)
+      }
+    } catch (failure) {
+      messageApi.error(errorText(failure))
+    } finally {
+      setCancelling('')
+    }
+  }, [messageApi])
 
   const latestJobOf = useCallback((member: Member): DeployJob | undefined => {
     return deployJobs.find(job => job.member === member.id || job.target?.host === member.ip)
@@ -806,6 +846,7 @@ function Panel({ ctx }: { ctx: any }) {
             <Button
               size="small"
               icon={<LoadingOutlined />}
+              title="查看升级进度；可在弹窗里取消升级"
               onClick={() => openProgress(activeJob)}
             >
               {activeJob.mode === 'upgrade' ? '正在升级' : activeJob.mode === 'test' ? '正在测试升级' : '正在部署'} {deployPercent(activeJob)}%
@@ -1429,8 +1470,8 @@ function Panel({ ctx }: { ctx: any }) {
             return (
               <Space size={8} wrap>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>最近一次部署/升级：</Typography.Text>
-                <Tag color={job.status === 'succeeded' ? 'success' : job.status === 'failed' ? 'error' : 'processing'}>
-                  {job.status === 'succeeded' ? '成功' : job.status === 'failed' ? '失败' : '进行中'}
+                <Tag color={job.status === 'succeeded' ? 'success' : job.status === 'failed' ? 'error' : job.status === 'cancelled' ? 'default' : 'processing'}>
+                  {job.status === 'succeeded' ? '成功' : job.status === 'failed' ? '失败' : job.status === 'cancelled' ? '已取消' : '进行中'}
                 </Tag>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                   {new Date(job.createdAt).toLocaleString()}
@@ -1618,6 +1659,20 @@ function Panel({ ctx }: { ctx: any }) {
         onCancel={() => setProgressJob(null)}
         footer={(
           <Space>
+            {progressJob !== null && (progressJob.status === 'running' || progressJob.status === 'queued') ? (
+              <Popconfirm
+                title={`取消这次${deployAction(progressJob)}？`}
+                description="停止升级进程并清理临时文件；成员保持在原版本。开始切换服务后不能取消。"
+                okText="取消任务"
+                cancelText="继续等待"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => { void cancelDeployJob(progressJob) }}
+              >
+                <Button danger loading={cancelling === progressJob.id} icon={<StopOutlined />}>
+                  取消{deployAction(progressJob)}
+                </Button>
+              </Popconfirm>
+            ) : null}
             {progressJob !== null && progressJob.status === 'failed' && progressJob.member !== null && progressJob.member !== undefined && progressJob.member !== 'local'
               ? (
                 <Popconfirm

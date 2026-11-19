@@ -2478,6 +2478,21 @@ export class MeshService {
   }
 
   /**
+   * Cancel one queued or running deployment job and clean up after it.
+   *
+   * The job is owned by a detached runner, so this stops the runner (and, on
+   * the member, only the staging/temp files that job made) instead of waiting
+   * for the next phase. A job already switching services is refused.
+   * @param {string} id job id.
+   * @returns {Promise<object|null>} cancelled job, or null when unknown.
+   */
+  async cancelDeploy(id) {
+    const job = await this.deploy.cancel(id)
+    this.logLine(`mesh cancel ${typeof id === 'string' ? id : ''}: ${job === null ? 'unknown job' : job.status}`)
+    return job
+  }
+
+  /**
    * List recent deployment jobs, newest first.
    * @param {number} [limit] maximum count.
    * @returns {Promise<object[]>} jobs.

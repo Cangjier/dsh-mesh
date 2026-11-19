@@ -309,7 +309,7 @@ export interface ScheduleState {
 export interface DeployStep {
   key: string
   label: string
-  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
   startedAt: string | null
   finishedAt: string | null
   detail: string
@@ -341,7 +341,7 @@ export interface DeployJob {
   services?: string[]
   target: { host: string; user?: string | null; port: number; os: string; appRoot: string }
   /** `queued` is the moment between the panel writing the job and its runner reporting in. */
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | string
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | string
   phase: string
   error: string | null
   steps?: DeployStep[]
@@ -627,6 +627,18 @@ export const api = {
     return request<{ job: DeployJob; lines: string[] }>(
       `/api/dsh-mesh/deploy/${encodeURIComponent(id)}?lines=${String(lines)}`,
     )
+  },
+
+  /**
+   * Stop a queued or running upgrade/deploy and clean up its temporary files.
+   * Refused once the job is switching services.
+   */
+  cancelDeploy(id: string): Promise<{ ok: boolean; job: DeployJob }> {
+    return request<{ ok: boolean; job: DeployJob }>('/api/dsh-mesh/deploy/cancel', {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: JSON.stringify({ id }),
+    })
   },
 
   startBuild(body: {

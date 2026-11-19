@@ -210,6 +210,16 @@ export function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, await service.clearFinishedBuilds())
           return
         }
+        if (path === '/deploy/cancel') {
+          const body = await readJson(request)
+          const job = await service.cancelDeploy(typeof body.id === 'string' ? body.id : '')
+          if (job === null) {
+            writeJson(response, 404, { ok: false, error: { code: 'not_found', message: 'Unknown deploy job.' } })
+            return
+          }
+          writeJson(response, 200, { ok: true, job })
+          return
+        }
         if (path === '/deploy/rollback') {
           const body = await readJson(request)
           writeJson(response, 202, await service.rollbackMember({

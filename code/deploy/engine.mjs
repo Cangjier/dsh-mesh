@@ -1875,6 +1875,126 @@ export function removeDownloadDirCommand(plan, remoteDir) {
 }
 
 /**
+ * Commands that delete what a cancelled job left on the target.
+ *
+ * Cleanup is deliberately narrow: the staging tree, the downloader's temp
+ * directory, the uploaded/downloaded archive, and the ephemeral credentials
+ * copy. It never touches `releases/`, `current` or the shared data, so a
+ * cancelled upgrade leaves the member on the version it was running.
+ * @param {object} plan deployment plan.
+ * @returns {{os: 'linux'|'windows', script: string}|null} cleanup script, or null when there is nothing to remove.
+ */
+export function cancelCleanupScript(plan) {
+  if (plan === null || typeof plan !== 'object') return null
+  const os = plan.os === 'windows' ? 'windows' : 'linux'
+  const targets = []
+  const release = String(plan.release ?? '')
+  const layoutRoot = String(plan.layoutRoot ?? '')
+  if (/^[A-Za-z0-9._-]{3,80}$/u.test(release) && layoutRoot !== '') {
+    targets.push(os === 'windows' ? `${layoutRoot}\\.staging\\${release}` : `${layoutRoot}/.staging/${release}`)
+  }
+  const sha12 = String(plan.package?.sha256 ?? '').slice(0, 12)
+  if (/^[a-f0-9]{12}$/u.test(sha12)) {
+    targets.push(os === 'windows' ? `C:\\Windows\\Temp\\dsh-mesh-release-${sha12}` : `/tmp/dsh-mesh-release-${sha12}`)
+  }
+  const inTemp = (value, prefix) => typeof value === 'string' && value !== ''
+    && (os === 'windows' ? value.toLowerCase().startsWith(prefix.toLowerCase()) : value.startsWith(prefix))
+  const tempPrefix = os === 'windows' ? 'C:\\Windows\\Temp\\dsh-mesh-' : '/tmp/dsh-mesh-'
+  if (plan.packageOnTarget !== true && inTemp(plan.remotePackage, tempPrefix)) targets.push(plan.remotePackage)
+  // The deployer account is copied to /tmp so the member can merge it. A
+  // cancelled job has no use for that copy; leaving a credential behind is
+  // worse than re-uploading it on the next attempt.
+  if (inTemp(plan.remoteCredentials, tempPrefix)) targets.push(plan.remoteCredentials, `${plan.remoteCredentials}.mjs`)
+  if (targets.length === 0) return null
+  const script = os === 'windows'
+    ? [
+        "$ErrorActionPreference = 'SilentlyContinue'",
+        ...targets.map(target => `Remove-Item -LiteralPath ${ps(target)} -Recurse -Force -ErrorAction SilentlyContinue`),
+        'exit 0',
+      ].join('\n')
+    : [
+        'set +e',
+        ...targets.map(target => `rm -rf -- ${sh(target)}`),
+        'exit 0',
+      ].join('\n')
+  return { os, script }
+}
+
+/** Resolve after one short pause. */
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/** Is a pid still alive (EPERM counts as alive)? */
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
+/**
+ * Terminate one process and wait for it to go away.
+ *
+ * A detached runner is a process-group leader; its `ssh` child must die with
+ * it, or the member keeps writing into a tree cleanup is about to delete. The
+ * group signal is tried first, then the bare pid.
+ * @param {number} pid process id.
+ * @returns {Promise<boolean>} whether the process is gone.
+ */
+async function terminateProcess(pid) {
+  if (!pidAlive(pid)) return false
+  try {
+    process.kill(-pid, 'SIGTERM')
+  } catch {
+    try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
+  }
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (!pidAlive(pid)) return true
+    await delay(100)
+  }
+  try {
+    process.kill(-pid, 'SIGKILL')
+  } catch {
+    try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+  }
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (!pidAlive(pid)) return true
+    await delay(100)
+  }
+  return false
+}
+
+/**
+ * Run a short command without a shell and ignore a failure (systemctl on a
+ * host without systemd, a unit that already vanished, ...).
+ * @param {string} command executable.
+ * @param {string[]} args arguments.
+ * @param {number} [timeoutMs] kill after this budget.
+ * @returns {Promise<boolean>} exit code 0.
+ */
+function runCommandQuiet(command, args, timeoutMs = 20_000) {
+  return new Promise(resolve => {
+    let child
+    try {
+      child = spawn(command, args, { stdio: 'ignore', windowsHide: true })
+    } catch {
+      resolve(false)
+      return
+    }
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
+      resolve(false)
+    }, timeoutMs)
+    timer.unref?.()
+    child.once('error', () => { clearTimeout(timer); resolve(false) })
+    child.once('exit', code => { clearTimeout(timer); resolve(code === 0) })
+  })
+}
+
+/**
  * One deployment job store and runner.
  */
 export class DeployManager {
@@ -2508,6 +2628,158 @@ export class DeployManager {
     const running = this.running.get(id)
     if (running !== undefined) await running
     return this.status(id)
+  }
+
+
+  /**
+   * Stop one queued or running deployment job and clean up its leftovers.
+   *
+   * The panel starts every job in a detached runner, so cancelling means
+   * stopping that process (and its systemd transient unit), then removing only
+   * what this job created: the staging tree, the downloader's temp directory,
+   * the temporary archive, the ephemeral credentials copy, and a detached
+   * in-place job's extracted tree. The install itself is never touched, so the
+   * member keeps the release it is running.
+   *
+   * Once the activate step has started the services are being switched and a
+   * kill could leave a half-restarted host; that state is refused and left to
+   * the job's own rollback instead.
+   * @param {string} id job id.
+   * @returns {Promise<object|null>} settled job state (null when unknown).
+   */
+  async cancel(id) {
+    if (typeof id !== 'string' || !/^deploy-[A-Za-z0-9-]+$/u.test(id)) return null
+    const dir = path.join(this.dataDir, id)
+    const state = await readDeployState(dir)
+    if (state === null) return null
+    if (state.status !== 'running' && state.status !== 'queued') return state
+    if (this.running.has(id)) {
+      throw new Error('这个任务在当前服务进程内运行，无法取消；请等它结束')
+    }
+    const activate = (state.steps ?? []).find(step => step?.key === 'activate')
+    if (state.phase === 'activate' || activate?.status === 'running') {
+      throw new Error('升级已经进入切换并重启服务的阶段，不能再取消；请等它结束（健康检查失败会自动切回上一版）')
+    }
+    const request = await readFile(jobPaths(dir).request, 'utf8').then(JSON.parse).catch(() => null)
+    await appendDeployLog(dir, 'cancel requested by user; stopping the runner')
+    const stopped = await this.#stopRunner(id, dir)
+    // The runner may have finished between the check and the signal. Its own
+    // terminal state wins: never rewrite a successful upgrade as cancelled.
+    const after = await readDeployState(dir)
+    if (after !== null && after.status !== 'running' && after.status !== 'queued') {
+      await appendDeployLog(dir, `cancel ignored: the job already finished with ${after.status}`)
+      return after
+    }
+    const cleanup = await this.#cleanupCancelledJob(dir, request, after ?? state)
+      .catch(error => ({ cleaned: [], failures: [error instanceof Error ? error.message : String(error)] }))
+    const stamp = new Date().toISOString()
+    const cancelled = after ?? state
+    cancelled.status = 'cancelled'
+    cancelled.phase = 'cancelled'
+    for (const step of cancelled.steps ?? []) {
+      if (step.status === 'running') {
+        step.status = 'cancelled'
+        step.finishedAt = stamp
+      }
+    }
+    cancelled.progress = { ...(cancelled.progress ?? {}), label: '已取消', percent: 0, indeterminate: false, speed: 0 }
+    cancelled.error = cleanup.failures.length === 0
+      ? '已取消：升级进程已停止，临时文件已清理，成员保持在原版本'
+      : `已取消：升级进程已停止；清理未完成：${cleanup.failures.join('；')}（下次升级会自动覆盖）`
+    cancelled.updatedAt = stamp
+    await writeDeployState(dir, cancelled)
+    const stoppedText = stopped.length === 0 ? '升级进程已不在运行' : `已停止 ${stopped.join('、')}`
+    const cleanupText = cleanup.failures.length === 0
+      ? (cleanup.cleaned.length === 0 ? '没有需要清理的临时文件' : `已清理 ${cleanup.cleaned.join('、')}`)
+      : `清理未完成：${cleanup.failures.join('；')}`
+    await appendDeployLog(dir, `cancelled by user; ${stoppedText}; ${cleanupText}`)
+    this.states.set(id, cancelled)
+    this.logLine(`mesh deploy ${id} cancelled by user`)
+    return cancelled
+  }
+
+  /**
+   * Stop the detached runner that owns one job.
+   * @param {string} id job id.
+   * @param {string} dir job directory.
+   * @returns {Promise<string[]>} what was stopped.
+   */
+  async #stopRunner(id, dir) {
+    const runner = await readFile(path.join(dir, 'runner.json'), 'utf8').then(JSON.parse).catch(() => null)
+    const notes = []
+    const unit = typeof runner?.unit === 'string' && runner.unit !== ''
+      ? runner.unit
+      : `dsh-mesh-job-${id.replace(/^deploy-/u, '')}`
+    if (await runCommandQuiet('systemctl', ['stop', unit], 30_000)) notes.push(unit)
+    const pid = Number(runner?.pid)
+    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
+      if (await terminateProcess(pid)) notes.push(`进程 ${String(pid)}`)
+    }
+    return notes
+  }
+
+  /**
+   * Remove the temporary files one cancelled job created.
+   * @param {string} dir job directory.
+   * @param {object|null} request job request.
+   * @param {object} state job state (for the creation time).
+   * @returns {Promise<{cleaned: string[], failures: string[]}>} what was removed and what failed.
+   */
+  async #cleanupCancelledJob(dir, request, state) {
+    const cleaned = []
+    const failures = []
+    const drop = async (target, label) => {
+      try {
+        await rm(target, { recursive: true, force: true })
+        cleaned.push(label)
+      } catch (error) {
+        failures.push(`${label}：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    // A detached in-place job keeps its extracted package and script copy here.
+    await drop(path.join(dir, 'stage'), '本地解压目录')
+    await drop(path.join(dir, 'tools'), '本地脚本副本')
+    if (request?.kind === 'inplace') {
+      const packagePath = String(request.inplace?.package ?? '')
+      // A partially downloaded archive; a complete one is a valid cache and stays.
+      if (packagePath !== '') await rm(`${packagePath}.part`, { force: true }).catch(() => {})
+      // The downloader's parts directory only exists while a job runs; a kill
+      // can leave it behind with hundreds of megabytes.
+      const created = Date.parse(String(state.createdAt ?? ''))
+      if (Number.isFinite(created)) {
+        const entries = await readdir(tmpdir(), { withFileTypes: true }).catch(() => [])
+        for (const entry of entries) {
+          if (!entry.isDirectory() || !entry.name.startsWith('dsh-mesh-download-')) continue
+          const full = path.join(tmpdir(), entry.name)
+          const info = await stat(full).catch(() => null)
+          if (info !== null && info.mtimeMs >= created - 60_000) await drop(full, '下载临时目录')
+        }
+      }
+      return { cleaned, failures }
+    }
+    const plan = request?.options?.plan
+    if (plan === null || plan === undefined || typeof plan !== 'object') return { cleaned, failures }
+    const release = String(plan.release ?? '')
+    if (plan.local === true) {
+      if (/^[A-Za-z0-9._-]{3,80}$/u.test(release) && typeof plan.layoutRoot === 'string' && plan.layoutRoot !== '') {
+        await drop(path.join(plan.layoutRoot, '.staging', release), '本机暂存目录')
+      }
+      if (plan.packageOnTarget !== true && typeof plan.remotePackage === 'string'
+        && path.isAbsolute(plan.remotePackage) && plan.remotePackage.startsWith(tmpdir() + path.sep)) {
+        await drop(plan.remotePackage, '本机临时安装包')
+      }
+      return { cleaned, failures }
+    }
+    const cleanup = cancelCleanupScript(plan)
+    if (cleanup === null) return { cleaned, failures }
+    try {
+      const runner = this.runnerFactory(plan)
+      await runner.script(cleanup.script, cleanup.os)
+      cleaned.push('成员上的暂存目录与临时安装包')
+    } catch (error) {
+      failures.push(`成员上的临时文件：${error instanceof Error ? error.message : String(error)}`)
+    }
+    return { cleaned, failures }
   }
 
   /**

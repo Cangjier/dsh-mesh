@@ -258,3 +258,29 @@ test('the upgrade route passes the latest and target-package sources through', a
     { member: '10.66.66.4', package: undefined, targetPackage: { path: 'C:\\Users\\Admin\\.dsh\\packages\\a.zip' } },
   ])
 })
+
+test('the panel can cancel a running upgrade and clean up after it', async () => {
+  const calls = []
+  const call = apiCaller({
+    async cancelDeploy(id) {
+      calls.push(id)
+      return { id, status: 'cancelled', error: '已取消：升级进程已停止，临时文件已清理，成员保持在原版本' }
+    },
+  })
+  const response = await call('POST', '/api/dsh-mesh/deploy/cancel', { id: 'deploy-abc' })
+  assert.equal(response.status, 200)
+  assert.equal(response.body.ok, true)
+  assert.equal(response.body.job.status, 'cancelled')
+  assert.deepEqual(calls, ['deploy-abc'])
+})
+
+test('cancelling an unknown deploy job answers 404', async () => {
+  const call = apiCaller({
+    async cancelDeploy() {
+      return null
+    },
+  })
+  const response = await call('POST', '/api/dsh-mesh/deploy/cancel', { id: 'deploy-nope' })
+  assert.equal(response.status, 404)
+  assert.equal(response.body.ok, false)
+})

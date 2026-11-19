@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import {
   DEFAULT_BUILD_SCHEDULE,
   DEFAULT_UPGRADE_SCHEDULE,
+  SCHEDULE_FORMAT,
   buildUpdateReasons,
   compareBuildStamps,
   latestPackagesByOs,
+  migrateSchedules,
   nextRunAt,
   normalizeSchedules,
   packageInfo,
@@ -34,14 +36,44 @@ function member(id, options = {}) {
   }
 }
 
-test('the documented defaults are 04:00 for build and 06:00 for each member upgrade', () => {
+test('the build clock and per-member upgrades are off by default', () => {
   const schedule = normalizeSchedules({})
-  assert.deepEqual(schedule.build, { enabled: true, time: '04:00' })
-  assert.deepEqual(schedule.upgrade, { enabled: true, time: '06:00' })
+  assert.deepEqual(schedule.build, { enabled: false, time: '04:00' })
+  assert.deepEqual(schedule.upgrade, { enabled: false, time: '06:00' })
   assert.deepEqual(schedule.upgrades, {})
   assert.equal(DEFAULT_BUILD_SCHEDULE.time, '04:00')
   assert.equal(DEFAULT_UPGRADE_SCHEDULE.time, '06:00')
-  assert.deepEqual(upgradeEntryFor(schedule, '10.66.66.2'), { enabled: true, time: '06:00' })
+  assert.equal(DEFAULT_BUILD_SCHEDULE.enabled, false)
+  assert.equal(DEFAULT_UPGRADE_SCHEDULE.enabled, false)
+  assert.deepEqual(upgradeEntryFor(schedule, '10.66.66.2'), { enabled: false, time: '06:00' })
+})
+
+test('legacy default-on schedules migrate to off without touching custom choices', () => {
+  const migrated = migrateSchedules({
+    format: 2,
+    build: { enabled: true, time: '04:00' },
+    upgrade: { enabled: true, time: '06:00' },
+    upgrades: { '10.66.66.2': { enabled: true, time: '06:00' } },
+  })
+  assert.deepEqual(migrated.build, { enabled: false, time: '04:00' })
+  assert.deepEqual(migrated.upgrade, { enabled: false, time: '06:00' })
+  assert.deepEqual(migrated.upgrades['10.66.66.2'], { enabled: true, time: '06:00' })
+
+  const custom = migrateSchedules({
+    format: 2,
+    build: { enabled: true, time: '05:30' },
+    upgrade: { enabled: false, time: '06:00' },
+  })
+  assert.deepEqual(custom.build, { enabled: true, time: '05:30' })
+  assert.deepEqual(custom.upgrade, { enabled: false, time: '06:00' })
+
+  const current = migrateSchedules({
+    format: SCHEDULE_FORMAT,
+    build: { enabled: true, time: '04:00' },
+    upgrade: { enabled: true, time: '06:00' },
+  })
+  assert.deepEqual(current.build, { enabled: true, time: '04:00' })
+  assert.deepEqual(current.upgrade, { enabled: true, time: '06:00' })
 })
 
 test('per-member overrides win over the default upgrade entry', () => {
@@ -61,7 +93,7 @@ test('clock values are validated and normalized', () => {
   assert.equal(parseClock('04:00:00'), null)
   const changed = normalizeSchedules({ build: { enabled: false, time: '3:15' }, upgrade: { time: 'bad' } })
   assert.deepEqual(changed.build, { enabled: false, time: '03:15' })
-  assert.deepEqual(changed.upgrade, { enabled: true, time: '06:00' })
+  assert.deepEqual(changed.upgrade, { enabled: false, time: '06:00' })
 })
 
 test('nextRunAt rolls over to tomorrow after the clock passed', () => {
@@ -155,7 +187,7 @@ test('build update reasons mention each source that moved', () => {
   assert.deepEqual(buildUpdateReasons({ latestManifest: null, current }), ['还没有带版本信息的编译任务'])
 })
 
-test('the scheduler waits for 04:00 and records a skipped build', async () => {
+test('the scheduler waits for 04:00 once the build clock is enabled', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-schedule-'))
   const file = path.join(dir, 'schedule.json')
   let now = new Date('2026-11-16T03:00:00+08:00').getTime()
@@ -176,6 +208,9 @@ test('the scheduler waits for 04:00 and records a skipped build', async () => {
   })
   try {
     await scheduler.start()
+    assert.equal(timer, null)
+    const armed = await scheduler.update({ build: { enabled: true } })
+    assert.equal(armed.build.enabled, true)
     assert.equal(delay, 60 * 60 * 1000)
     assert.ok(timer !== null)
     now = new Date('2026-11-16T04:00:00+08:00').getTime()
@@ -187,6 +222,44 @@ test('the scheduler waits for 04:00 and records a skipped build', async () => {
     const saved = await readScheduleFile(file)
     assert.equal(saved.schedule.build.time, '04:00')
     assert.equal(saved.last.build.reason, '没有更新')
+  } finally {
+    scheduler.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('starting on a legacy schedule file rewrites it with both defaults off', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-schedule-'))
+  const file = path.join(dir, 'schedule.json')
+  await writeFile(file, JSON.stringify({
+    format: 2,
+    build: { enabled: true, time: '04:00' },
+    upgrade: { enabled: true, time: '06:00' },
+    upgrades: { peer: { enabled: true, time: '7:30' } },
+    last: { build: { at: '2026-11-16T04:00:00+08:00', status: 'done' }, upgrades: {} },
+  }))
+  const scheduler = new Scheduler({
+    file,
+    service: {
+      scheduledBuild: async () => ({ status: 'skipped' }),
+      scheduledUpgradeMember: async memberId => ({ status: 'skipped', member: memberId }),
+    },
+    members: async () => ['local', 'peer'],
+    autoStart: false,
+  })
+  try {
+    await scheduler.start()
+    assert.equal(scheduler.status().build.enabled, false)
+    assert.equal(scheduler.status('local').upgrade.enabled, false)
+    assert.equal(scheduler.status('peer').upgrade.enabled, true)
+    assert.equal(scheduler.status('peer').upgrade.time, '07:30')
+    assert.equal(scheduler.status().build.last.status, 'done')
+    const saved = JSON.parse(await readFile(file, 'utf8'))
+    assert.equal(saved.format, SCHEDULE_FORMAT)
+    assert.equal(saved.build.enabled, false)
+    assert.equal(saved.upgrade.enabled, false)
+    assert.deepEqual(saved.upgrades.peer, { enabled: true, time: '07:30' })
+    assert.equal(saved.last.build.status, 'done')
   } finally {
     scheduler.dispose()
     await rm(dir, { recursive: true, force: true })
@@ -212,10 +285,11 @@ test('updating the build schedule persists it and disarms the clock', async () =
     assert.equal(status.build.time, '05:30')
     assert.equal(status.build.next, null)
     assert.equal(scheduler.status('local').upgrade.time, '06:00')
+    assert.equal(scheduler.status('local').upgrade.enabled, false)
     const saved = JSON.parse(await readFile(file, 'utf8'))
     assert.equal(saved.build.enabled, false)
     assert.equal(saved.build.time, '05:30')
-    assert.equal(saved.format, 2)
+    assert.equal(saved.format, SCHEDULE_FORMAT)
     assert.deepEqual(calls, [])
   } finally {
     scheduler.dispose()
@@ -223,7 +297,7 @@ test('updating the build schedule persists it and disarms the clock', async () =
   }
 })
 
-test('each member gets its own 06:00 upgrade tick by default', async () => {
+test('each member gets its own 06:00 upgrade tick once enabled', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-schedule-'))
   const file = path.join(dir, 'schedule.json')
   let now = new Date('2026-11-16T05:00:00+08:00').getTime()
@@ -244,6 +318,9 @@ test('each member gets its own 06:00 upgrade tick by default', async () => {
   })
   try {
     await scheduler.start()
+    assert.equal(timer, null)
+    await scheduler.update({ member: 'local', upgrade: { enabled: true } })
+    await scheduler.update({ member: 'peer', upgrade: { enabled: true } })
     assert.equal(delay, 60 * 60 * 1000)
     now = new Date('2026-11-16T06:00:00+08:00').getTime()
     timer()
@@ -273,6 +350,7 @@ test('a per-member override persists and disables just that member', async () =>
   })
   try {
     await scheduler.start()
+    await scheduler.update({ member: 'local', upgrade: { enabled: true } })
     const status = await scheduler.update({ member: 'peer', upgrade: { enabled: false, time: '7:30' } })
     assert.equal(status.upgrade.enabled, false)
     assert.equal(status.upgrade.time, '07:30')

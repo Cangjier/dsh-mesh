@@ -17,7 +17,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
   DEFAULT_BUILD_SCHEDULE,
+  SCHEDULE_FORMAT,
   formatClock,
+  migrateSchedules,
   nextRunAt,
   normalizeBuildSchedule,
   normalizeSchedules,
@@ -156,7 +158,7 @@ export class Scheduler {
     this.loading = (async () => {
       try {
         const parsed = JSON.parse(await readFile(this.file, 'utf8'))
-        const normalized = normalizeSchedules(parsed)
+        const normalized = migrateSchedules(parsed)
         this.schedule = normalized
         this.upgrades = new Map(Object.entries(normalized.upgrades))
         if (parsed?.last !== null && typeof parsed?.last === 'object') {
@@ -165,6 +167,9 @@ export class Scheduler {
             upgrades: parsed.last.upgrades !== null && typeof parsed.last.upgrades === 'object' ? parsed.last.upgrades : {},
           }
         }
+        // Rewrite a legacy file once so the next read sees the new format even
+        // when the in-memory migration was the only change.
+        if (parsed?.format !== SCHEDULE_FORMAT) await this.#save()
       } catch {
         // First run (or a corrupt file): keep the documented defaults.
       }
@@ -177,7 +182,7 @@ export class Scheduler {
     try {
       await mkdir(path.dirname(this.file), { recursive: true })
       await writeFile(this.file, `${JSON.stringify({
-        format: 2,
+        format: SCHEDULE_FORMAT,
         build: this.schedule.build,
         upgrade: this.schedule.upgrade,
         upgrades: Object.fromEntries(this.upgrades),
@@ -311,7 +316,7 @@ export class Scheduler {
 export async function readScheduleFile(file) {
   try {
     const parsed = JSON.parse(await readFile(file, 'utf8'))
-    const schedule = normalizeSchedules(parsed)
+    const schedule = migrateSchedules(parsed)
     return {
       schedule,
       upgrades: schedule.upgrades,

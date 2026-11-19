@@ -2,7 +2,8 @@
  * Timed build and per-member timed upgrade policy.
  *
  * There are two independent clocks: one build at 04:00, and one auto-upgrade
- * per member at 06:00 by default. Both are deliberately conservative:
+ * per member at 06:00. Both are **off by default**; the panel switches are the
+ * only way to opt in. Once enabled they stay conservative:
  *
  * - the build only starts when DSH, dsh-mesh, or a bundled plugin (xl) really
  *   changed compared with the most recent finished build;
@@ -20,10 +21,19 @@
 
 import path from 'node:path'
 
-/** Build default: before sunrise. */
-export const DEFAULT_BUILD_SCHEDULE = Object.freeze({ enabled: true, time: '04:00' })
-/** Auto-upgrade default for a member without its own override. */
-export const DEFAULT_UPGRADE_SCHEDULE = Object.freeze({ enabled: true, time: '06:00' })
+/** Current persisted `schedule.json` format: opt-in clocks. */
+export const SCHEDULE_FORMAT = 3
+/** Build default: before sunrise, disabled until the switch is turned on. */
+export const DEFAULT_BUILD_SCHEDULE = Object.freeze({ enabled: false, time: '04:00' })
+/** Auto-upgrade default for a member without its own override: disabled. */
+export const DEFAULT_UPGRADE_SCHEDULE = Object.freeze({ enabled: false, time: '06:00' })
+
+/**
+ * Values format 1/2 persisted even when nobody had touched the panel.
+ * Used only by the migration; never as a live default.
+ */
+const LEGACY_BUILD_SCHEDULE = Object.freeze({ enabled: true, time: '04:00' })
+const LEGACY_UPGRADE_SCHEDULE = Object.freeze({ enabled: true, time: '06:00' })
 
 /** A clock value used by the panel and the scheduler. */
 export function parseClock(value) {
@@ -85,6 +95,29 @@ export function normalizeSchedules(value) {
     upgrade: normalizeUpgradeSchedule(source.upgrade),
     upgrades,
   }
+}
+
+/**
+ * Normalize a schedule read from disk and migrate legacy opt-out files.
+ *
+ * Formats 1 and 2 wrote `enabled: true` at the old default clocks even when
+ * nobody had ever touched the panel. On upgrade, an entry that still exactly
+ * matches that old default is switched off; a user-chosen time, an explicit
+ * off, and every per-member override are preserved.
+ * @param {unknown} value raw persisted schedule.
+ * @returns {{build: {enabled: boolean, time: string}, upgrade: {enabled: boolean, time: string}, upgrades: Record<string, {enabled: boolean, time: string}>}} normalized schedules.
+ */
+export function migrateSchedules(value) {
+  const schedule = normalizeSchedules(value)
+  const format = value !== null && typeof value === 'object' ? value.format : undefined
+  if (format === SCHEDULE_FORMAT) return schedule
+  if (schedule.build.enabled && schedule.build.time === LEGACY_BUILD_SCHEDULE.time) {
+    schedule.build = { ...schedule.build, enabled: false }
+  }
+  if (schedule.upgrade.enabled && schedule.upgrade.time === LEGACY_UPGRADE_SCHEDULE.time) {
+    schedule.upgrade = { ...schedule.upgrade, enabled: false }
+  }
+  return schedule
 }
 
 /**

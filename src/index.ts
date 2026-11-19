@@ -40,7 +40,8 @@ export async function apply(ctx: any, config: any = {}) {
     service,
     file: scheduleFile(dataDirectory()),
     // Auto-upgrade is configured per member; the scheduler needs the current
-    // ids to apply the default 06:00 entry to members without an override.
+    // ids to apply the default 06:00 entry (off until enabled) to members
+    // without an override.
     members: async () => {
       const snapshot = await service.members()
       return [snapshot.local?.id, ...snapshot.members.map((member: { id: string }) => member.id)].filter((id): id is string => typeof id === 'string' && id !== '')

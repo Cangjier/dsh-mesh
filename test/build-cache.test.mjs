@@ -2,11 +2,16 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, statSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { archivePackage, materializeApp, patchBundleFingerprint, runWebBuild } from '../code/build/engine.mjs'
 import { createJob, runJob } from '../code/build/job.mjs'
+import { sevenZipAssetPath } from '../code/shared/sevenzip.mjs'
+
+/** The checkout root: the bundled 7-Zip binary lives under code/gate/assets. */
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 import { createTarGz } from '../code/build/archive.mjs'
 import {
   appCacheDir,
@@ -220,17 +225,32 @@ test('createTarGz produces a multi-member gzip tar with patched modes', async ()
   }
 })
 
-test('archivePackage writes a plain tar.gz for a Linux target', async () => {
+test('archivePackage writes a 7z archive with the bundled binary', async (t) => {
+  if (process.platform !== 'linux' || process.arch !== 'x64') {
+    t.skip('the bundled binary used here is linux-x64')
+    return
+  }
   const root = await tempDir()
   try {
     const pkg = path.join(root, 'pkg')
     await write(path.join(pkg, 'index.html'), '<!doctype html>')
     await write(path.join(pkg, 'install.sh'), '#!/bin/sh\n')
-    const archive = await archivePackage(pkg, 'linux-x64', { log: () => {}, threads: 2 })
-    assert.equal(archive, `${pkg}.tar.gz`)
-    const listing = execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' })
-    assert.match(listing, /pkg\/install\.sh/u)
-    assert.equal(existsSync(`${pkg}.tar.gz.tar`), false)
+    await write(path.join(pkg, 'bin', 'tool'), '#!/bin/sh\n')
+    const archive = await archivePackage(pkg, 'linux-x64', {
+      log: () => {},
+      threads: 2,
+      repositoryRoot: REPO_ROOT,
+    })
+    assert.equal(archive, `${pkg}.7z`)
+    // The gate's own static asset is the extractor the deploy uses.
+    const out = path.join(root, 'out')
+    await mkdir(out)
+    execFileSync(sevenZipAssetPath(REPO_ROOT, 'linux', 'x64'), ['x', '-y', '-bd', `-o${out}`, archive])
+    assert.equal(await readFile(path.join(out, 'pkg', 'install.sh'), 'utf8'), '#!/bin/sh\n')
+    assert.equal(existsSync(`${pkg}.7z.tar`), false)
+    const legacy = await archivePackage(pkg, 'linux-x64', { format: 'legacy', log: () => {}, threads: 2 })
+    assert.equal(legacy, `${pkg}.tar.gz`)
+    assert.match(execFileSync('tar', ['-tzf', legacy], { encoding: 'utf8' }), /pkg\/install\.sh/u)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -261,6 +281,7 @@ test('runJob packages a web-only target and settles its state', async () => {
       build: [process.execPath, 'make.mjs'],
       install: null,
       prebuild: false,
+      archiveFormat: 'legacy',
       full: false,
       smoke: false,
       publish: false,

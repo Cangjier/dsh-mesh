@@ -1,0 +1,35 @@
+{
+  "format": 1,
+  "name": "7z",
+  "version": "25.01",
+  "generatedAt": "2026-11-19T15:41:00.000000+00:00",
+  "assets": [
+    {
+      "os": "linux",
+      "arch": "x64",
+      "kind": "binary",
+      "file": "7zz-linux-x64",
+      "bytes": 3759224,
+      "sha256": "5ef56fbef44a9b618036a90039d4a709a18e0950d7939112114f5c43674c5422",
+      "contentType": "application/octet-stream"
+    },
+    {
+      "os": "linux",
+      "arch": "arm64",
+      "kind": "binary",
+      "file": "7zz-linux-arm64",
+      "bytes": 3117816,
+      "sha256": "17595ca8613132898c870558c018c4ab4b89f1bda5e23d227ee7925062d5728e",
+      "contentType": "application/octet-stream"
+    },
+    {
+      "os": "windows",
+      "arch": "x64",
+      "kind": "binary",
+      "file": "7za-windows-x64.exe",
+      "bytes": 1334784,
+      "sha256": "574bb90d17732f3cc4145fd4ba12d8f29b9d63400881c0e6fe3110c88b0485de",
+      "contentType": "application/octet-stream"
+    }
+  ]
+}

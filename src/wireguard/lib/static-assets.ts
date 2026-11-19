@@ -13,6 +13,7 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const CONTENT_TYPES = new Map([
   ['.exe', 'application/vnd.microsoft.portable-executable'],
   ['.msi', 'application/x-msi'],
+  ['.7z', 'application/x-7z-compressed'],
   ['.zip', 'application/zip'],
   ['.gz', 'application/gzip'],
   ['.tgz', 'application/gzip'],
@@ -64,7 +65,8 @@ function findAssetRoot(): string {
   for (const candidate of candidates) {
     if (existsSync(path.join(candidate, 'wireguard', 'manifest.json'))
       || existsSync(path.join(candidate, 'openssh', 'manifest.json'))
-      || existsSync(path.join(candidate, 'hysteria2', 'manifest.json'))) {
+      || existsSync(path.join(candidate, 'hysteria2', 'manifest.json'))
+      || existsSync(path.join(candidate, '7z', 'manifest.json'))) {
       return candidate;
     }
   }

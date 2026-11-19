@@ -73,7 +73,7 @@
 「升级进度」弹窗里有「取消升级」按钮；接口是 `POST /api/dsh-mesh/deploy/cancel`，body `{"id":"deploy-…"}`。取消只在任务还是 `queued`/`running`、并且还没进入 `activate` 时可用，服务端会：
 
 1. 停 runner：`systemd-run` 启动的就 `systemctl stop dsh-mesh-job-<id without deploy->`，否则向 runner 的进程组发 `SIGTERM`（不退再 `SIGKILL`）；
-2. 清理这个任务留下的临时文件：成员上的 `<root>/.staging/<release>`、`/tmp/dsh-mesh-release-<sha12>`、`/tmp/dsh-mesh-<sha12>.tar.gz` 和临时凭据副本；本机升级还会删 job 目录里的 `stage/`、`tools/`；
+2. 清理这个任务留下的临时文件：成员上的 `<root>/.staging/<release>`、`/tmp/dsh-mesh-release-<sha12>`、`/tmp/dsh-mesh-<sha12>.7z`、`/tmp/dsh-mesh-<sha12>-7z.bin` 和临时凭据副本；本机升级还会删 job 目录里的 `stage/`、`tools/`；
 3. 把 `job.json` 落成 `cancelled`，`deploy.log` 里记一行「cancel requested by user / cancelled by user」，面板显示「已取消」和清理结果。
 
 清理不动 `releases/`、指针和 `shared/`，所以成员保持在原版本，重试升级会从干净状态开始。已经进入切换并重启服务的任务会拒绝取消，让它跑完；失败时自动回滚或点「回滚到上一版」。手工兜底仍然可以先 `systemctl stop dsh-mesh-job-<id>`，再按上面的路径删除临时文件。

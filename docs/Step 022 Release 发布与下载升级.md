@@ -118,7 +118,7 @@
   "buildStamp": "20261118C",
   "assets": {
     "linux-x64": {
-      "archive": "dsh-mesh-0.2.2-rc.4-20261118C-linux-x64.tar.gz",
+      "archive": "dsh-mesh-0.2.2-rc.4-20261118C-linux-x64.7z",
       "bytes": 319815680,
       "sha256": "…",
       "github": { "url": "https://github.com/…/releases/download/latest/…" },

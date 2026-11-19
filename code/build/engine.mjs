@@ -18,7 +18,8 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { archiveThreads, createTarGz } from './archive.mjs'
+import { archiveThreads, createSevenZip, createTarGz } from './archive.mjs'
+import { ensureSevenZipBinary, hostSevenZipPath, SEVEN_ZIP_SUFFIX } from '../shared/sevenzip.mjs'
 import {
   appCacheDir,
   appCacheMetaFile,
@@ -948,14 +949,13 @@ export async function assembleWebPackage(options) {
 }
 
 /**
- * Create a `.tar.gz` for Linux or a `.zip` for Windows.
+ * Create a `.7z` package (or a legacy `.tar.gz`/`.zip` one).
  *
- * Linux archives are written by {@link createTarGz}: the tar is created
- * uncompressed, header modes are patched while streaming (Windows' bsdtar
- * writes every entry as 0666, which would strip the executable bit from
- * `install.sh` and the bundled node), and independent chunks are compressed on
- * worker threads. That replaces both the single-threaded `tar -czf` and the
- * old gunzip-patch-regzip pass that held the whole tree in memory.
+ * The default is 7-Zip: LZMA2 with the bundled binary under
+ * `code/gate/assets/7z`, multithreaded, and much smaller than the old
+ * gzip/zip archives. `format: 'legacy'` keeps the old container for the
+ * one-time transition on a host whose installed code does not know 7-Zip yet;
+ * the tar path still streams the header-mode patch and parallel gzip.
  * @param {string} packageDir directory to archive.
  * @param {string} target target descriptor.
  * @param {{log?: (line: string) => void, threads?: number, env?: NodeJS.ProcessEnv}} [options] dependencies.
@@ -963,14 +963,46 @@ export async function assembleWebPackage(options) {
  */
 export async function archivePackage(packageDir, target, options = {}) {
   const { os: targetOs } = parseTarget(target)
-  const archive = targetOs === 'win'
-    ? `${packageDir}.zip`
-    : `${packageDir}.tar.gz`
+  const requested = String(options.format ?? process.env.DSH_MESH_ARCHIVE_FORMAT ?? '7z').trim().toLowerCase()
+  // `legacy` is the one-time transition format: a host whose installed code
+  // predates the 7z switch can still extract it, and the package it installs
+  // contains the 7z-aware code.
+  const format = requested === 'legacy'
+    ? (targetOs === 'win' ? 'zip' : 'tar.gz')
+    : requested
+  if (format !== '7z' && format !== 'zip' && format !== 'tar.gz' && format !== 'tgz') {
+    throw new Error(`unknown archive format: ${requested} (use 7z, legacy, tar.gz, or zip)`)
+  }
+  if (format !== '7z' && format !== 'zip' && targetOs === 'win') {
+    throw new Error(`a Windows package must be 7z or zip, not ${format}`)
+  }
+  const extension = format === '7z' ? SEVEN_ZIP_SUFFIX : format === 'zip' ? '.zip' : '.tar.gz'
+  const archive = `${packageDir}${extension}`
   await rm(archive, { force: true })
   // Compressing a ~1 GiB package tree is one of the long silent steps; the
   // marker keeps the panel moving and says which target owns the time.
   options.log?.(`archiving ${target}`)
-  if (targetOs === 'win') {
+  if (format === '7z') {
+    if (typeof options.repositoryRoot !== 'string' || options.repositoryRoot === '') {
+      throw new Error('7z archiving needs repositoryRoot: the bundled 7z binary lives under code/gate/assets/7z')
+    }
+    try {
+      const binary = await ensureSevenZipBinary(hostSevenZipPath(options.repositoryRoot))
+      const started = Date.now()
+      const result = await createSevenZip({
+        packageDir,
+        destination: archive,
+        binary,
+        threads: options.threads ?? archiveThreads({ env: options.env }),
+        log: options.log,
+      })
+      options.log?.(`archived ${target}: ${(result.bytes / 1e6).toFixed(1)} MB 7z in ${Math.max(1, Math.round((Date.now() - started) / 1000))}s`)
+      return archive
+    } catch (error) {
+      throw new Error(`cannot archive ${packageDir}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  if (format === 'zip') {
     let result
     if (process.platform !== 'win32') {
       // GNU tar cannot create a zip; a Linux build host needs the `zip` tool.

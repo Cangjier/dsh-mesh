@@ -159,8 +159,8 @@ linux-arm64  可选
 包名由四段组成：
 
 ```text
-dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>.(tar.gz|zip)
-例：dsh-mesh-0.2.2-rc.3-20261115A-linux-x64.tar.gz
+dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>.7z
+例：dsh-mesh-0.2.2-rc.3-20261115A-linux-x64.7z
 ```
 
 - `<dshVersion>` **必须**等于 DSH 自己的版本（`apps/cli/package.json` / npm 包版本），原样写入，禁止改名或加后缀。`manifest.version` 也保持这个值。
@@ -168,7 +168,7 @@ dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>.(tar.gz|zip)
 - `manifest.buildStamp` 记录这个构建号；`manifest.version` 仍是 DSH 版本。
 - 面板编译在网关分配构建号，文件是 `<dataDir>/build-stamp.json`，同时扫描 `~/.dsh/packages` 里已有的同日包名取最大字母，所以删包也不会复用字母。
 - 命令行编译用 `--build-stamp 20261115A` 显式指定；不指定时使用 `~/.dsh/mesh/build-stamp.json` 分配。
-- 包内目录名与归档名相同（归档名再加 `.tar.gz`/`.zip`），`findLatestPackage`、上传校验和面板列表都不依赖固定版本段。
+- 包内目录名与归档名相同（归档名再加 `.7z`），`findLatestPackage`、上传校验和面板列表都不依赖固定版本段；旧的 `.tar.gz`/`.zip` 也仍被识别。详见 [Step 024](Step%20024%207z%20包格式与网关静态资源.md)。
 
 ### 完整包（默认）
 
@@ -276,10 +276,13 @@ node build/tools/package-prebuilt.mjs --targets linux-x64,win-x64
 
 ### 归档
 
-- Linux：`tar -czf` → `.tar.gz`
-- Windows：`tar -a -c -f` → `.zip`（bsdtar）
+- 默认：`7z a -t7z -mx=5 -mmt=<线程数> -bd -snl` → `.7z`（两个平台同一个容器）
+- `--archive-format legacy`：Linux `tar -czf` → `.tar.gz`，Windows `tar -a -c -f` → `.zip`（旧容器，迁移用）
+- `--archive-format tar.gz|zip`：显式指定
 
-输出在任务目录的 `dist/`，同名 `.tar.gz`/`.zip`。
+7-Zip 二进制在 `code/gate/assets/7z/`（gate 静态资源，见 [Step 024](Step%20024%207z%20包格式与网关静态资源.md)），构建机与部署目标都用它；`.7z` 不携带 Unix mode，解压端会显式 `chmod` 脚本、node 和包内 7zz。
+
+输出在任务目录的 `dist/`，同名 `.7z`。
 
 ## 缓存与资源
 
@@ -297,7 +300,7 @@ node build/tools/package-prebuilt.mjs --targets linux-x64,win-x64
 
 ## 构建加速
 
-一次 `master` 全量构建（2026-11-19，Windows 编译机 4C/8T、32 GB，DSH 0.2.2-rc.5）的实际耗时：
+下面是一次 `master` 全量构建（2026-11-19，Windows 编译机 4C/8T、32 GB，DSH 0.2.2-rc.5）在**改造前**的实际耗时，表中「归档」两行也正是后来被 7z 替换掉的路径：
 
 | 阶段 | 耗时 | 说明 |
 |---|---|---|
@@ -319,7 +322,7 @@ node build/tools/package-prebuilt.mjs --targets linux-x64,win-x64
 1. **前端构建缓存**（`cache/web`）：key = 源码 tarball 的 SHA-256 + 覆盖层内容 + `recipes.json` + prepare/install/build 命令 + 平台 + Node 版本。命中时整段 `pnpm install`、两个 `tsc`、`tsdown`、`vite` 全部跳过。源码 tarball 换了、覆盖层改了或命令改了都会得到新 key，不会拿到旧壳。
 2. **目标 app 缓存**（`cache/app`）：`npm install @deepseek-ai/dsh@<ver> --os/--cpu` + 两个客户端 bundle 补丁只对「版本 + 目标 + 补丁脚本内容」生效，装一次就存下来。之后打包时用硬链接克隆（同盘；20k 文件实测约 8 秒，约 100k 文件的真实 app 树几十秒；跨盘自动退化成复制），归档、冒烟、删任务都不会改到缓存。补丁脚本改了会判缓存过期并重装。包 `manifest.json` 里 `app.source` 记录这次是 `cache` 还是 `npm`。
 3. **app 安装与 Web 构建重叠**：版本号在解压后就已知，两个目标的 app 安装先启动，与 `tsc`/`vite` 并行；冷缓存时省掉「先等构建、再等安装」的串行等待。
-4. **归档并行压缩**：Linux 包不再 `tar -czf`，而是 `tar -cf` 后按 512 字节块流式改写 header mode（替掉整包 gunzip + level 9 重压），再把 tar 切成独立块用 worker 线程并行 gzip。输出是多个 gzip member 顺序拼接，GNU tar 和 Windows bsdtar 都能正常解压（测试里用 GNU tar 解包校验）。8 线程 Windows 编译机上 293 MB 不可压数据实测：新路径 5.4 秒，旧 `tar -czf` 单线程 11.5 秒，且旧路径之后还要整包 gunzip + level 9 重压（1.2 GB 包的归档原来是 2 分 16 秒）。Windows 的 zip 仍是 bsdtar，单线程。
+4. **7z 归档**：两个平台都改成 `.7z`（LZMA2、`-mmt` 多线程），不再有 `tar -czf` 之后的整包 gunzip + level 9 重压，也不再分别维护 tar.gz/zip；压缩比更好、Gitee 分片更少。7-Zip 二进制作为 gate 静态资源随包走，解压时由网关上传到目标。`--archive-format legacy` 仍能出旧的 tar.gz/zip（迁移用），旧的并行 gzip 路径保留在 `code/build/archive.mjs`。
 
 **并行打包**：`linux-x64` 和 `win-x64` 现在可以同时装配。默认并行度按 CPU/内存自动选（内存 < 6 GB 或核数太少时为 1，即保持原来的串行）；`--concurrency N` 或 `DSH_MESH_CONCURRENCY=N` 可覆盖，`--concurrency 1` 就是旧行为。状态文件由每个 job 一条写队列串行化，进度只增不减。
 
@@ -357,6 +360,10 @@ created → running(prepare → apply → build → package) → done
 | `jobId` | needs-fix 后固化工作树并继续 |
 | `buildStamp` | 按日构建号；默认由面板/CLI 分配 |
 | `keepDist` | 清理旧 build 时保留 dist |
+| `archiveFormat` | `7z`（默认）/ `legacy` / `tar.gz` / `zip`；CLI `--archive-format`，环境变量 `DSH_MESH_ARCHIVE_FORMAT` |
+| `archiveThreads` | 7z/gzip 线程数；CLI `--archive-threads`，环境变量 `DSH_MESH_ARCHIVE_THREADS` |
+| `concurrency` | 同时装配的目标数；CLI `--concurrency`，环境变量 `DSH_MESH_CONCURRENCY` |
+| `cache` / `refreshAppCache` / `refreshWebCache` | 前端与 app 缓存开关（见「构建加速」） |
 
 面板「成员」页只负责成员/组网，不再有构建页。
 

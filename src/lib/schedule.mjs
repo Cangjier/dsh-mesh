@@ -148,13 +148,14 @@ export function nextRunAt(at, time) {
 /**
  * Version/build stamp/os encoded in a deployed archive name.
  *
- * `dsh-mesh-<version>-<YYYYMMDD><Letter>-<os>-<arch>.(tar.gz|zip)`.
+ * `dsh-mesh-<version>-<YYYYMMDD><Letter>-<os>-<arch>.7z` (old packages may
+ * still be `.tar.gz`/`.zip`).
  * @param {string} name archive file name.
  * @returns {{version: string, buildStamp: string, os: 'linux'|'windows'|null}|null} parsed name.
  */
 export function packageInfo(name) {
   if (typeof name !== 'string') return null
-  const match = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(?:x64|arm64)\.(?:tar\.gz|tgz|zip)$/u.exec(name)
+  const match = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(?:x64|arm64)\.(?:7z|tar\.gz|tgz|zip)$/u.exec(name)
   if (match === null) return null
   return {
     version: match[1],

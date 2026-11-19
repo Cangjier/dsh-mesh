@@ -380,7 +380,7 @@ export function registerTools(ctx, toolsCtx, service) {
       '解包 → 用仓库的 gate/、shared/、config/、code/*、根脚本和 plugins/dsh-mesh/ 覆盖包内对应文件，',
       'app/、web/、runtime/node/ 原样保留 → 重新压缩并把 .sha256 边车更新掉。',
       '适合只改了网关或插件、不想重新下载依赖和 Node 运行时的场景；耗时约几十秒到两分钟。',
-      'package 可以是 ~/.dsh/packages 里的文件名，也可以是绝对路径；.tar.gz/.tgz 与 .zip 都支持。',
+      'package 可以是 ~/.dsh/packages 里的文件名，也可以是绝对路径；.7z 与旧的 .tar.gz/.tgz/.zip 都支持。',
     ].join('\n'),
     parameters: {
       type: 'object',

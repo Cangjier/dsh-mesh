@@ -350,6 +350,40 @@ async function gzipSingle(source, destination, patchModes) {
 }
 
 /**
+ * Turn one package directory into a 7-Zip archive.
+ *
+ * LZMA2 compresses the ~1.2 GiB package tree far better than deflate, and the
+ * encoder is multithreaded (`-mmt`), so this replaces both the gzip/zip
+ * creation and the old single-threaded post-passes. `-snl` stores symlinks as
+ * symlinks; without it 7-Zip follows them and a Linux package would ship the
+ * target's contents instead of the link (npm trees on Linux use `.bin` links).
+ * @param {{packageDir: string, destination: string, binary: string, level?: number, threads?: number, log?: (line: string) => void}} options input.
+ * @returns {Promise<{bytes: number}>} outcome.
+ */
+export async function createSevenZip(options) {
+  const log = options.log ?? (() => {})
+  const level = Number.isSafeInteger(options.level) ? options.level : Number(process.env.DSH_MESH_7Z_LEVEL ?? 0) || 5
+  const threads = Math.max(1, Number(options.threads) || 1)
+  await rm(options.destination, { force: true })
+  const args = [
+    'a',
+    '-t7z',
+    `-mx=${Math.max(0, Math.min(9, level))}`,
+    `-mmt=${threads}`,
+    '-bd',
+    '-snl',
+    options.destination,
+    path.basename(options.packageDir),
+  ]
+  log(`7z ${args.slice(0, 5).join(' ')} ${path.basename(options.destination)}`)
+  const result = await run(options.binary, args, { cwd: path.dirname(options.packageDir), log })
+  if (!result.ok) throw new Error(`7z could not create ${options.destination}: ${result.tail.join('\n')}`)
+  const info = await stat(options.destination)
+  if (!info.isFile() || info.size <= 0) throw new Error(`7z created no usable archive: ${options.destination}`)
+  return { bytes: info.size }
+}
+
+/**
  * Turn one package directory into a gzip tar, parallel when it is worth it.
  * @param {{packageDir: string, destination: string, patchModes?: boolean, threads?: number, log?: (line: string) => void}} options input.
  * @returns {Promise<{members: number, bytes: number}>} outcome.

@@ -6,6 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { repackArchive, repackDirectory } from '../code/build/repack.mjs'
+import { sevenZipAssetPath } from '../code/shared/sevenzip.mjs'
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -56,6 +57,32 @@ test('repacking an archive rewrites it in place and updates the checksum', async
     assert.equal(app, 'the dsh app payload')
     const sidecar = readFileSync(`${archive}.sha256`, 'utf8')
     assert.match(sidecar, new RegExp(`^${summary.sha256}  `, 'u'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('repacking a 7z archive keeps the app payload and rewrites the gate', async (t) => {
+  if (process.platform !== 'linux' || process.arch !== 'x64') {
+    t.skip('the bundled binary used here is linux-x64')
+    return
+  }
+  const root = mkdtempSync(path.join(os.tmpdir(), 'dsh-repack-'))
+  try {
+    const dir = fixture(root)
+    const archive = path.join(root, 'dsh-mesh-0.0.1-linux-x64.7z')
+    const seven = sevenZipAssetPath(repositoryRoot, 'linux', 'x64')
+    execFileSync(seven, ['a', '-t7z', '-mx=1', '-bd', '-snl', archive, path.basename(dir)], { cwd: root, stdio: 'ignore' })
+    const summary = await repackArchive(archive, { repositoryRoot })
+    assert.match(summary.sha256, /^[0-9a-f]{64}$/u)
+    assert.ok(summary.bytes > 0)
+    const out = path.join(root, 'out')
+    mkdirSync(out, { recursive: true })
+    execFileSync(seven, ['x', '-y', '-bd', `-o${out}`, archive], { stdio: 'ignore' })
+    const unpacked = path.join(out, path.basename(dir))
+    assert.equal(readFileSync(path.join(unpacked, 'app', 'keep.txt'), 'utf8'), 'the dsh app payload')
+    assert.ok(readFileSync(path.join(unpacked, 'gate', 'server.mjs'), 'utf8').includes('MemberService'))
+    assert.match(readFileSync(`${archive}.sha256`, 'utf8'), new RegExp(`^${summary.sha256}  `, 'u'))
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

@@ -13,7 +13,7 @@
  *     listener is exposed to the internet;
  *   - the deployment password is required in `x-dsh-gate-token`, so a peer
  *     cannot use it as a free file drop;
- *   - only `.zip`, `.tar.gz`, and `.tgz` names without path separators, and
+ *   - only `.7z`, `.zip`, `.tar.gz`, and `.tgz` names without path separators, and
  *     the body is streamed to a `.part` file and renamed only after its
  *     SHA-256 matches (when the caller sends one).
  *
@@ -71,8 +71,8 @@ export function packageName(name) {
   if (value === '' || value !== path.basename(value) || value.startsWith('.')) {
     throw new Error('name must be a plain file name')
   }
-  if (!/^[A-Za-z0-9][A-Za-z0-9._+-]*\.(?:zip|tar\.gz|tgz)$/iu.test(value)) {
-    throw new Error('name must end in .zip, .tar.gz, or .tgz')
+  if (!/^[A-Za-z0-9][A-Za-z0-9._+-]*\.(?:7z|zip|tar\.gz|tgz)$/iu.test(value)) {
+    throw new Error('name must end in .7z, .zip, .tar.gz, or .tgz')
   }
   return value
 }

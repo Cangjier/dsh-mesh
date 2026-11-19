@@ -275,8 +275,8 @@ gate 永远最后重启。服务清单、release、安装根、retention、账�
 ### 4.4 示例
 
 ```text
-deploy { "host": "10.66.66.3", "package": "dsh-mesh-0.2.2-rc.1-linux-x64.tar.gz" }
-deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-linux-x64.tar.gz" }
+deploy { "host": "10.66.66.3", "package": "dsh-mesh-0.2.2-rc.1-linux-x64.7z" }
+deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-linux-x64.7z" }
 ```
 
 ### 4.5 前置条件

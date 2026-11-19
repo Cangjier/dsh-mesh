@@ -34,6 +34,7 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const CONTENT_TYPES = new Map([
   ['.exe', 'application/vnd.microsoft.portable-executable'],
   ['.msi', 'application/x-msi'],
+  ['.7z', 'application/x-7z-compressed'],
   ['.zip', 'application/zip'],
   ['.gz', 'application/gzip'],
   ['.tgz', 'application/gzip'],

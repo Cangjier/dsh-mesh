@@ -6,6 +6,8 @@ import { promisify } from 'node:util'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { sevenZipAssetPath } from '../code/shared/sevenzip.mjs'
 import {
   buildDeployPlan,
   buildLinuxActivateScript,
@@ -110,6 +112,54 @@ test('plan separates prepare from activation and starts the gateway last', async
     assert.ok(summary.steps.some(step => step.includes('newest 2 releases')))
     assert.ok(summary.steps.at(-1).includes('previous'))
     assert.equal(summary.steps.at(-3), 'health check http://127.0.0.1:80/__gate/health')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a .7z package plan carries the bundled 7-Zip for its target', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-7z-'))
+  const repositoryRoot = fileURLToPath(new URL('..', import.meta.url))
+  try {
+    const packagePath = path.join(dir, 'dsh-mesh-1.0.0-20261119A-linux-x64.7z')
+    await writeFile(packagePath, 'fake package')
+    const plan = await buildDeployPlan({
+      host: '10.66.66.3',
+      os: 'linux',
+      package: packagePath,
+      appRoot: '/opt/dsh-mesh',
+      repositoryRoot,
+      release: '20261119-7z',
+    })
+    assert.equal(plan.remotePackage.endsWith('.7z'), true)
+    assert.equal(plan.sevenZip.local, sevenZipAssetPath(repositoryRoot, 'linux', 'x64'))
+    assert.match(plan.sevenZip.remote, /-7z\.bin$/u)
+    const script = buildLinuxPrepareScript(plan)
+    assert.match(script, /case "\$PACKAGE" in/u)
+    assert.match(script, /\*\.7z\)/u)
+    assert.match(script, /SEVENZIP='\/tmp\/dsh-mesh-[a-f0-9]+-7z\.bin'/u)
+    const windows = buildWindowsPrepareScript({
+      ...plan,
+      layoutRoot: 'C:\\dsh',
+      remotePackage: 'C:\\dsh\\p.7z',
+      release: '20261119-7z',
+      sevenZip: { file: '7za-windows-x64.exe', local: 'x', remote: 'C:\\dsh\\7z.exe' },
+    })
+    assert.match(windows, /\$Package -like '\*\.7z'/u)
+
+    // A legacy archive keeps the tar path and needs no 7-Zip upload.
+    const legacyPath = path.join(dir, 'dsh-mesh-1.0.0-20261119A-linux-x64.tar.gz')
+    await writeFile(legacyPath, 'fake package')
+    const legacy = await buildDeployPlan({
+      host: '10.66.66.3',
+      os: 'linux',
+      package: legacyPath,
+      appRoot: '/opt/dsh-mesh',
+      repositoryRoot,
+      release: '20261119-legacy',
+    })
+    assert.equal(legacy.sevenZip, null)
+    assert.match(buildLinuxPrepareScript(legacy), /tar -xzf "\$PACKAGE"/u)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

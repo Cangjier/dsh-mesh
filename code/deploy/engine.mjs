@@ -27,6 +27,7 @@ import { isIP } from 'node:net'
 import { homedir, hostname, tmpdir } from 'node:os'
 import path from 'node:path'
 import { EgressProxy } from '../shared/egress.mjs'
+import { resolveSevenZipAssetPath, sevenZipAssetFile, SEVEN_ZIP_SUFFIX } from '../shared/sevenzip.mjs'
 
 /** The prepare script emits one extraction marker per this many entries. */
 const EXTRACT_CHECKPOINT = 1000
@@ -567,13 +568,16 @@ export function normalizeServices(input, os) {
  */
 export async function findLatestPackage(repositoryRoot, os) {
   const dist = path.join(repositoryRoot, 'dist')
-  const suffix = os === 'linux' ? '.tar.gz' : '.zip'
+  // New packages are .7z; old .tar.gz/.zip packages stay discoverable so a
+  // checkout that still holds one can deploy it without a rebuild.
+  const suffixes = os === 'linux' ? ['.7z', '.tar.gz', '.tgz', '.zip'] : ['.7z', '.zip']
   const prefix = `dsh-mesh-`
-  const marker = `-${os === 'linux' ? 'linux' : 'win'}-x64`
+  const marker = `-${os === 'linux' ? 'linux' : 'win'}-`
   const entries = await readdir(dist).catch(() => [])
   const candidates = []
   for (const entry of entries) {
-    if (!entry.startsWith(prefix) || !entry.endsWith(suffix) || !entry.includes(marker)) continue
+    if (!entry.startsWith(prefix) || !entry.includes(marker)) continue
+    if (!suffixes.some(suffix => entry.endsWith(suffix))) continue
     const file = path.join(dist, entry)
     const info = await stat(file).catch(() => null)
     if (info?.isFile()) candidates.push({ file, mtimeMs: info.mtimeMs })
@@ -614,14 +618,15 @@ export function layoutRootFor(appRoot, os) {
  * `path.extname('foo.tar.gz')` is `.gz`, which still extracts correctly but
  * makes logs and stale-package cleanup harder to read. Keep the full suffix.
  * @param {string} file archive path or name.
- * @returns {string} `.tar.gz`, `.tgz`, `.zip`, or the last extension.
+ * @returns {string} `.7z`, `.tar.gz`, `.tgz`, `.zip`, or the last extension.
  */
 function archiveSuffix(file) {
   const name = path.basename(String(file ?? ''))
+  if (name.toLowerCase().endsWith(SEVEN_ZIP_SUFFIX)) return SEVEN_ZIP_SUFFIX
   if (name.endsWith('.tar.gz')) return '.tar.gz'
   if (name.endsWith('.tgz')) return '.tgz'
   const extension = path.extname(name)
-  return extension === '' ? '.tar.gz' : extension
+  return extension === '' ? SEVEN_ZIP_SUFFIX : extension
 }
 
 /**
@@ -718,6 +723,23 @@ export async function buildDeployPlan(options) {
   }
   const appRoot = normalizeInstallRoot(options.appRoot) || DEFAULT_APP_ROOT[os]
   const layoutRoot = layoutRootFor(appRoot, os)
+  // A .7z package needs a 7-Zip binary on the target before the prepare script
+  // can extract it. The gateway uploads the bundled copy (code/gate/assets/7z)
+  // next to the package; the prepare script only consumes it.
+  const archiveName = archiveNameFor(packagePath, os)
+  const packageArch = /-(arm64|x64)\.(?:7z|tgz|tar\.gz|zip)$/u.exec(archiveName)?.[1] ?? 'x64'
+  const wantsSevenZip = archiveName.toLowerCase().endsWith(SEVEN_ZIP_SUFFIX)
+  const sevenZip = wantsSevenZip
+    ? {
+      file: sevenZipAssetFile(os, packageArch),
+      // The plugin inside an installed release does not own `code/gate`; the
+      // resolver checks the release's `gate/assets/7z` as well.
+      local: resolveSevenZipAssetPath(repositoryRoot, os, packageArch),
+      remote: os === 'linux'
+        ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}-7z.bin`
+        : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}-7z.exe`,
+    }
+    : null
   const services = normalizeServices(options.services, os)
   const scope = options.scope === 'dsh' ? 'dsh' : 'all'
   const gatePort = String(options.gatePort ?? '80')
@@ -785,6 +807,8 @@ export async function buildDeployPlan(options) {
     // (call_member, the panel's conversation list), so the deploy installs and
     // starts it instead of leaving it to a manual script.
     interop: options.interop === false || process.env.DSH_DEPLOY_INTEROP === '0' ? null : interop,
+    // The 7-Zip binary uploaded for a .7z package (null for legacy archives).
+    sevenZip,
     // Named by content, not by release, so a retried deploy of the same package
     // reuses the upload instead of pushing hundreds of megabytes again.
     remotePackage: onTarget !== null
@@ -940,21 +964,50 @@ PACKAGE=${sh(plan.remotePackage)}
 rm -rf "$STAGE"
 mkdir -p "$STAGE" "$LAYOUT_ROOT/releases"
 # One marker per ${String(EXTRACT_CHECKPOINT)} extracted entries: the deploy engine turns
-# these into the panel's extraction progress.
-printf 'DSH-MESH-EXTRACT-TOTAL %s\\n' "$(tar -tzf "$PACKAGE" | wc -l | tr -d ' ')"
-tar -xzf "$PACKAGE" -C "$STAGE" --strip-components=1 -v | {
-  extracted=0
-  while IFS= read -r _entry; do
-    extracted=$((extracted + 1))
-    if [ $((extracted % ${String(EXTRACT_CHECKPOINT)})) -eq 0 ]; then printf 'DSH-MESH-EXTRACT %s\\n' "$extracted"; fi
-  done
-}
+# these into the panel's extraction progress. A .7z package is unpacked with
+# the bundled 7-Zip the deploy uploaded; the legacy formats still use tar so a
+# package built before the switch keeps installing.
+case "$PACKAGE" in
+  *.7z)
+    SEVENZIP=${sh(plan.sevenZip?.remote ?? '')}
+    [ -n "$SEVENZIP" ] && [ -f "$SEVENZIP" ] || { echo "7-Zip binary is missing: $SEVENZIP" >&2; exit 1; }
+    chmod +x "$SEVENZIP" 2>/dev/null || true
+    TOTAL=$("$SEVENZIP" l -ba "$PACKAGE" 2>/dev/null | wc -l | tr -d ' ')
+    printf 'DSH-MESH-EXTRACT-TOTAL %s\\n' "$TOTAL"
+    "$SEVENZIP" x -y -bd -o"$STAGE" "$PACKAGE" >/dev/null
+    # 7-Zip keeps the package's own top-level directory; the rest of the deploy
+    # expects the tree to start at the staging root.
+    for inner in "$STAGE"/dsh-mesh-*; do
+      [ -d "$inner" ] || continue
+      [ -f "$inner/manifest.json" ] || continue
+      ( shopt -s dotglob nullglob; mv "$inner"/* "$STAGE"/ )
+      rmdir "$inner" 2>/dev/null || true
+      break
+    done
+    printf 'DSH-MESH-EXTRACT %s\\n' "$TOTAL"
+    ;;
+  *)
+    printf 'DSH-MESH-EXTRACT-TOTAL %s\\n' "$(tar -tzf "$PACKAGE" | wc -l | tr -d ' ')"
+    tar -xzf "$PACKAGE" -C "$STAGE" --strip-components=1 -v | {
+      extracted=0
+      while IFS= read -r _entry; do
+        extracted=$((extracted + 1))
+        if [ $((extracted % ${String(EXTRACT_CHECKPOINT)})) -eq 0 ]; then printf 'DSH-MESH-EXTRACT %s\\n' "$extracted"; fi
+      done
+    }
+    ;;
+esac
 # The archive is 300+ MiB and /tmp is often a small tmpfs; a temp copy is
 # deleted after extraction. A package chosen from the member's own cache is
 # not a temp copy and is kept.
 ${plan.package?.keep === true ? '# keep the package: it was selected from the member\'s own cache' : 'rm -f "$PACKAGE"'}
 chmod +x "$STAGE"/*.sh "$STAGE/dsh-mesh.mjs" 2>/dev/null || true
+# A 7-Zip archive created on Windows carries no Unix mode bits, so every script
+# and the bundled node are made executable explicitly instead of trusting the
+# extraction. The 7-Zip asset itself is needed again by a future deploy.
+find "$STAGE" -type f -name '*.sh' -exec chmod +x {} + 2>/dev/null || true
 chmod +x "$STAGE/runtime/node/bin/node" 2>/dev/null || true
+chmod +x "$STAGE"/code/gate/assets/7z/7zz-* 2>/dev/null || true
 NODE="$STAGE/runtime/node/bin/node"
 [ -x "$NODE" ] || NODE=$(command -v node || true)
 [ -n "$NODE" ] && [ -x "$NODE" ] || { echo "the package has no usable node" >&2; exit 1; }
@@ -1053,8 +1106,15 @@ New-Item -ItemType Directory -Force -Path $LayoutRoot, (Join-Path $LayoutRoot 'r
 if (-not (Test-Path -LiteralPath $Stage)) {
   if (-not (Test-Path -LiteralPath $Package)) { throw "package is missing: $Package" }
   New-Item -ItemType Directory -Force -Path $Stage | Out-Null
-  Expand-Archive -LiteralPath $Package -DestinationPath $Stage -Force
-  if ($LASTEXITCODE -ne 0) { throw 'Expand-Archive failed' }
+  if ($Package -like '*.7z') {
+    $SevenZip = ${ps(plan.sevenZip?.remote ?? '')}
+    if (-not (Test-Path -LiteralPath $SevenZip)) { throw "7-Zip binary is missing: $SevenZip" }
+    & $SevenZip x -y -bd ("-o" + $Stage) $Package | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw '7-Zip extraction failed' }
+  } else {
+    Expand-Archive -LiteralPath $Package -DestinationPath $Stage -Force
+    if ($LASTEXITCODE -ne 0) { throw 'Expand-Archive failed' }
+  }
 }
 $inner = Get-ChildItem -LiteralPath $Stage -Directory | Select-Object -First 1
 if ($inner -and (Test-Path (Join-Path $inner.FullName 'manifest.json'))) {
@@ -1320,6 +1380,36 @@ export class SshRunner {
   }
 
   /**
+   * Count the entries in a remote 7-Zip archive.
+   * @param {string} remote remote archive path.
+   * @param {string} sevenZip remote 7-Zip binary path.
+   * @returns {Promise<number>} entry count.
+   */
+  async sevenZipEntries(remote, sevenZip) {
+    const command = this.plan.os === 'windows'
+      ? `"${sevenZip}" l -ba "${remote}"`
+      : `${sh(sevenZip)} l -ba ${sh(remote)}`
+    const { stdout } = await this.runProcess('ssh', [...this.sshOptions(), this.target(), command])
+    return String(stdout).split(/\r?\n/u).filter(line => line.trim() !== '').length
+  }
+
+  /**
+   * Extract a remote 7-Zip archive.
+   * @param {string} remote remote archive path.
+   * @param {string} target remote directory.
+   * @param {string} sevenZip remote 7-Zip binary path.
+   * @returns {Promise<void>}
+   */
+  async extractSevenZip(remote, target, sevenZip) {
+    if (this.plan.os === 'windows') {
+      await this.runProcess('ssh', [...this.sshOptions(), this.target(), `cmd /c if not exist "${target}" mkdir "${target}"`])
+      await this.runProcess('ssh', [...this.sshOptions(), this.target(), `"${sevenZip}" x -y -bd -o"${target}" "${remote}"`])
+      return
+    }
+    await this.runProcess('ssh', [...this.sshOptions(), this.target(), `mkdir -p ${sh(target)} && ${sh(sevenZip)} x -y -bd -o${sh(target)} ${sh(remote)}`])
+  }
+
+  /**
    * Read a remote file's size, or null when it cannot be read.
    * @param {string} remote remote path.
    * @returns {Promise<number|null>} size in bytes.
@@ -1375,7 +1465,7 @@ export class SshRunner {
     const keep = path.posix.basename(remote)
     const script = [
       `cd ${sh(dir)} 2>/dev/null || exit 0`,
-      'for f in dsh-mesh-*.gz dsh-mesh-*.tar.gz dsh-mesh-*.zip; do',
+      'for f in dsh-mesh-*.7z dsh-mesh-*.gz dsh-mesh-*.tar.gz dsh-mesh-*.zip dsh-mesh-*-7z.bin; do',
       '  [ -e "$f" ] || continue',
       `  [ "$f" = ${sh(keep)} ] && continue`,
       '  rm -f -- "$f"',
@@ -2209,6 +2299,16 @@ export class DeployManager {
           await mark('upload', 'succeeded', `${formatBytes(plan.package.bytes)} · ${uploadSeconds.toFixed(1)}s · ${formatBytes(plan.package.bytes / uploadSeconds)}/s`)
         }
       }
+      // A .7z package cannot be unpacked by the old tar/Expand-Archive path, so
+      // the bundled 7-Zip goes to the target right after the package. It is a
+      // few megabytes and is reused by every prepare on this deploy.
+      if (plan.sevenZip !== null && plan.sevenZip !== undefined) {
+        if (!existsSync(plan.sevenZip.local)) {
+          throw new Error(`bundled 7-Zip binary is missing: ${plan.sevenZip.local} (${plan.sevenZip.file})`)
+        }
+        await log(`uploading 7-Zip (${plan.sevenZip.file}) for package extraction`)
+        await runner.upload(plan.sevenZip.local, plan.sevenZip.remote)
+      }
       // Sign the member in with the deployer's account: the account grants in
       // `.credentials.yaml` are all a member needs, so no QR scan is required.
       const credentialsFile = deployerCredentialsFile()
@@ -2275,7 +2375,16 @@ export class DeployManager {
         }
         return false
       }
-      if (plan.os === 'windows' && typeof runner.archiveEntries === 'function' && typeof runner.extractArchive === 'function') {
+      if (plan.os === 'windows' && plan.sevenZip !== null && plan.sevenZip !== undefined && typeof runner.sevenZipEntries === 'function') {
+        const newDir = `${plan.layoutRoot}\\.staging\\${plan.release}`
+        const total = await runner.sevenZipEntries(plan.remotePackage, plan.sevenZip.remote).catch(() => 0)
+        if (total > 0) {
+          await log(`extracting ${total} archive entries with 7-Zip`)
+          await runner.extractSevenZip(plan.remotePackage, newDir, plan.sevenZip.remote)
+          extractProgress(total, total, true)
+          preExtracted = true
+        }
+      } else if (plan.os === 'windows' && typeof runner.archiveEntries === 'function' && typeof runner.extractArchive === 'function') {
         const newDir = `${plan.layoutRoot}\\.staging\\${plan.release}`
         const total = await runner.archiveEntries(plan.remotePackage).catch(() => 0)
         if (total > 0) {

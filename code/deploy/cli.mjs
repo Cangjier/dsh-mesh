@@ -7,8 +7,8 @@
  * a terminal must land there too, otherwise the panel shows nothing while it
  * runs — the job directory is the one place every window reads.
  *
- *   node code/deploy/cli.mjs --host 10.66.66.2 --package dsh-mesh-0.2.2-rc.3-20261115A-linux-x64.tar.gz
- *   node code/deploy/cli.mjs --host 10.66.66.4 --package dsh-mesh-0.2.2-rc.3-20261115A-win-x64.zip --no-wait
+ *   node code/deploy/cli.mjs --host 10.66.66.2 --package dsh-mesh-0.2.2-rc.3-20261115A-linux-x64.7z
+ *   node code/deploy/cli.mjs --host 10.66.66.4 --package dsh-mesh-0.2.2-rc.3-20261115A-win-x64.7z --no-wait
  *
  * @module @local/dsh-mesh/deploy-cli
  */

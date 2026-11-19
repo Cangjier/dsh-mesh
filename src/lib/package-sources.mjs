@@ -16,7 +16,7 @@
 import path from 'node:path'
 
 /** Archive names the deploy engine and the release publisher both produce. */
-export const PACKAGE_ARCHIVE_RE = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(x64|arm64)\.(tar\.gz|tgz|zip)$/u
+export const PACKAGE_ARCHIVE_RE = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u
 
 /** Release asset keys the publisher uses. */
 export const RELEASE_TARGET_RE = /^(linux|win)-(x64|arm64)$/u
@@ -216,7 +216,7 @@ $roots = @(
 $rows = @()
 foreach ($root in $roots) {
   if (-not (Test-Path -LiteralPath $root)) { continue }
-  Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.Name -match '^dsh-mesh-.*\\.(zip|tar\\.gz|tgz)$' } | ForEach-Object {
+  Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.Name -match '^dsh-mesh-.*\\.(7z|zip|tar\\.gz|tgz)$' } | ForEach-Object {
     $sha = ''
     $side = "$($_.FullName).sha256"
     if (Test-Path -LiteralPath $side) {
@@ -233,7 +233,7 @@ $rows | ForEach-Object { Write-Output $_ }
   return `BASE=${base}
 for root in "$BASE/.dsh/packages" "$BASE/.dsh/mesh/upgrade"; do
   [ -d "$root" ] || continue
-  find "$root" -maxdepth 3 -type f \\( -name 'dsh-mesh-*.tar.gz' -o -name 'dsh-mesh-*.tgz' -o -name 'dsh-mesh-*.zip' \\) -print0 2>/dev/null |
+  find "$root" -maxdepth 3 -type f \\( -name 'dsh-mesh-*.7z' -o -name 'dsh-mesh-*.tar.gz' -o -name 'dsh-mesh-*.tgz' -o -name 'dsh-mesh-*.zip' \\) -print0 2>/dev/null |
   while IFS= read -r -d '' file; do
     bytes=$(stat -c %s -- "$file" 2>/dev/null || echo 0)
     mtime=$(stat -c %Y -- "$file" 2>/dev/null || echo 0)

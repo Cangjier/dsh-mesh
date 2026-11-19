@@ -3,3 +3,6 @@
 *.mjs text eol=lf
 *.md text eol=lf
 *.json text eol=lf
+
+# Bundled binaries (7-Zip et al.) must never be line-ending-normalised.
+code/gate/assets/** -text

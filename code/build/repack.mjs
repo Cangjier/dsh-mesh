@@ -21,6 +21,7 @@ import { createReadStream, existsSync } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { collectStaticAssets } from './static-assets.mjs'
+import { ensureSevenZipBinary, hostSevenZipPath, isSevenZipArchive } from '../shared/sevenzip.mjs'
 
 const run = promisify(execFile)
 
@@ -152,7 +153,7 @@ async function sha256File(file) {
  * @returns {string} directory name.
  */
 function archiveRootName(file) {
-  return path.basename(file).replace(/\.(tar\.gz|tgz|zip)$/u, '')
+  return path.basename(file).replace(/\.(7z|tar\.gz|tgz|zip)$/u, '')
 }
 
 /**
@@ -161,9 +162,12 @@ function archiveRootName(file) {
  * @param {string} directory destination (parent of the top-level dir).
  * @returns {Promise<string>} extracted package directory.
  */
-async function extractArchive(file, directory) {
+async function extractArchive(file, directory, repositoryRoot) {
   await mkdir(directory, { recursive: true })
-  if (file.endsWith('.zip')) {
+  if (isSevenZipArchive(file)) {
+    const binary = await ensureSevenZipBinary(hostSevenZipPath(repositoryRoot))
+    await run(binary, ['x', '-y', '-bd', `-o${directory}`, file])
+  } else if (file.endsWith('.zip')) {
     try {
       await run('unzip', ['-q', file, '-d', directory])
     } catch {
@@ -187,9 +191,12 @@ async function extractArchive(file, directory) {
  * @param {string} file destination archive.
  * @returns {Promise<void>} completion.
  */
-async function compressDirectory(parent, name, file) {
+async function compressDirectory(parent, name, file, repositoryRoot) {
   await clear(file)
-  if (file.endsWith('.zip')) {
+  if (isSevenZipArchive(file)) {
+    const binary = await ensureSevenZipBinary(hostSevenZipPath(repositoryRoot))
+    await run(binary, ['a', '-t7z', '-mx=5', '-mmt=on', '-bd', '-snl', file, name], { cwd: parent })
+  } else if (file.endsWith('.zip')) {
     try {
       await run('zip', ['-qr', '-X', file, name], { cwd: parent })
     } catch {
@@ -212,12 +219,12 @@ export async function repackArchive(file, { repositoryRoot, log = () => {} }) {
   const work = await mkdtemp(path.join(path.dirname(file), '.repack-'))
   try {
     log(`extracting ${path.basename(file)}`)
-    const packageDir = await extractArchive(file, work)
+    const packageDir = await extractArchive(file, work, repositoryRoot)
     const summary = await repackDirectory(packageDir, repositoryRoot)
     log(`replaced gateway, scripts and plugin files (${String(summary.files)} files in the package)`)
     const parent = path.dirname(packageDir)
     const name = path.basename(packageDir)
-    await compressDirectory(parent, name, file)
+    await compressDirectory(parent, name, file, repositoryRoot)
     const bytes = (await stat(file)).size
     const sha256 = await sha256File(file)
     await writeFile(`${file}.sha256`, `${sha256}  ${path.basename(file)}\n\n`, 'utf8')

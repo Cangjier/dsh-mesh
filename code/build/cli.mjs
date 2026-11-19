@@ -126,6 +126,7 @@ function speedOptions(values) {
     refreshWebCache: values.get('refresh-web-cache') === true,
     concurrency: numberArg(values, 'concurrency'),
     archiveThreads: numberArg(values, 'archive-threads'),
+    archiveFormat: typeof values.get('archive-format') === 'string' ? values.get('archive-format') : undefined,
   }
 }
 
@@ -250,7 +251,8 @@ async function main() {
     '  --smoke-start-timeout <ms>  DSH startup budget (default 180000)',
     '  --smoke-page-timeout <ms>   browser boot budget (default 180000)',
     '  --concurrency <n>        targets packaged in parallel (default: auto by CPU/memory)',
-    '  --archive-threads <n>    gzip worker threads (default: CPU count, max 8)',
+    '  --archive-threads <n>    gzip/7z worker threads (default: CPU count, max 8)',
+    '  --archive-format <fmt>   7z (default), legacy (tar.gz on Linux / zip on Windows), tar.gz, zip',
     '  --no-cache               do not reuse the built web shell or the app tree',
     '  --refresh-app-cache      re-run npm install for the target app instead of cloning the cache',
     '  --refresh-web-cache      rebuild the web shell even when the cache matches',

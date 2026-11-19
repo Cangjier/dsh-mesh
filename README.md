@@ -80,7 +80,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - **前置编译步骤**：干净工作树下 `apps/web` 依赖 workspace 里 `lib/` 产物（`dsh-client-web`、`ui-theme` 的 CSS、webworker 运行时等），`build/recipes.json` 的 `prepare` 会在 `pnpm run build:web` 之前执行这些命令（CLI 用 `--prepare` 覆盖）。
 - **构建后抓屏冒烟**：完整包归档后，在本机目标上真的启动一次（一次性沙箱 + 包内 supervisor/gate + 空闲端口），用 headless Chrome/Edge 过密码门、等 DSH 壳、点侧边栏 `Mesh`，确认面板出现并截图到 `<job>/smoke/<target>/`。页面报 `Failed to load plugins`、DSH 起不来、Mesh 面板不出现都会让构建以 `smoke-failed` 结束。单个目标跨平台或没有 Chrome/Chromium/Edge 时该目标记为跳过（Windows 上会自动探测 `Program Files (x86)` / `Program Files` / `LOCALAPPDATA` 下的 Edge，没装 Chrome 也能抓屏），但**一个目标都没真正启动过的完整包同样以 `smoke-failed` 结束**，不会留在 `~/.dsh/packages`；只有显式 `--no-smoke` 才接受未验证包，`--require-smoke` 还会把“没有浏览器”直接判失败。详见 [Step 010](docs/Step%20010%20从源码构建多平台Web包.md)。
 - **前端与 app 同源检查**：源码构建的 `web/` 会覆盖 npm app 里的同版本前端。如果源码 `master` 已经领先于 npm 发布的 DSH（例如 `staticModules` 从 record 变成 descriptor 数组，或 shell 少了 app 客户端要的 `rankByName`），包能装、健康检查也过，但浏览器停在 `Failed to load plugins`。装配时会读两边的实际产物做契约检查；不一致时保留 npm 包自带的前端（与 app 的客户端插件天然同源），并在包的 `manifest.json` 里记下 `frontend.source: "published"` 和原因，不覆盖成读不懂的 shell。
-- **包名与按日构建号**：归档名是 `dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>.tar.gz|zip`，例如 `dsh-mesh-0.2.2-rc.3-20261115A-linux-x64.tar.gz`。`<dshVersion>` 必须与 DSH 版本完全一致（`manifest.version` 也不改写）；`<YYYYMMDD><Letter>` 是网关按本地日期分配的构建号（A、B…Z、AA…），同一天多次编译不会重名。面板用 `<dataDir>/build-stamp.json` 计数并扫描 `~/.dsh/packages` 已有包名，CLI 用 `~/.dsh/mesh/build-stamp.json`，也可 `--build-stamp` 指定。
+- **包名与按日构建号**：归档名是 `dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>.7z`，例如 `dsh-mesh-0.2.2-rc.3-20261115A-linux-x64.7z`。`<dshVersion>` 必须与 DSH 版本完全一致（`manifest.version` 也不改写）；`<YYYYMMDD><Letter>` 是网关按本地日期分配的构建号（A、B…Z、AA…），同一天多次编译不会重名。面板用 `<dataDir>/build-stamp.json` 计数并扫描 `~/.dsh/packages` 已有包名，CLI 用 `~/.dsh/mesh/build-stamp.json`，也可 `--build-stamp` 指定。
+- **7z 包与网关静态资源**：包统一是 `.7z`（LZMA2、多线程，比原来的 gzip/zip 小很多）。7-Zip 不是 Node 依赖，所以二进制随仓库走：`code/gate/assets/7z/` 里是 Linux x64/arm64 的静态 `7zz` 和 Windows x64 的 `7za.exe`，网关按静态资源发布在 `/__gate/assets/7z`，构建机用它打包、部署时由网关把对应二进制上传到目标再解压。旧的 `.tar.gz` / `.zip` 包仍能安装和升级；`--archive-format legacy`（或 `DSH_MESH_ARCHIVE_FORMAT=legacy`）可出旧格式的过渡包。从旧版本升级到 7z 包的**一次性迁移步骤**见 [Step 024](docs/Step%20024%207z%20包格式与网关静态资源.md)。
 - Web 构建成功后按目标打包：
   - **完整包**（默认）：`app/`（`@deepseek-ai/dsh` + 目标原生依赖）、`runtime/node/`、`gate/`、`shared/`、`plugin/`、安装脚本。
   - **只 Web 包**（`--web-only`）：只含 `web/` 前端产物，便于覆盖已有安装。
@@ -92,7 +93,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - **编译**：选择编译成员、外网代理（直连 / 经成员 / 自定义 URL）、源码引用（默认 `master`，可填提交号）和目标平台。默认值按当前成员自动选：编译成员取 CPU/内存最多的在线成员（Windows 和 Linux 都行），外网代理取公网 IP 在国外（非 CN）的 Linux 成员；目标平台默认 Linux x64 + Windows x64。成员的公网 IP 来自 WireGuard endpoint，国家查询结果缓存 30 天；查不到国家时保留直连，也认成员标签里的「国外 / 海外」。点「编译」后任务在后台跑，页面按阶段显示进度。
 - **拉回服务**：编译卡片里的开关，默认关闭。关闭时产物留在编译机的 `~/.dsh/mesh/upgrade/<job>/`，编译成功后自动在该成员上升级；打开后额外把包拉回网关 `~/.dsh/packages`，部署包列表里就能拿它部署到其他成员。默认值来自部署包内 `cordis.patch.yml` 的 `build.pullBack`；`build.autoUpgrade: false` 可关闭编译后的自动升级（本机编译始终不自动升级）。
 - **自动编译**：默认关闭；打开后默认每天 04:00 触发，可在「编译」卡片下开关和改时间。触发前比较最近一次**已完成**编译的清单：DSH 源码 tarball 的 ETag、dsh-mesh 构建输入的内容指纹、`build/plugins.json` 里每个随包插件（当前是 xl）的 tarball ETag。三者都没有变化就跳过，不产生新包；有变化才用和面板相同的默认成员/代理策略启动后台编译。配置和上次结果写在 `<dataDir>/schedule.json`，不依赖浏览器开着。旧版本留下的、仍等于 04:00 开启默认值的设置会在升级时一次性迁移为关闭；手动改过时间或单独给成员开启的设置保持不变。
-- **构建加速**：同一源码 + 覆盖层的重编直接复用上一次的前端构建产物（整段 `pnpm install`、两个 `tsc`、`tsdown`、`vite` 都跳过）；每个目标的 app 安装按「DSH 版本 + 目标」缓存，之后用硬链接克隆（秒级，补丁只打一次）。app 安装与 Web 构建重叠执行，`linux-x64` 和 `win-x64` 默认并行装配（按 CPU/内存自动定并行度），Linux 包的 gzip 改成 worker 线程并行、tar header mode 流式改写。缓存放在 `~/.dsh/mesh/cache/{web,app}`，`--no-cache` / `--refresh-app-cache` / `--refresh-web-cache` / `--concurrency` / `--archive-threads` 可控制。实测见 [Step 010](docs/Step%20010%20从源码构建多平台Web包.md) 的「构建加速」。
+- **构建加速**：同一源码 + 覆盖层的重编直接复用上一次的前端构建产物（整段 `pnpm install`、两个 `tsc`、`tsdown`、`vite` 都跳过）；每个目标的 app 安装按「DSH 版本 + 目标」缓存，之后用硬链接克隆（秒级，补丁只打一次）。app 安装与 Web 构建重叠执行，`linux-x64` 和 `win-x64` 默认并行装配（按 CPU/内存自动定并行度），包用 7z 多线程压缩。缓存放在 `~/.dsh/mesh/cache/{web,app}`，`--no-cache` / `--refresh-app-cache` / `--refresh-web-cache` / `--concurrency` / `--archive-threads` / `--archive-format` 可控制。实测见 [Step 010](docs/Step%20010%20从源码构建多平台Web包.md) 的「构建加速」。
 - **编译任务**：保留最近任务的成员、引用、目标、进度和时间；「日志」弹层实时跟随 `build.log`。
 - **包里带什么**：每个产物固定携带 `dsh-mesh` 与 `xl` 两个插件。`dsh-mesh` 是当前仓库；`xl` 来自 `Cangjier/xl` 的 `main`，每次编译现拉，来源与归档哈希记在包的 `manifest.json`（`extraPlugins`）里。清单在 `build/plugins.json`，加插件只要加一条。
 - **部署包**：列出 `~/.dsh/packages` 里的包（平台、大小、时间），可直接删除；成员编译出的产物也会出现在这里，接着就能对成员「部署」。
@@ -105,8 +106,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 
 ```bash
 PW=$(grep '^DSH_GATE_PASSWORD=' ~/.dsh/shared/config/gate.env | cut -d= -f2-)
-curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
-  "http://10.66.66.1/__gate/packages/upload?name=dsh-mesh.tar.gz&sha256=$(sha256sum dsh-mesh.tar.gz | cut -d' ' -f1)"
+curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.7z \
+  "http://10.66.66.1/__gate/packages/upload?name=dsh-mesh.7z&sha256=$(sha256sum dsh-mesh.7z | cut -d' ' -f1)"
 ```
 
 上传按流式写入 `.part` 再原子改名，校验和一致才落盘，并在旁边写 `.sha256`。
@@ -168,8 +169,9 @@ pnpm build          # 生成 index.js / client.js
 Linux：
 
 ```bash
-tar -xzf dsh-mesh-<version>-linux-x64.tar.gz
-cd dsh-mesh-<version>-linux-x64
+# 包是 7z；网关的静态资源里带着 Linux/Windows 的 7-Zip（也可用系统 7z）
+7zz x -o dsh-mesh-pkg dsh-mesh-<version>-linux-x64.7z
+cd dsh-mesh-pkg/dsh-mesh-<version>-linux-x64
 sudo ./install.sh                                  # 默认 /root/.dsh，监听 80
 sudo ./install.sh --root /srv/dsh --port 8080 --password '<所有成员相同的密码>'
 ```
@@ -248,6 +250,7 @@ node code/build/cli.mjs build --no-publish          # 只编译，不上传 Rele
 node code/build/cli.mjs build --no-cache             # 不复用前端/app 缓存，强制全量重建
 node code/build/cli.mjs build --refresh-app-cache    # 强制重新 npm install 目标 app
 node code/build/cli.mjs build --concurrency 1        # 两个目标串行装配（旧行为）
+node code/build/cli.mjs build --archive-format legacy # 出 tar.gz/zip 过渡包（旧安装能解）
 node code/build/smoke-cli.mjs --root <package> --screenshot-dir /tmp/smoke  # 单独复跑一个包
 ```
 
@@ -266,8 +269,8 @@ node build/tools/package-prebuilt.mjs --targets linux-x64,win-x64
 ### 通过 SSH 部署/更新成员
 
 ```text
-deploy { "host": "10.66.66.3", "package": "dsh-mesh-0.2.2-rc.1-linux-x64.tar.gz" }
-deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-linux-x64.tar.gz" }
+deploy { "host": "10.66.66.3", "package": "dsh-mesh-0.2.2-rc.1-linux-x64.7z" }
+deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-linux-x64.7z" }
 ```
 
 `deploy` 只有 `host` 和 `package` 两个输入。`host` 命中成员时自动解析成员 IP、SSH 用户/私钥、OS 和安装目录；不是成员时按普通 SSH 主机处理，OS 由包名决定。部署同步等待结束并返回 `data.logFile`；健康检查失败会自动切回 `previous`。目标必须已经安装过一次（`shared/config/gate.env` 存在），SSH 使用密钥和 `BatchMode=yes`。详见 [Step 018](docs/Step%20018%20成员升级与独立升级进程.md)。
@@ -308,6 +311,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 016 入网即双向 SSH](docs/Step%20016%20入网即双向SSH.md) | 成员自带密钥、`from=` 限制、`/ssh/authorize`、托管 config 块、撤销 |
 | [Step 022 Release 发布与下载升级](docs/Step%20022%20Release%20发布与下载升级.md) | 固定 latest tag、GitHub 整包/Gitee 分片、仅保留最新版、成员经外网代理下载、失败回退上传 |
 | [Step 023 指针布局：稳定 mjs 启动器](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md) | 稳定 launcher + 指针文件、releases/shared 布局、环境变量注入、安装/升级/回退一条路径 |
+| [Step 024 7z 包格式与网关静态资源](docs/Step%20024%207z%20包格式与网关静态资源.md) | 7-Zip 二进制作为 gate 静态资源、`.7z` 打包/解压、从旧版本的迁移步骤、legacy 过渡格式 |
 | [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、升级/取消、包内容 |
 | [Step 020 内嵌 interop 服务](docs/Step%20020%20内嵌interop服务.md) | 会话由 DSH Web 拥有、嵌入式 :8765、部署/回滚、冷读「已停止」根因 |
 

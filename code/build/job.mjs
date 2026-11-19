@@ -429,6 +429,8 @@ export async function runJob(dir, options) {
         log,
         env: outbound.env,
         threads: options.archiveThreads,
+        repositoryRoot,
+        format: options.archiveFormat,
       })
       const info = await stat(archive)
       // A package that installs cleanly can still ship a UI that never boots.

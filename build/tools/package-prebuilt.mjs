@@ -126,7 +126,10 @@ for (const target of targets) {
     cacheDir,
     log: line => console.log(line),
   })
-  const archive = await archivePackage(assembled.packageDir, target, { log: line => console.log(line) })
+  const archive = await archivePackage(assembled.packageDir, target, {
+    log: line => console.log(line),
+    repositoryRoot: REPOSITORY_ROOT,
+  })
   const size = fs.statSync(archive).size
   const sha = createHash('sha256').update(fs.readFileSync(archive)).digest('hex')
   await writeFile(`${archive}.sha256`, `${sha}  ${path.basename(archive)}\n`, 'utf8')

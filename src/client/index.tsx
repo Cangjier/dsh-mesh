@@ -1640,7 +1640,7 @@ function Panel({ ctx }: { ctx: any }) {
                   type="info"
                   showIcon
                   message="没有可用的部署包"
-                  description="可以切换到「latest tag」或「目标成员已有包」，也可以把 .tar.gz / .zip 放进本机 ~/.dsh/packages/ 后点刷新。"
+                  description="可以切换到「latest tag」或「目标成员已有包」，也可以把 .7z（或旧的 .tar.gz / .zip）放进本机 ~/.dsh/packages/ 后点刷新。"
                 />
               ) : null}
             </>

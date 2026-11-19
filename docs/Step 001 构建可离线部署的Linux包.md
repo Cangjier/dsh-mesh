@@ -14,11 +14,11 @@
 一台联网的开发机                        目标 Linux（2 GB）
 ─────────────────                       ──────────────────
 1. npm install --os=linux  ──打包──▶     1. 解压
-2. 下载官方 linux Node 二进制              2. ./install.sh --skip-install
-3. tar.gz                                3. systemctl start
+2. 下载官方 linux Node 二进制              2. ./install.sh
+3. tar.gz                                3. （脚本装好并启动服务）
 ```
 
-目标机器只做三件事：解压、写配置、起服务。不联网、不编译、不跑 npm。
+目标机器只做两件事：解压、跑安装脚本。不联网、不编译、不跑 npm。
 
 ## 关键实现
 
@@ -64,37 +64,30 @@ tar -xJf "$TMP/$ARCHIVE" -C runtime/node --strip-components=1
 ### 3. 离线整包结构
 
 ```
-dsh-web-linux/
-├── gate/                 # 网关源码
-├── config/               # 目录选择器覆盖层（gate.env 由安装时生成，不入包）
+dsh-mesh-<version>-linux-x64/
 ├── app/node_modules/     # 已装配好的 linux-x64 依赖（约 740 MB）
+├── web/                  # 前端产物
 ├── runtime/node/         # 官方 Node（约 130 MB）
-├── .offline-payload      # 标记文件：install.sh 见到它就跳过一切联网步骤
-├── install.sh / start.sh / stop.sh / status.sh / doctor.sh
-└── systemd/dsh-web.service
+├── gate/                 # 网关源码
+├── code/                 # deploy / install / shared / wireguard / interop-service
+├── plugins/dsh-mesh/     # host 插件与客户端 bundle
+├── config/               # 目录选择器覆盖层（gate.env 由安装时生成，不入包）
+├── docs/                 # 这些文档
+├── dsh-mesh.mjs          # 稳定启动器
+├── install.sh / install.ps1
+└── manifest.json         # 版本、buildStamp、target、资产哈希
 ```
 
-打包时要排除：
+包里没有 `data/`、`workspace/`、`shared/`、`config/gate.env`：这些都在安装时由
+`install.sh` 在 `<root>/shared/` 下生成。因此打包不需要排除运行数据，只要别把
+`node_modules/.cache` 之类带进去。
 
-```bash
-tar --exclude='dsh-web-linux/data' \
-    --exclude='dsh-web-linux/workspace' \
-    --exclude='dsh-web-linux/config/gate.env' \
-    -czf dsh-web-linux-<ver>-offline-linux-x64.tar.gz dsh-web-linux
-```
+### 4. 安装脚本只做指针安装
 
-- `data/` 有网关注册密钥和会话；
-- `config/gate.env` 有本机密码与 IP；
-- `workspace/` 是运行目录。
-
-### 4. 安装脚本的自觉
-
-```bash
-if [ -f "$ROOT/.offline-payload" ] && [ "$SKIP_INSTALL" != "1" ]; then
-  SKIP_INSTALL=1
-  say "检测到离线整包（.offline-payload）：跳过 Node 下载与 npm 安装"
-fi
-```
+`install.sh` 不是 npm 安装器：它把当前目录交给 `code/deploy/upgrade-local.mjs`，
+由后者把包移进 `<root>/releases/<id>`、写 `dsh-mesh.json`、准备 systemd 单元并启动。
+目标机要求 `app/node_modules` 已经由构建机装配好，缺了会在 prepare 阶段直接失败，
+不会偷偷联网。
 
 ## 坑点与解决
 
@@ -102,20 +95,20 @@ fi
 |---|---|---|
 | `tar -xJf` 报 `Can't initialize filter; unable to run program "xz"` | Windows 的 bsdtar 不认 `.tar.xz` | 用 Python 的 `lzma` + `tarfile` 解包，不依赖外部 `xz` |
 | `sha256sum -c` 全失败 | 下载时改了文件名 | 保持 `node-vX.Y.Z-linux-x64.tar.xz` 原样 |
-| `VERSION` 文件莫名带 BOM，包名变成 `dsh-web-linux-﻿0.2.2-rc.1` | PowerShell `Set-Content -Encoding utf8` 会写 BOM | 用无 BOM 的 UTF-8 写文件，读取用 `utf-8-sig` |
-| 安装后 `npm install` 又跑了一遍 | 没识别到离线包 | 校验 `.offline-payload` 是否随包分发 |
+| `VERSION` 文件莫名带 BOM，包名变成 `dsh-mesh-﻿0.2.2-rc.1` | PowerShell `Set-Content -Encoding utf8` 会写 BOM | 用无 BOM 的 UTF-8 写文件，读取用 `utf-8-sig` |
 | 原生模块缺失（终端/图片不可用） | `--ignore-scripts` 跳过了构建 | 按上面的表逐个核对 `*.node` 是否存在 |
 
 ## 预期效果
 
 ```bash
 $ sudo ./install.sh
-==> 检测到离线整包（.offline-payload）：跳过 Node 下载与 npm 安装
-==> 复用已下载的 Node 运行时：v24.22.2
-==> 服务已启动：dsh-web.service
+==> 安装到 /root/.dsh
+[upgrade] installed release 20261119122710-2b88a547
+[upgrade] gateway, interop and control panel are healthy
+==> 安装完成
 ```
 
-安装耗时 < 1 分钟，峰值内存 < 200 MB，全程无网络。
+安装耗时 < 1 分钟（同文件系统内是 rename），峰值内存 < 200 MB，全程无网络。
 
 ## 测试思路
 

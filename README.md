@@ -120,15 +120,15 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - **不再使用 `#member=id`**：URL 片段不会发给服务器，方案已移除。
 - cookie 是浏览器级的，所以**一个浏览器同时只有一个活动成员**；两个标签页切不同成员会互相覆盖。
 
-### 5. 通过 SSH 蓝绿部署成员
+### 5. 通过 SSH 部署成员
 
-- `deploy` 从 A 通过 SSH 部署 B：先让 B 从 Release 下载包（经有外网成员代理，失败回退 A 上传），解压到新的 `releases/<release>`，建立 `shared/config|data|home|workspace` 链接，更新服务定义，全部准备好后才切换 `current`。
+- `deploy` 从 A 通过 SSH 部署 B：先让 B 从 Release 下载包（经有外网成员代理，失败回退 A 上传），解压到新的 `releases/<release>`，在 `shared/` 下准备配置与数据目录，更新服务定义，全部准备好后才翻转指针。
 - 重启顺序强制为 `control → dsh → gate`；**网关永远最后**，因为用户可能正通过 B 的网关操作 A，B 的网关先重启会切断这条路径。
 - 支持 `scope=dsh`：只重启 DSH/控制面板，不重启网关。
 - 健康检查失败自动切回 `previous` 并重启；`rollback` 可手动回滚。
 - 成功激活后只保留当前和上一个 release（正好两个解压包），升级时其余 release 目录会被删除。
 - **自动升级**：每个成员单独配置，入口在成员行的「更多」菜单 →「自动升级」；默认关闭，打开后默认每天 06:00，可开关和改时间。对每个成员选它对应系统的最新部署包（按构建号，不按文件 mtime），与成员上报的当前部署（`manifest.version` + `buildStamp`）比较；一致或最新包更旧就跳过；需要升级时只启动这个成员的升级 job。
-- 面板的「升级」对本机和每个已安装的成员都开放，收在操作列的纯图标「更多」菜单里（Linux 成员同一菜单另有「测试升级」，先演练平铺路径）；成员表还有一列「版本」，显示每台成员当前运行的部署包；它用同一套引擎换包，升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的 `dsh-web`/网关不会把升级本身打断，也不会带走发起升级的面板。平铺安装（网关这种没有 `current` 的布局）走 `code/deploy/upgrade-local.sh`：备份（含 `app`/`runtime`/`web` 与工具层）→ 覆盖文件（保留 config/data/home/workspace）→ 重写 profile 与单元 → 健康检查，失败整体回滚；回退同样换回运行时三层，不会把旧脚本搭在新运行时上；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。测试升级的抓屏在目标成员没有 Chrome/Chromium/Edge 时会自动下载 Chrome for Testing 的 `chrome-headless-shell`（缓存在 `~/.cache/dsh-mesh/chrome`）再继续；只有下载或启动也失败才写「抓屏跳过」，不会把「成员没有浏览器」变成升级失败（Step 018）。
+- 面板的「升级」对本机和每个已安装的成员都开放，收在操作列的纯图标「更多」菜单里；成员表还有一列「版本」，显示每台成员当前运行的部署包。升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的网关不会把升级本身打断，也不会带走发起升级的面板。安装和升级走同一个 `upgrade-local.mjs`：包进 `releases/<id>` → 写启动器/单元 → 翻指针 → 健康检查，失败自动翻回上一版；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。
 - 详见 [Step 018](docs/Step%20018%20成员升级与独立升级进程.md)。
 
 ### 6. 内嵌 DSH 交互 HTTP 服务
@@ -267,7 +267,7 @@ deploy { "host": "10.66.66.3", "package": "dsh-mesh-0.2.2-rc.1-linux-x64.tar.gz"
 deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-linux-x64.tar.gz" }
 ```
 
-`deploy` 只有 `host` 和 `package` 两个输入。`host` 命中成员时自动解析成员 IP、SSH 用户/私钥、OS 和安装目录；不是成员时按普通 SSH 主机处理，OS 由包名决定。部署同步等待结束并返回 `data.logFile`；健康检查失败会自动切回 `previous`。目标必须已经安装过一次（`shared/config/gate.env` 存在），SSH 使用密钥和 `BatchMode=yes`。详见 [Step 011](docs/Step%20011%20通过%20SSH%20蓝绿部署.md)。
+`deploy` 只有 `host` 和 `package` 两个输入。`host` 命中成员时自动解析成员 IP、SSH 用户/私钥、OS 和安装目录；不是成员时按普通 SSH 主机处理，OS 由包名决定。部署同步等待结束并返回 `data.logFile`；健康检查失败会自动切回 `previous`。目标必须已经安装过一次（`shared/config/gate.env` 存在），SSH 使用密钥和 `BatchMode=yes`。详见 [Step 018](docs/Step%20018%20成员升级与独立升级进程.md)。
 
 ### 安装独立 DSH 交互 HTTP 服务（仅回退/旧结构需要）
 
@@ -294,20 +294,18 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 003 目录选择器](docs/Step%20003%20目录选择器.md) | 为什么远程必须用 browse picker、覆盖层写法、界面的三处修改 |
 | [Step 004 Chrome Headless 扫码登录](docs/Step%20004%20Chrome%20Headless扫码登录.md) | 平台只收 loopback 回调、CDP 驱动、二维码提取与裁剪、一次请求 |
 | [Step 005 账号登录前端补丁](docs/Step%20005%20账号登录前端补丁.md) | 登录按钮改弹层、等待面板、过期换码 |
-| [Step 006 部署与运维](docs/Step%20006%20部署与运维.md) | systemd、swap、内存、TLS/Cloudflare、日志与健康检查 |
 | [Step 007 升级适配清单](docs/Step%20007%20升级适配清单.md) | DSH 升级后逐项重打的检查表 |
-| [Step 008 测试与验证](docs/Step%20008%20测试与验证.md) | 端到端脚本、浏览器断言、请求数断言、失败模式对照 |
+| [Step 008 测试与验证](docs/Step%20008%20测试与验证.md) | 分层测试、浏览器断言、请求数断言、失败模式对照、回归命令 |
 | [Step 009 成员发现与切换](docs/Step%20009%20成员发现与切换.md) | peer 发现、`dsh_gate_target` cookie、cluster HMAC、cookie 命名空间 |
 | [Step 010 从源码构建多平台 Web 包](docs/Step%20010%20从源码构建多平台Web包.md) | 固定源/ref、源码覆盖层、工作单、自动固化/继续、目标打包、按日构建号、构建后 Chrome 抓屏 |
-| [Step 011 通过 SSH 蓝绿部署成员](docs/Step%20011%20通过%20SSH%20蓝绿部署.md) | releases/current/shared、prepare/activate、gateway 最后、回滚 |
-| [Step 012 独立服务与WireGuard控制面板](docs/Step%20012%20独立服务与WireGuard控制面板.md) | 网关/DSH/51821 三个独立服务、token 文件、内置面板代理 |
+| [Step 012 WireGuard 控制面板](docs/Step%20012%20独立服务与WireGuard控制面板.md) | 51821 独立服务、按需拆分 DSH、token 文件、内置面板代理 |
 | [Step 013 独立DSH交互HTTP服务](docs/Step%20013%20独立DSH交互HTTP服务.md) | 独立 8765、SDK stdio、创建/等待/通知/事件/回调 |
 | [Step 014 成员任务插件与主对话回调](docs/Step%20014%20成员任务插件与主对话回调.md) | `call_member`、成员发现、后台等待、agent.followup 通知 |
 | [Step 015 面板事件推送](docs/Step%20015%20面板事件推送.md) | SSE 通道、`fs.watch` 任务目录、面板零轮询 |
 | [Step 016 入网即双向 SSH](docs/Step%20016%20入网即双向SSH.md) | 成员自带密钥、`from=` 限制、`/ssh/authorize`、托管 config 块、撤销 |
 | [Step 022 Release 发布与下载升级](docs/Step%20022%20Release%20发布与下载升级.md) | 固定 latest tag、GitHub 整包/Gitee 分片、仅保留最新版、成员经外网代理下载、失败回退上传 |
-| [Step 023 指针布局：稳定 mjs 启动器](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md) | 稳定 launcher + 指针文件、releases/shared 布局、启动器 .bak、升级/回退一份 mjs 实现、首次自动 adopt |
-| [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、蓝绿/平铺两条路径、清空编译日志 |
+| [Step 023 指针布局：稳定 mjs 启动器](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md) | 稳定 launcher + 指针文件、releases/shared 布局、环境变量注入、安装/升级/回退一条路径 |
+| [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、升级/取消、包内容 |
 | [Step 019 升级验收与回退页](docs/Step%20019%20升级验收与回退页.md) | 升级后先看后验收、查看/验收/回退三个按钮、marker、独立进程回退 |
 | [Step 020 内嵌 interop 服务](docs/Step%20020%20内嵌interop服务.md) | 会话由 DSH Web 拥有、嵌入式 :8765、部署/回滚、冷读「已停止」根因 |
 
@@ -319,14 +317,15 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `src/index.ts` | 插件入口：注册 Host API 与模型工具 |
 | `src/lib/service.mjs` | 成员发现、同步构建、部署 job、日志路径 |
 | `code/deploy/engine.mjs` | 部署引擎：prepare/activate/rollback、服务顺序、健康检查、job 状态、`LocalRunner` |
-| `code/deploy/runner.mjs` | 独立升级进程：心跳、job 状态、蓝绿或就地升级二选一 |
+| `code/deploy/runner.mjs` | 独立升级进程：心跳、job 状态、本机就地升级 |
 | `code/deploy/release-download.mjs` | 目标机下载器：读 latest.json、整包/分片、SHA-256 校验、进度标记 |
 | `code/shared/release.mjs` | Release 发布：分片、latest.json、GitHub/Gitee API、旧资产清理 |
 | `code/shared/http-client.mjs` | 带 HTTP 代理的流式上传/下载（发布与目标机下载共用） |
 | `code/shared/egress.mjs` | 一次性外网代理管理（构建与升级下载共用） |
-| `code/deploy/upgrade-local.sh` | 平铺安装的就地升级：备份、覆盖、接线、重装单元、健康检查、回滚 |
-| `code/deploy/wire-profile.mjs` | 就地升级后的 `gate.env` 与 profile 接线 |
-| `code/deploy/rollback-local.sh` | 验收页「回退」：平铺恢复备份 / 蓝绿切回 previous |
+| `code/deploy/upgrade-local.mjs` | 安装与升级的唯一实现：release、指针、单元、健康检查、回滚 |
+| `code/install/layout.mjs` | prepare / activate / rollback：启动器、单元、profile 接线、指针 |
+| `code/deploy/wire-profile.mjs` | `gate.env` 与 profile 接线 |
+| `code/deploy/rollback-local.mjs` | 验收页「回退」：翻转指针、恢复启动器 .bak |
 | `src/lib/interop-service.mjs` | 内嵌 HTTP 服务：`ctx.agents` 创建/恢复、等待/通知/事件/回调 |
 | `code/interop-service/server.mjs` | 旧独立 HTTP 服务（回退用，默认不启动） |
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
@@ -355,7 +354,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | 工具 | 作用 |
 |---|---|
 | `build` | 从 DSH 源码全量构建离线包（下载依赖 + Node 运行时） |
-| `deploy` | SSH 蓝绿部署到成员 |
+| `deploy` | SSH 部署/升级成员（pointer） |
 | `repack` | 用当前仓库刷新已有离线包：只替换 `gate/`、`shared/`、`config/`、`code/*`、根脚本和 `plugins/dsh-mesh/`，DSH 主体（`app/`、`web/`、`runtime/`）复用，最后更新 `.sha256` |
 | `members` | WireGuard 成员发现 |
 | `call_member` | 在成员上发起/继续对话，返回 taskId |

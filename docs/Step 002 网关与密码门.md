@@ -123,12 +123,8 @@ const tlsServer = createSecureServer({ cert, key }, requestListener)
 ## 预期效果
 
 ```bash
-$ ./doctor.sh
-  ✓ Linux（6.6.x）
-  ✓ 内存 1674 MB：网关会自动把 dsh web 堆限到 1024 MB
-  ✓ glibc 2.38
-  ✓ 端口 80 空闲
-  ✓ 可访问 nodejs.org / npm registry
+$ node ~/.dsh/dsh-mesh.mjs --status
+{"ok":true,"layout":"pointer","active":"releases/<id>","previous":"releases/<old>","version":"0.2.2-rc.5"}
 ```
 
 ```bash

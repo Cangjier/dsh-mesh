@@ -58,22 +58,19 @@ node ~/.dsh/dsh-mesh.mjs --role gate|dsh|control|interop
 
 ## 升级
 
-一份实现：`code/deploy/upgrade-local.mjs`，网关和 Linux 成员共用。
+一份实现：`code/deploy/upgrade-local.mjs`，网关和成员共用。
 
-1. 包被移到 `<root>/releases/<id>`（不覆盖运行中的树）；
-2. 只有从 pointer 之前的安装升级时，才先跑一次 `layout.mjs migrate`，把旧安装的
-   `config/data/workspace` 和旧 `DSH_HOME` **复制**进 `shared/`（旧树保持完整，
-   健康检查失败时还能用）。这是唯一的迁移入口，之后的升级不再猜、不再复制；
-3. `layout.mjs prepare`：替换启动器（先写 `.bak`）、稳定 node、systemd 单元、
+1. 包被移到 `<root>/releases/<id>`（不覆盖运行中的树）；首次安装时先在
+   `shared/{config,data,home,workspace}` 里写 `gate.env` / `interop.env`；
+2. `layout.mjs prepare`：替换启动器（先写 `.bak`）、稳定 node、systemd 单元、
    profile 复制接线；release 里不建任何数据链接；
-4. `layout.mjs activate`：原子写指针，必要时写验收 marker；
-5. 按 control → dsh → gate 顺序重启（所有单元都跑启动器）；
-6. 健康检查（网关、内嵌 interop、控制面板）；失败时翻回 previous（首次迁移则
-   恢复旧单元），再验一次；
-7. 只保留当前和上一个 release（active/previous 永不清），其他解压包删除。
+3. `layout.mjs activate`：原子写指针，必要时写验收 marker；
+4. 按 control → dsh → gate 顺序重启（所有单元都跑启动器）；
+5. 健康检查（网关、内嵌 interop、控制面板）；失败时翻回 previous（首次安装则
+   恢复原单元），再验一次；
+6. 只保留当前和上一个 release（active/previous 永不清），其他解压包删除。
 
-`code/deploy/upgrade-local.sh` 只是两行兼容 shim：旧 runner 按 `.sh` 路径调用，
-shim 找到 `--stage` 里的 mjs 交给 node，之后可以删。
+没有迁移步骤：pointer 之前的布局不再支持，`install.sh` 装出来的第一版就是 pointer。
 
 ## 回退
 
@@ -96,41 +93,36 @@ Linux 成员的 prepare/activate/rollback 也只做三件事：
 「测试升级」在指针布局下已没有单独路径，入口直接返回明确错误：每次升级都会
 自动回退，不需要再演练 flat 覆盖。
 
-## 迁移
+## 首次安装
 
-只有从 pointer 之前的安装（flat 或 blue-green）升级时，才会先跑一次
-`layout.mjs migrate --from <旧根>`：只复制数据、不移动，旧目录保留到人工确认后
-再删；`shared/` 一旦有内容就不再覆盖。pointer 之后的上报 `appRoot` 落在
-`releases/` 里，`migrate` 会直接拒绝，不做任何复制。
+没有迁移。`install.sh` / `install.ps1` 把解压好的包交给 `upgrade-local.mjs`：
+写好 `shared/` 的配置、把包放进 `releases/<id>`、写 `dsh-mesh.json`、装单元并启动。
+指针之前的 flat / blue-green 布局不再支持。
 
-## 现状（2026-11-18 实测）
+## 现状（2026-11-19 实测）
 
-- Linux 网关：实现并测试通过（flat → pointer、pointer → pointer、rollback）。
-- Linux 成员 `.3`：已实际迁移到 pointer（`releases/20261118D-11221bf0`），
-  单元 `ExecStart=node /root/.dsh/dsh-mesh.mjs --role gate`，网关与内嵌 interop
-  健康检查通过，面板上报 `layout=pointer`。
-- Windows 成员 `.4`：已实际迁移到 pointer
-  （`C:\Users\Admin\.dsh\releases\20261118071638-d90f0bcc`）。服务壳编译在
-  新根 `dsh-mesh-service.exe`，由 root 的 `start.ps1` / `start-stack.ps1` 交给
-  `node .dsh\dsh-mesh.mjs`；`data` 是指向 `shared\data` 的 junction；面板上报
-  `layout=pointer`。
-- Linux/Windows 的 engine prepare/activate/rollback 都只剩“解压到 staging /
-  调 `upgrade-local.mjs` / 调 `rollback-local.mjs`”。
+- Linux 网关与成员 `.3`：pointer 布局，单元 `ExecStart=node <root>/dsh-mesh.mjs
+  --role …`；成员 `.3` 升到 `releases/20261119122710-2b88a547`，网关、内嵌
+  interop、51821 健康检查都通过，面板上报 `layout=pointer`。
+- Windows 成员 `.4`：pointer 布局。服务壳 `dsh-mesh-service.exe` 在 `<root>`，
+  由 root 的 `start.ps1` / `start-stack.ps1` shim 交给 `node <root>\dsh-mesh.mjs`。
+- release 里没有任何数据链接；可变路径全部由启动器注入的环境变量指定。
+- 安装与升级是同一份实现：`install.sh` / `install.ps1` → `upgrade-local.mjs`
+  → `layout.mjs prepare/activate`；回退统一走 `rollback-local.mjs`。
 
 真实升级中发现并修掉的坑：
 
 1. activate 用 staged node 启动 mjs 后，stage 被 move 进 `releases/`，再拿
    `process.execPath` 去 spawn layout 会 ENOENT。现在按 release 里的 node 重新解析。
 2. Windows 上 `cpSync` 递归 DSH_HOME 里的 junction 会让 Node 崩溃
-   （0xC0000409）。adoption 现在过滤 symlink/junction 与 `node_modules`，并且
-   先写 `.partial-<pid>` 再改名，避免留下半个 `shared/home`。
-3. 成员的 `appRoot` 在 pointer 布局下就是 `releases/<id>`，早期版本把它当成
-   “旧安装”去做迁移，而 release 里的 `config/data/workspace` 是指回 `shared/`
-   的符号链接，迁移的源和目标成了同一个目录，最后 rename 一个不存在的
-   partial 直接 ENOENT（2026-11-19 成员 `.3` 升级失败）。现在两头都收紧：
-   release 里不再建这些链接；`layout.mjs migrate` 只接受 `releases/` 之外的
-   源，候选源是符号链接或 realpath 等于目标时跳过，copy 没有产物时不动目标。
+   （0xC0000409）。profile 的插件接线现在由 `wireProfile` 从 release 重新复制，
+   不做整棵 DSH_HOME 的递归拷贝。
+3. 2026-11-19 成员 `.3` 升级失败：当时的 release 里还有 `config/data/workspace`
+   符号链接，而升级脚本又把 `releases/<id>` 当成旧安装去“迁移”，源和目标成了
+   同一个空目录——`cpSync` 过滤链接后没有产物，`rmSync` 却先删了目标，最后
+   rename 一个不存在的 partial 直接 ENOENT。现在 release 不建链接，迁移代码也已
+   删除，这个失败类别不再存在。
 
-设计上只保留两个 Windows junction，都跟数据无关：`<root>\code` 指向当前
-release 的 `code/`（服务壳按自己目录找脚本），`<root>\data` 指向 `shared\data`
-（服务壳把 `service.log` 写在 exe 旁边）。
+Windows 上只保留两个 junction，都跟数据无关：`<root>\code` 指向当前 release 的
+`code/`（服务壳按自己目录找脚本），`<root>\data` 指向 `shared\data`（服务壳把
+`service.log` 写在 exe 旁边）。

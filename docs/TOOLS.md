@@ -12,7 +12,7 @@
 | 工具 | 行为 | 参数 | 并发安全 |
 |---|---|---|---|
 | `build` | 从固定源码构建 Web 离线包，等待结束 | `source` `ref` `targets` `planOnly` `version` `jobId` `keepDist` | `false` |
-| `deploy` | SSH 蓝绿部署，等待结束 | `host` `package` | `false` |
+| `deploy` | SSH 部署/升级，等待结束 | `host` `package` | `false` |
 | `members` | 只读成员发现 | 无 | `true` |
 | `call_member` | 在另一个成员上派发/等待/继续对话 | `action` + `member` / `prompt` / `content` / `taskId` / `cwd` | `false` |
 
@@ -219,7 +219,7 @@ build { "jobId": "<needs-fix-job-id>" }
   → host 不是成员：按普通 SSH 主机处理，OS 由包名决定，安装目录用默认值
   → 获取包：升级时目标从 Release 下载（GitHub 经外网成员代理、Gitee 直连），失败回退网关上传
   → prepare：解压新 release、共享目录、gate.env、服务定义
-  → activate：切 current，按 control → dsh → gate 重启
+  → activate：翻指针，按 control → dsh → gate 重启
   → 健康检查 /__gate/health
   → 失败自动切回 previous
   → 同步等待 job 结束后返回

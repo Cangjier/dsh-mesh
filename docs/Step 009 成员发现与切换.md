@@ -152,7 +152,7 @@ x-dsh-cluster: v1.<timestamp>.<nonce>.<base64url HMAC-SHA256>
 - `/__gate/select` 是状态变更 POST：要求 gate cookie、`x-dsh-gate: 1`、同源 `Origin`/`Sec-Fetch-Site`。
 - cluster 端点只接受私网来源 + HMAC + 时间窗 + nonce；公网来源在签名前就被拒。
 - `/__gate/member` 不含 cluster key、DSH token、密码；只暴露名字/VPN IP/版本/可达性。
-- `version` 现在是**成员实际运行的部署版本**：gate 从安装根目录的 `manifest.json` 读取（蓝绿安装就是 `releases/<id>/manifest.json`），并带一个 `deployment` 对象（`version` / `buildStamp` / `builtAt` / `release` / `layout`）。以前它读的是安装根目录不存在的 `package.json`，所以每台成员都报 `0.0.0`；成员页的「版本」列优先用这份上报，旧 gate 才退回「最近一次成功升级的包」推断。
+- `version` 现在是**成员实际运行的部署版本**：gate 从安装根目录的 `manifest.json` 读取（pointer 安装就是 `releases/<id>/manifest.json`），并带一个 `deployment` 对象（`version` / `buildStamp` / `builtAt` / `release` / `layout`）。以前它读的是安装根目录不存在的 `package.json`，所以每台成员都报 `0.0.0`；成员页的「版本」列优先用这份上报，旧 gate 才退回「最近一次成功升级的包」推断。
 - 目标 id 只接受 `local` 或 IP 字面量，且在成员表里存在；不能拿它做 SSRF。
 - 浏览器到入口 gate 是 HTTP（除非配了 TLS）；cluster 走 VPN 明文 + HMAC，是完整性/来源认证，不是机密性。敏感部署应在 WireGuard 内或加 TLS。
 

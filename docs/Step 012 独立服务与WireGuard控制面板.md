@@ -1,4 +1,4 @@
-# Step 012 网关、DSH、WireGuard 控制面板的独立服务
+# Step 012 WireGuard 控制面板（与可选的独立 DSH 服务）
 
 目标：三个进程各自是 OS 服务，任何一个重启都不牵连另外两个；WireGuard 的 51821 由独立服务持有，DSH 退出不影响它。
 
@@ -21,25 +21,26 @@ DSH-Mesh          0.0.0.0:80            网关，最后重启
 ## Windows
 
 ```powershell
-# 首次安装或已有安装升级
-.\install.ps1 -Port 80 -ClusterKey <secret> -InstallService
-# 已安装过、只拆服务：
-.\code\windows-service\install-split-services.ps1 -Root .
+# 默认安装：网关自己 spawn DSH，控制面板独立
+.\install.ps1
+# 已有安装想要「DSH 不随网关重启」的拆分模式：
+.\code\windows-service\install-split-services.ps1 -Root <root>
 ```
 
 会创建/更新：
 
 ```text
 DSH-WireGuard-Control   Automatic   独立控制面板，51821
-DSH-Mesh         Automatic（external-DSH 模式）
+DSH-Mesh                Automatic   网关（默认自己 spawn DSH；拆分模式为 external-DSH）
+DSH-Web-App             Automatic   仅拆分模式：独立 DSH
 ```
 
-控制面板不需要手工安装：`install.ps1 -InstallService` 和每一次成员部署/升级都会调用
+控制面板不需要手工安装：`install.ps1` 和每一次成员部署/升级都会调用
 `code/wireguard/windows-service/install-control-service.ps1`，把它注册在稳定的安装根上，
 由 `dsh-mesh.mjs --role control` 跟随当前 release。手工安装仍可用于修复：
 
 ```powershell
-.\code\windows-service\install-control-service.ps1 -Root <dsh-wireguard 目录> -DshHome <DSH_HOME>
+.\code\windows-service\install-control-service.ps1 -Root <root> -DshHome <root>\shared\home
 ```
 
 服务名 `DSH-WireGuard-Control`；日志 `control-service.log`。
@@ -49,17 +50,18 @@ DSH-Mesh         Automatic（external-DSH 模式）
 ## Linux
 
 ```bash
-./install.sh --port 80 --password '...'
-# install.sh 末尾会自动调用：
-bash code/dsh-service/install-split.sh
+sudo ./install.sh --port 80 --password '...'
+# 默认只有 control + gate（gate 自己 spawn DSH）。
+# 想要独立的 DSH 服务（DSH 不随网关重启）：
+sudo bash <root>/code/dsh-service/install-split.sh
 ```
 
 会创建：
 
 ```text
-dsh-wireguard-control.service   51821（dsh-wireguard 的 install-control-service.sh）
-dsh-web-app.service             DSH，独立
-dsh-web-gate.service            网关，80，独立
+dsh-wireguard-control.service   51821，控制面板（install.sh 默认装）
+dsh-web-gate.service            网关，80（install.sh 默认装）
+dsh-web-app.service             DSH，独立（仅拆分模式）
 ```
 
 控制面板：
@@ -88,12 +90,14 @@ sudo ./install-control-service.sh --dsh-home /root/.dsh --node /usr/bin/node
 
 ```json
 [
-  { "name": "dsh-web-app.service", "role": "dsh", "command": "start-dsh.sh" },
-  { "name": "dsh-web-gate.service", "role": "gate", "command": "start.sh" }
+  { "name": "dsh-web-app.service", "role": "dsh" },
+  { "name": "dsh-web-gate.service", "role": "gate" }
 ]
 ```
 
-Windows 对应 `DSH-Web-App` / `DSH-Mesh`。控制面板不属于 dsh-mesh 的 release，由 dsh-wireguard 自己更新，不放进 dsh-mesh 的切换清单。
+Windows 对应 `DSH-Web-App` / `DSH-Mesh`。单元只启动 `<root>/dsh-mesh.mjs --role <role>`，
+没有按角色区分的启动脚本。控制面板不属于 dsh-mesh 的 release，由 dsh-wireguard 自己更新，
+不放进 dsh-mesh 的切换清单。
 
 ## WireGuard 内置面板
 

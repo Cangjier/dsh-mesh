@@ -152,7 +152,7 @@
 
 1. 如果目标上已有大小匹配的包，直接跳过；
 2. 清理目标上更早的包，检查剩余空间；
-3. 在目标上找 Node（`<appRoot>/current/runtime/node[/bin]/node`、`$HOME/.dsh/dsh-mesh/...`、
+3. 在目标上找 Node（`<root>/runtime/node[/bin]/node`、`$HOME/.dsh/runtime/node/...`、
    `command -v node`）；
 4. 如果有代理成员，用 `code/shared/egress.mjs` 在它上面启动一次性 HTTP 代理（绑定其 VPN 地址）；
 5. 上传两个小文件到目标：`release-download.mjs` + `http-client.mjs`，用目标自己的 Node 运行；

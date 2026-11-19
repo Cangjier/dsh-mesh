@@ -3,7 +3,7 @@
 ## 分层
 
 ```
-冒烟（秒级）     doctor.sh / status.sh / health
+冒烟（秒级）     dsh-mesh.mjs --status / 健康检查
 接口（十秒级）   密码门、token 交换、/api、WebSocket
 浏览器（分钟级） 真实 Chrome 走一遍：登录页 → 工作台 → 目录弹窗 → 扫码弹层
 请求数断言       确认没有轮询、没有 SSE
@@ -12,9 +12,11 @@
 ## 1. 冒烟
 
 ```bash
-./doctor.sh                       # 退出码 0 = 无阻塞项
-curl -s http://127.0.0.1/__gate/health
-ss -lntp | grep -E ':(80|443)\b'
+node <root>/dsh-mesh.mjs --status          # 指针、active/previous、版本
+curl -s http://127.0.0.1/__gate/health     # {"ok":true,...}
+curl -s http://127.0.0.1:51821/api/dsh-wireguard/health
+systemctl is-active dsh-web-gate dsh-wireguard-control
+ss -lntp | grep -E ':(80|443|51821)\b'
 ```
 
 ## 2. 接口脚本（无浏览器）
@@ -92,7 +94,7 @@ print(Counter(im.getdata()).most_common(3))   # 只有 (255,255,255) 和 (0,0,0)
 
 ```bash
 pgrep -c chrome            # 关闭弹层后必须是 0
-systemctl show dsh-web -p MemoryCurrent
+systemctl show dsh-web-gate -p MemoryCurrent
 free -m
 ```
 
@@ -112,10 +114,11 @@ free -m
 ## 8. 回归顺序（每次改动都跑）
 
 ```bash
-./doctor.sh
-node e2e.mjs http://127.0.0.1 <password>
-node ui.mjs        http://127.0.0.1 <password>   # 登录 → 工作台
-node ui-picker2.mjs https://<域名> <password>     # 目录弹窗
-node ui-qr.mjs      https://<域名> <password>     # 扫码弹层
-node ui-requests.mjs https://<域名> <password>    # 请求数
+node --test "test/*.test.mjs"                    # 单元/集成，345 项
+node code/build/smoke-cli.mjs --root <包目录> --target linux-x64 \
+     --screenshot-dir smoke/linux-x64              # 真实 Chrome 冒烟，没有浏览器时跳过
 ```
+
+指针安装的回归集中在 `test/pointer-install.test.mjs`（首次安装、升一版、只留两版、
+回滚、缺启动器拒绝）和 `test/layout.test.mjs`（prepare/activate/rollback、单元、
+无链接、Windows shim）。

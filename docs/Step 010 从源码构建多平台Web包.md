@@ -181,9 +181,10 @@ dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>/
 ├── shared/                 # 发现/cluster/cookie 模块
 ├── config/                 # 目录选择器覆盖层等
 ├── plugin/                 # index.js / client.js / cordis.patch.yml / locale
-├── install.sh / start.sh / stop.sh / status.sh / doctor.sh
-├── install.ps1 / start.ps1 / stop.ps1 / start.cmd / stop.cmd
-├── VERSION
+├── code/                   # deploy / install / shared / wireguard / interop-service
+├── plugins/dsh-mesh/       # host 插件与客户端 bundle
+├── dsh-mesh.mjs            # 稳定启动器
+├── install.sh / install.ps1
 └── manifest.json
 ```
 
@@ -206,7 +207,7 @@ dsh-mesh-<dshVersion>-<YYYYMMDD><Letter>-<os>-<arch>/
 
 打包完成不等于能启动。客户端的 plugin bundle、`app/` 里的 DSH 版本和 profile 接线只要有一处对不上，`/__gate/health` 仍然可能是 200，而页面停在 `Failed to load plugins`。所以每个**本机目标**的完整包在归档之后都会被真正启动一次，并用 headless Chrome 抓屏：
 
-1. 在任务目录 `smoke/<target>/install/` 里用软链搭一份一次性平铺安装（`app/`、`code/`、`gate/`、`plugins/`、`shared/` 指回包内，`config/`、`data/`、`home/`、`workspace/` 是新的）；
+1. 在任务目录 `smoke/<target>/install/` 里用软链搭一份一次性安装沙箱（`app/`、`code/`、`gate/`、`plugins/`、`shared/` 指回包内，`config/`、`data/`、`home/`、`workspace/` 是新的）；
 2. 用包自带的 `code/deploy/wire-profile.mjs` 把 `@local/dsh-mesh` 接进临时 DSH profile；
 3. 启动包里的 `code/dsh-service/supervisor.mjs` 和 `gate/server.mjs`，端口取空闲端口，`DSH_HOME`/`DSH_WORKDIR` 全部指向沙箱；
 4. 先 POST `/__gate/login` 拿 `dsh_gate` cookie，再用 CDP 写入浏览器，打开网关首页；这样登录表单不占用渲染主线程；

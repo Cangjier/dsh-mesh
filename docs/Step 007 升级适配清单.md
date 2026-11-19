@@ -5,8 +5,10 @@ DSH 升级后，**运行时代码不用改**（网关是外部进程），但两
 ## 0. 记录版本
 
 ```bash
-node -p "require('/root/.dsh/dsh-web-linux/app/node_modules/@deepseek-ai/dsh/package.json').version"
-node -p "require('/root/.dsh/dsh-web-linux/app/node_modules/@deepseek-ai/dsh-client-ui-settings-account/package.json').version"
+R=~/.dsh
+V=$(node -p "require('$R/dsh-mesh.json').active")
+node -p "require('$R/'+V+'/app/node_modules/@deepseek-ai/dsh/package.json').version"
+node -p "require('$R/'+V+'/app/node_modules/@deepseek-ai/dsh-client-ui-settings-account/package.json').version"
 ```
 
 本文档基于 `0.2.2-rc.1`。

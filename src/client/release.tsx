@@ -20,18 +20,6 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return '0'
-  const units = ['B', 'KiB', 'MiB', 'GiB']
-  let amount = value
-  let unit = 0
-  while (amount >= 1024 && unit < units.length - 1) {
-    amount /= 1024
-    unit += 1
-  }
-  return `${amount >= 10 || unit === 0 ? String(Math.round(amount)) : amount.toFixed(1)} ${units[unit]}`
-}
-
 /** One masked token field. */
 function TokenInput({ value, onChange, placeholder }: { value: string, onChange: (value: string) => void, placeholder: string }) {
   return (
@@ -49,7 +37,6 @@ function TokenInput({ value, onChange, placeholder }: { value: string, onChange:
 export function ReleaseCard({ active }: { active: boolean }) {
   const [messageApi, contextHolder] = message.useMessage()
   const [config, setConfig] = useState<ReleaseSettings | null>(null)
-  const [manifestUrls, setManifestUrls] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -63,7 +50,6 @@ export function ReleaseCard({ active }: { active: boolean }) {
     try {
       const result = await api.releaseSettings()
       setConfig(result.config)
-      setManifestUrls(result.manifestUrls)
       setWarnings([])
     } catch (failure) {
       setError(errorText(failure))
@@ -78,10 +64,6 @@ export function ReleaseCard({ active }: { active: boolean }) {
 
   const update = useCallback((patch: Partial<ReleaseSettings>) => {
     setConfig(previous => (previous === null ? previous : { ...previous, ...patch }))
-  }, [])
-
-  const updateRepo = useCallback((repo: 'github' | 'gitee', patch: object) => {
-    setConfig(previous => (previous === null ? previous : { ...previous, [repo]: { ...previous[repo], ...patch } }))
   }, [])
 
   const save = useCallback(async () => {
@@ -102,12 +84,10 @@ export function ReleaseCard({ active }: { active: boolean }) {
         gitee: {
           owner: config.gitee.owner,
           repo: config.gitee.repo,
-          branch: config.gitee.branch,
           ...(giteeToken.trim() === '' ? {} : { token: giteeToken.trim() }),
         },
       })
       setConfig(result.config)
-      setManifestUrls(result.manifestUrls)
       setWarnings(result.warnings ?? [])
       setGithubToken('')
       setGiteeToken('')
@@ -135,11 +115,6 @@ export function ReleaseCard({ active }: { active: boolean }) {
     >
       {contextHolder}
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          只填 token 即可：Gitee 分支默认 <span className="dsh-pw-mono">master</span>。
-          编译完成后把最新包上传到固定的 <span className="dsh-pw-mono">{config?.tag ?? 'latest'}</span> Release（旧资产自动删除）；成员升级时优先从 Release 下载：GitHub 走外网代理，Gitee 直连。
-          Gitee 单附件约 100MB，包会按分片上传再合并；GitHub 保留整包。
-        </Typography.Text>
         {error !== '' ? <Alert type="error" showIcon message={error} closable onClose={() => setError('')} /> : null}
         {warnings.length > 0 ? <Alert type="warning" showIcon message="自动识别账号未完成" description={warnings.join('；')} closable onClose={() => setWarnings([])} /> : null}
         {config === null ? (
@@ -175,28 +150,8 @@ export function ReleaseCard({ active }: { active: boolean }) {
             </Space>
             <Space size={10} wrap>
               <Typography.Text strong style={{ width: 60 }}>Gitee</Typography.Text>
-              <Input size="small" style={{ width: 110 }} prefix="branch" placeholder="master" value={config.gitee.branch} onChange={event => updateRepo('gitee', { branch: event.target.value })} />
               <TokenInput value={giteeToken} onChange={setGiteeToken} placeholder={config.gitee.hasToken ? '已保存，留空不改' : 'private token'} />
             </Space>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              配置文件：<span className="dsh-pw-mono">{config.file}</span>
-              {config.fileError === null ? '' : `（读取失败：${config.fileError}）`}
-            </Typography.Text>
-            {manifestUrls.length === 0 ? (
-              <Alert type="warning" showIcon message="还没有可用的 Release 地址：填一个 token 并保存" />
-            ) : (
-              <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>成员读取的最新清单：</Typography.Text>
-                {manifestUrls.map(url => (
-                  <Typography.Text key={url} className="dsh-pw-mono" style={{ fontSize: 12 }} copyable={{ text: url }}>{url}</Typography.Text>
-                ))}
-              </Space>
-            )}
-            {config.gitee.enabled ? (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                注意：Gitee 仓库需公开（私有 Release 需要 token，成员无法直接下载），单文件上限约 100MB、仓库附件总量约 1GB；仓库不存在时会用这个 token 自动创建（需要 projects 权限），发布时先清旧分片再传新分片。当前分片大小 {formatBytes(config.partBytes)}。
-              </Typography.Text>
-            ) : null}
           </>
         )}
       </Space>

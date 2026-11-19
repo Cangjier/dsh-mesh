@@ -55,7 +55,7 @@
 - `owner` 由 token 自动识别（GitHub/Gitee 的 `/user`）。保存时识别一次并写回配置；
   识别不了（比如编译网关直连不到 GitHub）只给警告，发布时再经编译机的外网代理识别一次。
 - `repo` 默认 `dsh-web-release`。
-- Gitee 的 `branch` 在面板里编辑，留空默认 `master`（Gitee 新建仓库的默认分支）。
+- Gitee 的 `branch` 不再作为面板输入；配置里缺省时使用 `master`（Gitee 新建仓库的默认分支）。
 - 仓库不存在时**发布用该 token 自动创建公开仓库**：`owner` 是 token 自己时建在个人名下，
   填了组织时建在该组织下（token 需要该组织的写权限）；Gitee 的 `owner` 是别人的个人账号时发布会失败并提示。
 
@@ -89,7 +89,7 @@
 1. **GitHub**：生成 token（classic 勾 `repo`，或 fine-grained 给 `Contents: Read and write` +
    `Metadata: Read`；要自动建仓库还需要 `Administration: Read and write` 或 classic 的 `repo`）。
 2. **Gitee**：生成私人令牌（勾 `projects`，自动建仓库需要该权限）。
-3. 面板里只贴 token 保存即可；账号、仓库、分支都会自动补齐。也可以直接写上面的 JSON。
+3. 面板里只贴 token 保存即可；面板只保留开关、Tag、Gitee 分片和两个 token 输入，账号与仓库自动补齐，分支沿用配置里的值（默认 `master`）。也可以直接写上面的 JSON。
 
 ## 4. 发布流程
 

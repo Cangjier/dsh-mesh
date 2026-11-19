@@ -92,11 +92,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 
 - **编译**：选择编译成员、外网代理（直连 / 经成员 / 自定义 URL）、源码引用（默认 `master`，可填提交号）和目标平台。默认值按当前成员自动选：编译成员取 CPU/内存最多的在线成员（Windows 和 Linux 都行），外网代理取公网 IP 在国外（非 CN）的 Linux 成员；目标平台默认 Linux x64 + Windows x64。成员的公网 IP 来自 WireGuard endpoint，国家查询结果缓存 30 天；查不到国家时保留直连，也认成员标签里的「国外 / 海外」。点「编译」后任务在后台跑，页面按阶段显示进度。
 - **拉回服务**：编译卡片里的开关，默认关闭。关闭时产物留在编译机的 `~/.dsh/mesh/upgrade/<job>/`，编译成功后自动在该成员上升级；打开后额外把包拉回网关 `~/.dsh/packages`，部署包列表里就能拿它部署到其他成员。默认值来自部署包内 `cordis.patch.yml` 的 `build.pullBack`；`build.autoUpgrade: false` 可关闭编译后的自动升级（本机编译始终不自动升级）。
-- **自动编译**：默认每天 04:00 触发，可在「编译」卡片下开关和改时间。触发前比较最近一次**已完成**编译的清单：DSH 源码 tarball 的 ETag、dsh-mesh 构建输入的内容指纹、`build/plugins.json` 里每个随包插件（当前是 xl）的 tarball ETag。三者都没有变化就跳过，不产生新包；有变化才用和面板相同的默认成员/代理策略启动后台编译。配置和上次结果写在 `<dataDir>/schedule.json`，不依赖浏览器开着。
+- **自动编译**：默认关闭；打开后默认每天 04:00 触发，可在「编译」卡片下开关和改时间。触发前比较最近一次**已完成**编译的清单：DSH 源码 tarball 的 ETag、dsh-mesh 构建输入的内容指纹、`build/plugins.json` 里每个随包插件（当前是 xl）的 tarball ETag。三者都没有变化就跳过，不产生新包；有变化才用和面板相同的默认成员/代理策略启动后台编译。配置和上次结果写在 `<dataDir>/schedule.json`，不依赖浏览器开着。旧版本留下的、仍等于 04:00 开启默认值的设置会在升级时一次性迁移为关闭；手动改过时间或单独给成员开启的设置保持不变。
 - **编译任务**：保留最近任务的成员、引用、目标、进度和时间；「日志」弹层实时跟随 `build.log`。
 - **包里带什么**：每个产物固定携带 `dsh-mesh` 与 `xl` 两个插件。`dsh-mesh` 是当前仓库；`xl` 来自 `Cangjier/xl` 的 `main`，每次编译现拉，来源与归档哈希记在包的 `manifest.json`（`extraPlugins`）里。清单在 `build/plugins.json`，加插件只要加一条。
 - **部署包**：列出 `~/.dsh/packages` 里的包（平台、大小、时间），可直接删除；成员编译出的产物也会出现在这里，接着就能对成员「部署」。
-- **Release 发布**：编译成功后自动把本次最新包上传到 GitHub / Gitee 的固定 `latest` Release，旧资产随之删除。GitHub 存整包（单文件 2GB 上限，上传走编译机的外网代理）；Gitee 单附件约 100MB、仓库附件总量约 1GB，所以按 85MiB 分片上传（Gitee 直连、不走代理），客户端下载后拼接并校验 SHA-256。配置在 `~/.dsh/mesh/release.json`（0600）；面板「Release 发布」卡片**只需要贴 token**，账号与仓库由 token 自动补齐（仓库不存在会自动创建为公开仓库），Gitee 分支默认 `master`。token 不会回传浏览器。详见 [Step 022](docs/Step%20022%20Release%20发布与下载升级.md)。
+- **Release 发布**：编译成功后自动把本次最新包上传到 GitHub / Gitee 的固定 `latest` Release，旧资产随之删除。GitHub 存整包（单文件 2GB 上限，上传走编译机的外网代理）；Gitee 单附件约 100MB、仓库附件总量约 1GB，所以按 85MiB 分片上传（Gitee 直连、不走代理），客户端下载后拼接并校验 SHA-256。配置在 `~/.dsh/mesh/release.json`（0600）；面板「Release 发布」卡片**只需要贴 token**，账号与仓库由 token 自动补齐（仓库不存在会自动创建为公开仓库），Gitee 分支沿用 `master` 默认值（面板不再提供 branch 输入）。token 不会回传浏览器。详见 [Step 022](docs/Step%20022%20Release%20发布与下载升级.md)。
 - **指针布局（新骨架）**：`~/.dsh` 下只保留一个稳定启动器 `dsh-mesh.mjs` 和指针 `dsh-mesh.json`，每个版本解压到 `releases/<id>` 后就不再覆盖；升级 = 写指针 + 重启，回退 = 指针翻回 + 重启。启动器替换前自动留 `.bak`，会话/配置统一在 `~/.dsh/shared`。升级实现只有 `code/deploy/upgrade-local.mjs` 一份，网关和 Linux 成员共用；`.sh` 只是旧调用方的兼容 shim。详见 [Step 023](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md)。
 - **升级优先从 Release 下载**：成员升级不再必须由网关上传整个包。部署计划只带公开的 `latest.json` URL 和一个有外网成员的代理坐标；目标成员直接下载（GitHub 优先、Gitee 分片兜底），校验 SHA-256 后原地进入 prepare/activate。下载失败、目标没有 Node、Release 里没有所选包时自动回退到原有的网关上传。代理默认按「公网 IP 非 CN 的 Linux 成员」选择，只作用于 GitHub；Gitee 不走代理。升级弹窗里可以改成直连或指定成员。
 
@@ -126,7 +126,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - 支持 `scope=dsh`：只重启 DSH/控制面板，不重启网关。
 - 健康检查失败自动切回 `previous` 并重启；`rollback` 可手动回滚。
 - 成功激活后只保留当前和上一个 release（正好两个解压包），升级时其余 release 目录会被删除。
-- **自动升级**：每个成员单独配置，入口在成员行的「更多」菜单 →「自动升级」；默认每天 06:00，可开关和改时间。对每个成员选它对应系统的最新部署包（按构建号，不按文件 mtime），与成员上报的当前部署（`manifest.version` + `buildStamp`）比较；一致或最新包更旧就跳过；需要升级时只启动这个成员的升级 job。
+- **自动升级**：每个成员单独配置，入口在成员行的「更多」菜单 →「自动升级」；默认关闭，打开后默认每天 06:00，可开关和改时间。对每个成员选它对应系统的最新部署包（按构建号，不按文件 mtime），与成员上报的当前部署（`manifest.version` + `buildStamp`）比较；一致或最新包更旧就跳过；需要升级时只启动这个成员的升级 job。
 - 面板的「升级」对本机和每个已安装的成员都开放，收在操作列的纯图标「更多」菜单里（Linux 成员同一菜单另有「测试升级」，先演练平铺路径）；成员表还有一列「版本」，显示每台成员当前运行的部署包；它用同一套引擎换包，升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的 `dsh-web`/网关不会把升级本身打断，也不会带走发起升级的面板。平铺安装（网关这种没有 `current` 的布局）走 `code/deploy/upgrade-local.sh`：备份（含 `app`/`runtime`/`web` 与工具层）→ 覆盖文件（保留 config/data/home/workspace）→ 重写 profile 与单元 → 健康检查，失败整体回滚；回退同样换回运行时三层，不会把旧脚本搭在新运行时上；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。测试升级的抓屏在目标成员没有 Chrome/Chromium/Edge 时会自动下载 Chrome for Testing 的 `chrome-headless-shell`（缓存在 `~/.cache/dsh-mesh/chrome`）再继续；只有下载或启动也失败才写「抓屏跳过」，不会把「成员没有浏览器」变成升级失败（Step 018）。
 - 详见 [Step 018](docs/Step%20018%20成员升级与独立升级进程.md)。
 

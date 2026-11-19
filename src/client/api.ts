@@ -466,7 +466,7 @@ export const api = {
     tag?: string
     partBytes?: number
     github?: { owner?: string, repo?: string, token?: string }
-    gitee?: { owner?: string, repo?: string, token?: string, branch?: string }
+    gitee?: { owner?: string, repo?: string, token?: string }
   }): Promise<ReleaseSettingsResponse> {
     return request<ReleaseSettingsResponse>('/api/dsh-mesh/release', {
       method: 'POST',
@@ -677,6 +677,10 @@ export interface HysteriaLink {
   port: number
   mode: string
   bandwidth: number
+  /** Local HTTP proxy the build/deploy engines use (always present on new links). */
+  httpProxy?: string
+  /** Whether the server's VPN address is steered through the tun device. */
+  tunRoute?: boolean
   updatedAt: string
 }
 

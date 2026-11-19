@@ -107,8 +107,13 @@ Linux 用静态 `7zzs`（`7zzs` 改名），不依赖 glibc/libstdc++ 版本；W
 已经有一个 `.7z` 包、不想再编过渡包时，用仓库自带的 `7zz` 解：
 
 ```bash
-/root/ws/dsh-plugins/dsh-mesh/code/gate/assets/7z/7zz-linux-x64 x -o /tmp/pkg /path/to/dsh-mesh-....7z
-cd /tmp/pkg/dsh-mesh-... && sudo ./install.sh      # 或 --root <现有安装根>
+zzz=/root/ws/dsh-plugins/dsh-mesh/code/gate/assets/7z/7zz-linux-x64
+$zzz x -o /tmp/pkg /path/to/dsh-mesh-....7z
+cd /tmp/pkg/dsh-mesh-*
+# Windows 生成的 7z 不携带 Unix mode，按 prepare 脚本的做法补上可执行位
+find . -type f -name '*.sh' -exec chmod +x {} +
+chmod +x dsh-mesh.mjs runtime/node/bin/node code/gate/assets/7z/7zz-* 2>/dev/null || true
+sudo ./install.sh      # 或 --root <现有安装根>
 ```
 
 同样会重启网关。之后 `code/gate/assets/7z/` 就在新 release 里，`/__gate/assets/7z` 也能被成员访问。

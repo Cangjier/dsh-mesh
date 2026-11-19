@@ -138,6 +138,12 @@ test('a .7z package plan carries the bundled 7-Zip for its target', async () => 
     assert.match(script, /case "\$PACKAGE" in/u)
     assert.match(script, /\*\.7z\)/u)
     assert.match(script, /SEVENZIP='\/tmp\/dsh-mesh-[a-f0-9]+-7z\.bin'/u)
+    // 7-Zip exits with 2 when it refuses a parent-relative link (the node
+    // runtime's bin shims); the prepare must keep going and recreate them.
+    assert.match(script, /SEVENZIP_STATUS/u)
+    assert.match(script, /-ne 2 \]\]?/u)
+    assert.match(script, /DSH-MESH-LINK/u)
+    assert.match(script, /NODE_BIN="\$STAGE\/runtime\/node\/bin"/u)
     const windows = buildWindowsPrepareScript({
       ...plan,
       layoutRoot: 'C:\\dsh',

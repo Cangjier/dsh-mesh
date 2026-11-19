@@ -10,6 +10,7 @@ import { PackageUploads, isMeshPeer, packageName } from '../code/gate/packages.m
 test('packageName accepts archives and rejects paths', () => {
   assert.equal(packageName('dsh-mesh-0.2.2-linux-x64.tar.gz'), 'dsh-mesh-0.2.2-linux-x64.tar.gz')
   assert.equal(packageName('x.zip'), 'x.zip')
+  assert.equal(packageName('dsh-mesh-0.2.2-linux-x64.7z'), 'dsh-mesh-0.2.2-linux-x64.7z')
   assert.throws(() => packageName('../evil.zip'), /plain file name/u)
   assert.throws(() => packageName('a/b.zip'), /plain file name/u)
   assert.throws(() => packageName('notes.txt'), /end in/u)
@@ -66,6 +67,26 @@ test('upload stores an archive with its checksum', async () => {
     assert.match(await readFile(path.join(dir, 'demo-linux-x64.tar.gz.sha256'), 'utf8'), new RegExp(digest, 'u'))
     const listed = await fetch(`${server.url}/__gate/packages`).then(body => body.json())
     assert.equal(listed.packages[0].name, 'demo-linux-x64.tar.gz')
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a 7z upload is listed', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-upload-'))
+  const payload = Buffer.from('7z package bytes')
+  const digest = createHash('sha256').update(payload).digest('hex')
+  const server = await serve({ password: 'secret', packagesDir: dir })
+  try {
+    const response = await fetch(`${server.url}/__gate/packages/upload?name=dsh-mesh-0.2.2-20261120A-linux-x64.7z&sha256=${digest}`, {
+      method: 'POST',
+      headers: { 'x-dsh-gate-token': 'secret', 'content-type': 'application/octet-stream' },
+      body: payload,
+    })
+    assert.equal(response.status, 200)
+    const listed = await fetch(`${server.url}/__gate/packages`).then(body => body.json())
+    assert.deepEqual(listed.packages.map(item => item.name), ['dsh-mesh-0.2.2-20261120A-linux-x64.7z'])
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })

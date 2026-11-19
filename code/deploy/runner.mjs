@@ -19,7 +19,7 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { chmod, cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -218,6 +218,38 @@ async function acquireRelease(context) {
  * @param {object} context run context.
  * @returns {Promise<void>} completion.
  */
+/**
+ * Recreate the node runtime's bin shims after a 7-Zip extraction.
+ *
+ * A 7-Zip archive created on Windows packs `runtime/node/bin/npm` and its
+ * siblings as symlinks to `../lib/node_modules/...`. 7-Zip refuses to restore
+ * a link whose target contains `..` and leaves an empty file behind, so the
+ * three shims are relinked from the runtime layout. Only an empty file whose
+ * target exists is touched.
+ * @param {string} stage extraction root.
+ * @param {(line: string) => Promise<void>} note log callback.
+ * @returns {Promise<void>} completion.
+ */
+async function restoreRuntimeLinks(stage, note) {
+  const bin = path.join(stage, 'runtime', 'node', 'bin')
+  const modules = path.join(stage, 'runtime', 'node', 'lib', 'node_modules')
+  if (!existsSync(bin) || !existsSync(modules)) return
+  const links = [
+    ['npm', 'npm/bin/npm-cli.js'],
+    ['npx', 'npm/bin/npx-cli.js'],
+    ['corepack', 'corepack/dist/corepack.js'],
+  ]
+  for (const [name, relative] of links) {
+    const target = path.join(bin, name)
+    const source = path.join(modules, relative)
+    const info = await stat(target).catch(() => null)
+    if (info === null || !info.isFile() || info.size !== 0 || !existsSync(source)) continue
+    await rm(target, { force: true })
+    await symlink(`../lib/node_modules/${relative}`, target).catch(() => {})
+    await note(`restored runtime link ${name}`)
+  }
+}
+
 async function runInplace(context) {
   const { jobDir, request, save, note, mark, meter } = context
   const settings = request.inplace ?? {}
@@ -258,7 +290,15 @@ async function runInplace(context) {
     // upgrade expects the tree at the stage root.
     const binary = await ensureSevenZipBinary(hostSevenZipPath(REPOSITORY_ROOT))
     meter('解压安装包', { done: 0, total: entries, percent: 0, indeterminate: entries === 0 })
-    await run(binary, ['x', '-y', '-bd', `-o${stage}`, packagePath], line => note(`7z: ${line}`))
+    try {
+      await run(binary, ['x', '-y', '-bd', `-o${stage}`, packagePath], line => note(`7z: ${line}`))
+    } catch (error) {
+      // 7-Zip exits with 2 when it refuses a link whose target uses '..' (the
+      // node runtime's bin shims); every other entry still landed and the
+      // links are recreated below.
+      if (!/exited with 2\b/u.test(String(error?.message ?? ''))) throw error
+      await note('7-Zip refused parent-relative links; recreating them after extraction')
+    }
     const inner = (await readdir(stage)).find(name => existsSync(path.join(stage, name, 'manifest.json')))
     if (inner !== undefined) {
       for (const name of await readdir(path.join(stage, inner))) {
@@ -266,6 +306,7 @@ async function runInplace(context) {
       }
       await rm(path.join(stage, inner), { recursive: true, force: true })
     }
+    await restoreRuntimeLinks(stage, note)
     meter('解压安装包', { done: entries, total: entries, percent: 100 })
   } else {
     let extracted = 0

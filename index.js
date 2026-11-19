@@ -6460,7 +6460,15 @@ case "$PACKAGE" in
     chmod +x "$SEVENZIP" 2>/dev/null || true
     TOTAL=$("$SEVENZIP" l -ba "$PACKAGE" 2>/dev/null | wc -l | tr -d ' ')
     printf 'DSH-MESH-EXTRACT-TOTAL %s\\n' "$TOTAL"
+    # 7-Zip reports status 2 when it refuses a link but still extracts every
+    # other entry; the links it refused are recreated below, so only a real
+    # archive error may abort here (the node --check at the end is the proof
+    # the tree is complete).
+    set +e
     "$SEVENZIP" x -y -bd -o"$STAGE" "$PACKAGE" >/dev/null
+    SEVENZIP_STATUS=$?
+    set -e
+    if [ "$SEVENZIP_STATUS" -ne 0 ] && [ "$SEVENZIP_STATUS" -ne 2 ]; then echo "7-Zip extraction failed ($SEVENZIP_STATUS)" >&2; exit "$SEVENZIP_STATUS"; fi
     # 7-Zip keeps the package's own top-level directory; the rest of the deploy
     # expects the tree to start at the staging root.
     for inner in "$STAGE"/dsh-mesh-*; do
@@ -6494,6 +6502,22 @@ chmod +x "$STAGE"/*.sh "$STAGE/dsh-mesh.mjs" 2>/dev/null || true
 find "$STAGE" -type f -name '*.sh' -exec chmod +x {} + 2>/dev/null || true
 chmod +x "$STAGE/runtime/node/bin/node" 2>/dev/null || true
 chmod +x "$STAGE"/code/gate/assets/7z/7zz-* 2>/dev/null || true
+# 7-Zip refuses any link whose target contains '..' (the node runtime's
+# npm/npx/corepack shims do) and leaves an empty file in its place. Recreate
+# them from the runtime layout, only when the file is empty and the target
+# really exists \u2014 a Windows-built package carries no Unix mode, so these are
+# the only symlinks a package needs.
+NODE_BIN="$STAGE/runtime/node/bin"
+if [ -d "$STAGE/runtime/node/lib/node_modules" ] && [ -d "$NODE_BIN" ]; then
+  for link in npm:npm/bin/npm-cli.js npx:npm/bin/npx-cli.js corepack:corepack/dist/corepack.js; do
+    link_name=\${link%%:*}
+    link_target=\${link#*:}
+    if [ -f "$NODE_BIN/$link_name" ] && [ ! -s "$NODE_BIN/$link_name" ] && [ -f "$STAGE/runtime/node/lib/node_modules/$link_target" ]; then
+      ln -sfn "../lib/node_modules/$link_target" "$NODE_BIN/$link_name"
+      printf 'DSH-MESH-LINK %s\\n' "$link_name"
+    fi
+  done
+fi
 NODE="$STAGE/runtime/node/bin/node"
 [ -x "$NODE" ] || NODE=$(command -v node || true)
 [ -n "$NODE" ] && [ -x "$NODE" ] || { echo "the package has no usable node" >&2; exit 1; }
@@ -10898,7 +10922,7 @@ var MeshService = class {
     const packages = [];
     for (const entry of entries) {
       if (!entry.isFile()) continue;
-      if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(entry.name)) continue;
+      if (!/\.(?:7z|zip|tar\.gz|tgz)$/iu.test(entry.name)) continue;
       const file = path22.join(this.packagesDir, entry.name);
       const info = await stat13(file).catch(() => null);
       if (info === null) continue;
@@ -11201,7 +11225,7 @@ var MeshService = class {
     if (name === "" || name !== path22.basename(name) || name.startsWith(".")) {
       throw new Error("package name is invalid");
     }
-    if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`);
+    if (!/\.(?:7z|zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`);
     const file = path22.join(this.packagesDir, name);
     const info = await stat13(file).catch(() => null);
     if (info === null || !info.isFile()) throw new Error(`package not found: ${name}`);

@@ -208,7 +208,7 @@ export class PackageUploads {
     const entries = await readdir(this.packagesDir, { withFileTypes: true }).catch(() => [])
     const packages = []
     for (const entry of entries) {
-      if (!entry.isFile() || !/\.(?:zip|tar\.gz|tgz)$/iu.test(entry.name)) continue
+      if (!entry.isFile() || !/\.(?:7z|zip|tar\.gz|tgz)$/iu.test(entry.name)) continue
       const info = await stat(path.join(this.packagesDir, entry.name)).catch(() => null)
       if (info === null) continue
       packages.push({ name: entry.name, bytes: info.size, mtime: info.mtime.toISOString() })

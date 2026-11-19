@@ -7,6 +7,7 @@ import { MeshService } from '../src/lib/service.mjs'
 
 const SHA = 'c'.repeat(64)
 const ARCHIVE = 'dsh-mesh-0.2.2-rc.5-20261119F-linux-x64.tar.gz'
+const SEVEN = 'dsh-mesh-0.2.2-rc.5-20261120A-win-x64.7z'
 
 /**
  * A service whose member table and release manifest are fixtures.
@@ -110,15 +111,40 @@ test('the local member lists its package cache and build staging', async () => {
     await mkdir(staging, { recursive: true })
     await writeFile(path.join(packagesDir, ARCHIVE), 'archive')
     await writeFile(path.join(packagesDir, `${ARCHIVE}.sha256`), `${SHA}  ${ARCHIVE}\n`)
+    await writeFile(path.join(packagesDir, SEVEN), 'archive')
     await writeFile(path.join(staging, 'dsh-mesh-0.2.2-20261118F-linux-x64.tar.gz'), 'old')
     service.packagesDir = packagesDir
     const result = await service.memberPackages('local')
     assert.equal(result.ok, true)
-    assert.equal(result.packages.length, 2)
+    assert.equal(result.packages.length, 3)
+    assert.equal(result.packages.find(item => item.name === SEVEN)?.target, 'win-x64')
     const latest = result.packages.find(item => item.name === ARCHIVE)
     assert.equal(latest.sha256, SHA)
     assert.equal(latest.target, 'linux-x64')
     assert.ok(result.packages.some(item => item.name.includes('20261118F')))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('removePackage accepts a 7z archive and refuses other files', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-service-remove-package-'))
+  try {
+    const service = new MeshService({
+      dataDir: path.join(dir, 'mesh'),
+      config: {},
+      log: () => {},
+      spawnRunner: async () => ({ mode: 'test', unit: null }),
+    })
+    const packagesDir = path.join(dir, 'packages')
+    await mkdir(packagesDir, { recursive: true })
+    service.packagesDir = packagesDir
+    await writeFile(path.join(packagesDir, SEVEN), 'archive')
+    await writeFile(path.join(packagesDir, 'notes.txt'), 'text')
+    const result = await service.removePackage({ name: SEVEN })
+    assert.equal(result.ok, true)
+    await assert.rejects(readFile(path.join(packagesDir, SEVEN)))
+    await assert.rejects(service.removePackage({ name: 'notes.txt' }), /not a package name/u)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

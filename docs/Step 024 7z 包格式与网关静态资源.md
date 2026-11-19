@@ -70,6 +70,7 @@ Linux 用静态 `7zzs`（`7zzs` 改名），不依赖 glibc/libstdc++ 版本；W
 - **Windows prepare**：`$Package -like '*.7z'` → 用上传的 `7za.exe` 解压；否则仍走 `Expand-Archive`。
 - **Windows 预解压**：`SshRunner.sevenZipEntries` / `extractSevenZip` 在 prepare 之前用 7z 解到 staging，进度按条目总数一次到位。
 - **本机原地升级**（`code/deploy/runner.mjs`）：`.7z` 用本机 release 里的 `code/gate/assets/7z/<host binary>` 解压并把顶层目录拍平；旧格式继续走 tar。
+- **符号链接**：7-Zip 拒绝还原任何目标里带 `..` 的链接（`ERROR: Dangerous link path was ignored`，退出码 2），并在原位置留一个 0 字节文件。node 运行时的 `runtime/node/bin/{npm,npx,corepack}` 正是这种链接。prepare 与 runner 都因此把退出码 2 当作“部分条目被跳过”继续执行，解压后按运行时布局把这三个 shim 重新 `ln -sfn` 回 `../lib/node_modules/...`（只在文件为 0 字节且目标存在时执行）。没有这一步，Linux 成员会在 prepare 阶段失败，或拿到一个没有 npm 的运行时。
 - **手工安装**：`7zz x -o <dir> <pkg>.7z`（Windows：`7za.exe x -o<dir> <pkg>.7z`），进 `dsh-mesh-.../` 跑 `install.sh` / `install.ps1`。
 
 ## 兼容性

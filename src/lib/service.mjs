@@ -1383,7 +1383,7 @@ export class MeshService {
     const packages = []
     for (const entry of entries) {
       if (!entry.isFile()) continue
-      if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(entry.name)) continue
+      if (!/\.(?:7z|zip|tar\.gz|tgz)$/iu.test(entry.name)) continue
       const file = path.join(this.packagesDir, entry.name)
       const info = await stat(file).catch(() => null)
       if (info === null) continue
@@ -1703,7 +1703,7 @@ export class MeshService {
     if (name === '' || name !== path.basename(name) || name.startsWith('.')) {
       throw new Error('package name is invalid')
     }
-    if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`)
+    if (!/\.(?:7z|zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`)
     const file = path.join(this.packagesDir, name)
     const info = await stat(file).catch(() => null)
     if (info === null || !info.isFile()) throw new Error(`package not found: ${name}`)

@@ -72,57 +72,6 @@ export interface Snapshot {
   cluster?: { configured: boolean; memberPort: number }
 }
 
-export interface MemberConversation {
-  id: string
-  sessionId?: string
-  title?: string
-  initiator?: { id?: string; name?: string; ip?: string; source?: string } | null
-  status?: string
-  createdAt?: string
-  updatedAt?: string
-  lastText?: string
-  turns?: number
-  eventCount?: number
-  cwd?: string
-  /** Workspace name the conversation was created in, when it had one. */
-  workspace?: string
-  /** First prompt, uncapped; the title is only its first 80 characters. */
-  prompt?: string
-  error?: string | null
-}
-
-export interface ConversationGroup {
-  id: string
-  name: string
-  ip: string
-  online: boolean
-  self: boolean
-  dsh: boolean
-  conversations: MemberConversation[]
-  error: string | null
-}
-
-/** One member that accepted a panel message. */
-export interface SendOutcome {
-  member: string
-  ip: string
-  conversationId: string
-  /** true when the text joined a conversation that was already running. */
-  reused: boolean
-}
-
-export interface SendResult {
-  ok: boolean
-  sent: SendOutcome[]
-  errors: Array<{ member: string; ip: string; error: string }>
-}
-
-export interface ConversationSnapshot {
-  ok: boolean
-  updatedAt: string
-  groups: ConversationGroup[]
-}
-
 export interface HostStatus {
   ok: boolean
   host: {
@@ -653,27 +602,6 @@ export const api = {
       headers: { 'x-dsh-mesh': '1' },
       body: JSON.stringify({ member }),
     })
-  },
-
-  /**
-   * Post a message from the panel. An empty member list means every member.
-   */
-  sendConversation(text: string, members: string[]): Promise<SendResult> {
-    return request<SendResult>('/api/dsh-mesh/conversations/send', {
-      method: 'POST',
-      body: JSON.stringify({ text, members }),
-    })
-  },
-
-  conversations(): Promise<ConversationSnapshot> {
-    return request<ConversationSnapshot>('/api/dsh-mesh/conversations')
-  },
-
-  clearConversations(): Promise<{ ok: boolean; removed: number; errors: Array<{ member: string; error: string }> }> {
-    return request<{ ok: boolean; removed: number; errors: Array<{ member: string; error: string }> }>(
-      '/api/dsh-mesh/conversations/clear',
-      { method: 'POST' },
-    )
   },
 
   job(id: string): Promise<{ job: BuildJob }> {

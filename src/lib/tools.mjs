@@ -154,7 +154,7 @@ export function registerTools(ctx, toolsCtx, service) {
     log: line => ctx.logger?.info?.(`mesh: ${line}`),
   })
 
-  // The panel lists member conversations through the same client.
+  // Exposed on the service so tests can inspect the in-flight task table.
   service.memberTasks = memberTasks
   try {
     ctx.effect(() => () => memberTasks.dispose(), 'mesh member tasks')

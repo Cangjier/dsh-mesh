@@ -259,39 +259,6 @@ test('a delegation tells the member what the conversation is about and who start
   }
 })
 
-test('the conversation list is grouped per member and survives one failing peer', async () => {
-  const { server, port } = await fakeMember()
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-task-'))
-  const service = {
-    config: { interopPort: port, interopToken: 'test-token', interopUseGatePassword: false },
-    dataDir,
-    repositoryRoot: process.cwd(),
-    members: async () => ({
-      local: { id: 'local', kind: 'self', name: 'member-a', ip: '127.0.0.1', online: true, dsh: true },
-      // Unroutable on purpose: the list must still return the healthy member.
-      members: [{ id: 'peer-1', kind: 'peer', name: 'member-b', ip: '10.255.255.1', online: false, dsh: true }],
-    }),
-  }
-  const tasks = new MemberTaskService({ ctx: { get: () => undefined }, service, dataDir })
-  try {
-    const snapshot = await tasks.listByMember(300)
-    assert.equal(snapshot.ok, true)
-    assert.equal(snapshot.groups.length, 2)
-    assert.equal(snapshot.groups[0].self, true)
-    assert.equal(snapshot.groups[0].name, 'member-a')
-    assert.equal(snapshot.groups[0].conversations.length, 2)
-    assert.equal(snapshot.groups[0].conversations[0].title, 'render the report')
-    assert.equal(snapshot.groups[0].conversations[0].initiator.source, 'call_member')
-    assert.equal(snapshot.groups[1].name, 'member-b')
-    assert.equal(snapshot.groups[1].conversations.length, 0)
-    assert.ok(typeof snapshot.groups[1].error === 'string' && snapshot.groups[1].error !== '')
-  } finally {
-    await tasks.dispose()
-    await new Promise(resolve => server.close(resolve))
-    await rm(dataDir, { recursive: true, force: true })
-  }
-})
-
 /**
  * Start a member interop that creates one conversation and then answers its
  * waits with the supplied handler, so a single failure mode can be exercised.

@@ -29,7 +29,7 @@ function plan(os) {
     ],
     scope: 'all',
     gatePort: '80',
-    retention: 3,
+    retention: 2,
     sudo: !windows,
     serviceUser: windows ? undefined : 'root',
     gatePassword: 'shared-pw',

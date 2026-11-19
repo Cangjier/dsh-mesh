@@ -136,7 +136,7 @@ export function ReleaseCard({ active }: { active: boolean }) {
       {contextHolder}
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          只填 token 即可：owner 由 token 自动识别，仓库默认 <span className="dsh-pw-mono">dsh-web-release</span>（公开仓库，不存在会自动创建），Gitee 分支默认 <span className="dsh-pw-mono">master</span>。
+          只填 token 即可：Gitee 分支默认 <span className="dsh-pw-mono">master</span>。
           编译完成后把最新包上传到固定的 <span className="dsh-pw-mono">{config?.tag ?? 'latest'}</span> Release（旧资产自动删除）；成员升级时优先从 Release 下载：GitHub 走外网代理，Gitee 直连。
           Gitee 单附件约 100MB，包会按分片上传再合并；GitHub 保留整包。
         </Typography.Text>
@@ -171,14 +171,10 @@ export function ReleaseCard({ active }: { active: boolean }) {
             <Divider style={{ margin: '2px 0' }} />
             <Space size={10} wrap>
               <Typography.Text strong style={{ width: 60 }}>GitHub</Typography.Text>
-              <Input size="small" style={{ width: 150 }} prefix="owner" placeholder="自动识别" value={config.github.owner} onChange={event => updateRepo('github', { owner: event.target.value })} />
-              <Input size="small" style={{ width: 150 }} prefix="repo" placeholder="dsh-web-release" value={config.github.repo} onChange={event => updateRepo('github', { repo: event.target.value })} />
               <TokenInput value={githubToken} onChange={setGithubToken} placeholder={config.github.hasToken ? '已保存，留空不改' : 'personal access token'} />
             </Space>
             <Space size={10} wrap>
               <Typography.Text strong style={{ width: 60 }}>Gitee</Typography.Text>
-              <Input size="small" style={{ width: 150 }} prefix="owner" placeholder="自动识别" value={config.gitee.owner} onChange={event => updateRepo('gitee', { owner: event.target.value })} />
-              <Input size="small" style={{ width: 150 }} prefix="repo" placeholder="dsh-web-release" value={config.gitee.repo} onChange={event => updateRepo('gitee', { repo: event.target.value })} />
               <Input size="small" style={{ width: 110 }} prefix="branch" placeholder="master" value={config.gitee.branch} onChange={event => updateRepo('gitee', { branch: event.target.value })} />
               <TokenInput value={giteeToken} onChange={setGiteeToken} placeholder={config.gitee.hasToken ? '已保存，留空不改' : 'private token'} />
             </Space>
@@ -187,7 +183,7 @@ export function ReleaseCard({ active }: { active: boolean }) {
               {config.fileError === null ? '' : `（读取失败：${config.fileError}）`}
             </Typography.Text>
             {manifestUrls.length === 0 ? (
-              <Alert type="warning" showIcon message="还没有可用的 Release 地址：填一个 token 并保存，owner 会自动识别" />
+              <Alert type="warning" showIcon message="还没有可用的 Release 地址：填一个 token 并保存" />
             ) : (
               <Space direction="vertical" size={2} style={{ width: '100%' }}>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>成员读取的最新清单：</Typography.Text>

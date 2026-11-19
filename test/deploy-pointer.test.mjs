@@ -102,6 +102,10 @@ test('Windows activate switches the pointer, then installs the service against t
   assert.match(script, /--services 'DSH-Mesh=gate'/u)
   assert.match(script, /--no-restart/u)
   assert.match(script, /install-service\.ps1[\s\S]*-Root \$LayoutRoot/u)
+  // The control panel is a per-member service: the activate step installs it
+  // against the stable root and refuses to report success without 51821.
+  assert.match(script, /install-control-service\.ps1[\s\S]*-Root \$LayoutRoot -NodePath \$stableNode -DshHome \$dshHome/u)
+  assert.match(script, /51821\/api\/dsh-wireguard\/health/u)
   assert.match(script, /__gate\/health/u)
   assert.doesNotMatch(script, /mklink/u)
 })

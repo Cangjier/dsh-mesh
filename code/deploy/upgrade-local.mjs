@@ -37,7 +37,6 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-const KEEP_RELEASES = 3
 const ROLE_ORDER = { control: 0, dsh: 1, gate: 2, interop: 3 }
 /** Units of the split gateway layout; a member passes its own list. */
 const DEFAULT_SERVICES = [
@@ -390,6 +389,28 @@ if (credentials !== '' && existsSync(credentials)) {
     if (merged.status === 0) rmSync(credentials, { force: true })
   }
 }
+// ── retention: exactly the active release and its rollback target ───────────
+// Members keep only these two extracted trees. Anything older is dead weight:
+// it can no longer be started (the pointer never names it) and the next upgrade
+// replaces `previous` anyway. A missing pointer is not a reason to wipe the
+// directory, so pruning is skipped when there is no active release to keep.
+const pointer = readJson(pointerFile) ?? {}
+const activeNow = typeof pointer.active === 'string' ? pointer.active : ''
+const previousNow = typeof pointer.previous === 'string' ? pointer.previous : ''
+if (activeNow !== '') {
+  const keep = new Set([activeNow, previousNow].filter(name => name !== ''))
+  const releases = readdirSync(path.join(root, 'releases'), { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => entry.name)
+  let removed = 0
+  for (const name of releases) {
+    if (keep.has(`releases/${name}`)) continue
+    rmSync(path.join(root, 'releases', name), { recursive: true, force: true })
+    removed += 1
+  }
+  log(`[upgrade] active=${activeNow} previous=${previousNow || '<none>'} kept releases=${String(keep.size)} removed=${String(removed)}`)
+}
+
 if (noRestart) {
   log('[upgrade] --no-restart: pointer flipped, services untouched')
   process.exit(0)
@@ -432,14 +453,28 @@ async function interopResponds() {
 /** Restart every unit in role order; interop is only stopped (embedded). */
 function restartUnits() {
   if (isWindows) {
-    const service = services.find(entry => entry.role === 'gate')
-    if (service === undefined) return false
-    run('sc.exe', ['stop', service.unit])
-    return run('sc.exe', ['start', service.unit])
+    // Stop everything before starting anything: the control panel must not keep
+    // running while the release it reads is being replaced, and the gateway has
+    // to come up last so it never advertises a half-restarted mesh.
+    // Old members may not have the control-panel service installed yet; the
+    // deploy adds it, so a missing service is skipped instead of failing the
+    // upgrade. sc.exe returns before the stop has finished, so wait before the
+    // starts; there is no synchronous sleep in Node without this.
+    const owned = services.filter(entry => entry.role !== 'interop' && run('sc.exe', ['query', entry.unit]))
+    if (!owned.some(entry => entry.role === 'gate')) return false
+    for (const service of owned) run('sc.exe', ['stop', service.unit])
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000)
+    for (const service of owned) {
+      if (!run('sc.exe', ['start', service.unit])) return false
+    }
+    return true
   }
   run('systemctl', ['daemon-reload'])
   for (const service of services) {
     if (service.role === 'interop') continue
+    // layout prepare wrote the unit a moment ago; enabling it here is what
+    // makes the control panel survive a reboot without an operator login.
+    if (service.role === 'control') run('systemctl', ['enable', service.unit])
     if (!run('systemctl', ['restart', service.unit])) return false
     if (service.role === 'dsh') {
       const deadline = Date.now() + 60_000
@@ -517,23 +552,3 @@ if (!await healthy()) {
   process.exit(1)
 }
 log('[upgrade] gateway, interop and control panel are healthy')
-
-// ── retention: keep the active release, its rollback target and one more ────
-const pointer = readJson(pointerFile) ?? {}
-const activeNow = typeof pointer.active === 'string' ? pointer.active : ''
-const previousNow = typeof pointer.previous === 'string' ? pointer.previous : ''
-const releases = readdirSync(path.join(root, 'releases'), { withFileTypes: true })
-  .filter(entry => entry.isDirectory())
-  .map(entry => entry.name)
-  .sort()
-  .reverse()
-let kept = 0
-for (const name of releases) {
-  const relative = `releases/${name}`
-  if (relative === activeNow || relative === previousNow || kept < KEEP_RELEASES) {
-    kept += 1
-    continue
-  }
-  rmSync(path.join(root, 'releases', name), { recursive: true, force: true })
-}
-log(`[upgrade] active=${activeNow} previous=${previousNow || '<none>'} kept releases=${String(Math.min(kept, KEEP_RELEASES))}`)

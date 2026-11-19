@@ -96,7 +96,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - **编译任务**：保留最近任务的成员、引用、目标、进度和时间；「日志」弹层实时跟随 `build.log`。
 - **包里带什么**：每个产物固定携带 `dsh-mesh` 与 `xl` 两个插件。`dsh-mesh` 是当前仓库；`xl` 来自 `Cangjier/xl` 的 `main`，每次编译现拉，来源与归档哈希记在包的 `manifest.json`（`extraPlugins`）里。清单在 `build/plugins.json`，加插件只要加一条。
 - **部署包**：列出 `~/.dsh/packages` 里的包（平台、大小、时间），可直接删除；成员编译出的产物也会出现在这里，接着就能对成员「部署」。
-- **Release 发布**：编译成功后自动把本次最新包上传到 GitHub / Gitee 的固定 `latest` Release，旧资产随之删除。GitHub 存整包（单文件 2GB 上限，上传走编译机的外网代理）；Gitee 单附件约 100MB、仓库附件总量约 1GB，所以按 85MiB 分片上传（Gitee 直连、不走代理），客户端下载后拼接并校验 SHA-256。配置在 `~/.dsh/mesh/release.json`（0600）；面板「Release 发布」卡片**只需要贴 token**：owner 由 token 自动识别，仓库默认 `dsh-web-release`、不存在会自动创建（公开），Gitee 分支默认 `master`。token 不会回传浏览器。详见 [Step 022](docs/Step%20022%20Release%20发布与下载升级.md)。
+- **Release 发布**：编译成功后自动把本次最新包上传到 GitHub / Gitee 的固定 `latest` Release，旧资产随之删除。GitHub 存整包（单文件 2GB 上限，上传走编译机的外网代理）；Gitee 单附件约 100MB、仓库附件总量约 1GB，所以按 85MiB 分片上传（Gitee 直连、不走代理），客户端下载后拼接并校验 SHA-256。配置在 `~/.dsh/mesh/release.json`（0600）；面板「Release 发布」卡片**只需要贴 token**，账号与仓库由 token 自动补齐（仓库不存在会自动创建为公开仓库），Gitee 分支默认 `master`。token 不会回传浏览器。详见 [Step 022](docs/Step%20022%20Release%20发布与下载升级.md)。
 - **指针布局（新骨架）**：`~/.dsh` 下只保留一个稳定启动器 `dsh-mesh.mjs` 和指针 `dsh-mesh.json`，每个版本解压到 `releases/<id>` 后就不再覆盖；升级 = 写指针 + 重启，回退 = 指针翻回 + 重启。启动器替换前自动留 `.bak`，会话/配置统一在 `~/.dsh/shared`。升级实现只有 `code/deploy/upgrade-local.mjs` 一份，网关和 Linux 成员共用；`.sh` 只是旧调用方的兼容 shim。详见 [Step 023](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md)。
 - **升级优先从 Release 下载**：成员升级不再必须由网关上传整个包。部署计划只带公开的 `latest.json` URL 和一个有外网成员的代理坐标；目标成员直接下载（GitHub 优先、Gitee 分片兜底），校验 SHA-256 后原地进入 prepare/activate。下载失败、目标没有 Node、Release 里没有所选包时自动回退到原有的网关上传。代理默认按「公网 IP 非 CN 的 Linux 成员」选择，只作用于 GitHub；Gitee 不走代理。升级弹窗里可以改成直连或指定成员。
 
@@ -125,7 +125,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - 重启顺序强制为 `control → dsh → gate`；**网关永远最后**，因为用户可能正通过 B 的网关操作 A，B 的网关先重启会切断这条路径。
 - 支持 `scope=dsh`：只重启 DSH/控制面板，不重启网关。
 - 健康检查失败自动切回 `previous` 并重启；`rollback` 可手动回滚。
-- 成功激活后只保留最近 3 个 release，`current`/`previous` 指向的目录永不删除。
+- 成功激活后只保留当前和上一个 release（正好两个解压包），升级时其余 release 目录会被删除。
 - **自动升级**：每个成员单独配置，入口在成员行的「更多」菜单 →「自动升级」；默认每天 06:00，可开关和改时间。对每个成员选它对应系统的最新部署包（按构建号，不按文件 mtime），与成员上报的当前部署（`manifest.version` + `buildStamp`）比较；一致或最新包更旧就跳过；需要升级时只启动这个成员的升级 job。
 - 面板的「升级」对本机和每个已安装的成员都开放，收在操作列的纯图标「更多」菜单里（Linux 成员同一菜单另有「测试升级」，先演练平铺路径）；成员表还有一列「版本」，显示每台成员当前运行的部署包；它用同一套引擎换包，升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的 `dsh-web`/网关不会把升级本身打断，也不会带走发起升级的面板。平铺安装（网关这种没有 `current` 的布局）走 `code/deploy/upgrade-local.sh`：备份（含 `app`/`runtime`/`web` 与工具层）→ 覆盖文件（保留 config/data/home/workspace）→ 重写 profile 与单元 → 健康检查，失败整体回滚；回退同样换回运行时三层，不会把旧脚本搭在新运行时上；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。测试升级的抓屏在目标成员没有 Chrome/Chromium/Edge 时会自动下载 Chrome for Testing 的 `chrome-headless-shell`（缓存在 `~/.cache/dsh-mesh/chrome`）再继续；只有下载或启动也失败才写「抓屏跳过」，不会把「成员没有浏览器」变成升级失败（Step 018）。
 - 详见 [Step 018](docs/Step%20018%20成员升级与独立升级进程.md)。
@@ -146,18 +146,6 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话并等待；`run` 可直接同步等待最终结果。
 - B 完成后，A 的插件用 `agent.followup()` 把结果写回 **A 的同一个会话**；A 正忙就排到下一轮，空闲就唤醒一个 turn，类似子代理完成通知。
 - 不需要 B 主动访问 A；A 长轮询（阻塞式等待）B 的 `/wait`，避免回调端口/NAT 问题。
-
-### 8. 任务：对象树 → 本机协调对话 → 成员执行
-
-- 面板顶层 Tab「任务」：把一件事拆成对象树，每个对象有 `source`（文件 / git 仓库 / 类名）、`define`（要做的事）和 `children`（只存 `{ id, remark }` 引用）。
-- 平铺视图把全部对象各列一行，直接子对象作为表格子行挂在下面（只一层，带该条引用的备注）；树形视图只列根对象逐层展开。根对象按「没有被任何对象引用」算出来，因此同一对象可以挂多处。
-- 「复制」把当前任务导出成多级标题文本：根对象 `#`、子对象 `##`、孙对象 `###`……最多到 `######`；标题只写 `source`，引用备注写成 `> 备注：…`，`define` 原样跟在下面。不输出 ID、缩进和连接线，与当前展开的视图无关。
-- 编辑走抽屉；表格只给入口；窄屏沿用同一张表，横向滚动。
-- 发起时整棵树渲染成 markdown，网关先在**本机**的 DSH（8765 交互服务）建一个协调对话：它用 `call_member` 把任务交给所选成员、用 `wait_member` 等待，最后负责验收。本机不执行具体任务。
-- 面板的「成员」下拉只列出其他成员；工作目录只能从该成员的 `~/.dsh/workspaces` 里选择，或只输入名称新建（实际目录固定为 `~/.dsh/workspaces/<name>`，由成员的 interop 解析并创建）。
-- 历史保存发起那一刻的定义、协调对话 id、执行成员、工作目录、状态与验收结果；「清空」只删除已结束的记录。任务、模板、历史都存在网关的 control-service（`$DSH_HOME/wireguard/tasks/tasks.json`），成员带着入网时的 agent token 读写同一份。
-- 对话 Tab 里，本机消息（协调对话的 prompt）也有「详细」，不再只显示 80 字标题。
-- 详见 [Step 017](docs/Step%20017%20发起任务.md) 与 [Step 021](docs/Step%20021%20协调任务与工作区.md)。
 
 ## 快速开始
 
@@ -319,8 +307,6 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 014 成员任务插件与主对话回调](docs/Step%20014%20成员任务插件与主对话回调.md) | `call_member`、成员发现、后台等待、agent.followup 通知 |
 | [Step 015 面板事件推送](docs/Step%20015%20面板事件推送.md) | SSE 通道、`fs.watch` 任务目录、面板零轮询 |
 | [Step 016 入网即双向 SSH](docs/Step%20016%20入网即双向SSH.md) | 成员自带密钥、`from=` 限制、`/ssh/authorize`、托管 config 块、撤销 |
-| [Step 017 发起任务](docs/Step%20017%20发起任务.md) | 对象树（source/define/children）、平铺与树形视图、模板、历史快照 |
-| [Step 021 协调任务与工作区](docs/Step%20021%20协调任务与工作区.md) | 本机协调对话、只选其他成员、`~/.dsh/workspaces/<name>`、历史清空、消息详情 |
 | [Step 022 Release 发布与下载升级](docs/Step%20022%20Release%20发布与下载升级.md) | 固定 latest tag、GitHub 整包/Gitee 分片、仅保留最新版、成员经外网代理下载、失败回退上传 |
 | [Step 023 指针布局：稳定 mjs 启动器](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md) | 稳定 launcher + 指针文件、releases/shared 布局、启动器 .bak、升级/回退一份 mjs 实现、首次自动 adopt |
 | [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、蓝绿/平铺两条路径、清空编译日志 |
@@ -349,10 +335,6 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
 | `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` 工具 |
-| `src/wireguard/lib/task-model.ts` | 对象树模型：归一化、根对象、增删改排序、树布局、markdown 渲染、复制用多级标题大纲 |
-| `src/wireguard/lib/task-store.ts` | 任务文件：原子写、模板与历史归一化、历史上限 |
-| `src/wireguard/lib/task-service.ts` | 草稿/模板/历史、在本机建协调对话、工作区列表、状态追踪、成员→网关转发 |
-| `src/client/tasks/index.tsx` | 「任务」Tab：任务/模板/历史、平铺与树形、复制多级标题大纲、抽屉编辑、发起预览、历史清空 |
 | `src/client/index.tsx` | 侧边栏「DSH 成员」面板 |
 | `code/gate/server.mjs` | 网关：密码门、目标路由、反向代理、WebSocket |
 | `code/gate/members.mjs` | 成员发现、`/__gate/select`、cluster 代理、cookie 隔离 |

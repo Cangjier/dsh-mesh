@@ -79,6 +79,16 @@ namespace DshWireGuard
                     }
                 }
                 string script = Path.Combine(root, "control-service.js");
+                string scriptArgs = "";
+                // Deploy installs this service at the stable layout root and
+                // points it at dsh-mesh.mjs, so the panel follows the active
+                // release instead of a directory that an upgrade replaces.
+                string configuredScript = Environment.GetEnvironmentVariable("DSH_WIREGUARD_SCRIPT");
+                if (configuredScript != null && configuredScript.Trim().Length > 0)
+                {
+                    script = configuredScript.Trim();
+                    scriptArgs = Environment.GetEnvironmentVariable("DSH_WIREGUARD_ARGS") ?? "";
+                }
                 if (!File.Exists(script))
                 {
                     Log("missing " + script);
@@ -87,7 +97,8 @@ namespace DshWireGuard
                 }
                 ProcessStartInfo info = new ProcessStartInfo();
                 info.FileName = node;
-                info.Arguments = "\"" + script + "\"";
+                info.Arguments = "\"" + script + "\"" + (scriptArgs.Trim().Length > 0 ? " " + scriptArgs.Trim() : "");
+                Log("launching " + node + " " + info.Arguments);
                 info.WorkingDirectory = root;
                 info.UseShellExecute = false;
                 info.CreateNoWindow = true;

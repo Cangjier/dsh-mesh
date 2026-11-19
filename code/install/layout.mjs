@@ -413,7 +413,19 @@ function prepare(args, root) {
   const units = parseServices(args.services)
   if (args['no-units'] !== 'true' && process.platform !== 'win32' && units.length > 0) {
     if (process.getuid?.() !== 0) throw new Error('writing systemd units needs root; pass --no-units when preparing a sandbox')
-    for (const service of units) writeUnit(root, node, service)
+    for (const service of units) {
+      writeUnit(root, node, service)
+      if (service.role === 'interop') continue
+      // A deploy now writes the control panel unit too, and a member that
+      // reboots with no operator at the console must still come back with
+      // 51821 listening. Preparation happens before activation, so only
+      // `enable` is safe here; the upgrade restarts the unit afterwards.
+      try {
+        execFileSync('systemctl', ['enable', service.name.endsWith('.service') ? service.name : `${service.name}.service`], { stdio: 'ignore' })
+      } catch {
+        // A unit without an [Install] section cannot be enabled; not fatal.
+      }
+    }
     execFileSync('systemctl', ['daemon-reload'], { stdio: 'ignore' })
   }
 

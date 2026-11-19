@@ -31,15 +31,20 @@ test('normalizeServices orders control, dsh and the gateway last', () => {
 })
 
 test('default service manifest matches the package layout', () => {
-  // A package runs one gate service that spawns the private DSH.
+  // Every member carries the control panel; the package gate runs last because
+  // it spawns the private DSH.
   const linux = normalizeServices(undefined, 'linux')
-  assert.deepEqual(linux.map(service => service.role), ['gate'])
-  assert.equal(linux[0].name, 'dsh-web-gate.service')
-  assert.equal(linux[0].command, 'start.sh')
-  // Windows runs one supervisor service that owns gate + interop.
+  assert.deepEqual(linux.map(service => service.role), ['control', 'gate'])
+  assert.equal(linux[0].name, 'dsh-wireguard-control.service')
+  assert.equal(linux[0].command, 'start-control.sh')
+  assert.equal(linux[1].name, 'dsh-web-gate.service')
+  assert.equal(linux[1].command, 'start.sh')
+  // Windows runs one supervisor service that owns gate + interop, plus the
+  // separate control-panel service so restarting the gateway leaves 51821 up.
   const windows = normalizeServices(undefined, 'windows')
-  assert.deepEqual(windows.map(service => service.role), ['gate'])
-  assert.equal(windows[0].name, 'DSH-Mesh')
+  assert.deepEqual(windows.map(service => service.role), ['control', 'gate'])
+  assert.equal(windows[0].name, 'DSH-WireGuard-Control')
+  assert.equal(windows[1].name, 'DSH-Mesh')
 })
 
 test('normalizeServices refuses a manifest without a gateway', () => {
@@ -51,6 +56,33 @@ test('normalizeServices refuses two gateways', () => {
     { name: 'gate-a.service', role: 'gate' },
     { name: 'gate-b.service', role: 'gate' },
   ], 'linux'), /exactly one gateway/)
+})
+
+test('a default plan carries and health-checks the control panel', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-deploy-control-'))
+  try {
+    const packagePath = path.join(dir, 'dsh-mesh-test-windows-x64.zip')
+    await writeFile(packagePath, 'fake package')
+    const plan = await buildDeployPlan({
+      host: '10.66.66.4',
+      os: 'windows',
+      package: packagePath,
+      appRoot: 'C:\\Users\\Admin\\.dsh\\dsh-mesh',
+      repositoryRoot: dir,
+      release: 'control-panel',
+    })
+    // No explicit manifest: the default is what a plain member deploy uses.
+    assert.deepEqual(plan.services.map(service => service.role), ['control', 'gate'])
+    assert.equal(plan.services[0].name, 'DSH-WireGuard-Control')
+    const script = buildWindowsActivateScript(plan)
+    assert.match(script, /install-control-service\.ps1/u)
+    assert.match(script, /51821\/api\/dsh-wireguard\/health/u)
+    const summary = describePlan(plan)
+    assert.ok(summary.steps.some(step => step.includes('51821')))
+    assert.ok(summary.steps.some(step => step.includes('restart DSH-WireGuard-Control (control)')))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('plan separates prepare from activation and starts the gateway last', async () => {
@@ -76,7 +108,7 @@ test('plan separates prepare from activation and starts the gateway last', async
     assert.equal(plan.shared, '/opt/dsh-mesh/shared')
     const summary = describePlan(plan)
     assert.ok(summary.steps.some(step => step.includes('no service switch')))
-    assert.ok(summary.steps.some(step => step.includes('newest 3 releases')))
+    assert.ok(summary.steps.some(step => step.includes('newest 2 releases')))
     assert.ok(summary.steps.at(-1).includes('previous'))
     assert.equal(summary.steps.at(-3), 'health check http://127.0.0.1:80/__gate/health')
   } finally {

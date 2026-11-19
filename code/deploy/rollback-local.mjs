@@ -166,11 +166,18 @@ const interopBind = interopEnv.DSH_INTEROP_BIND && interopEnv.DSH_INTEROP_BIND !
 const tokenFile = path.join(root, 'shared', 'data', 'dsh-web.json')
 
 const isWindows = process.platform === 'win32'
-log(`[rollback] restarting services${isWindows ? ' (DSH-Mesh)' : ' (control -> dsh -> gate)'}`)
+log(`[rollback] restarting services${isWindows ? ' (DSH-WireGuard-Control -> DSH-Mesh)' : ' (control -> dsh -> gate)'}`)
 let gateRestarted = false
 if (isWindows) {
+  // The control panel is installed on every member now, so a rollback has to
+  // move it back with the gateway. Old Windows installs may not have it yet:
+  // only restart it when the SCM knows the service.
+  const hasControl = run('sc.exe', ['query', 'DSH-WireGuard-Control'])
+  if (hasControl) log('[rollback] restarting DSH-WireGuard-Control')
+  if (hasControl) run('sc.exe', ['stop', 'DSH-WireGuard-Control'])
   run('sc.exe', ['stop', 'DSH-Mesh'])
   await new Promise(resolve => setTimeout(resolve, 3000))
+  if (hasControl) run('sc.exe', ['start', 'DSH-WireGuard-Control'])
   gateRestarted = run('sc.exe', ['start', 'DSH-Mesh'])
 } else {
   run('systemctl', ['daemon-reload'])
@@ -188,7 +195,7 @@ if (isWindows) {
 
 const gateOk = gateRestarted && await waitFor(() => curlOk(`http://127.0.0.1:${port}/__gate/health`), 45, 2000)
 const interopOk = await waitFor(() => curlOk(`http://${interopBind}:${interopPort}/healthz`), 30, 2000)
-const controlOk = isWindows
+const controlOk = isWindows && !run('sc.exe', ['query', 'DSH-WireGuard-Control'])
   ? true
   : await waitFor(() => curlOk('http://127.0.0.1:51821/api/dsh-wireguard/health'), 30, 2000)
 

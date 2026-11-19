@@ -342,53 +342,6 @@ export class MeshService {
     return { ok: true, member: { id: member.id, name: member.name, ip: member.ip }, status: parsed?.status ?? null }
   }
 
-  /**
-   * Conversations controlled by every member's interop service, grouped by
-   * member. The task service owns the interop client and its token.
-   * @returns {Promise<{ok: boolean, updatedAt: string, groups: object[]}>} groups.
-   */
-  async conversations() {
-    const tasks = this.memberTasks
-    if (tasks === undefined || tasks === null) {
-      throw Object.assign(new Error('the member task service is not available yet'), { status: 503 })
-    }
-    return tasks.listByMember()
-  }
-
-  /**
-   * Post a message typed in the panel to selected members.
-   *
-   * An empty selection broadcasts to every other member; the panel resolves
-   * `@3` mentions into ids before calling, so this stays a transport.
-   * @param {{text?: string, members?: string[]}} request message and targets.
-   * @returns {Promise<{ok: boolean, sent: object[], errors: object[]}>} outcome.
-   */
-  async sendConversation(request) {
-    const tasks = this.memberTasks
-    if (tasks === undefined || tasks === null) {
-      throw Object.assign(new Error('the member task service is not available yet'), { status: 503 })
-    }
-    const text = typeof request?.text === 'string' ? request.text.trim() : ''
-    if (text === '') throw Object.assign(new Error('消息不能为空'), { status: 400 })
-    if (text.length > 8000) throw Object.assign(new Error('消息太长（上限 8000 字）'), { status: 400 })
-    const members = Array.isArray(request?.members)
-      ? request.members.filter(item => typeof item === 'string' && item.trim() !== '')
-      : []
-    return tasks.sendTo({ text, members })
-  }
-
-  /**
-   * Ask every member's interop service to drop its finished conversations.
-   * @returns {Promise<{ok: boolean, removed: number, errors: object[]}>} summary.
-   */
-  async clearConversations() {
-    const tasks = this.memberTasks
-    if (tasks === undefined || tasks === null) {
-      throw Object.assign(new Error('the member task service is not available yet'), { status: 503 })
-    }
-    return tasks.clearConversations()
-  }
-
   async members() {
     await this.#loadProbes()
     const stateFile = path.join(this.home, 'wireguard', 'state.json')

@@ -3,7 +3,6 @@
 import { request as httpRequest } from 'node:http';
 import { API_PREFIX, MAX_REQUEST_BYTES } from './constants';
 import { WireGuardError } from './errors';
-import { runSummary } from './task-service';
 
 const AGENT_HEADER = 'x-dsh-wireguard';
 
@@ -52,21 +51,6 @@ async function readJson(request) {
 }
 
 /**
- * Whether this request may touch the shared task store.
- *
- * The panel reaches it over loopback. A member reaches the gateway's copy over
- * the tunnel, authenticated by that member's own agent token — the same secret
- * its SSH enrollment uses, so no new credential exists.
- * @param {import('./service').WireGuardService} service service instance.
- * @param {import('node:http').IncomingMessage} request incoming request.
- * @returns {boolean} whether the request is authorized.
- */
-function tasksAuthorized(service, request) {
-  if (isLoopbackAddress(request.socket?.remoteAddress)) return true;
-  return service.authorizePeerToken(String(request.headers['x-dsh-peer-token'] ?? ''));
-}
-
-/**
  * Build the local panel API handler over one service instance.
  * @param {import('./service').WireGuardService} service service instance.
  * @returns {(request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<void>} handler.
@@ -86,30 +70,6 @@ export function createHttpApiHandler(service) {
         writeJson(response, 200, { ok: true, service: 'dsh-wireguard' });
         return;
       }
-      if (method === 'GET' && (
-        path === `${API_PREFIX}/tasks`
-        || path === `${API_PREFIX}/tasks/workspaces`
-        || path.startsWith(`${API_PREFIX}/tasks/runs/`)
-      )) {
-        if (!tasksAuthorized(service, request)) {
-          writeJson(response, 401, { ok: false, error: { code: 'peer_token_invalid', message: 'The member agent token is missing or invalid.' } });
-          return;
-        }
-        if (!service.tasks) {
-          writeJson(response, 501, { ok: false, error: { code: 'not_supported', message: 'This control service does not host the task list.' } });
-          return;
-        }
-        if (path === `${API_PREFIX}/tasks/workspaces`) {
-          const member = url.searchParams.get('member') ?? '';
-          const listing = await service.tasks.workspaces(member);
-          writeJson(response, 200, { ok: true, dir: listing.dir, workspaces: listing.workspaces });
-          return;
-        }
-        const runId = path === `${API_PREFIX}/tasks` ? null : decodeURIComponent(path.slice(`${API_PREFIX}/tasks/runs/`.length));
-        if (runId === null) writeJson(response, 200, { ok: true, tasks: await service.tasks.snapshot() });
-        else writeJson(response, 200, { ok: true, run: await service.tasks.run(runId) });
-        return;
-      }
       if (method !== 'POST') {
         writeJson(response, 405, { ok: false, error: { code: 'method_not_allowed', message: 'Use GET or POST.' } });
         return;
@@ -119,48 +79,6 @@ export function createHttpApiHandler(service) {
         return;
       }
       const body = await readJson(request);
-      if (path.startsWith(`${API_PREFIX}/tasks/`)) {
-        if (!tasksAuthorized(service, request)) {
-          writeJson(response, 401, { ok: false, error: { code: 'peer_token_invalid', message: 'The member agent token is missing or invalid.' } });
-          return;
-        }
-        if (!service.tasks) {
-          writeJson(response, 501, { ok: false, error: { code: 'not_supported', message: 'This control service does not host the task list.' } });
-          return;
-        }
-        const tasks = service.tasks;
-        if (path === `${API_PREFIX}/tasks/draft`) {
-          writeJson(response, 200, { ok: true, tasks: await tasks.setDraft(body.doc) });
-          return;
-        }
-        if (path === `${API_PREFIX}/tasks/templates/create`) {
-          writeJson(response, 200, { ok: true, tasks: await tasks.createTemplate(body.name, body.doc) });
-          return;
-        }
-        if (path === `${API_PREFIX}/tasks/templates/rename`) {
-          writeJson(response, 200, { ok: true, tasks: await tasks.renameTemplate(body.id, body.name) });
-          return;
-        }
-        if (path === `${API_PREFIX}/tasks/templates/update`) {
-          writeJson(response, 200, { ok: true, tasks: await tasks.updateTemplate(body.id, body.doc) });
-          return;
-        }
-        if (path === `${API_PREFIX}/tasks/templates/delete`) {
-          writeJson(response, 200, { ok: true, tasks: await tasks.deleteTemplate(body.id) });
-          return;
-        }
-        if (path === `${API_PREFIX}/tasks/launch`) {
-          const launched = await tasks.launch(body);
-          writeJson(response, 200, { ok: true, tasks: launched.tasks, run: runSummary(launched.run) });
-          return;
-        }
-        if (path === `${API_PREFIX}/tasks/runs/clear`) {
-          writeJson(response, 200, { ok: true, tasks: await tasks.clearRuns() });
-          return;
-        }
-        writeJson(response, 404, { ok: false, error: { code: 'not_found', message: 'Unknown task endpoint.' } });
-        return;
-      }
       let result;
       if (path === `${API_PREFIX}/install`) result = await service.installWireGuard();
       else if (path === `${API_PREFIX}/server/start`) result = await service.startServer(body);
@@ -266,10 +184,9 @@ export function createControlExtraHandler(service) {
   return async (request, response) => {
     const path = new URL(request.url ?? '/', 'http://local.invalid').pathname;
     if (path !== API_PREFIX && !path.startsWith(`${API_PREFIX}/`)) return false;
-    // Members read and write the shared task store through this listener; every
-    // other API prefix stays loopback-only.
-    const remote = !isLoopbackAddress(request.socket?.remoteAddress);
-    if (remote && !path.startsWith(`${API_PREFIX}/tasks`)) return false;
+    // The panel API is loopback-only; anything from another host keeps
+    // falling through to the public control panel routes.
+    if (!isLoopbackAddress(request.socket?.remoteAddress)) return false;
     await api(request, response);
     return true;
   };

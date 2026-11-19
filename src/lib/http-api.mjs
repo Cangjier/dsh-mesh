@@ -102,22 +102,6 @@ export function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, await service.removePackage({ name: typeof body.name === 'string' ? body.name : '' }))
           return
         }
-        if (method === 'POST' && path === '/conversations/send') {
-          const body = await readJson(request)
-          writeJson(response, 200, await service.sendConversation({
-            text: typeof body.text === 'string' ? body.text : '',
-            members: Array.isArray(body.members) ? body.members.filter(item => typeof item === 'string') : [],
-          }))
-          return
-        }
-        if (method === 'POST' && path === '/conversations/clear') {
-          writeJson(response, 200, await service.clearConversations())
-          return
-        }
-        if (method === 'GET' && path === '/conversations') {
-          writeJson(response, 200, await service.conversations())
-          return
-        }
         if (method === 'GET' && path === '/events') {
           hub.subscribe(request, response)
           return

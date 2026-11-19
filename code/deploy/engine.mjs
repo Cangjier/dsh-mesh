@@ -35,18 +35,29 @@ const DEFAULT_APP_ROOT = {
   windows: 'C:\\dsh-mesh',
 }
 
-/** Services used by the split package: DSH first, gateway last. */
+/**
+ * Services every member runs: control panel first, gateway last.
+ *
+ * The control panel is not a gateway-only component. In the mesh every host is
+ * a member and the panel is what tells that member whether it joined as the
+ * server or as a client, so a deploy installs and starts it on all of them.
+ * The role itself lives in the member's own state; the unit only starts the
+ * launcher with `--role control`.
+ */
 const DEFAULT_SERVICES = {
   linux: [
     // The package's start.sh runs the gate, which spawns the private DSH; the
     // split services belong to the hand-installed layout, not to a package.
+    { name: 'dsh-wireguard-control.service', role: 'control', command: 'start-control.sh' },
     { name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' },
   ],
   windows: [
     // The supervisor service owns the whole stack: it runs start-stack.ps1
     // (gate + interop) in the interactive session when it can, and in session 0
     // otherwise. The old split DSH-Web-App service duplicated the gate's own
-    // DSH spawn and is removed by the deploy.
+    // DSH spawn and is removed by the deploy. The control panel is its own SCM
+    // service so restarting the gateway never takes 51821 down with it.
+    { name: 'DSH-WireGuard-Control', role: 'control', command: 'dsh-wireguard-control-service.exe' },
     { name: 'DSH-Mesh', role: 'gate', command: 'dsh-mesh-service.exe' },
   ],
 }
@@ -671,8 +682,10 @@ export async function buildDeployPlan(options) {
   const scope = options.scope === 'dsh' ? 'dsh' : 'all'
   const gatePort = String(options.gatePort ?? '80')
   if (!/^\d{1,5}$/.test(gatePort) || Number(gatePort) > 65535) throw new Error('gatePort is invalid')
-  const retention = Number.isSafeInteger(options.retention) ? options.retention : 3
-  if (retention < 2) throw new Error('retention must be at least 2 (current plus previous)')
+  // Every install keeps exactly two extracted trees: the active release and
+  // the one the pointer can roll back to. Everything older is pruned by
+  // upgrade-local.mjs after the pointer flips.
+  const retention = 2
   const llm = options.llm === false ? null : deployerModelRoute()
   const vpnAddress = isIP(String(options.host ?? '').trim()) === 0 ? '0.0.0.0' : String(options.host).trim()
   const interop = {
@@ -1070,17 +1083,52 @@ if ($LASTEXITCODE -ne 0) {
   if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a failed service install also failed' }
   throw 'service installation failed after the pointer switch; rolled back'
 }
+# The control panel is a per-member service, not a gateway extra: register it
+# against the stable layout root and let the launcher pick the active release,
+# so an upgrade never leaves 51821 pointing at a release that is about to go.
+# The stage may already be gone (a successful rename moves it into releases/),
+# so read the installer through the stable code junction when it exists.
+$controlInstaller = Join-Path $LayoutRoot 'code\\wireguard\\windows-service\\install-control-service.ps1'
+if (-not (Test-Path $controlInstaller)) { $controlInstaller = Join-Path $Stage 'code\\wireguard\\windows-service\\install-control-service.ps1' }
+if (-not (Test-Path $controlInstaller)) { throw 'missing the control panel installer in the new release' }
+$stableNode = Join-Path $LayoutRoot 'runtime\\node\\node.exe'
+if (-not (Test-Path $stableNode)) { $stableNode = $node }
+$dshHome = Join-Path $LayoutRoot 'shared\\home'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $controlInstaller -Root $LayoutRoot -NodePath $stableNode -DshHome $dshHome
+if ($LASTEXITCODE -ne 0) {
+  & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+  if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a failed control panel install also failed' }
+  throw 'control panel installation failed after the pointer switch; rolled back'
+}
 $deadline = (Get-Date).AddSeconds(180)
+$gateHealthy = $false
 while ((Get-Date) -lt $deadline) {
   try {
     $response = Invoke-WebRequest -Uri ("http://127.0.0.1:" + $port + "/__gate/health") -UseBasicParsing -TimeoutSec 3
-    if ($response.StatusCode -eq 200) { Write-Output 'gateway healthy'; exit 0 }
+    if ($response.StatusCode -eq 200) { $gateHealthy = $true; break }
   } catch { }
   Start-Sleep -Seconds 3
 }
-& $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
-if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a failed health check also failed' }
-throw 'gateway health check failed after the pointer switch; rolled back'
+if (-not $gateHealthy) {
+  & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+  if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a failed health check also failed' }
+  throw 'gateway health check failed after the pointer switch; rolled back'
+}
+$controlDeadline = (Get-Date).AddSeconds(120)
+$controlHealthy = $false
+while ((Get-Date) -lt $controlDeadline) {
+  try {
+    $response = Invoke-WebRequest -Uri 'http://127.0.0.1:51821/api/dsh-wireguard/health' -UseBasicParsing -TimeoutSec 3
+    if ($response.StatusCode -eq 200) { $controlHealthy = $true; break }
+  } catch { }
+  Start-Sleep -Seconds 3
+}
+if (-not $controlHealthy) {
+  & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+  if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a failed control panel health check also failed' }
+  throw 'control panel health check on 51821 failed after the pointer switch; rolled back'
+}
+Write-Output 'gateway and control panel are healthy'
 `
 }
 
@@ -1129,6 +1177,9 @@ export function describePlan(plan) {
         .filter(service => plan.scope === 'all' || service.role !== 'gate')
         .map(service => `restart ${service.name} (${service.role})`),
       `health check http://127.0.0.1:${plan.gatePort}/__gate/health`,
+      ...(plan.services.some(service => service.role === 'control')
+        ? ['health check http://127.0.0.1:51821/api/dsh-wireguard/health']
+        : []),
       `keep the newest ${plan.retention} releases (current/previous are never deleted)`,
       'on failure switch back to the previous release and restart',
     ],

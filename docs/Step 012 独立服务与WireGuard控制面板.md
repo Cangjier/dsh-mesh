@@ -5,7 +5,7 @@
 ## 服务拓扑
 
 ```text
-DSH-WireGuard-Control   51821   独立控制面板（server 成员）
+DSH-WireGuard-Control   51821   独立控制面板（每个成员都跑：server 或 client 角色）
 DSH-Web-App             127.0.0.1:<随机端口>   独立 DSH Web
 DSH-Mesh          0.0.0.0:80            网关，最后重启
 ```
@@ -30,11 +30,13 @@ DSH-Mesh          0.0.0.0:80            网关，最后重启
 会创建/更新：
 
 ```text
-DSH-Web-App            Automatic
+DSH-WireGuard-Control   Automatic   独立控制面板，51821
 DSH-Mesh         Automatic（external-DSH 模式）
 ```
 
-控制面板单独安装（dsh-wireguard 包）：
+控制面板不需要手工安装：`install.ps1 -InstallService` 和每一次成员部署/升级都会调用
+`code/wireguard/windows-service/install-control-service.ps1`，把它注册在稳定的安装根上，
+由 `dsh-mesh.mjs --role control` 跟随当前 release。手工安装仍可用于修复：
 
 ```powershell
 .\code\windows-service\install-control-service.ps1 -Root <dsh-wireguard 目录> -DshHome <DSH_HOME>
@@ -66,6 +68,10 @@ dsh-web-gate.service            网关，80，独立
 cd <dsh-wireguard>
 sudo ./install-control-service.sh --dsh-home /root/.dsh --node /usr/bin/node
 ```
+
+成员部署/升级会自动写并 `systemctl enable` 这个单元（`code/install/layout.mjs` 的
+`writeUnit`），单元里跑的是 `<root>/dsh-mesh.mjs --role control`，所以它跟着指针走，
+不绑定到某个 release。上面的手工命令只用于修复。
 
 网关和 DSH 没有 systemd `Requires`/`BindsTo`，只共享 `config/gate.env` 和 `data/dsh-web.json` 文件。
 

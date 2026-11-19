@@ -64,7 +64,8 @@ test('deployPackage resolves a package and queues a detached job for a member', 
     assert.equal(state.mode, 'install')
     assert.equal(state.target.host, '10.66.66.2')
     assert.equal(state.target.appRoot, '/opt/b')
-    assert.equal(state.services[0], 'dsh-web-gate.service')
+    // Every member carries the control panel; the gateway is restarted last.
+    assert.deepEqual(state.services, ['dsh-wireguard-control.service', 'dsh-web-gate.service'])
     // The plan travels with the job so the runner does not hash the package
     // twice, and the queued row already shows the right release.
     const request = await readRequest(result.job)

@@ -59,7 +59,7 @@ node ~/.dsh/dsh-mesh.mjs --role gate|dsh|control|interop
 5. 按 control → dsh → gate 顺序重启（所有单元都跑启动器）；
 6. 健康检查（网关、内嵌 interop、控制面板）；失败时翻回 previous（首次迁移则
    恢复旧单元），再验一次；
-7. 保留最近 3 个 release（active/previous 永不清）。
+7. 只保留当前和上一个 release（active/previous 永不清），其他解压包删除。
 
 `code/deploy/upgrade-local.sh` 只是两行兼容 shim：旧 runner 按 `.sh` 路径调用，
 shim 找到 `--stage` 里的 mjs 交给 node，之后可以删。

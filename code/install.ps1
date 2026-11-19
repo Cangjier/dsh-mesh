@@ -94,6 +94,23 @@ if ($InstallService) {
       & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $splitInstaller -Root $Root
       if ($LASTEXITCODE -ne 0) { throw "Split service installation failed with exit code $LASTEXITCODE" }
     }
+    # The WireGuard control panel is a per-member service, so a first install
+    # carries it too. A failure is a warning: the gateway itself still works.
+    $controlInstaller = Join-Path $Root 'code\wireguard\windows-service\install-control-service.ps1'
+    if (Test-Path $controlInstaller) {
+      $controlNode = Join-Path $Root 'runtime\node\node.exe'
+      if (-not (Test-Path $controlNode)) { $controlNode = (Get-Command node.exe -ErrorAction SilentlyContinue).Source }
+      $controlHome = Join-Path $Root 'shared\home'
+      if (-not (Test-Path $controlHome)) { $controlHome = '' }
+      $controlArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $controlInstaller, '-Root', $Root, '-NodePath', $controlNode)
+      if ($controlHome -ne '') { $controlArgs += @('-DshHome', $controlHome) }
+      try {
+        & powershell.exe @controlArgs
+        if ($LASTEXITCODE -ne 0) { Write-Warning 'Control panel service installation failed.' }
+      } catch {
+        Write-Warning "Control panel service installation failed: $($_.Exception.Message)"
+      }
+    }
   }
 }
 

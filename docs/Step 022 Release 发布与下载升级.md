@@ -50,12 +50,12 @@
 配置文件固定在 `<DSH_HOME>/mesh/release.json`（默认 `~/.dsh/mesh/release.json`），权限 0600。
 面板「包管理 → Release 发布」卡片读写同一份文件，token 只显示「已保存」，不会回传浏览器。
 
-**最少只需要一个 token**：
+**面板最少只需要一个 token**（owner/repo 不再作为面板输入，由发布流程维护）：
 
-- `owner` 留空即由 token 自动识别（GitHub/Gitee 的 `/user`）。保存时识别一次并写回配置；
+- `owner` 由 token 自动识别（GitHub/Gitee 的 `/user`）。保存时识别一次并写回配置；
   识别不了（比如编译网关直连不到 GitHub）只给警告，发布时再经编译机的外网代理识别一次。
-- `repo` 留空默认 `dsh-web-release`。
-- Gitee 的 `branch` 留空默认 `master`（Gitee 新建仓库的默认分支）。
+- `repo` 默认 `dsh-web-release`。
+- Gitee 的 `branch` 在面板里编辑，留空默认 `master`（Gitee 新建仓库的默认分支）。
 - 仓库不存在时**发布用该 token 自动创建公开仓库**：`owner` 是 token 自己时建在个人名下，
   填了组织时建在该组织下（token 需要该组织的写权限）；Gitee 的 `owner` 是别人的个人账号时发布会失败并提示。
 
@@ -89,7 +89,7 @@
 1. **GitHub**：生成 token（classic 勾 `repo`，或 fine-grained 给 `Contents: Read and write` +
    `Metadata: Read`；要自动建仓库还需要 `Administration: Read and write` 或 classic 的 `repo`）。
 2. **Gitee**：生成私人令牌（勾 `projects`，自动建仓库需要该权限）。
-3. 面板里只贴 token 保存即可；仓库、owner、分支都会自动补齐。也可以直接写上面的 JSON。
+3. 面板里只贴 token 保存即可；账号、仓库、分支都会自动补齐。也可以直接写上面的 JSON。
 
 ## 4. 发布流程
 

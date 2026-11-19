@@ -47,7 +47,7 @@ activate  切换 current → previous 指向旧 release → 按
 
 `prepare` 和 `activate` 分开执行，所以“解压、准备”和“切换服务”之间可以检查；`prepare` 失败时线上服务完全没动。
 
-健康检查通过后只保留**最近 3 个 release**（默认 `retention: 3`）；`current` 和 `previous` 指向的目录无论新旧都不会被删。这样磁盘不会无限增长，同时始终有最近两个版本可回退。
+健康检查通过后只保留**当前和上一个 release**（默认 `retention: 2`）；`current` 和 `previous` 指向的目录无论新旧都不会被删，其他 release 目录会被删除。这样磁盘不会无限增长，同时始终有最近两个版本可回退。
 
 ## 服务顺序
 
@@ -100,7 +100,7 @@ dsh_mesh_deploy action="plan" host="10.66.66.3" user="root" os="linux" \
 ```text
 dsh_mesh_deploy action="deploy" host="10.66.66.3" user="root" os="linux" \
   identityFile="C:\Users\Admin\.ssh\id_ed25519" \
-  retention=3 \
+  retention=2 \
   services=[{"name":"dsh-web.service","role":"gate","command":"start.sh"}]
 ```
 

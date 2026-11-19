@@ -5072,13 +5072,16 @@ var DEFAULT_SERVICES = {
   linux: [
     // The package's start.sh runs the gate, which spawns the private DSH; the
     // split services belong to the hand-installed layout, not to a package.
+    { name: "dsh-wireguard-control.service", role: "control", command: "start-control.sh" },
     { name: "dsh-web-gate.service", role: "gate", command: "start.sh" }
   ],
   windows: [
     // The supervisor service owns the whole stack: it runs start-stack.ps1
     // (gate + interop) in the interactive session when it can, and in session 0
     // otherwise. The old split DSH-Web-App service duplicated the gate's own
-    // DSH spawn and is removed by the deploy.
+    // DSH spawn and is removed by the deploy. The control panel is its own SCM
+    // service so restarting the gateway never takes 51821 down with it.
+    { name: "DSH-WireGuard-Control", role: "control", command: "dsh-wireguard-control-service.exe" },
     { name: "DSH-Mesh", role: "gate", command: "dsh-mesh-service.exe" }
   ]
 };
@@ -5336,8 +5339,7 @@ async function buildDeployPlan(options) {
   const scope = options.scope === "dsh" ? "dsh" : "all";
   const gatePort = String(options.gatePort ?? "80");
   if (!/^\d{1,5}$/.test(gatePort) || Number(gatePort) > 65535) throw new Error("gatePort is invalid");
-  const retention = Number.isSafeInteger(options.retention) ? options.retention : 3;
-  if (retention < 2) throw new Error("retention must be at least 2 (current plus previous)");
+  const retention = 2;
   const llm = options.llm === false ? null : deployerModelRoute();
   const vpnAddress = isIP3(String(options.host ?? "").trim()) === 0 ? "0.0.0.0" : String(options.host).trim();
   const interop = {
@@ -5613,17 +5615,52 @@ if ($LASTEXITCODE -ne 0) {
   if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a failed service install also failed' }
   throw 'service installation failed after the pointer switch; rolled back'
 }
+# The control panel is a per-member service, not a gateway extra: register it
+# against the stable layout root and let the launcher pick the active release,
+# so an upgrade never leaves 51821 pointing at a release that is about to go.
+# The stage may already be gone (a successful rename moves it into releases/),
+# so read the installer through the stable code junction when it exists.
+$controlInstaller = Join-Path $LayoutRoot 'code\\wireguard\\windows-service\\install-control-service.ps1'
+if (-not (Test-Path $controlInstaller)) { $controlInstaller = Join-Path $Stage 'code\\wireguard\\windows-service\\install-control-service.ps1' }
+if (-not (Test-Path $controlInstaller)) { throw 'missing the control panel installer in the new release' }
+$stableNode = Join-Path $LayoutRoot 'runtime\\node\\node.exe'
+if (-not (Test-Path $stableNode)) { $stableNode = $node }
+$dshHome = Join-Path $LayoutRoot 'shared\\home'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $controlInstaller -Root $LayoutRoot -NodePath $stableNode -DshHome $dshHome
+if ($LASTEXITCODE -ne 0) {
+  & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+  if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a failed control panel install also failed' }
+  throw 'control panel installation failed after the pointer switch; rolled back'
+}
 $deadline = (Get-Date).AddSeconds(180)
+$gateHealthy = $false
 while ((Get-Date) -lt $deadline) {
   try {
     $response = Invoke-WebRequest -Uri ("http://127.0.0.1:" + $port + "/__gate/health") -UseBasicParsing -TimeoutSec 3
-    if ($response.StatusCode -eq 200) { Write-Output 'gateway healthy'; exit 0 }
+    if ($response.StatusCode -eq 200) { $gateHealthy = $true; break }
   } catch { }
   Start-Sleep -Seconds 3
 }
-& $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
-if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a failed health check also failed' }
-throw 'gateway health check failed after the pointer switch; rolled back'
+if (-not $gateHealthy) {
+  & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+  if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a failed health check also failed' }
+  throw 'gateway health check failed after the pointer switch; rolled back'
+}
+$controlDeadline = (Get-Date).AddSeconds(120)
+$controlHealthy = $false
+while ((Get-Date) -lt $controlDeadline) {
+  try {
+    $response = Invoke-WebRequest -Uri 'http://127.0.0.1:51821/api/dsh-wireguard/health' -UseBasicParsing -TimeoutSec 3
+    if ($response.StatusCode -eq 200) { $controlHealthy = $true; break }
+  } catch { }
+  Start-Sleep -Seconds 3
+}
+if (-not $controlHealthy) {
+  & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+  if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a failed control panel health check also failed' }
+  throw 'control panel health check on 51821 failed after the pointer switch; rolled back'
+}
+Write-Output 'gateway and control panel are healthy'
 `;
 }
 function buildWindowsRollbackScript(plan) {
@@ -5656,6 +5693,7 @@ function describePlan(plan) {
       `switch ${plan.current} to ${plan.release}`,
       ...plan.services.filter((service) => plan.scope === "all" || service.role !== "gate").map((service) => `restart ${service.name} (${service.role})`),
       `health check http://127.0.0.1:${plan.gatePort}/__gate/health`,
+      ...plan.services.some((service) => service.role === "control") ? ["health check http://127.0.0.1:51821/api/dsh-wireguard/health"] : [],
       `keep the newest ${plan.retention} releases (current/previous are never deleted)`,
       "on failure switch back to the previous release and restart"
     ]
@@ -8334,48 +8372,6 @@ var MeshService = class {
     }
     return { ok: true, member: { id: member.id, name: member.name, ip: member.ip }, status: parsed?.status ?? null };
   }
-  /**
-   * Conversations controlled by every member's interop service, grouped by
-   * member. The task service owns the interop client and its token.
-   * @returns {Promise<{ok: boolean, updatedAt: string, groups: object[]}>} groups.
-   */
-  async conversations() {
-    const tasks = this.memberTasks;
-    if (tasks === void 0 || tasks === null) {
-      throw Object.assign(new Error("the member task service is not available yet"), { status: 503 });
-    }
-    return tasks.listByMember();
-  }
-  /**
-   * Post a message typed in the panel to selected members.
-   *
-   * An empty selection broadcasts to every other member; the panel resolves
-   * `@3` mentions into ids before calling, so this stays a transport.
-   * @param {{text?: string, members?: string[]}} request message and targets.
-   * @returns {Promise<{ok: boolean, sent: object[], errors: object[]}>} outcome.
-   */
-  async sendConversation(request) {
-    const tasks = this.memberTasks;
-    if (tasks === void 0 || tasks === null) {
-      throw Object.assign(new Error("the member task service is not available yet"), { status: 503 });
-    }
-    const text = typeof request?.text === "string" ? request.text.trim() : "";
-    if (text === "") throw Object.assign(new Error("\u6D88\u606F\u4E0D\u80FD\u4E3A\u7A7A"), { status: 400 });
-    if (text.length > 8e3) throw Object.assign(new Error("\u6D88\u606F\u592A\u957F\uFF08\u4E0A\u9650 8000 \u5B57\uFF09"), { status: 400 });
-    const members = Array.isArray(request?.members) ? request.members.filter((item) => typeof item === "string" && item.trim() !== "") : [];
-    return tasks.sendTo({ text, members });
-  }
-  /**
-   * Ask every member's interop service to drop its finished conversations.
-   * @returns {Promise<{ok: boolean, removed: number, errors: object[]}>} summary.
-   */
-  async clearConversations() {
-    const tasks = this.memberTasks;
-    if (tasks === void 0 || tasks === null) {
-      throw Object.assign(new Error("the member task service is not available yet"), { status: 503 });
-    }
-    return tasks.clearConversations();
-  }
   async members() {
     await this.#loadProbes();
     const stateFile = path18.join(this.home, "wireguard", "state.json");
@@ -10348,22 +10344,6 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, await service.removePackage({ name: typeof body.name === "string" ? body.name : "" }));
           return;
         }
-        if (method === "POST" && path25 === "/conversations/send") {
-          const body = await readJson2(request);
-          writeJson(response, 200, await service.sendConversation({
-            text: typeof body.text === "string" ? body.text : "",
-            members: Array.isArray(body.members) ? body.members.filter((item) => typeof item === "string") : []
-          }));
-          return;
-        }
-        if (method === "POST" && path25 === "/conversations/clear") {
-          writeJson(response, 200, await service.clearConversations());
-          return;
-        }
-        if (method === "GET" && path25 === "/conversations") {
-          writeJson(response, 200, await service.conversations());
-          return;
-        }
         if (method === "GET" && path25 === "/events") {
           hub.subscribe(request, response);
           return;
@@ -11277,83 +11257,6 @@ var MemberTaskService = class {
     }
     return task;
   }
-  /**
-   * Send a message typed in the panel to one or more members.
-   *
-   * A member whose conversation is still running gets the text as a follow-up;
-   * everyone else gets a fresh conversation. No task is created and nothing is
-   * notified back: the panel reads conversations straight from each member, so
-   * the answer shows up in the group chat on the next refresh.
-   * @param {{text: string, members?: string[]}} input text and target ids/ips.
-   * @returns {Promise<{ok: boolean, sent: object[], errors: object[]}>} outcome.
-   */
-  async sendTo({ text, members = [] }) {
-    const content = String(text ?? "").trim();
-    if (content === "") throw new Error("text is required");
-    const snapshot = await this.service.members();
-    this.identity = this.identity ?? {
-      id: String(snapshot.local?.id ?? "local"),
-      name: String(snapshot.local?.name ?? snapshot.local?.id ?? "local"),
-      ip: String(snapshot.local?.ip ?? "")
-    };
-    const others = [snapshot.local, ...Array.isArray(snapshot.members) ? snapshot.members : []].filter(Boolean).filter((member) => member.kind !== "self" && member.self !== true);
-    const wanted = (Array.isArray(members) ? members : []).map((item) => String(item).trim()).filter((item) => item !== "");
-    const targets = [];
-    if (wanted.length === 0) {
-      targets.push(...others);
-    } else {
-      for (const item of wanted) {
-        const match = others.find((member) => [String(member.id), String(member.ip), String(member.name)].includes(item));
-        if (match !== void 0) {
-          if (!targets.includes(match)) targets.push(match);
-          continue;
-        }
-        const resolved = await this.#resolveMember(item).catch(() => null);
-        if (resolved !== null && !targets.some((member) => member.ip === resolved.ip)) targets.push(resolved);
-      }
-    }
-    if (targets.length === 0) throw new Error("no member to send to");
-    const sent = [];
-    const errors = [];
-    await Promise.all(targets.map(async (member) => {
-      const name = String(member.name ?? member.id ?? member.ip ?? "");
-      const ip = String(member.ip ?? "");
-      const label = ip === "" ? name : `${name} (${ip})`;
-      try {
-        const baseUrl = this.#baseUrl(ip === "" ? name : ip);
-        const listed = await this.#request(baseUrl, "GET", "/v1/conversations", void 0, 8e3).catch(() => null);
-        const live = (Array.isArray(listed?.conversations) ? listed.conversations : []).find((row) => row.status === "running" && this.#isOwnConversation(row));
-        if (live !== void 0) {
-          await this.#request(baseUrl, "POST", `/v1/conversations/${encodeURIComponent(live.id)}/messages`, { content }, 3e4);
-          sent.push({ member: name, ip, conversationId: String(live.id), reused: true });
-          return;
-        }
-        const created = await this.#request(baseUrl, "POST", "/v1/conversations", {
-          prompt: content,
-          // The panel clamps the bubble, so the whole text is the title: a
-          // truncated one would never be recoverable through 详细.
-          title: content.length > 2e3 ? `${content.slice(0, 2e3)}\u2026` : content,
-          initiator: { ...this.identity, source: "panel" }
-        }, 6e4);
-        const conversation = created?.conversation ?? {};
-        sent.push({ member: name, ip, conversationId: String(conversation.id ?? ""), reused: false });
-      } catch (error) {
-        errors.push({ member: label, ip, error: error instanceof Error ? error.message : String(error) });
-      }
-    }));
-    return { ok: true, sent, errors };
-  }
-  /**
-   * True when a member's conversation was started from this machine.
-   * @param {object} row conversation summary.
-   * @returns {boolean} whether this host initiated it.
-   */
-  #isOwnConversation(row) {
-    const initiator = row?.initiator ?? null;
-    if (initiator === null || this.identity === null) return false;
-    if (initiator.id !== void 0 && String(initiator.id) === String(this.identity.id)) return true;
-    return initiator.ip !== void 0 && String(initiator.ip) !== "" && String(initiator.ip) === String(this.identity.ip);
-  }
   async #monitor(task) {
     const signal = this.controllers.get(task.id)?.signal;
     while (!this.disposed && (task.status === "running" || task.status === "starting")) {
@@ -11579,69 +11482,6 @@ var MemberTaskService = class {
     } catch {
       return "";
     }
-  }
-  /**
-   * List the conversations every member's interop service currently controls.
-   *
-   * A slow or offline member degrades to an `error` entry so one bad peer does
-   * not hide the rest of the list.
-   * @param {number} [timeoutMs] per-member request budget.
-   * @returns {Promise<{ok: boolean, updatedAt: string, groups: object[]}>} groups by member.
-   */
-  async listByMember(timeoutMs = 4e3) {
-    const snapshot = await this.service.members();
-    this.identity = this.identity ?? {
-      id: String(snapshot.local?.id ?? "local"),
-      name: String(snapshot.local?.name ?? snapshot.local?.id ?? "local"),
-      ip: String(snapshot.local?.ip ?? "")
-    };
-    const members = [snapshot.local, ...Array.isArray(snapshot.members) ? snapshot.members : []].filter(Boolean);
-    const groups = await Promise.all(members.map(async (member) => {
-      const summary = {
-        id: String(member.id),
-        name: String(member.name ?? member.id),
-        ip: String(member.ip ?? ""),
-        online: member.online !== false,
-        self: member.kind === "self",
-        dsh: member.dsh === true
-      };
-      if (summary.ip === "") return { ...summary, conversations: [], error: "no VPN address" };
-      try {
-        const data = await this.#request(this.#baseUrl(summary.ip), "GET", "/v1/conversations", void 0, timeoutMs);
-        return { ...summary, conversations: Array.isArray(data?.conversations) ? data.conversations : [], error: null };
-      } catch (error) {
-        return { ...summary, conversations: [], error: error instanceof Error ? error.message : String(error) };
-      }
-    }));
-    groups.sort((left, right) => {
-      if (left.self !== right.self) return left.self ? -1 : 1;
-      if (left.online !== right.online) return left.online ? -1 : 1;
-      return left.name.localeCompare(right.name);
-    });
-    return { ok: true, updatedAt: (/* @__PURE__ */ new Date()).toISOString(), groups };
-  }
-  /**
-   * Delete the finished conversations each member's interop service holds. A
-   * running one is left alone: its SDK session still owns it.
-   * @param {number} timeoutMs per-member timeout.
-   * @returns {Promise<{ok: boolean, removed: number, errors: object[]}>} summary.
-   */
-  async clearConversations(timeoutMs = 8e3) {
-    const state = await this.service.members();
-    const members = [state.local, ...Array.isArray(state.members) ? state.members : []].filter(Boolean);
-    let removed = 0;
-    const errors = [];
-    for (const member of members) {
-      const ip = String(member.ip ?? "");
-      if (ip === "") continue;
-      try {
-        const data = await this.#request(this.#baseUrl(ip), "DELETE", "/v1/conversations", void 0, timeoutMs);
-        if (Number.isInteger(data?.removed)) removed += data.removed;
-      } catch (error) {
-        errors.push({ member: String(member.name ?? ip), ip, error: error instanceof Error ? error.message : String(error) });
-      }
-    }
-    return { ok: true, removed, errors };
   }
   /**
    * Absolute path of one task's log file.

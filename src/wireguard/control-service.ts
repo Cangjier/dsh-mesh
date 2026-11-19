@@ -10,11 +10,10 @@
  *   DSH_HOME=/root/.dsh node control-service.js
  */
 
-import { homedir, hostname } from 'node:os';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { createControlExtraHandler } from './lib/http-api';
 import { WireGuardService } from './lib/service';
-import { TaskService, findInteropToken } from './lib/task-service';
 
 const home = process.env.DSH_HOME && process.env.DSH_HOME.trim() ? process.env.DSH_HOME.trim() : path.join(homedir(), '.dsh');
 const service = new WireGuardService({
@@ -30,18 +29,6 @@ const service = new WireGuardService({
 // panel API only claims requests below its own prefix.
 service.setControlExtraHandler(createControlExtraHandler(service));
 await service.init();
-
-// The shared 发起任务 store: the gateway owns the file, members forward to it.
-const tasks = new TaskService({
-  dir: path.join(home, 'wireguard', 'tasks'),
-  log: (line) => console.log(`[wireguard-control] ${line}`),
-  members: () => service.taskMembers(),
-  remote: () => service.taskRemote(),
-  interopToken: () => findInteropToken(),
-  selfName: hostname(),
-});
-await tasks.init();
-service.setTaskService(tasks);
 await service.startControlPanel();
 console.log('[wireguard-control] ready; control panel owns 51821');
 

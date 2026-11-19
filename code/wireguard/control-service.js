@@ -1,6 +1,6 @@
 // src/wireguard/control-service.ts
-import { homedir as homedir4, hostname } from "node:os";
-import path10 from "node:path";
+import { homedir as homedir4 } from "node:os";
+import path8 from "node:path";
 
 // src/wireguard/lib/constants.ts
 var PLUGIN_VERSION = "0.2.0";
@@ -50,826 +50,6 @@ function missingToolHint(tool, platform) {
   return `WireGuard is supported on Windows and Linux; this host reports ${platform}.`;
 }
 
-// src/wireguard/lib/task-service.ts
-import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import os from "node:os";
-import path2 from "node:path";
-
-// src/wireguard/lib/task-model.ts
-var MAX_NODES = 500;
-var MAX_SOURCE_CHARS = 2e3;
-var MAX_DEFINE_CHARS = 2e4;
-var MAX_REMARK_CHARS = 2e3;
-var MAX_TITLE_CHARS = 200;
-function cleanText(value, limit) {
-  const text2 = typeof value === "string" ? value.replace(/\r\n?/g, "\n").trim() : "";
-  return text2.length > limit ? text2.slice(0, limit) : text2;
-}
-function readId(value) {
-  const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
-  if (!Number.isSafeInteger(number) || number < 0) return null;
-  return number;
-}
-function normalizeDoc(value) {
-  const source = value !== null && typeof value === "object" ? value : {};
-  const rawNodes = Array.isArray(source.nodes) ? source.nodes : [];
-  const nodes = [];
-  const used = /* @__PURE__ */ new Set();
-  let next = 0;
-  for (const entry of rawNodes.slice(0, MAX_NODES)) {
-    if (entry === null || typeof entry !== "object") continue;
-    const item = entry;
-    let id = readId(item.id);
-    if (id === null || used.has(id)) {
-      while (used.has(next)) next += 1;
-      id = next;
-    }
-    used.add(id);
-    nodes.push({
-      id,
-      source: cleanText(item.source, MAX_SOURCE_CHARS),
-      define: cleanText(item.define, MAX_DEFINE_CHARS),
-      children: []
-    });
-  }
-  const known = new Set(nodes.map((node) => node.id));
-  rawNodes.slice(0, MAX_NODES).forEach((entry, index) => {
-    const node = nodes[index];
-    if (node === void 0 || entry === null || typeof entry !== "object") return;
-    const rawChildren = Array.isArray(entry.children) ? entry.children : [];
-    for (const raw of rawChildren) {
-      if (raw === null || typeof raw !== "object") continue;
-      const child = raw;
-      const id = readId(child.id);
-      if (id === null || !known.has(id)) continue;
-      node.children.push({ id, remark: cleanText(child.remark, MAX_REMARK_CHARS) });
-    }
-  });
-  return { nodes };
-}
-function rootIds(doc) {
-  const referenced = /* @__PURE__ */ new Map();
-  for (const node of doc.nodes) referenced.set(node.id, false);
-  for (const node of doc.nodes) {
-    for (const child of node.children) {
-      if (referenced.has(child.id)) referenced.set(child.id, true);
-    }
-  }
-  return doc.nodes.filter((node) => referenced.get(node.id) !== true).map((node) => node.id);
-}
-function summarize(doc) {
-  let edges = 0;
-  for (const node of doc.nodes) edges += node.children.length;
-  return { nodes: doc.nodes.length, roots: rootIds(doc).length, edges };
-}
-function defineLines(text2) {
-  if (text2 === "") return [];
-  return text2.split("\n").map((line) => line === "" ? ">" : `> ${line}`);
-}
-function renderTaskMarkdown(doc, title) {
-  const heading = cleanText(title, MAX_TITLE_CHARS) || "\u4EFB\u52A1";
-  const stats = summarize(doc);
-  const lines = [];
-  lines.push(`# ${heading}`, "");
-  lines.push(`- \u5BF9\u8C61\uFF1A${String(stats.nodes)} \u4E2A\uFF08\u6839\u5BF9\u8C61 ${String(stats.roots)} \u4E2A\uFF0C\u5F15\u7528 ${String(stats.edges)} \u6761\uFF09`);
-  lines.push("- \u8BF4\u660E\uFF1A\u6BCF\u4E2A\u5BF9\u8C61\u662F\u4E00\u4E2A\u53EF\u6267\u884C\u5355\u5143\uFF1B`source` \u6307\u51FA\u5B83\u6307\u5411\u7684\u6587\u4EF6\u3001git \u4ED3\u5E93\u6216\u4EE3\u7801\u4E2D\u7684\u7C7B\uFF0C`define` \u662F\u5B83\u8981\u505A\u7684\u4E8B\uFF0C\u5B50\u5BF9\u8C61\u662F\u8981\u5148\u505A\u6216\u5305\u542B\u7684\u4E8B\u3002");
-  lines.push("");
-  const byId = new Map(doc.nodes.map((node) => [node.id, node]));
-  const emitted = /* @__PURE__ */ new Set();
-  const walk = (id, depth, remark, path11) => {
-    const node = byId.get(id);
-    if (node === void 0 || depth > 12) return;
-    const key = `${String(id)}|${String(depth)}|${remark}`;
-    if (path11.has(id) || emitted.has(key)) return;
-    emitted.add(key);
-    const marker = depth === 0 ? "###" : "####";
-    const arrow = depth === 0 ? "" : `${"\u21B3 ".repeat(Math.min(depth, 6))}`;
-    lines.push(`${marker} ${arrow}#${String(node.id)}${node.source === "" ? "" : ` \xB7 ${node.source}`}`);
-    if (remark !== "") lines.push(`> ${remark}`);
-    const body = defineLines(node.define);
-    if (body.length > 0) lines.push("", ...body);
-    lines.push("");
-    const nextPath = new Set(path11);
-    nextPath.add(id);
-    for (const child of node.children) walk(child.id, depth + 1, child.remark, nextPath);
-  };
-  for (const id of rootIds(doc)) walk(id, 0, "", /* @__PURE__ */ new Set());
-  if (doc.nodes.length > 1) {
-    lines.push("---", "", "## \u5BF9\u8C61\u7D22\u5F15", "", "| id | source | \u5B50\u5BF9\u8C61 |", "| --- | --- | --- |");
-    const cell = (text2) => text2.replace(/\|/gu, "\\|").replace(/\n/gu, " ");
-    for (const node of doc.nodes) {
-      const children = node.children.length === 0 ? "\u2014" : cell(node.children.map((child) => `#${String(child.id)}${child.remark === "" ? "" : `\uFF08${child.remark}\uFF09`}`).join("\u3001"));
-      lines.push(`| ${String(node.id)} | ${node.source === "" ? "\u2014" : cell(node.source)} | ${children} |`);
-    }
-    lines.push("");
-  }
-  return lines.join("\n");
-}
-
-// src/wireguard/lib/task-store.ts
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import path from "node:path";
-var MAX_RUNS = 100;
-var MAX_RESULT_CHARS = 2e4;
-function emptyTaskData() {
-  return { version: 1, draft: { nodes: [] }, templates: [], runs: [] };
-}
-function text(value, limit) {
-  const result = typeof value === "string" ? value.replace(/\r\n?/g, "\n").trim() : "";
-  return result.length > limit ? result.slice(0, limit) : result;
-}
-function normalizeTemplate(value) {
-  if (value === null || typeof value !== "object") return null;
-  const item = value;
-  const name = text(item.name, 120);
-  if (name === "") return null;
-  const id = text(item.id, 80) || `tpl-${Date.now().toString(36)}`;
-  return {
-    id,
-    name,
-    doc: normalizeDoc(item.doc),
-    createdAt: text(item.createdAt, 40) || (/* @__PURE__ */ new Date()).toISOString(),
-    updatedAt: text(item.updatedAt, 40) || (/* @__PURE__ */ new Date()).toISOString()
-  };
-}
-function normalizeRun(value) {
-  if (value === null || typeof value !== "object") return null;
-  const item = value;
-  const id = text(item.id, 80);
-  const conversationId = text(item.conversationId, 120);
-  if (id === "" || conversationId === "") return null;
-  const status = item.status === "completed" || item.status === "failed" ? item.status : "running";
-  const memberOf = (value2) => {
-    if (value2 === null || typeof value2 !== "object") return null;
-    const entry = value2;
-    return {
-      id: text(entry.id, 120),
-      name: text(entry.name, 120),
-      ip: text(entry.ip, 120)
-    };
-  };
-  return {
-    id,
-    title: text(item.title, MAX_TITLE_CHARS) || "\u4EFB\u52A1",
-    status,
-    member: memberOf(item.member),
-    manager: memberOf(item.manager),
-    workspace: text(item.workspace, 120) || null,
-    cwd: text(item.cwd, 400) || null,
-    conversationId,
-    createdAt: text(item.createdAt, 40) || (/* @__PURE__ */ new Date()).toISOString(),
-    updatedAt: text(item.updatedAt, 40) || (/* @__PURE__ */ new Date()).toISOString(),
-    doc: normalizeDoc(item.doc),
-    markdown: text(item.markdown, 2e5),
-    result: text(item.result, MAX_RESULT_CHARS),
-    error: text(item.error, 2e3) || null,
-    resultTries: typeof item.resultTries === "number" && Number.isSafeInteger(item.resultTries) && item.resultTries > 0 ? item.resultTries : 0
-  };
-}
-function normalizeTaskData(value) {
-  const source = value !== null && typeof value === "object" ? value : {};
-  const templates = (Array.isArray(source.templates) ? source.templates : []).map(normalizeTemplate).filter((item) => item !== null).slice(0, 200);
-  const seen = /* @__PURE__ */ new Set();
-  for (const template of templates) {
-    if (seen.has(template.id)) template.id = `${template.id}-${Math.random().toString(36).slice(2, 8)}`;
-    seen.add(template.id);
-  }
-  const runs = (Array.isArray(source.runs) ? source.runs : []).map(normalizeRun).filter((item) => item !== null).slice(0, MAX_RUNS);
-  return { version: 1, draft: normalizeDoc(source.draft), templates, runs };
-}
-var TaskStore = class {
-  file;
-  logger;
-  data = emptyTaskData();
-  #chain = Promise.resolve();
-  /**
-   * @param directory data directory.
-   * @param log logger.
-   */
-  constructor(directory, log = () => {
-  }) {
-    this.file = path.join(directory, "tasks.json");
-    this.logger = log;
-  }
-  /**
-   * Read the file; a missing or broken file yields the empty store.
-   * @returns loaded data.
-   */
-  async load() {
-    try {
-      const raw = await readFile(this.file, "utf8");
-      this.data = normalizeTaskData(JSON.parse(raw));
-    } catch (error) {
-      const code = error.code;
-      if (code !== "ENOENT") this.logger(`task store unreadable (${code ?? "error"}); starting empty`);
-      this.data = emptyTaskData();
-    }
-    return this.data;
-  }
-  /**
-   * Write the file, serialized so concurrent saves cannot interleave.
-   * @returns when the file is on disk.
-   */
-  async save() {
-    const snapshot = JSON.stringify(this.data, null, 2);
-    const run2 = this.#chain.then(async () => {
-      await mkdir(path.dirname(this.file), { recursive: true });
-      const temporary = `${this.file}.${String(process.pid)}.tmp`;
-      await writeFile(temporary, snapshot, { encoding: "utf8", mode: 384 });
-      await rename(temporary, this.file);
-    });
-    this.#chain = run2.catch(() => {
-    });
-    await run2;
-  }
-};
-function pruneRuns(runs) {
-  if (runs.length <= MAX_RUNS) return runs;
-  return [...runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, MAX_RUNS);
-}
-
-// src/wireguard/lib/task-service.ts
-var LIVE_STATUS = /* @__PURE__ */ new Set(["blank", "running"]);
-function readEnvFile(file) {
-  const result = {};
-  let raw = "";
-  try {
-    raw = readFileSync(file, "utf8");
-  } catch {
-    return result;
-  }
-  for (const line of raw.split(/\r?\n/u)) {
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/u.exec(line);
-    if (match === null) continue;
-    let value = match[2].trim();
-    if (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1);
-    result[match[1]] = value;
-  }
-  return result;
-}
-function tokenRoots() {
-  const roots = [];
-  let current = process.cwd();
-  for (let depth = 0; depth < 6; depth += 1) {
-    roots.push(current);
-    const parent = path2.dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  return roots;
-}
-function findInteropToken(roots = tokenRoots()) {
-  for (const name of ["DSH_TASKS_INTEROP_TOKEN", "DSH_INTEROP_TOKEN", "DSH_GATE_PASSWORD"]) {
-    const value = process.env[name];
-    if (typeof value === "string" && value.trim() !== "") return value.trim();
-  }
-  for (const root of roots) {
-    const interop = readEnvFile(path2.join(root, "config", "interop.env"));
-    if (interop.DSH_INTEROP_TOKEN !== void 0 && interop.DSH_INTEROP_TOKEN !== "") return interop.DSH_INTEROP_TOKEN;
-    const gate = readEnvFile(path2.join(root, "config", "gate.env"));
-    if (gate.DSH_GATE_PASSWORD !== void 0 && gate.DSH_GATE_PASSWORD !== "") return gate.DSH_GATE_PASSWORD;
-  }
-  return null;
-}
-function runSummary(run2) {
-  const preview = run2.result.replace(/\s+/gu, " ").trim();
-  return {
-    id: run2.id,
-    title: run2.title,
-    status: run2.status,
-    member: run2.member,
-    manager: run2.manager ?? null,
-    workspace: run2.workspace ?? null,
-    cwd: run2.cwd,
-    conversationId: run2.conversationId,
-    createdAt: run2.createdAt,
-    updatedAt: run2.updatedAt,
-    nodeCount: run2.doc.nodes.length,
-    resultPreview: preview.length > 160 ? `${preview.slice(0, 160)}\u2026` : preview,
-    error: run2.error
-  };
-}
-function cleanWorkspace(value) {
-  const name = cleanText(value, 120);
-  if (name === "") return null;
-  if (name === "." || name === ".." || /[\\/"]/u.test(name) || /[\u0000-\u001f]/u.test(name)) {
-    throw new WireGuardError("workspace_invalid", "\u5DE5\u4F5C\u76EE\u5F55\u540D\u79F0\u4E0D\u80FD\u5305\u542B\u8DEF\u5F84\u5206\u9694\u7B26\u6216\u5F15\u53F7\u3002", { status: 400 });
-  }
-  return name;
-}
-function normalizeWorkspaces(value, dir) {
-  const list = Array.isArray(value) ? value : [];
-  const workspaces = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const item of list) {
-    const name = item !== null && typeof item === "object" ? cleanText(item.name, 120) : "";
-    if (name === "" || seen.has(name)) continue;
-    seen.add(name);
-    workspaces.push({ name });
-  }
-  return { dir: cleanText(dir, 400), workspaces };
-}
-function coordinatorPrompt(input) {
-  const { title, markdown, target, workspace } = input;
-  const delegateArgs = [
-    'action="delegate"',
-    `member="${target.ip}"`,
-    ...workspace === null ? [] : [`workspace="${workspace}"`]
-  ].join("\uFF0C");
-  return [
-    `# \u534F\u8C03\u4EFB\u52A1\uFF1A${title}`,
-    "",
-    "\u4F60\u662F\u8FD9\u6B21\u4EFB\u52A1\u7684\u7BA1\u7406\u8005\u3001\u534F\u8C03\u8005\u548C\u9A8C\u6536\u8005\uFF0C**\u4E0D\u8D1F\u8D23\u5177\u4F53\u6267\u884C**\uFF1A\u4E0D\u8981\u81EA\u5DF1\u4FEE\u6539\u6587\u4EF6\u6216\u6267\u884C\u4EFB\u52A1\u91CC\u7684\u547D\u4EE4\u3002",
-    "",
-    `- \u6267\u884C\u6210\u5458\uFF1A${target.name}\uFF08${target.ip}\uFF09`,
-    ...workspace === null ? [] : [`- \u5DE5\u4F5C\u76EE\u5F55\uFF1A~/.dsh/workspaces/${workspace}\uFF08\u6267\u884C\u6210\u5458\u672C\u673A\u7684\u5B9E\u9645\u76EE\u5F55\uFF09`],
-    "",
-    "## \u6267\u884C\u65B9\u5F0F",
-    `1. \u7528 \`call_member\`\uFF08${delegateArgs}\uFF09\u628A\u300C## \u4EFB\u52A1\u300D\u4E0B\u7684 markdown \u539F\u6837\u4F5C\u4E3A prompt \u4EA4\u7ED9\u6267\u884C\u6210\u5458\uFF0C\u5E76\u5199\u6E05\u9A8C\u6536\u8981\u6C42\u3002`,
-    "2. \u7528 `wait_member` \u7B49\u5F85\uFF1Astate=progress \u8868\u793A\u8FD8\u5728\u8FDB\u884C\uFF0C\u7EE7\u7EED\u7528\u540C\u4E00\u4E2A taskId \u7B49\u5F85\uFF1Bstate=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002",
-    '3. \u9A8C\u6536\uFF1A\u5BF9\u7167\u4EFB\u52A1\u5B9A\u4E49\u68C0\u67E5\u7ED3\u679C\uFF1B\u4E0D\u901A\u8FC7\u65F6\u7528 `call_member`\uFF08action="send"\uFF09\u8BA9\u6267\u884C\u6210\u5458\u8865\u505A\uFF0C\u518D\u7EE7\u7EED\u7B49\u5F85\u3002',
-    "4. \u6700\u540E\u7ED9\u51FA\uFF1A\u9A8C\u6536\u7ED3\u8BBA\uFF08\u901A\u8FC7 / \u4E0D\u901A\u8FC7\uFF09\u3001\u6539\u52A8\u6E05\u5355\u3001\u9A8C\u8BC1\u65B9\u5F0F\u3001\u9057\u7559\u95EE\u9898\u3002",
-    "",
-    "## \u4EFB\u52A1",
-    "",
-    markdown
-  ].join("\n");
-}
-var TaskService = class {
-  store;
-  now;
-  logger;
-  fetchImpl;
-  interopPort;
-  options;
-  #lastRefresh = 0;
-  #refreshing = null;
-  /**
-   * @param options service options.
-   */
-  constructor(options) {
-    this.options = options;
-    this.now = options.now ?? (() => Date.now());
-    this.logger = options.log ?? (() => {
-    });
-    this.fetchImpl = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
-    this.interopPort = options.interopPort ?? 8765;
-    this.store = new TaskStore(options.dir, this.logger);
-  }
-  /** Load the store; safe to call twice. */
-  async init() {
-    await this.store.load();
-  }
-  /** True when another machine owns the data. */
-  get delegated() {
-    return (this.options.remote?.() ?? null) !== null;
-  }
-  /**
-   * The panel's whole view: draft, templates, and recent launches.
-   * @returns snapshot.
-   */
-  async snapshot() {
-    if (this.delegated) return (await this.#remote("GET", "")).tasks;
-    await this.refreshWithin(2500);
-    return this.#view();
-  }
-  /**
-   * The current view without waiting for member polling.
-   * @returns snapshot.
-   */
-  #view() {
-    const data = this.store.data;
-    const runs = [...data.runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).map(runSummary);
-    return { draft: data.draft, templates: data.templates, runs };
-  }
-  /**
-   * Replace the object being edited.
-   * @param doc new document.
-   * @returns the new snapshot.
-   */
-  async setDraft(doc) {
-    if (this.delegated) return (await this.#remote("POST", "/draft", { doc })).tasks;
-    this.store.data.draft = normalizeDoc(doc);
-    await this.store.save();
-    return this.#view();
-  }
-  /**
-   * Save the current document under a new template name.
-   * @param name template name.
-   * @param doc document.
-   * @returns the whole template list.
-   */
-  async createTemplate(name, doc) {
-    if (this.delegated) return (await this.#remote("POST", "/templates/create", { name, doc })).tasks;
-    const label = this.#templateName(name);
-    const unique = this.#uniqueName(label);
-    const stamp = new Date(this.now()).toISOString();
-    this.store.data.templates.push({
-      id: `tpl-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`,
-      name: unique,
-      doc: normalizeDoc(doc),
-      createdAt: stamp,
-      updatedAt: stamp
-    });
-    await this.store.save();
-    return this.#view();
-  }
-  /**
-   * Rename one template.
-   * @param id template id.
-   * @param name new name.
-   * @returns the whole template list.
-   */
-  async renameTemplate(id, name) {
-    if (this.delegated) return (await this.#remote("POST", "/templates/rename", { id, name })).tasks;
-    const template = this.#template(id);
-    const label = this.#templateName(name);
-    const clash = this.store.data.templates.find((item) => item !== template && item.name === label);
-    if (clash !== void 0) throw new WireGuardError("template_name_taken", `\u6A21\u677F\u300C${label}\u300D\u5DF2\u7ECF\u5B58\u5728\u3002`, { status: 409 });
-    template.name = label;
-    template.updatedAt = new Date(this.now()).toISOString();
-    await this.store.save();
-    return this.#view();
-  }
-  /**
-   * Overwrite a template with the current document.
-   * @param id template id.
-   * @param doc document.
-   * @returns the whole template list.
-   */
-  async updateTemplate(id, doc) {
-    if (this.delegated) return (await this.#remote("POST", "/templates/update", { id, doc })).tasks;
-    const template = this.#template(id);
-    template.doc = normalizeDoc(doc);
-    template.updatedAt = new Date(this.now()).toISOString();
-    await this.store.save();
-    return this.#view();
-  }
-  /**
-   * Delete one template.
-   * @param id template id.
-   * @returns the whole template list.
-   */
-  async deleteTemplate(id) {
-    if (this.delegated) return (await this.#remote("POST", "/templates/delete", { id })).tasks;
-    const template = this.#template(id);
-    this.store.data.templates = this.store.data.templates.filter((item) => item !== template);
-    await this.store.save();
-    return this.#view();
-  }
-  /**
-   * Render the task and launch it through a local coordinator conversation.
-   *
-   * The gateway never executes the task itself. It opens a conversation on the
-   * local member whose agent delegates to the target with `call_member`, waits
-   * with `wait_member`, and returns the acceptance result. The target member is
-   * the only machine that executes anything, which also means the coordinator's
-   * conversation is what 对话 lists and what the run status follows.
-   * @param input document, title, member, workspace, cwd.
-   * @returns the new run.
-   */
-  async launch(input) {
-    if (this.delegated) {
-      const answer = await this.#remote("POST", "/launch", input);
-      return { run: answer.run, tasks: answer.tasks };
-    }
-    const doc = input.doc === void 0 ? this.store.data.draft : normalizeDoc(input.doc);
-    if (doc.nodes.length === 0) throw new WireGuardError("task_empty", "\u4EFB\u52A1\u91CC\u8FD8\u6CA1\u6709\u5BF9\u8C61\uFF0C\u5148\u6DFB\u52A0\u4E00\u4E2A\u518D\u53D1\u8D77\u3002", { status: 400 });
-    const members = this.options.members?.() ?? [];
-    if (members.length === 0) throw new WireGuardError("no_member", "\u6CA1\u6709\u53EF\u7528\u7684\u6210\u5458\u3002", { status: 503 });
-    const local = members.find((member) => member.id === "local");
-    const target = this.#target(input.member, members);
-    const title = cleanText(input.title, MAX_TITLE_CHARS) || `\u4EFB\u52A1 ${new Date(this.now()).toLocaleString("zh-CN", { hour12: false })}`;
-    const workspace = cleanWorkspace(input.workspace);
-    const legacyCwd = cleanText(input.cwd, 400) || null;
-    const cwd = workspace === null ? legacyCwd : `~/.dsh/workspaces/${workspace}`;
-    const markdown = renderTaskMarkdown(doc, title);
-    const localIp = (local?.ip ?? "").trim();
-    const managerIp = localIp === "" ? "127.0.0.1" : localIp;
-    const prompt = coordinatorPrompt({ title, markdown, target, workspace });
-    const created = await this.#interop(managerIp, "POST", "/v1/conversations", {
-      prompt,
-      // The executor's conversation carries the task title; the coordinator's
-      // is marked so 对话 shows which local conversation is doing the managing.
-      title: `${title} \xB7 \u534F\u8C03`,
-      initiator: { id: "gateway", name: this.options.selfName ?? os.hostname(), ip: managerIp, source: "panel-task" },
-      ...workspace === null ? {} : { workspace }
-    });
-    const conversation = created.conversation;
-    const conversationId = typeof conversation?.id === "string" ? conversation.id : "";
-    if (conversationId === "") throw new WireGuardError("interop_refused", "\u672C\u673A\u7684\u534F\u8C03\u5BF9\u8BDD\u6CA1\u6709\u8FD4\u56DE id\u3002", { status: 502 });
-    const stamp = new Date(this.now()).toISOString();
-    const run2 = {
-      id: `run-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`,
-      title,
-      status: "running",
-      member: { id: target.id, name: target.name, ip: target.ip },
-      manager: { id: local?.id ?? "local", name: local?.name ?? (this.options.selfName ?? os.hostname()), ip: managerIp },
-      workspace,
-      cwd,
-      conversationId,
-      createdAt: stamp,
-      updatedAt: stamp,
-      doc,
-      markdown,
-      result: "",
-      error: null
-    };
-    this.store.data.runs = pruneRuns([run2, ...this.store.data.runs]);
-    await this.store.save();
-    this.logger(`launched ${run2.id}: local coordinator (${managerIp}) -> ${target.name} (${target.ip}): ${conversationId}`);
-    return { run: run2, tasks: this.#view() };
-  }
-  /**
-   * Workspaces a member exposes below `~/.dsh/workspaces`.
-   * @param member member id, name, or VPN address.
-   * @returns the member's workspace listing.
-   */
-  async workspaces(member) {
-    if (this.delegated) {
-      const answer2 = await this.#remote("GET", `/workspaces?member=${encodeURIComponent(String(member ?? ""))}`);
-      return normalizeWorkspaces(answer2.workspaces, answer2.dir);
-    }
-    const members = this.options.members?.() ?? [];
-    if (members.length === 0) throw new WireGuardError("no_member", "\u6CA1\u6709\u53EF\u7528\u7684\u6210\u5458\u3002", { status: 503 });
-    const target = this.#target(member, members);
-    const answer = await this.#interop(target.ip, "GET", "/v1/workspaces");
-    const payload = answer;
-    return normalizeWorkspaces(payload.workspaces, payload.dir);
-  }
-  /**
-   * Remove the finished launches from 历史, leaving running ones alone.
-   * @returns the new snapshot.
-   */
-  async clearRuns() {
-    if (this.delegated) return (await this.#remote("POST", "/runs/clear")).tasks;
-    const before = this.store.data.runs.length;
-    this.store.data.runs = this.store.data.runs.filter((run2) => run2.status === "running");
-    if (this.store.data.runs.length !== before) await this.store.save();
-    return this.#view();
-  }
-  /**
-   * One full historical run, refreshing it first when still in flight.
-   * @param id run id.
-   * @returns the run.
-   */
-  async run(id) {
-    if (this.delegated) return (await this.#remote("GET", `/runs/${encodeURIComponent(String(id ?? ""))}`)).run;
-    const run2 = this.store.data.runs.find((item) => item.id === String(id ?? ""));
-    if (run2 === void 0) throw new WireGuardError("run_not_found", "\u627E\u4E0D\u5230\u8FD9\u6B21\u4EFB\u52A1\u3002", { status: 404 });
-    if (run2.status === "running" || run2.status === "completed" && run2.result === "" && (run2.resultTries ?? 0) < 3) {
-      await this.#refreshRun(run2);
-      await this.store.save();
-    }
-    return run2;
-  }
-  /**
-   * Refresh running launches without waiting longer than the budget.
-   * @param budgetMs time to spend at most.
-   * @returns when the refresh is done or the budget elapsed.
-   */
-  async refreshWithin(budgetMs) {
-    const refresh = this.refresh();
-    if (refresh === null) return;
-    let timer = null;
-    const timeout = new Promise((resolve) => {
-      timer = setTimeout(resolve, budgetMs);
-      timer.unref?.();
-    });
-    await Promise.race([refresh, timeout]);
-    if (timer !== null) clearTimeout(timer);
-  }
-  /**
-   * Ask every live launch's interop service for its status. Throttled.
-   * @param force ignore the throttle.
-   * @returns the shared refresh promise, or null when nothing is in flight.
-   */
-  refresh(force = false) {
-    if (this.delegated) return null;
-    const live = this.store.data.runs.filter((run2) => run2.status === "running" || run2.status === "completed" && run2.result === "" && (run2.resultTries ?? 0) < 3);
-    if (live.length === 0) return null;
-    if (!force && this.now() - this.#lastRefresh < 5e3) return null;
-    if (this.#refreshing !== null) return this.#refreshing;
-    this.#lastRefresh = this.now();
-    this.#refreshing = (async () => {
-      for (const run2 of live) await this.#refreshRun(run2);
-      await this.store.save();
-    })().finally(() => {
-      this.#refreshing = null;
-    });
-    return this.#refreshing;
-  }
-  /**
-   * Update one run from its member's conversation state.
-   * @param run run to refresh.
-   * @returns when the run is updated.
-   */
-  async #refreshRun(run2) {
-    const ip = (run2.manager?.ip ?? "").trim() !== "" ? String(run2.manager?.ip) : run2.member?.ip ?? "";
-    if (ip === "") return;
-    let conversation = null;
-    try {
-      const answer = await this.#interop(ip, "GET", `/v1/conversations/${encodeURIComponent(run2.conversationId)}`);
-      conversation = answer.conversation;
-    } catch (error) {
-      const status2 = error.status;
-      if (status2 === 404) {
-        run2.status = "failed";
-        run2.error = run2.manager === null || run2.manager === void 0 ? "\u6210\u5458\u4E0A\u5DF2\u7ECF\u6CA1\u6709\u8FD9\u4E2A\u5BF9\u8BDD\u4E86\u3002" : "\u672C\u673A\u4E0A\u5DF2\u7ECF\u6CA1\u6709\u8FD9\u4E2A\u534F\u8C03\u5BF9\u8BDD\u4E86\u3002";
-        run2.updatedAt = new Date(this.now()).toISOString();
-        return;
-      }
-      return;
-    }
-    if (conversation === null) return;
-    const status = typeof conversation.status === "string" ? conversation.status : "";
-    const failure = typeof conversation.error === "string" && conversation.error !== "" ? conversation.error : null;
-    if (failure !== null) {
-      run2.status = "failed";
-      run2.error = failure;
-    } else if (LIVE_STATUS.has(status)) {
-      run2.status = "running";
-    } else if (status === "idle") {
-      run2.status = "completed";
-      run2.error = null;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-          const result = await this.#interop(ip, "GET", `/v1/conversations/${encodeURIComponent(run2.conversationId)}/result`);
-          const finalText = typeof result.finalText === "string" ? result.finalText : "";
-          if (finalText !== "") {
-            run2.result = finalText.length > MAX_RESULT_CHARS ? finalText.slice(0, MAX_RESULT_CHARS) : finalText;
-            run2.resultTries = 0;
-            break;
-          }
-        } catch {
-        }
-        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 600));
-      }
-      if (run2.result === "") run2.resultTries = (run2.resultTries ?? 0) + 1;
-    } else {
-      run2.status = "failed";
-      run2.error = status === "interrupted" ? "\u5BF9\u8BDD\u88AB\u4E2D\u65AD\u4E86\u3002" : status === "unavailable" ? "\u6210\u5458\u7684 SDK \u8FD0\u884C\u65F6\u5DF2\u9000\u51FA\u3002" : `\u5BF9\u8BDD\u72B6\u6001\uFF1A${status || "\u672A\u77E5"}`;
-    }
-    run2.updatedAt = new Date(this.now()).toISOString();
-  }
-  /**
-   * Call one member's interop service.
-   * @param ip member VPN address.
-   * @param method HTTP method.
-   * @param endpoint path below the interop root.
-   * @param body JSON body.
-   * @returns parsed answer.
-   */
-  async #interop(ip, method, endpoint, body) {
-    const token = this.options.interopToken?.() ?? findInteropToken();
-    if (token === null) throw new WireGuardError("interop_token_missing", "\u627E\u4E0D\u5230\u6210\u5458 SDK \u7684\u8BBF\u95EE\u4EE4\u724C\uFF08config/interop.env \u6216 config/gate.env\uFF09\u3002", { status: 503 });
-    const host = ip.includes(":") && !ip.startsWith("[") ? `[${ip}]` : ip;
-    const url = `http://${host}:${String(this.interopPort)}${endpoint}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), method === "POST" ? 6e4 : 8e3);
-    timer.unref?.();
-    let response;
-    try {
-      response = await this.fetchImpl(url, {
-        method,
-        headers: {
-          authorization: `Bearer ${token}`,
-          ...body === void 0 ? {} : { "content-type": "application/json" }
-        },
-        ...body === void 0 ? {} : { body: JSON.stringify(body) },
-        signal: controller.signal
-      });
-    } catch (error) {
-      throw new WireGuardError("interop_unreachable", `${ip} \u7684 SDK \u670D\u52A1\u8FDE\u4E0D\u4E0A\uFF1A${error instanceof Error ? error.message : String(error)}`, { status: 502 });
-    } finally {
-      clearTimeout(timer);
-    }
-    const text2 = await response.text();
-    let parsed = {};
-    try {
-      parsed = text2 === "" ? {} : JSON.parse(text2);
-    } catch {
-      parsed = {};
-    }
-    if (!response.ok) {
-      const detail = parsed;
-      const message = typeof detail?.error?.message === "string" ? detail.error.message : `HTTP ${String(response.status)}`;
-      throw new WireGuardError("interop_failed", `${ip} \u7684 SDK \u62D2\u7EDD\u4E86\u8BF7\u6C42\uFF1A${message}`, { status: response.status >= 500 ? 502 : response.status });
-    }
-    return parsed;
-  }
-  /**
-   * Forward one task request to the gateway that owns the store.
-   * @param method HTTP method.
-   * @param suffix path below the tasks API.
-   * @param body JSON body.
-   * @returns parsed payload.
-   */
-  async #remote(method, suffix, body) {
-    const target = this.options.remote?.() ?? null;
-    if (target === null) throw new WireGuardError("not_delegated", "This machine owns the task store.", { status: 500 });
-    const base = target.baseUrl.replace(/\/+$/u, "");
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3e4);
-    timer.unref?.();
-    let response;
-    try {
-      response = await this.fetchImpl(`${base}${API_PREFIX}/tasks${suffix}`, {
-        method,
-        headers: {
-          "content-type": "application/json",
-          "x-dsh-wireguard": "1",
-          "x-dsh-peer-token": target.token
-        },
-        ...body === void 0 ? {} : { body: JSON.stringify(body) },
-        signal: controller.signal
-      });
-    } catch (error) {
-      throw new WireGuardError("gateway_unreachable", `\u7F51\u5173\u8FDE\u4E0D\u4E0A\uFF0C\u4EFB\u52A1\u5217\u8868\u6682\u65F6\u8BFB\u4E0D\u5230\uFF1A${error instanceof Error ? error.message : String(error)}`, { status: 502 });
-    } finally {
-      clearTimeout(timer);
-    }
-    const text2 = await response.text();
-    let parsed = {};
-    try {
-      parsed = text2 === "" ? {} : JSON.parse(text2);
-    } catch {
-      parsed = {};
-    }
-    if (!response.ok || parsed.ok === false) {
-      const message = typeof parsed?.error?.message === "string" ? parsed.error.message : `HTTP ${String(response.status)}`;
-      throw new WireGuardError(parsed?.error?.code ?? "gateway_failed", message, { status: response.status >= 400 ? response.status : 502 });
-    }
-    return {
-      tasks: parsed.tasks,
-      run: parsed.run,
-      workspaces: parsed.workspaces,
-      dir: parsed.dir
-    };
-  }
-  /**
-   * Resolve the member that executes a task.
-   *
-   * The local member is never an execution target: it owns the coordinator
-   * conversation. Callers send an id, a name, or a VPN address.
-   * @param value raw identifier; empty picks the first peer.
-   * @param members current members, local included.
-   * @returns the target.
-   */
-  #target(value, members) {
-    const wanted = String(value ?? "").trim();
-    const target = wanted === "" ? members.find((member) => member.id !== "local") : members.find((member) => member.id === wanted || member.ip === wanted || member.name === wanted);
-    if (target === void 0) {
-      throw new WireGuardError(
-        wanted === "" ? "no_member" : "member_not_found",
-        wanted === "" ? "\u6CA1\u6709\u53EF\u6267\u884C\u7684\u6210\u5458\uFF1B\u672C\u673A\u53EA\u8D1F\u8D23\u7BA1\u7406\u548C\u9A8C\u6536\u3002" : `\u627E\u4E0D\u5230\u6210\u5458 ${wanted}\u3002`,
-        { status: wanted === "" ? 503 : 404 }
-      );
-    }
-    if (target.id === "local") {
-      throw new WireGuardError("local_member_not_allowed", "\u672C\u673A\u53EA\u8D1F\u8D23\u7BA1\u7406\u548C\u9A8C\u6536\uFF0C\u8BF7\u9009\u62E9\u5176\u4ED6\u6210\u5458\u6267\u884C\u3002", { status: 400 });
-    }
-    if (target.ip.trim() === "") throw new WireGuardError("member_without_ip", `\u6210\u5458 ${target.name} \u6CA1\u6709 VPN \u5730\u5740\u3002`, { status: 409 });
-    return target;
-  }
-  /**
-   * Name a template, refusing empty ones.
-   * @param value raw name.
-   * @returns the name.
-   */
-  #templateName(value) {
-    const name = cleanText(value, 120);
-    if (name === "") throw new WireGuardError("template_name_required", "\u6A21\u677F\u540D\u4E0D\u80FD\u4E3A\u7A7A\u3002", { status: 400 });
-    return name;
-  }
-  /**
-   * Append a counter until the name is unused.
-   * @param name wanted name.
-   * @returns a free name.
-   */
-  #uniqueName(name) {
-    const taken = new Set(this.store.data.templates.map((item) => item.name));
-    if (!taken.has(name)) return name;
-    for (let index = 2; index < 1e3; index += 1) {
-      const candidate = `${name} (${String(index)})`;
-      if (!taken.has(candidate)) return candidate;
-    }
-    return `${name} (${randomUUID().slice(0, 4)})`;
-  }
-  /**
-   * Find one template or fail the request.
-   * @param value raw id.
-   * @returns the template.
-   */
-  #template(value) {
-    const id = String(value ?? "").trim();
-    const template = this.store.data.templates.find((item) => item.id === id);
-    if (template === void 0) throw new WireGuardError("template_not_found", "\u627E\u4E0D\u5230\u8FD9\u4E2A\u6A21\u677F\u3002", { status: 404 });
-    return template;
-  }
-};
-
 // src/wireguard/lib/http-api.ts
 var AGENT_HEADER = "x-dsh-wireguard";
 function writeJson(response, status, value) {
@@ -903,42 +83,18 @@ async function readJson(request) {
   }
   return parsed;
 }
-function tasksAuthorized(service2, request) {
-  if (isLoopbackAddress(request.socket?.remoteAddress)) return true;
-  return service2.authorizePeerToken(String(request.headers["x-dsh-peer-token"] ?? ""));
-}
 function createHttpApiHandler(service2) {
   return async (request, response) => {
     try {
       const method = request.method ?? "GET";
       const url = new URL(request.url ?? "/", "http://local.invalid");
-      const path11 = url.pathname;
-      if (method === "GET" && path11 === `${API_PREFIX}/state`) {
+      const path9 = url.pathname;
+      if (method === "GET" && path9 === `${API_PREFIX}/state`) {
         writeJson(response, 200, { ok: true, state: await service2.getState() });
         return;
       }
-      if (method === "GET" && path11 === `${API_PREFIX}/health`) {
+      if (method === "GET" && path9 === `${API_PREFIX}/health`) {
         writeJson(response, 200, { ok: true, service: "dsh-wireguard" });
-        return;
-      }
-      if (method === "GET" && (path11 === `${API_PREFIX}/tasks` || path11 === `${API_PREFIX}/tasks/workspaces` || path11.startsWith(`${API_PREFIX}/tasks/runs/`))) {
-        if (!tasksAuthorized(service2, request)) {
-          writeJson(response, 401, { ok: false, error: { code: "peer_token_invalid", message: "The member agent token is missing or invalid." } });
-          return;
-        }
-        if (!service2.tasks) {
-          writeJson(response, 501, { ok: false, error: { code: "not_supported", message: "This control service does not host the task list." } });
-          return;
-        }
-        if (path11 === `${API_PREFIX}/tasks/workspaces`) {
-          const member = url.searchParams.get("member") ?? "";
-          const listing = await service2.tasks.workspaces(member);
-          writeJson(response, 200, { ok: true, dir: listing.dir, workspaces: listing.workspaces });
-          return;
-        }
-        const runId = path11 === `${API_PREFIX}/tasks` ? null : decodeURIComponent(path11.slice(`${API_PREFIX}/tasks/runs/`.length));
-        if (runId === null) writeJson(response, 200, { ok: true, tasks: await service2.tasks.snapshot() });
-        else writeJson(response, 200, { ok: true, run: await service2.tasks.run(runId) });
         return;
       }
       if (method !== "POST") {
@@ -950,60 +106,18 @@ function createHttpApiHandler(service2) {
         return;
       }
       const body = await readJson(request);
-      if (path11.startsWith(`${API_PREFIX}/tasks/`)) {
-        if (!tasksAuthorized(service2, request)) {
-          writeJson(response, 401, { ok: false, error: { code: "peer_token_invalid", message: "The member agent token is missing or invalid." } });
-          return;
-        }
-        if (!service2.tasks) {
-          writeJson(response, 501, { ok: false, error: { code: "not_supported", message: "This control service does not host the task list." } });
-          return;
-        }
-        const tasks2 = service2.tasks;
-        if (path11 === `${API_PREFIX}/tasks/draft`) {
-          writeJson(response, 200, { ok: true, tasks: await tasks2.setDraft(body.doc) });
-          return;
-        }
-        if (path11 === `${API_PREFIX}/tasks/templates/create`) {
-          writeJson(response, 200, { ok: true, tasks: await tasks2.createTemplate(body.name, body.doc) });
-          return;
-        }
-        if (path11 === `${API_PREFIX}/tasks/templates/rename`) {
-          writeJson(response, 200, { ok: true, tasks: await tasks2.renameTemplate(body.id, body.name) });
-          return;
-        }
-        if (path11 === `${API_PREFIX}/tasks/templates/update`) {
-          writeJson(response, 200, { ok: true, tasks: await tasks2.updateTemplate(body.id, body.doc) });
-          return;
-        }
-        if (path11 === `${API_PREFIX}/tasks/templates/delete`) {
-          writeJson(response, 200, { ok: true, tasks: await tasks2.deleteTemplate(body.id) });
-          return;
-        }
-        if (path11 === `${API_PREFIX}/tasks/launch`) {
-          const launched = await tasks2.launch(body);
-          writeJson(response, 200, { ok: true, tasks: launched.tasks, run: runSummary(launched.run) });
-          return;
-        }
-        if (path11 === `${API_PREFIX}/tasks/runs/clear`) {
-          writeJson(response, 200, { ok: true, tasks: await tasks2.clearRuns() });
-          return;
-        }
-        writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown task endpoint." } });
-        return;
-      }
       let result;
-      if (path11 === `${API_PREFIX}/install`) result = await service2.installWireGuard();
-      else if (path11 === `${API_PREFIX}/server/start`) result = await service2.startServer(body);
-      else if (path11 === `${API_PREFIX}/server/stop`) result = await service2.stopServer();
-      else if (path11 === `${API_PREFIX}/peers/remove`) result = await service2.removePeer(String(body.publicKey ?? ""));
-      else if (path11 === `${API_PREFIX}/peers/ssh`) result = await service2.configurePeerSsh(body);
-      else if (path11 === `${API_PREFIX}/peers/reverse`) result = await service2.setPeerReverseKey(body);
-      else if (path11 === `${API_PREFIX}/peers/egress`) result = await service2.setPeerEgress(body);
-      else if (path11 === `${API_PREFIX}/client/connect`) result = await service2.connectClient(body);
-      else if (path11 === `${API_PREFIX}/client/retry`) result = await service2.retryClient();
-      else if (path11 === `${API_PREFIX}/client/disconnect`) result = await service2.disconnectClient();
-      else if (path11 === `${API_PREFIX}/refresh`) result = await service2.getState({ force: true });
+      if (path9 === `${API_PREFIX}/install`) result = await service2.installWireGuard();
+      else if (path9 === `${API_PREFIX}/server/start`) result = await service2.startServer(body);
+      else if (path9 === `${API_PREFIX}/server/stop`) result = await service2.stopServer();
+      else if (path9 === `${API_PREFIX}/peers/remove`) result = await service2.removePeer(String(body.publicKey ?? ""));
+      else if (path9 === `${API_PREFIX}/peers/ssh`) result = await service2.configurePeerSsh(body);
+      else if (path9 === `${API_PREFIX}/peers/reverse`) result = await service2.setPeerReverseKey(body);
+      else if (path9 === `${API_PREFIX}/peers/egress`) result = await service2.setPeerEgress(body);
+      else if (path9 === `${API_PREFIX}/client/connect`) result = await service2.connectClient(body);
+      else if (path9 === `${API_PREFIX}/client/retry`) result = await service2.retryClient();
+      else if (path9 === `${API_PREFIX}/client/disconnect`) result = await service2.disconnectClient();
+      else if (path9 === `${API_PREFIX}/refresh`) result = await service2.getState({ force: true });
       else {
         writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown WireGuard endpoint." } });
         return;
@@ -1032,17 +146,16 @@ function createHttpApiHandler(service2) {
 }
 function isLoopbackAddress(address) {
   if (!address) return false;
-  const text2 = address.startsWith("::ffff:") ? address.slice(7) : address;
-  if (text2 === "::1") return true;
-  return /^127\./.test(text2) && text2.split(".").length === 4;
+  const text = address.startsWith("::ffff:") ? address.slice(7) : address;
+  if (text === "::1") return true;
+  return /^127\./.test(text) && text.split(".").length === 4;
 }
 function createControlExtraHandler(service2) {
   const api = createHttpApiHandler(service2);
   return async (request, response) => {
-    const path11 = new URL(request.url ?? "/", "http://local.invalid").pathname;
-    if (path11 !== API_PREFIX && !path11.startsWith(`${API_PREFIX}/`)) return false;
-    const remote = !isLoopbackAddress(request.socket?.remoteAddress);
-    if (remote && !path11.startsWith(`${API_PREFIX}/tasks`)) return false;
+    const path9 = new URL(request.url ?? "/", "http://local.invalid").pathname;
+    if (path9 !== API_PREFIX && !path9.startsWith(`${API_PREFIX}/`)) return false;
+    if (!isLoopbackAddress(request.socket?.remoteAddress)) return false;
     await api(request, response);
     return true;
   };
@@ -1051,10 +164,10 @@ function createControlExtraHandler(service2) {
 // src/wireguard/lib/service.ts
 import { execFile as execFile3 } from "node:child_process";
 import { createHash as createHash4, randomBytes as randomBytes3 } from "node:crypto";
-import { access, chmod as chmod3, mkdir as mkdir6, mkdtemp as mkdtemp2, readFile as readFile5, readdir as readdir2, rename as rename3, rm as rm3, writeFile as writeFile4 } from "node:fs/promises";
+import { access, chmod as chmod3, mkdir as mkdir5, mkdtemp as mkdtemp2, readFile as readFile4, readdir as readdir2, rename as rename2, rm as rm3, writeFile as writeFile3 } from "node:fs/promises";
 import { isIP as isIP2 } from "node:net";
 import { homedir as homedir3, tmpdir as tmpdir2 } from "node:os";
-import path9 from "node:path";
+import path7 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { promisify as promisify2 } from "node:util";
 
@@ -1077,9 +190,9 @@ import { isIP } from "node:net";
 var IPV4_PATTERN = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
 function parseIpv4(value) {
   if (typeof value !== "string") return null;
-  const text2 = value.trim();
-  if (!IPV4_PATTERN.test(text2)) return null;
-  const parts = text2.split(".").map(Number);
+  const text = value.trim();
+  if (!IPV4_PATTERN.test(text)) return null;
+  const parts = text.split(".").map(Number);
   return (parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3]) >>> 0;
 }
 function ipv4ToString(value) {
@@ -1125,8 +238,8 @@ function allocatePeerIp(cidr, used, serverIp) {
   const limit = Math.min(cidr.last, cidr.network + 65535);
   for (let candidate = cidr.network + 2 >>> 0; candidate <= limit; candidate = candidate + 1 >>> 0) {
     if (candidate === cidr.broadcast) break;
-    const text2 = ipv4ToString(candidate);
-    if (!reserved.has(text2)) return text2;
+    const text = ipv4ToString(candidate);
+    if (!reserved.has(text)) return text;
   }
   return null;
 }
@@ -1163,23 +276,23 @@ function formatEndpointHost(host) {
   return isIP(host) === 6 ? `[${host}]` : host;
 }
 function normalizeEndpointHost(value) {
-  let text2 = String(value ?? "").trim();
-  if (!text2) return "";
-  text2 = text2.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
-  text2 = text2.split("/")[0].split("?")[0].split("#")[0];
-  if (text2.startsWith("[")) {
-    const match2 = /^\[([0-9A-Fa-f:.]+)\](?::\d{1,5})?$/.exec(text2);
+  let text = String(value ?? "").trim();
+  if (!text) return "";
+  text = text.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
+  text = text.split("/")[0].split("?")[0].split("#")[0];
+  if (text.startsWith("[")) {
+    const match2 = /^\[([0-9A-Fa-f:.]+)\](?::\d{1,5})?$/.exec(text);
     if (!match2 || isIP(match2[1]) !== 6) {
       invalid("endpointHost", "Server address must be an IPv4 address, an IPv6 address, or a hostname.");
     }
     if (match2[1] === "::") invalid("endpointHost", "Server address must be a connectable IPv6 address.");
     return match2[1];
   }
-  if (isIP(text2) === 6) {
-    if (text2 === "::") invalid("endpointHost", "Server address must be a connectable IPv6 address.");
-    return text2;
+  if (isIP(text) === 6) {
+    if (text === "::") invalid("endpointHost", "Server address must be a connectable IPv6 address.");
+    return text;
   }
-  const match = /^([^:]+)(?::\d{1,5})?$/.exec(text2);
+  const match = /^([^:]+)(?::\d{1,5})?$/.exec(text);
   if (!match) invalid("endpointHost", "Bracket IPv6 addresses when adding a port, for example [2408:...]:51821.");
   const host = match[1].trim();
   const address = parseIpv4(host);
@@ -1197,8 +310,8 @@ function normalizeEndpointHost(value) {
   return host;
 }
 function normalizeDeviceName(value, fallback = "device") {
-  const text2 = String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
-  const name = text2 || fallback;
+  const text = String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  const name = text || fallback;
   return Array.from(name).slice(0, 64).join("");
 }
 function normalizeSettings(raw, base = DEFAULT_SETTINGS) {
@@ -1287,15 +400,15 @@ function buildClientConfig(input) {
 `;
 }
 function parseServerAddress(value, defaultPort = DEFAULT_CONTROL_PORT) {
-  let text2 = String(value ?? "").trim();
-  if (!text2) invalid("serverAddress", "Enter the server address.");
-  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text2)) {
-    if (isIP(text2) === 6) text2 = `http://[${text2}]`;
-    else text2 = `http://${text2}`;
+  let text = String(value ?? "").trim();
+  if (!text) invalid("serverAddress", "Enter the server address.");
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
+    if (isIP(text) === 6) text = `http://[${text}]`;
+    else text = `http://${text}`;
   }
   let url;
   try {
-    url = new URL(text2);
+    url = new URL(text);
   } catch {
     invalid("serverAddress", "Server address is not a valid host, host:port, or URL.");
   }
@@ -2545,8 +1658,8 @@ function buildManualEgressCommands(target) {
 
 // src/wireguard/lib/installer.ts
 import { createWriteStream } from "node:fs";
-import { copyFile, mkdir as mkdir2 } from "node:fs/promises";
-import path5 from "node:path";
+import { copyFile, mkdir } from "node:fs/promises";
+import path3 from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { setTimeout as delay } from "node:timers/promises";
@@ -2555,7 +1668,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { execFile } from "node:child_process";
 import { accessSync, constants as syncConstants } from "node:fs";
 import { networkInterfaces, hostname as osHostname } from "node:os";
-import path3 from "node:path";
+import path from "node:path";
 var IS_WINDOWS = process.platform === "win32";
 var IS_LINUX = process.platform === "linux";
 var PATH_EXTENSIONS = IS_WINDOWS ? [".exe", ".cmd", ""] : [""];
@@ -2601,7 +1714,7 @@ function run(command, args, options = {}) {
           return;
         }
         const detail = String(stderr || stdout || error.message).trim().slice(0, 800);
-        reject(new CommandError(`${path3.basename(command)} failed${detail ? `: ${detail}` : ""}`, {
+        reject(new CommandError(`${path.basename(command)} failed${detail ? `: ${detail}` : ""}`, {
           command,
           args,
           exitCode: error.code,
@@ -2612,7 +1725,7 @@ function run(command, args, options = {}) {
       }
     );
     child.once("error", (error) => {
-      reject(new CommandError(`${path3.basename(command)} could not start: ${error.message}`, {
+      reject(new CommandError(`${path.basename(command)} could not start: ${error.message}`, {
         command,
         args,
         exitCode: error.code
@@ -2628,10 +1741,10 @@ function findExecutable(name, candidates = []) {
     } catch {
     }
   }
-  const directories = String(process.env.PATH ?? "").split(path3.delimiter).filter(Boolean);
+  const directories = String(process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
   for (const directory of directories) {
     for (const extension of PATH_EXTENSIONS) {
-      const candidate = path3.join(directory, `${name}${extension}`);
+      const candidate = path.join(directory, `${name}${extension}`);
       try {
         accessSync(candidate, syncConstants.X_OK);
         return candidate;
@@ -2661,12 +1774,12 @@ async function detectPlatform() {
   const programFilesX86 = process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
   const localAppData = process.env.LOCALAPPDATA ?? "";
   const windowsCandidates = [
-    path3.join(programFiles, "WireGuard"),
-    path3.join(programFilesX86, "WireGuard"),
-    ...localAppData ? [path3.join(localAppData, "Programs", "WireGuard")] : []
+    path.join(programFiles, "WireGuard"),
+    path.join(programFilesX86, "WireGuard"),
+    ...localAppData ? [path.join(localAppData, "Programs", "WireGuard")] : []
   ];
-  const wg = IS_WINDOWS ? findExecutable("wg", windowsCandidates.map((directory) => path3.join(directory, "wg.exe"))) : findExecutable("wg", ["/usr/bin/wg", "/usr/sbin/wg", "/usr/local/bin/wg"]);
-  const wireguard = IS_WINDOWS ? findExecutable("wireguard", windowsCandidates.map((directory) => path3.join(directory, "wireguard.exe"))) : null;
+  const wg = IS_WINDOWS ? findExecutable("wg", windowsCandidates.map((directory) => path.join(directory, "wg.exe"))) : findExecutable("wg", ["/usr/bin/wg", "/usr/sbin/wg", "/usr/local/bin/wg"]);
+  const wireguard = IS_WINDOWS ? findExecutable("wireguard", windowsCandidates.map((directory) => path.join(directory, "wireguard.exe"))) : null;
   const ip = IS_LINUX ? findExecutable("ip", ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip"]) : null;
   return {
     platform: process.platform,
@@ -2698,14 +1811,14 @@ async function runPrivileged(command, args, options) {
   try {
     return await run(sudo, ["-n", command, ...args], { timeout: options.timeout });
   } catch (error) {
-    const text2 = error instanceof CommandError ? `${error.stderr}
+    const text = error instanceof CommandError ? `${error.stderr}
 ${error.stdout}` : String(error);
-    if (/password is required|a terminal is required|not allowed|permission denied/i.test(text2)) {
+    if (/password is required|a terminal is required|not allowed|permission denied/i.test(text)) {
       throw new WireGuardError("needs_privilege", "WireGuard needs administrator rights, but passwordless sudo is not available.", {
         status: 403,
         hint: "Run \u201Csudo -v\u201D in a terminal to authorize this user, then press Retry. For unattended use, run Harness as root or configure passwordless sudo for wg and ip.",
         command: `${sudo} -v`,
-        details: { stderr: text2.trim().slice(0, 500) }
+        details: { stderr: text.trim().slice(0, 500) }
       });
     }
     throw error;
@@ -2752,8 +1865,8 @@ function localHostname() {
 
 // src/wireguard/lib/static-assets.ts
 import { existsSync } from "node:fs";
-import { readFile as readFile2, readdir, stat as stat2 } from "node:fs/promises";
-import path4 from "node:path";
+import { readFile, readdir, stat as stat2 } from "node:fs/promises";
+import path2 from "node:path";
 import { fileURLToPath } from "node:url";
 var NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 var FILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -2771,18 +1884,18 @@ var CONTENT_TYPES = /* @__PURE__ */ new Map([
 function findAssetRoot() {
   const configured = String(process.env.DSH_MESH_ASSET_ROOT ?? "").trim();
   if (configured !== "") return configured;
-  const here = path4.dirname(fileURLToPath(import.meta.url));
+  const here = path2.dirname(fileURLToPath(import.meta.url));
   const candidates = [
-    path4.join(here, "../gate/assets"),
-    path4.join(here, "../../gate/assets"),
-    path4.join(here, "../../../gate/assets"),
-    path4.join(here, "../../../code/gate/assets"),
-    path4.join(here, "../../../../code/gate/assets"),
-    path4.join(process.cwd(), "gate/assets"),
-    path4.join(process.cwd(), "code/gate/assets")
+    path2.join(here, "../gate/assets"),
+    path2.join(here, "../../gate/assets"),
+    path2.join(here, "../../../gate/assets"),
+    path2.join(here, "../../../code/gate/assets"),
+    path2.join(here, "../../../../code/gate/assets"),
+    path2.join(process.cwd(), "gate/assets"),
+    path2.join(process.cwd(), "code/gate/assets")
   ];
   for (const candidate of candidates) {
-    if (existsSync(path4.join(candidate, "wireguard", "manifest.json")) || existsSync(path4.join(candidate, "openssh", "manifest.json")) || existsSync(path4.join(candidate, "hysteria2", "manifest.json"))) {
+    if (existsSync(path2.join(candidate, "wireguard", "manifest.json")) || existsSync(path2.join(candidate, "openssh", "manifest.json")) || existsSync(path2.join(candidate, "hysteria2", "manifest.json"))) {
       return candidate;
     }
   }
@@ -2790,7 +1903,7 @@ function findAssetRoot() {
 }
 function contentTypeFor(file, fallback) {
   if (typeof fallback === "string" && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/iu.test(fallback)) return fallback;
-  return CONTENT_TYPES.get(path4.extname(file).toLowerCase()) ?? "application/octet-stream";
+  return CONTENT_TYPES.get(path2.extname(file).toLowerCase()) ?? "application/octet-stream";
 }
 function normalizeManifest(raw, folder) {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -2842,14 +1955,14 @@ var AssetStore = class {
     if (!NAME_PATTERN.test(name)) {
       throw new WireGuardError("asset_name_invalid", `Invalid asset name: ${name}`, { status: 400 });
     }
-    return path4.join(this.root, name);
+    return path2.join(this.root, name);
   }
   /** Read one normalized manifest and its directory. */
   async #read(folder) {
     const directory = this.#directory(folder);
     let raw;
     try {
-      raw = JSON.parse(await readFile2(path4.join(directory, "manifest.json"), "utf8"));
+      raw = JSON.parse(await readFile(path2.join(directory, "manifest.json"), "utf8"));
     } catch (error) {
       throw new WireGuardError("asset_manifest_missing", `Cannot read the ${folder} asset manifest.`, {
         status: 503,
@@ -2884,11 +1997,11 @@ var AssetStore = class {
     return manifest;
   }
   /** First asset for an OS/arch pair. */
-  async first(name, os2 = "", arch = "") {
+  async first(name, os = "", arch = "") {
     const manifest = await this.manifest(name);
-    const asset = manifest.assets.find((item) => (os2 === "" || item.os === os2) && (arch === "" || item.arch === arch));
+    const asset = manifest.assets.find((item) => (os === "" || item.os === os) && (arch === "" || item.arch === arch));
     if (asset === void 0) {
-      throw new WireGuardError("asset_not_found", `No ${os2 || "any"}/${arch || "any"} file for ${name}.`, { status: 404 });
+      throw new WireGuardError("asset_not_found", `No ${os || "any"}/${arch || "any"} file for ${name}.`, { status: 404 });
     }
     return asset;
   }
@@ -2902,7 +2015,7 @@ var AssetStore = class {
     if (asset === void 0) {
       throw new WireGuardError("asset_not_found", `Unknown file for ${name}: ${file}`, { status: 404 });
     }
-    const target = path4.join(manifest.directory, asset.file);
+    const target = path2.join(manifest.directory, asset.file);
     const info = await stat2(target).catch(() => null);
     if (info === null || !info.isFile()) {
       throw new WireGuardError("asset_missing", `Asset file is missing: ${asset.file}`, { status: 503 });
@@ -2951,7 +2064,7 @@ async function download(url, target) {
     if (length > WINDOWS_INSTALLER_MAX_BYTES) {
       throw new WireGuardError("download_failed", "The WireGuard installer is unexpectedly large.", { status: 502 });
     }
-    await mkdir2(path5.dirname(target), { recursive: true });
+    await mkdir(path3.dirname(target), { recursive: true });
     await pipeline(Readable.fromWeb(response.body), createWriteStream(target, { mode: 448 }));
   } catch (error) {
     if (error instanceof WireGuardError) throw error;
@@ -2984,12 +2097,12 @@ async function bundledWireGuardInstaller() {
   }
 }
 async function installWindows(platform, dataDir, log) {
-  let installerPath = path5.join(dataDir, "wireguard-installer.exe");
+  let installerPath = path3.join(dataDir, "wireguard-installer.exe");
   const bundled = await bundledWireGuardInstaller();
   if (bundled !== null) {
-    installerPath = path5.join(dataDir, path5.basename(bundled));
+    installerPath = path3.join(dataDir, path3.basename(bundled));
     log(`using the bundled WireGuard installer at ${installerPath}`);
-    await mkdir2(path5.dirname(installerPath), { recursive: true });
+    await mkdir(path3.dirname(installerPath), { recursive: true });
     await copyFile(bundled, installerPath);
   } else try {
     log(`downloading WireGuard installer to ${installerPath}`);
@@ -3086,13 +2199,13 @@ async function installLinux(platform, log) {
     }
   } catch (error) {
     if (error instanceof WireGuardError && !platform.sudo) throw error;
-    const text2 = error instanceof Error ? `${error.message}` : String(error);
-    if (platform.admin || !/password|terminal|permission|not allowed|access is denied/i.test(text2)) {
+    const text = error instanceof Error ? `${error.message}` : String(error);
+    if (platform.admin || !/password|terminal|permission|not allowed|access is denied/i.test(text)) {
       throw new WireGuardError("install_failed", "The package manager could not install WireGuard.", {
         status: 500,
         hint: "Check internet access and package-manager output, or run the command below in a terminal.",
         command: `sudo ${command}`,
-        details: { cause: text2 }
+        details: { cause: text }
       });
     }
     const pkexec = findExecutable("pkexec", ["/usr/bin/pkexec"]);
@@ -3148,10 +2261,10 @@ function base64urlToBase64(value) {
 var X25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b656e04220420", "hex");
 function normalizeKey(value) {
   if (typeof value !== "string") return null;
-  let text2 = value.trim();
-  if (/^[A-Za-z0-9+/]{43}$/.test(text2)) text2 += "=";
-  if (!KEY_PATTERN.test(text2)) return null;
-  const bytes = Buffer.from(text2, "base64");
+  let text = value.trim();
+  if (/^[A-Za-z0-9+/]{43}$/.test(text)) text += "=";
+  if (!KEY_PATTERN.test(text)) return null;
+  const bytes = Buffer.from(text, "base64");
   if (bytes.length !== 32) return null;
   return bytes.toString("base64");
 }
@@ -3184,13 +2297,13 @@ function keyFingerprint(publicKey) {
 
 // src/wireguard/lib/known-hosts.ts
 import { execFile as execFile2 } from "node:child_process";
-import { appendFile, mkdir as mkdir3 } from "node:fs/promises";
+import { appendFile, mkdir as mkdir2 } from "node:fs/promises";
 import { homedir } from "node:os";
-import path6 from "node:path";
+import path4 from "node:path";
 import { promisify } from "node:util";
 var execFileAsync = promisify(execFile2);
 function knownHostsPath() {
-  return path6.join(homedir(), ".ssh", "known_hosts");
+  return path4.join(homedir(), ".ssh", "known_hosts");
 }
 function parseScannedHostKeys(output) {
   return output.split(/\r?\n/u).map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("#"));
@@ -3203,7 +2316,7 @@ async function refreshKnownHosts(host, port = 22, options = {}) {
   const keys = parseScannedHostKeys(String(scan.stdout ?? ""));
   if (keys.length === 0) throw new Error("ssh-keyscan returned no host keys");
   const file = options.file ?? knownHostsPath();
-  await mkdir3(path6.dirname(file), { recursive: true, mode: 448 });
+  await mkdir2(path4.dirname(file), { recursive: true, mode: 448 });
   const target = port === 22 ? host : `[${host}]:${port}`;
   try {
     await execFileAsync("ssh-keygen", ["-R", target, "-f", file], { timeout: 1e4, windowsHide: true });
@@ -3238,9 +2351,9 @@ var SSH_KEY_TYPES = /* @__PURE__ */ new Set([
 ]);
 function parseSshPublicKey(value) {
   if (typeof value !== "string") return null;
-  const text2 = value.trim();
-  if (!text2 || /[\r\n]/u.test(text2)) return null;
-  const parts = text2.split(/\s+/u);
+  const text = value.trim();
+  if (!text || /[\r\n]/u.test(text)) return null;
+  const parts = text.split(/\s+/u);
   if (parts.length < 2) return null;
   const [type, base64] = parts;
   if (!SSH_KEY_TYPES.has(type)) return null;
@@ -3269,13 +2382,13 @@ function authorizedKeyHasTag(line, tag) {
   const fields = line.trim().split(/\s+/u);
   return fields.length > 2 && fields.slice(2).includes(token);
 }
-function removeAuthorizedKeyTag(text2, tag) {
-  const kept = String(text2 ?? "").split(/\r?\n/u).filter((line) => line.trim() !== "" && !authorizedKeyHasTag(line, tag));
+function removeAuthorizedKeyTag(text, tag) {
+  const kept = String(text ?? "").split(/\r?\n/u).filter((line) => line.trim() !== "" && !authorizedKeyHasTag(line, tag));
   return kept.length === 0 ? "" : `${kept.join("\n")}
 `;
 }
-function upsertAuthorizedKey(text2, entry, tag) {
-  const kept = removeAuthorizedKeyTag(text2, tag);
+function upsertAuthorizedKey(text, entry, tag) {
+  const kept = removeAuthorizedKeyTag(text, tag);
   return `${kept}${entry.trim()}
 `;
 }
@@ -3295,10 +2408,10 @@ function gatewaySshConfigBlock(options) {
     `# <<< ${GATEWAY_BLOCK_NAME} <<<`
   ].join("\n");
 }
-function mergeManagedBlock(text2, name, block) {
+function mergeManagedBlock(text, name, block) {
   const begin = `# >>> ${name} >>>`;
   const end = `# <<< ${name} <<<`;
-  const lines = String(text2 ?? "").split(/\r?\n/u);
+  const lines = String(text ?? "").split(/\r?\n/u);
   const kept = [];
   let inside = false;
   for (const line of lines) {
@@ -3322,9 +2435,9 @@ ${end}`;
 function knownHostsTarget(host, port = 22) {
   return port === 22 ? host : `[${host}]:${port}`;
 }
-function mergeKnownHosts(text2, host, port, keys) {
+function mergeKnownHosts(text, host, port, keys) {
   const target = knownHostsTarget(host, port);
-  const kept = String(text2 ?? "").split(/\r?\n/u).filter((line) => {
+  const kept = String(text ?? "").split(/\r?\n/u).filter((line) => {
     const trimmed = line.trim();
     if (!trimmed) return false;
     const first = trimmed.split(/\s+/u)[0];
@@ -3336,8 +2449,8 @@ function mergeKnownHosts(text2, host, port, keys) {
   return `${[...kept, ...entries].join("\n")}
 `;
 }
-function encodeText(text2) {
-  return Buffer.from(text2, "utf8").toString("base64");
+function encodeText(text) {
+  return Buffer.from(text, "utf8").toString("base64");
 }
 
 // src/wireguard/lib/ssh.ts
@@ -3381,13 +2494,13 @@ Write-Output 'SSH public key installed for Windows user ' + $user`;
 // src/wireguard/lib/ssh-agent.ts
 import { createHash as createHash3 } from "node:crypto";
 import { existsSync as existsSync2 } from "node:fs";
-import { chmod, mkdir as mkdir4, mkdtemp, readFile as readFile3, rm, writeFile as writeFile2 } from "node:fs/promises";
+import { chmod, mkdir as mkdir3, mkdtemp, readFile as readFile2, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir as homedir2, tmpdir, hostname as osHostname2, userInfo } from "node:os";
-import path7 from "node:path";
+import path5 from "node:path";
 var WINDOWS_INSTALL_DIR = "C:\\Program Files\\OpenSSH";
 var WINDOWS_SSHD_CANDIDATES = [
-  path7.join(WINDOWS_INSTALL_DIR, "sshd.exe"),
+  path5.join(WINDOWS_INSTALL_DIR, "sshd.exe"),
   "C:\\Windows\\System32\\OpenSSH\\sshd.exe"
 ];
 function cleanUser(value) {
@@ -3408,8 +2521,8 @@ async function testSshBanner(port = 22, timeout = 2500) {
     const socket = connect({ host: "127.0.0.1", port });
     socket.setTimeout(timeout);
     socket.once("data", (chunk) => {
-      const text2 = chunk.subarray(0, 64).toString("ascii");
-      finish(text2.startsWith("SSH-"));
+      const text = chunk.subarray(0, 64).toString("ascii");
+      finish(text.startsWith("SSH-"));
     });
     socket.once("timeout", () => finish(false));
     socket.once("error", () => finish(false));
@@ -3472,18 +2585,18 @@ async function detectInteractiveUser(platform) {
 async function readSshVersion(sshd) {
   try {
     const result = await run(sshd, ["-V"], { timeout: 5e3 });
-    const text2 = `${result.stdout}
+    const text = `${result.stdout}
 ${result.stderr}`.trim();
-    const line = text2.split(/\r?\n/u).find((item) => item.trim()) ?? "";
+    const line = text.split(/\r?\n/u).find((item) => item.trim()) ?? "";
     return line.trim().slice(0, 120) || null;
   } catch (error) {
-    const text2 = error instanceof Error ? error.message : String(error);
-    const match = /OpenSSH[_A-Za-z0-9.\- p]+/u.exec(text2);
+    const text = error instanceof Error ? error.message : String(error);
+    const match = /OpenSSH[_A-Za-z0-9.\- p]+/u.exec(text);
     return match?.[0]?.trim().slice(0, 120) ?? null;
   }
 }
 async function inspectSsh(platform) {
-  const hostname2 = osHostname2();
+  const hostname = osHostname2();
   const user = await detectInteractiveUser(platform);
   let installed = false;
   let running = false;
@@ -3536,7 +2649,7 @@ async function inspectSsh(platform) {
   else if (!running) error = "OpenSSH Server is not running";
   else if (!ready) error = "sshd is running but did not send an SSH banner";
   else if (!user) error = "Could not determine the interactive Windows/Linux user";
-  return { installed, running, serviceRunning, ready, version, port: 22, user, hostname: hostname2, error };
+  return { installed, running, serviceRunning, ready, version, port: 22, user, hostname, error };
 }
 function quotePowerShell(value) {
   return value.replace(/'/gu, "''");
@@ -3560,10 +2673,10 @@ icacls $admin /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-N
 Write-Output 'authorized key installed'`;
 }
 async function authorizeWindowsKey(platform, publicKey, user) {
-  const directory = await mkdtemp(path7.join(tmpdir(), "dsh-ssh-key-"));
-  const scriptPath = path7.join(directory, "authorize.ps1");
+  const directory = await mkdtemp(path5.join(tmpdir(), "dsh-ssh-key-"));
+  const scriptPath = path5.join(directory, "authorize.ps1");
   try {
-    await writeFile2(scriptPath, `${windowsAuthorizeKeyScript(publicKey, user)}
+    await writeFile(scriptPath, `${windowsAuthorizeKeyScript(publicKey, user)}
 `, "utf8");
     await runPrivileged("powershell.exe", [
       "-NoProfile",
@@ -3597,7 +2710,7 @@ echo 'authorized key installed'`;
   await runPrivileged("sh", ["-c", script], { platform, timeout: 3e4 });
 }
 async function verifyOpenSshZip(file, manifest) {
-  const data = await readFile3(file);
+  const data = await readFile2(file);
   if (data.length !== manifest.bytes) {
     throw new Error(`OpenSSH asset size mismatch (${data.length} != ${manifest.bytes}).`);
   }
@@ -3682,7 +2795,7 @@ try {
 }`;
 }
 var WINDOWS_KEYGEN_CANDIDATES = [
-  path7.join(WINDOWS_INSTALL_DIR, "ssh-keygen.exe"),
+  path5.join(WINDOWS_INSTALL_DIR, "ssh-keygen.exe"),
   "C:\\Windows\\System32\\OpenSSH\\ssh-keygen.exe"
 ];
 var LINUX_KEYGEN_CANDIDATES = [
@@ -3695,10 +2808,10 @@ function memberHomeDirectory(platform, user) {
   const account = user && SSH_USER_PATTERN.test(user) ? user : null;
   if (!account) return homedir2();
   const drive = String(process.env.SystemDrive || "C:").replace(/[\\/]+$/u, "");
-  return path7.win32.join(`${drive}\\`, "Users", account);
+  return path5.win32.join(`${drive}\\`, "Users", account);
 }
 function memberSshPaths(platform, user) {
-  const join = platform.isWindows ? path7.win32.join : path7.posix.join;
+  const join = platform.isWindows ? path5.win32.join : path5.posix.join;
   const dir = join(memberHomeDirectory(platform, user), ".ssh");
   return {
     dir,
@@ -3724,7 +2837,7 @@ async function grantWindowsControl(target, user) {
 async function ensureMemberKey(platform, paths, options) {
   const keygen = findExecutable("ssh-keygen", platform.isWindows ? WINDOWS_KEYGEN_CANDIDATES : LINUX_KEYGEN_CANDIDATES);
   if (!keygen) throw new Error("OpenSSH ssh-keygen was not found on this member.");
-  await mkdir4(paths.dir, { recursive: true, mode: 448 });
+  await mkdir3(paths.dir, { recursive: true, mode: 448 });
   await chmodQuiet(paths.dir, 448);
   let created = false;
   if (!existsSync2(paths.privateKey)) {
@@ -3735,7 +2848,7 @@ async function ensureMemberKey(platform, paths, options) {
   }
   let publicKey = "";
   if (existsSync2(paths.publicKey)) {
-    publicKey = (await readFile3(paths.publicKey, "utf8")).trim();
+    publicKey = (await readFile2(paths.publicKey, "utf8")).trim();
   }
   if (!parseSshPublicKey(publicKey)) {
     const derived = await run(keygen, ["-y", "-f", paths.privateKey], { timeout: 15e3 });
@@ -3744,7 +2857,7 @@ async function ensureMemberKey(platform, paths, options) {
   const parsed = parseSshPublicKey(publicKey);
   if (!parsed) throw new Error("Could not read the member SSH public key.");
   if (!existsSync2(paths.publicKey)) {
-    await writeFile2(paths.publicKey, `${parsed.text}
+    await writeFile(paths.publicKey, `${parsed.text}
 `, { encoding: "utf8", mode: 420 });
     await grantWindowsControl(paths.publicKey, options.user ?? null);
   }
@@ -3753,20 +2866,20 @@ async function ensureMemberKey(platform, paths, options) {
 async function installGatewaySshAccess(platform, paths, access2, options = {}) {
   const readOrEmpty = async (file) => {
     try {
-      return await readFile3(file, "utf8");
+      return await readFile2(file, "utf8");
     } catch {
       return "";
     }
   };
   const config = mergeManagedBlock(await readOrEmpty(paths.config), GATEWAY_BLOCK_NAME, access2.configText);
-  await writeFile2(paths.config, config, { encoding: "utf8", mode: 384 });
+  await writeFile(paths.config, config, { encoding: "utf8", mode: 384 });
   await chmodQuiet(paths.config, 384);
   await grantWindowsControl(paths.config, options.user ?? null);
   const keys = access2.knownHostsText.split(/\r?\n/u).filter((line) => line.trim() !== "");
   if (keys.length > 0) {
     const knownHosts = mergeKnownHosts(await readOrEmpty(paths.knownHosts), access2.host, access2.port, keys);
     if (knownHosts) {
-      await writeFile2(paths.knownHosts, knownHosts, { encoding: "utf8", mode: 384 });
+      await writeFile(paths.knownHosts, knownHosts, { encoding: "utf8", mode: 384 });
       await chmodQuiet(paths.knownHosts, 384);
       await grantWindowsControl(paths.knownHosts, options.user ?? null);
     }
@@ -3779,10 +2892,10 @@ function gatewaySshCommand(access2) {
 }
 async function installWindowsOpenSsh(platform, zipPath, publicKey, user) {
   if (!platform.isWindows) throw new Error("OpenSSH auto-install is only implemented for Windows.");
-  const directory = await mkdtemp(path7.join(tmpdir(), "dsh-ssh-install-"));
-  const scriptPath = path7.join(directory, "install-openssh.ps1");
+  const directory = await mkdtemp(path5.join(tmpdir(), "dsh-ssh-install-"));
+  const scriptPath = path5.join(directory, "install-openssh.ps1");
   try {
-    await writeFile2(scriptPath, `${windowsInstallScript(publicKey, user)}
+    await writeFile(scriptPath, `${windowsInstallScript(publicKey, user)}
 `, "utf8");
     const result = await runPrivileged("powershell.exe", [
       "-NoProfile",
@@ -3803,8 +2916,8 @@ ${result.stderr}`.trim();
 }
 
 // src/wireguard/lib/store.ts
-import { chmod as chmod2, mkdir as mkdir5, readFile as readFile4, rename as rename2, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
-import path8 from "node:path";
+import { chmod as chmod2, mkdir as mkdir4, readFile as readFile3, rename, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import path6 from "node:path";
 function emptyState() {
   return {
     version: 1,
@@ -3968,12 +3081,12 @@ var Store = class {
   existed;
   constructor(dataDir) {
     this.dataDir = dataDir;
-    this.statePath = path8.join(dataDir, "state.json");
+    this.statePath = path6.join(dataDir, "state.json");
     this.state = emptyState();
     this.existed = false;
   }
   async init() {
-    await mkdir5(this.dataDir, { recursive: true, mode: 448 });
+    await mkdir4(this.dataDir, { recursive: true, mode: 448 });
     try {
       await chmod2(this.dataDir, 448);
     } catch {
@@ -3985,15 +3098,15 @@ var Store = class {
    */
   async load() {
     try {
-      const text2 = await readFile4(this.statePath, "utf8");
-      const state = normalizeState(JSON.parse(text2));
+      const text = await readFile3(this.statePath, "utf8");
+      const state = normalizeState(JSON.parse(text));
       this.existed = true;
       return state;
     } catch (error) {
       if (error && /** @type {NodeJS.ErrnoException} */
       error.code === "ENOENT") return emptyState();
       try {
-        await rename2(this.statePath, `${this.statePath}.corrupt-${Date.now()}`);
+        await rename(this.statePath, `${this.statePath}.corrupt-${Date.now()}`);
       } catch {
       }
       return emptyState();
@@ -4008,9 +3121,9 @@ var Store = class {
     state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     this.state = state;
     const temporary = `${this.statePath}.tmp-${process.pid}-${Date.now()}`;
-    await writeFile3(temporary, `${JSON.stringify(state, null, 2)}
+    await writeFile2(temporary, `${JSON.stringify(state, null, 2)}
 `, { encoding: "utf8", mode: 384 });
-    await rename2(temporary, this.statePath);
+    await rename(temporary, this.statePath);
     try {
       await chmod2(this.statePath, 384);
     } catch {
@@ -4022,9 +3135,9 @@ var Store = class {
    * @returns {Promise<{ privateKey: string, publicKey: string, privateKeyPath: string }>}
    */
   async ensureKey(role) {
-    const privateKeyPath = path8.join(this.dataDir, `${role}.key`);
+    const privateKeyPath = path6.join(this.dataDir, `${role}.key`);
     try {
-      const stored = await readFile4(privateKeyPath, "utf8");
+      const stored = await readFile3(privateKeyPath, "utf8");
       const normalized = normalizeKey(stored);
       if (normalized) {
         try {
@@ -4037,13 +3150,13 @@ var Store = class {
       if (!error || /** @type {NodeJS.ErrnoException} */
       error.code !== "ENOENT") {
         try {
-          await rename2(privateKeyPath, `${privateKeyPath}.corrupt-${Date.now()}`);
+          await rename(privateKeyPath, `${privateKeyPath}.corrupt-${Date.now()}`);
         } catch {
         }
       }
     }
     const pair = generateKeyPair();
-    await writeFile3(privateKeyPath, `${pair.privateKey}
+    await writeFile2(privateKeyPath, `${pair.privateKey}
 `, { encoding: "utf8", mode: 384 });
     try {
       await chmod2(privateKeyPath, 384);
@@ -4061,8 +3174,8 @@ var Store = class {
    * @returns {string} absolute config path.
    */
   configPath(role, interfaceName = null, windows = false) {
-    if (windows && interfaceName) return path8.join(this.dataDir, `${interfaceName}.conf`);
-    return path8.join(this.dataDir, `${role}.conf`);
+    if (windows && interfaceName) return path6.join(this.dataDir, `${interfaceName}.conf`);
+    return path6.join(this.dataDir, `${role}.conf`);
   }
   /**
    * @param {'server' | 'client'} role config owner.
@@ -4071,9 +3184,9 @@ var Store = class {
    * @param {boolean} [windows] whether the host is Windows.
    * @returns {Promise<void>}
    */
-  async writeConfig(role, text2, interfaceName = null, windows = false) {
+  async writeConfig(role, text, interfaceName = null, windows = false) {
     const target = this.configPath(role, interfaceName, windows);
-    await writeFile3(target, text2, { encoding: "utf8", mode: 384 });
+    await writeFile2(target, text, { encoding: "utf8", mode: 384 });
     try {
       await chmod2(target, 384);
     } catch {
@@ -4178,8 +3291,8 @@ var Tunnel = class {
       try {
         await runPrivileged(this.platform.wireguard, ["/uninstalltunnelservice", interfaceName], { platform: this.platform, timeout: 2e4 });
       } catch (error) {
-        const text2 = error instanceof CommandError ? `${error.message} ${error.stderr}` : String(error);
-        if (/not installed|does not exist|cannot find|no such|not found|找不到|指定的服务/i.test(text2)) return;
+        const text = error instanceof CommandError ? `${error.message} ${error.stderr}` : String(error);
+        if (/not installed|does not exist|cannot find|no such|not found|找不到|指定的服务/i.test(text)) return;
         throw error;
       }
       return;
@@ -4188,8 +3301,8 @@ var Tunnel = class {
     try {
       await runPrivileged(this.platform.ip, ["link", "delete", "dev", interfaceName], { platform: this.platform, timeout: 15e3 });
     } catch (error) {
-      const text2 = error instanceof CommandError ? `${error.message} ${error.stderr}` : String(error);
-      if (/Cannot find device|does not exist|找不到/i.test(text2)) return;
+      const text = error instanceof CommandError ? `${error.message} ${error.stderr}` : String(error);
+      if (/Cannot find device|does not exist|找不到/i.test(text)) return;
       throw error;
     }
   }
@@ -4300,8 +3413,8 @@ var Tunnel = class {
       if (error instanceof WireGuardError) {
         return { up: false, publicKey: "", listenPort: null, peers: [], error: error.message, privilege: true };
       }
-      const text2 = error instanceof CommandError ? `${error.stderr} ${error.stdout}` : String(error);
-      return { up: false, publicKey: "", listenPort: null, peers: [], error: text2.trim().slice(0, 400) || "Interface is not running." };
+      const text = error instanceof CommandError ? `${error.stderr} ${error.stdout}` : String(error);
+      return { up: false, publicKey: "", listenPort: null, peers: [], error: text.trim().slice(0, 400) || "Interface is not running." };
     }
   }
   /**
@@ -4371,24 +3484,24 @@ var Tunnel = class {
    */
   describe(error) {
     if (error instanceof WireGuardError) return error;
-    const text2 = error instanceof CommandError ? `${error.message} ${error.stderr}` : String(error);
-    if (/operation not permitted|permission denied|access is denied|requires elevation/i.test(text2)) {
+    const text = error instanceof CommandError ? `${error.message} ${error.stderr}` : String(error);
+    if (/operation not permitted|permission denied|access is denied|requires elevation/i.test(text)) {
       return new WireGuardError("needs_privilege", "WireGuard needs administrator rights to change the network interface.", {
         status: 403,
         hint: this.platform.isWindows ? "Close Harness and start it again with \u201CRun as administrator\u201D, then retry." : "Run Harness as root, or configure passwordless sudo for wg and ip, then retry.",
-        details: { stderr: text2.trim().slice(0, 500) }
+        details: { stderr: text.trim().slice(0, 500) }
       });
     }
-    if (/unknown device type|wireguard.*not found|module.*not found|protocol not supported/i.test(text2)) {
+    if (/unknown device type|wireguard.*not found|module.*not found|protocol not supported/i.test(text)) {
       return new WireGuardError("wireguard_unavailable", "The WireGuard kernel interface is unavailable.", {
         status: 503,
         hint: this.platform.isLinux ? "Load the kernel module with `sudo modprobe wireguard`, or install a WireGuard-enabled kernel." : void 0,
-        details: { stderr: text2.trim().slice(0, 500) }
+        details: { stderr: text.trim().slice(0, 500) }
       });
     }
     return new WireGuardError("interface_error", "Could not configure the WireGuard interface.", {
       status: 500,
-      details: { stderr: text2.trim().slice(0, 500) }
+      details: { stderr: text.trim().slice(0, 500) }
     });
   }
 };
@@ -4405,13 +3518,13 @@ function integerOr(value, fallback) {
 }
 function defaultAuthorizedKeysPath() {
   if (process.platform === "win32") {
-    return path9.join(process.env.ProgramData ?? "C:\\ProgramData", "ssh", "administrators_authorized_keys");
+    return path7.join(process.env.ProgramData ?? "C:\\ProgramData", "ssh", "administrators_authorized_keys");
   }
-  return path9.join(homedir3(), ".ssh", "authorized_keys");
+  return path7.join(homedir3(), ".ssh", "authorized_keys");
 }
 function defaultHostKeyDirectories() {
   if (process.platform === "win32") {
-    return [path9.join(process.env.ProgramData ?? "C:\\ProgramData", "ssh")];
+    return [path7.join(process.env.ProgramData ?? "C:\\ProgramData", "ssh")];
   }
   return ["/etc/ssh"];
 }
@@ -4426,8 +3539,6 @@ var WireGuardService = class {
   now;
   logger;
   control;
-  /** The shared task list, when this control service hosts one. */
-  tasks;
   controlExtraHandler;
   knownHosts;
   commandRunner;
@@ -4456,7 +3567,6 @@ var WireGuardService = class {
     this.now = options.now ?? (() => Date.now());
     this.logger = options.log ?? ((line) => console.log(`[dsh-wireguard] ${line}`));
     this.control = null;
-    this.tasks = null;
     this.controlExtraHandler = null;
     this.knownHosts = {
       refresh: options.knownHosts?.refresh ?? ((host) => refreshKnownHosts(host)),
@@ -4695,13 +3805,13 @@ var WireGuardService = class {
       mtu: this.state.server.mtu,
       interfaceName: this.state.server.interfaceName
     };
-    const text2 = buildServerConfig({
+    const text = buildServerConfig({
       privateKey: key.privateKey,
       settings,
       cidr,
       peers: this.state.server.peers
     });
-    await this.store.writeConfig("server", text2, this.state.server.interfaceName, this.platform?.isWindows === true);
+    await this.store.writeConfig("server", text, this.state.server.interfaceName, this.platform?.isWindows === true);
   }
   /**
    * Best-effort variant for peer mutations: a config rewrite must not undo an
@@ -4826,13 +3936,13 @@ var WireGuardService = class {
    * @returns {Promise<string>} script path.
    */
   async #egressScriptPath() {
-    const here = path9.dirname(fileURLToPath2(import.meta.url));
+    const here = path7.dirname(fileURLToPath2(import.meta.url));
     const configured = typeof this.config.egressScript === "string" ? this.config.egressScript.trim() : String(process.env.DSH_MESH_EGRESS_SCRIPT ?? "").trim();
     const candidates = [
       ...configured ? [configured] : [],
-      path9.join(here, "egress-via-hub.sh"),
-      path9.join(here, "code", "wireguard", "egress-via-hub.sh"),
-      path9.resolve(here, "..", "..", "..", "code", "wireguard", "egress-via-hub.sh")
+      path7.join(here, "egress-via-hub.sh"),
+      path7.join(here, "code", "wireguard", "egress-via-hub.sh"),
+      path7.resolve(here, "..", "..", "..", "code", "wireguard", "egress-via-hub.sh")
     ];
     for (const candidate of candidates) {
       try {
@@ -5640,7 +4750,7 @@ var WireGuardService = class {
    */
   #sshKeyPath(peerPublicKey) {
     const digest = createHash4("sha256").update(peerPublicKey).digest("hex");
-    return path9.join(this.store.dataDir, "ssh", `${digest}.key`);
+    return path7.join(this.store.dataDir, "ssh", `${digest}.key`);
   }
   /**
    * Reuse a peer's SSH key if present, otherwise generate a new Ed25519 key.
@@ -5650,14 +4760,14 @@ var WireGuardService = class {
   async #ensureSshKey(peerPublicKey) {
     const keyPath = this.#sshKeyPath(peerPublicKey);
     const publicPath = `${keyPath}.pub`;
-    const directory = path9.dirname(keyPath);
-    await mkdir6(directory, { recursive: true, mode: 448 });
+    const directory = path7.dirname(keyPath);
+    await mkdir5(directory, { recursive: true, mode: 448 });
     try {
       await chmod3(directory, 448);
     } catch {
     }
     try {
-      const existing = (await readFile5(publicPath, "utf8")).trim();
+      const existing = (await readFile4(publicPath, "utf8")).trim();
       if (existing) {
         try {
           await chmod3(keyPath, 384);
@@ -5668,12 +4778,12 @@ var WireGuardService = class {
     } catch {
     }
     try {
-      await readFile5(keyPath, "utf8");
+      await readFile4(keyPath, "utf8");
       try {
         const derived = await execFileAsync2("ssh-keygen", ["-y", "-f", keyPath]);
         const publicKey2 = String(derived.stdout ?? "").trim();
         if (publicKey2) {
-          await writeFile4(publicPath, `${publicKey2}
+          await writeFile3(publicPath, `${publicKey2}
 `, { encoding: "utf8", mode: 420 });
           try {
             await chmod3(keyPath, 384);
@@ -5697,7 +4807,7 @@ var WireGuardService = class {
         hint: "Install OpenSSH ssh-keygen on the Harness host, then retry."
       });
     }
-    const publicKey = (await readFile5(publicPath, "utf8")).trim();
+    const publicKey = (await readFile4(publicPath, "utf8")).trim();
     if (!publicKey) {
       throw new WireGuardError("ssh_keygen_failed", "SSH key generation produced no public key.", { status: 500 });
     }
@@ -5727,46 +4837,6 @@ var WireGuardService = class {
     return peer.sshToken;
   }
   /** Resolve one peer from its WireGuard key and per-peer agent token. */
-  /**
-   * Attach the shared task list. The control service builds it with the
-   * callbacks it needs; tests may skip it entirely.
-   * @param tasks task service.
-   * @returns this service.
-   */
-  setTaskService(tasks2) {
-    this.tasks = tasks2;
-    return this;
-  }
-  /**
-   * Whether a token belongs to one of this gateway's members.
-   * @param token agent token sent by the member.
-   * @returns whether it matches a peer.
-   */
-  authorizePeerToken(token) {
-    const value = String(token ?? "");
-    if (value === "") return false;
-    return this.state.server.peers.some((peer) => typeof peer.sshToken === "string" && peer.sshToken !== "" && secretsMatch(value, peer.sshToken));
-  }
-  /**
-   * Members a task can be launched on, this machine first.
-   * @returns members.
-   */
-  taskMembers() {
-    const selfIp = this.state.role === "server" ? String(this.state.settings.serverIp ?? "") : String(this.state.client.assignedIp ?? "");
-    const self = { id: "local", name: localHostname(), ip: selfIp };
-    const peers = this.state.server.peers.filter((peer) => typeof peer.ip === "string" && peer.ip !== "").map((peer) => ({ id: peer.ip, name: peer.name, ip: peer.ip }));
-    return [self, ...peers];
-  }
-  /**
-   * Where a member forwards task requests. Null on the gateway itself.
-   * @returns upstream coordinates or null.
-   */
-  taskRemote() {
-    if (this.state.role === "server") return null;
-    const client = this.state.client;
-    if (!client.connected || !client.serverUrl || !client.sshToken) return null;
-    return { baseUrl: client.serverUrl, token: client.sshToken };
-  }
   #peerByToken(publicKey, token) {
     const key = normalizeKey(publicKey);
     if (!key) {
@@ -5969,21 +5039,21 @@ var WireGuardService = class {
    */
   async #writeAuthorizedKeys(change) {
     const file = this.authorizedKeysPath;
-    await mkdir6(path9.dirname(file), { recursive: true, mode: 448 });
+    await mkdir5(path7.dirname(file), { recursive: true, mode: 448 });
     let current = "";
     try {
-      current = await readFile5(file, "utf8");
+      current = await readFile4(file, "utf8");
     } catch {
     }
     const next = change(current);
     if (next === current) return;
     const temporary = `${file}.tmp-${process.pid}-${Date.now()}`;
-    await writeFile4(temporary, next, { encoding: "utf8", mode: 384 });
+    await writeFile3(temporary, next, { encoding: "utf8", mode: 384 });
     try {
       await chmod3(temporary, 384);
     } catch {
     }
-    await rename3(temporary, file);
+    await rename2(temporary, file);
   }
   /**
    * Revoke a peer's reverse login when the peer leaves or is removed.
@@ -6015,7 +5085,7 @@ var WireGuardService = class {
           continue;
         }
         for (const name of names) {
-          if (/^ssh_host_.*_key\.pub$/u.test(name)) files.push(path9.join(directory, name));
+          if (/^ssh_host_.*_key\.pub$/u.test(name)) files.push(path7.join(directory, name));
         }
       }
     }
@@ -6023,7 +5093,7 @@ var WireGuardService = class {
     const keys = [];
     for (const file of files) {
       try {
-        const line = (await readFile5(file, "utf8")).split(/\r?\n/u).find((item) => item.trim() !== "");
+        const line = (await readFile4(file, "utf8")).split(/\r?\n/u).find((item) => item.trim() !== "");
         const parsed = parseSshPublicKey(line ?? "");
         if (parsed) keys.push(parsed.text);
       } catch {
@@ -6391,10 +5461,10 @@ var WireGuardService = class {
           details: { cause: errorMessage(error) }
         });
       }
-      const text2 = await response.text();
+      const text = await response.text();
       let data;
       try {
-        data = JSON.parse(text2);
+        data = JSON.parse(text);
       } catch {
         throw new WireGuardError("bad_response", "The WireGuard control panel returned a non-JSON response.", {
           status: 502,
@@ -6470,7 +5540,7 @@ var WireGuardService = class {
         status.error = `OpenSSH auto-install failed: ${errorMessage(error)}`;
         this.#log(`SSH agent: ${status.error}`);
       } finally {
-        if (zipPath) await rm3(path9.dirname(zipPath), { recursive: true, force: true }).catch(() => {
+        if (zipPath) await rm3(path7.dirname(zipPath), { recursive: true, force: true }).catch(() => {
         });
       }
     }
@@ -6659,9 +5729,9 @@ var WireGuardService = class {
         throw new Error(`the gateway refused the OpenSSH package (HTTP ${response.status})`);
       }
       const data = Buffer.from(await response.arrayBuffer());
-      const directory = await mkdtemp2(path9.join(tmpdir2(), "dsh-openssh-"));
-      const zipPath = path9.join(directory, manifest.file);
-      await writeFile4(zipPath, data);
+      const directory = await mkdtemp2(path7.join(tmpdir2(), "dsh-openssh-"));
+      const zipPath = path7.join(directory, manifest.file);
+      await writeFile3(zipPath, data);
       await verifyOpenSshZip(zipPath, manifest);
       this.#log(`downloaded OpenSSH ${manifest.version} (${data.length} bytes)`);
       return zipPath;
@@ -6732,27 +5802,17 @@ var WireGuardService = class {
 };
 
 // src/wireguard/control-service.ts
-var home = process.env.DSH_HOME && process.env.DSH_HOME.trim() ? process.env.DSH_HOME.trim() : path10.join(homedir4(), ".dsh");
+var home = process.env.DSH_HOME && process.env.DSH_HOME.trim() ? process.env.DSH_HOME.trim() : path8.join(homedir4(), ".dsh");
 var service = new WireGuardService({
   config: {
     externalControlPanel: true,
     keepTunnelOnExit: true
   },
-  dataDir: path10.join(home, "wireguard"),
+  dataDir: path8.join(home, "wireguard"),
   log: (line) => console.log(`[wireguard-control] ${line}`)
 });
 service.setControlExtraHandler(createControlExtraHandler(service));
 await service.init();
-var tasks = new TaskService({
-  dir: path10.join(home, "wireguard", "tasks"),
-  log: (line) => console.log(`[wireguard-control] ${line}`),
-  members: () => service.taskMembers(),
-  remote: () => service.taskRemote(),
-  interopToken: () => findInteropToken(),
-  selfName: hostname()
-});
-await tasks.init();
-service.setTaskService(tasks);
 await service.startControlPanel();
 console.log("[wireguard-control] ready; control panel owns 51821");
 var closing = false;

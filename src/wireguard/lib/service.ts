@@ -34,7 +34,6 @@ import {
   upsertAuthorizedKey,
 } from './member-ssh';
 import { detectGlobalIpv6, detectLanAddress, detectPlatform, findExecutable, localHostname, runPrivileged, type PlatformInfo } from './platform';
-import type { TaskMember, TaskService } from './task-service';
 import { buildSshAuthorizeCommand, buildWindowsSshAuthorizeCommand, SSH_USER_PATTERN } from './ssh';
 import {
   authorizeLinuxKey,
@@ -124,8 +123,6 @@ export class WireGuardService {
   readonly now: () => number;
   readonly logger: (line: string) => void;
   control: ControlPanel | null;
-  /** The shared task list, when this control service hosts one. */
-  tasks: TaskService | null;
   controlExtraHandler: ((request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean> | boolean) | null;
   knownHosts: { refresh: (host: string) => Promise<unknown>; forget: (host: string) => Promise<void> };
   readonly commandRunner: NonNullable<WireGuardServiceOptions['commandRunner']>;
@@ -155,7 +152,6 @@ export class WireGuardService {
     this.now = options.now ?? (() => Date.now());
     this.logger = options.log ?? ((line) => console.log(`[dsh-wireguard] ${line}`));
     this.control = null;
-    this.tasks = null;
     this.controlExtraHandler = null;
     this.knownHosts = {
       refresh: options.knownHosts?.refresh ?? ((host: string) => refreshKnownHosts(host)),
@@ -1498,56 +1494,6 @@ export class WireGuardService {
   }
 
   /** Resolve one peer from its WireGuard key and per-peer agent token. */
-  /**
-   * Attach the shared task list. The control service builds it with the
-   * callbacks it needs; tests may skip it entirely.
-   * @param tasks task service.
-   * @returns this service.
-   */
-  setTaskService(tasks: TaskService | null): this {
-    this.tasks = tasks;
-    return this;
-  }
-
-  /**
-   * Whether a token belongs to one of this gateway's members.
-   * @param token agent token sent by the member.
-   * @returns whether it matches a peer.
-   */
-  authorizePeerToken(token: unknown): boolean {
-    const value = String(token ?? '');
-    if (value === '') return false;
-    return this.state.server.peers.some((peer) => (
-      typeof peer.sshToken === 'string' && peer.sshToken !== '' && secretsMatch(value, peer.sshToken)
-    ));
-  }
-
-  /**
-   * Members a task can be launched on, this machine first.
-   * @returns members.
-   */
-  taskMembers(): TaskMember[] {
-    const selfIp = this.state.role === 'server'
-      ? String(this.state.settings.serverIp ?? '')
-      : String(this.state.client.assignedIp ?? '');
-    const self: TaskMember = { id: 'local', name: localHostname(), ip: selfIp };
-    const peers = this.state.server.peers
-      .filter((peer) => typeof peer.ip === 'string' && peer.ip !== '')
-      .map((peer) => ({ id: peer.ip, name: peer.name, ip: peer.ip }));
-    return [self, ...peers];
-  }
-
-  /**
-   * Where a member forwards task requests. Null on the gateway itself.
-   * @returns upstream coordinates or null.
-   */
-  taskRemote(): { baseUrl: string; token: string } | null {
-    if (this.state.role === 'server') return null;
-    const client = this.state.client;
-    if (!client.connected || !client.serverUrl || !client.sshToken) return null;
-    return { baseUrl: client.serverUrl, token: client.sshToken };
-  }
-
   #peerByToken(publicKey, token) {
     const key = normalizeKey(publicKey);
     if (!key) {

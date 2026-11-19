@@ -1498,6 +1498,7 @@ async function archivePackage(packageDir, target, options = {}) {
   const { os: targetOs2 } = parseTarget(target);
   const archive = targetOs2 === "win" ? `${packageDir}.zip` : `${packageDir}.tar.gz`;
   await rm(archive, { force: true });
+  options.log?.(`archiving ${target}`);
   let result;
   if (targetOs2 === "win" && process.platform !== "win32") {
     result = await runCommand("zip", ["-qr", archive, path5.basename(packageDir)], {
@@ -1764,6 +1765,7 @@ async function assembleRuntimePackage(options) {
     await rm(web, { recursive: true, force: true });
     await cp(frontend.dist, web, { recursive: true });
   }
+  log(`node runtime ${options.target}`);
   await installNodeRuntime({
     version: options.nodeVersion,
     target: options.target,
@@ -3166,7 +3168,7 @@ async function nextBuildStamp(options = {}) {
 // code/build/progress.mjs
 var BUILD_DONE = 65;
 var PACKAGE_END = 95;
-var STAGE_FACTOR = { start: 0, smoke: 0.55, end: 1 };
+var STAGE_FACTOR = { start: 0, install: 0.15, smoke: 0.55, archive: 0.85, end: 1 };
 function targetRange(targets, target) {
   const list = Array.isArray(targets) && targets.length > 0 ? targets : ["linux-x64"];
   const index = Math.max(0, list.indexOf(target));
@@ -3181,17 +3183,33 @@ function targetPercent(targets, target, stage = "start") {
   const factor = STAGE_FACTOR[stage] ?? 0;
   return Math.round(start + (end - start) * factor);
 }
-function phaseFromLine(line, targets = ["linux-x64"]) {
+function phaseFromLine(line, targets = ["linux-x64"], context = {}) {
   const text = String(line);
+  const list = Array.isArray(targets) && targets.length > 0 ? targets : ["linux-x64"];
+  const known = typeof context?.currentTarget === "string" && context.currentTarget !== "" ? context.currentTarget : null;
   if (text.includes("job created")) return { phase: "prepare", percent: 2 };
   if (text.includes("extracting ")) return { phase: "prepare", percent: 6 };
   if (text.includes("needs-fix")) return { phase: "apply", percent: 14, status: "needs-fix" };
   if (/^(?:applied|skipped) /u.test(text)) return { phase: "apply", percent: 11 };
   if (text.includes("$ pnpm install") || text.includes("$ pnpm i")) return { phase: "build", percent: 18 };
+  if (text.startsWith("Progress: resolved")) return { phase: "build", percent: 30 };
   if (text.includes("$ pnpm run build:web") || text.includes("$ pnpm build")) return { phase: "build", percent: 50 };
+  if (/^\$ pnpm (?:exec|run) /u.test(text)) return { phase: "build", percent: 44 };
+  const packaging = /^packaging (\S+)$/u.exec(text.trim());
+  if (packaging !== null) {
+    return { phase: "package", percent: targetPercent(list, packaging[1], "start"), currentTarget: packaging[1] };
+  }
+  if (text.includes("$ npm install @deepseek-ai/dsh")) {
+    const target = known ?? list[0];
+    return { phase: "package", percent: targetPercent(list, target, "install"), currentTarget: target };
+  }
+  const stagedStep = /^(?:node runtime|archiving) (\S+)$/u.exec(text.trim());
+  if (stagedStep !== null) {
+    return { phase: "package", percent: targetPercent(list, stagedStep[1], "archive"), currentTarget: stagedStep[1] };
+  }
   if (text.includes("frontend installed") || text.includes("patching ")) {
-    const first = Array.isArray(targets) && targets.length > 0 ? targets[0] : "linux-x64";
-    return { phase: "package", percent: targetPercent(targets, first, "start"), currentTarget: first };
+    const target = known ?? list[0];
+    return { phase: "package", percent: targetPercent(list, target, "install"), currentTarget: target };
   }
   const packaged = /^packaged (\S+):/u.exec(text);
   if (packaged !== null) {
@@ -4713,6 +4731,7 @@ async function runJob(dir, options) {
         percent: targetPercent(targets, target, "start"),
         currentTarget: target
       });
+      log(`packaging ${target}`);
       const shared = {
         dist: built.dist,
         target,
@@ -6603,18 +6622,23 @@ var DeployManager = class {
       await runner.upload(localClient, join("shared/http-client.mjs"));
       const needsProxy = manifests.some((entry) => entry.provider === "github");
       if (download2.proxy !== null && typeof download2.proxy === "object" && needsProxy) {
-        try {
-          egress = new EgressProxy({ log: (line) => {
-            void log(`download proxy: ${line}`);
-          } });
-          const started = await egress.start({ plan: download2.proxy, member: download2.proxy.name ?? download2.proxy.host });
-          proxyUrl = started.url;
-          await log(`release download through ${download2.proxy.name ?? download2.proxy.host} proxy (${proxyUrl}); Gitee is fetched directly`);
-        } catch (error) {
-          egress?.closeAll();
-          egress = null;
-          proxyUrl = null;
-          await log(`download proxy unavailable (${error instanceof Error ? error.message : String(error)}); trying a direct release download`);
+        if (download2.proxy.kind === "link" && typeof download2.proxy.url === "string" && download2.proxy.url !== "") {
+          proxyUrl = download2.proxy.url;
+          await log(`release download through direct link ${download2.proxy.name ?? ""} (${proxyUrl}); Gitee is fetched directly`);
+        } else {
+          try {
+            egress = new EgressProxy({ log: (line) => {
+              void log(`download proxy: ${line}`);
+            } });
+            const started = await egress.start({ plan: download2.proxy, member: download2.proxy.name ?? download2.proxy.host });
+            proxyUrl = started.url;
+            await log(`release download through ${download2.proxy.name ?? download2.proxy.host} proxy (${proxyUrl}); Gitee is fetched directly`);
+          } catch (error) {
+            egress?.closeAll();
+            egress = null;
+            proxyUrl = null;
+            await log(`download proxy unavailable (${error instanceof Error ? error.message : String(error)}); trying a direct release download`);
+          }
         }
       } else if (download2.proxy !== null && typeof download2.proxy === "object") {
         await log("release download has only Gitee manifests; the proxy is not used");
@@ -6977,12 +7001,7 @@ function windowsBuildScript(options) {
   const proxy2 = typeof options.proxyUrl === "string" ? options.proxyUrl.trim() : "";
   const proxyArgument = proxy2 === "" ? "" : ` -Proxy ${quotePs(proxy2)}`;
   const appRoot = String(options.appRoot ?? "").replace(/[\\/]+$/u, "");
-  const candidates = [
-    ...appRoot === "" ? [] : [quotePs(`${appRoot}\\runtime\\node`)],
-    '"$env:USERPROFILE\\.dsh\\dsh-mesh\\current\\runtime\\node"',
-    '"$env:USERPROFILE\\.dsh\\dsh-person-web\\runtime\\node"',
-    '"$env:ProgramFiles\\nodejs"'
-  ];
+  const candidates = windowsNodeLookup(appRoot);
   return [
     "$ErrorActionPreference = 'Stop'",
     "$ProgressPreference = 'SilentlyContinue'",
@@ -6993,18 +7012,28 @@ function windowsBuildScript(options) {
     `$out = Join-Path $root 'build\\${options.jobId}'`,
     "New-Item -ItemType Directory -Force -Path $out, $bin | Out-Null",
     "$nodeDir = $null",
-    `foreach ($candidate in @(${candidates.join(", ")})) { if (Test-Path (Join-Path $candidate 'node.exe')) { $nodeDir = $candidate; break } }`,
+    `foreach ($candidate in @(${candidates})) { if (Test-Path (Join-Path $candidate 'node.exe')) { $nodeDir = $candidate; break } }`,
     "if ($null -eq $nodeDir) { throw 'no node runtime on this member' }",
-    // Remove last run's job directory with Node instead of Remove-Item:
-    // node_modules paths are longer than MAX_PATH and Remove-Item fails on
-    // them halfway through, which is exactly how a member's disk filled up.
+    // Last run's job tree is removed by a background Node process instead of
+    // synchronously: a 1.9 GiB / 112k-file tree took minutes on the Windows
+    // member, and that was pure delay in front of every build. Remove-Item is
+    // not an option — node_modules paths are longer than MAX_PATH and it gives
+    // up halfway through, which is exactly how a member's disk filled up.
     "$buildRoot = Join-Path $root 'build'",
-    `$rmScript = "const fs=require('fs');const p=process.argv[1];fs.rmSync(p,{recursive:true,force:true,maxRetries:5,retryDelay:200})"`,
-    `Get-ChildItem -LiteralPath $buildRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} } | ForEach-Object { & (Join-Path $nodeDir 'node.exe') -e $rmScript $_.FullName 2>$null; if (Test-Path -LiteralPath $_.FullName) { Write-Output ('could not remove a leftover job dir: ' + $_.Name) } }`,
-    `Get-ChildItem -LiteralPath (Join-Path $root 'upgrade') -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue`,
+    "$upgradeRoot = Join-Path $root 'upgrade'",
+    ...rmTreeScriptLines(),
+    `$leftovers = @(Get-ChildItem -LiteralPath $buildRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} }) + @(Get-ChildItem -LiteralPath $upgradeRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ${quotePs(String(options.jobId))} })`,
+    "$cleaners = @()",
+    `foreach ($dir in $leftovers) { try { $cleaners += Start-Process -FilePath (Join-Path $nodeDir 'node.exe') -ArgumentList ('"{0}" "{1}"' -f (Join-Path $bin 'rm-tree.cjs'), $dir.FullName) -WindowStyle Hidden -PassThru -ErrorAction Stop } catch { Write-Output ('could not start the leftover cleanup: ' + $dir.Name) } }`,
     "$driveFree = 0",
     "try { $driveFree = (Get-PSDrive ((Get-Item $env:USERPROFILE).PSDrive.Name)).Free } catch { $driveFree = (Get-PSDrive C).Free }",
-    `if ($driveFree -lt ${String(needGiB * 1024 ** 3)}) { throw ("not enough free space on the build host: {0:N1} GiB free, ${String(needGiB)} GiB needed" -f ($driveFree / 1GB)) }`,
+    `if ($driveFree -lt ${String(needGiB * 1024 ** 3)}) {`,
+    // Only the rare full-disk start waits for the deletion; a normal build
+    // downloads its checkout while the previous tree is still going away.
+    "  foreach ($cleaner in $cleaners) { if (-not $cleaner.HasExited) { $cleaner.WaitForExit(600000) | Out-Null } }",
+    "  try { $driveFree = (Get-PSDrive ((Get-Item $env:USERPROFILE).PSDrive.Name)).Free } catch { $driveFree = (Get-PSDrive C).Free }",
+    `  if ($driveFree -lt ${String(needGiB * 1024 ** 3)}) { throw ("not enough free space on the build host: {0:N1} GiB free, ${String(needGiB)} GiB needed" -f ($driveFree / 1GB)) }`,
+    "}",
     '$env:PATH = "$bin;$nodeDir;$env:PATH"',
     "$env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'",
     "$env:CI = '1'",
@@ -7046,6 +7075,56 @@ function windowsBuildScript(options) {
     "$code = $LASTEXITCODE",
     "Get-ChildItem -Directory $out -ErrorAction SilentlyContinue | Select-Object -First 5 -ExpandProperty FullName",
     "exit $code",
+    ""
+  ].filter((line) => line !== "").join("\r\n");
+}
+var RM_TREE_SCRIPT = [
+  "const fs = require('fs')",
+  "const target = process.argv[2]",
+  "try {",
+  "  fs.rmSync(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 })",
+  "} catch (error) {",
+  "  console.error(String(error && error.message ? error.message : error))",
+  "  process.exitCode = 1",
+  "}"
+].join("\n");
+function rmTreeScriptLines() {
+  return [
+    "$rmScript = @'",
+    ...RM_TREE_SCRIPT.split("\n"),
+    "'@",
+    "[IO.File]::WriteAllText((Join-Path $bin 'rm-tree.cjs'), $rmScript, (New-Object System.Text.UTF8Encoding($false)))"
+  ];
+}
+function windowsNodeLookup(appRoot) {
+  const root = String(appRoot ?? "").replace(/[\\/]+$/u, "");
+  return [
+    ...root === "" ? [] : [quotePs(`${root}\\runtime\\node`)],
+    '"$env:USERPROFILE\\.dsh\\runtime\\node"',
+    '"$env:USERPROFILE\\.dsh\\dsh-mesh\\current\\runtime\\node"',
+    '"$env:USERPROFILE\\.dsh\\dsh-person-web\\runtime\\node"',
+    '"$env:ProgramFiles\\nodejs"'
+  ].join(", ");
+}
+function windowsCleanupScript(options) {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+    "$root = Join-Path $env:USERPROFILE '.dsh\\mesh'",
+    "$bin = Join-Path $root 'bin'",
+    "$out = Join-Path $root 'build\\" + String(options.jobId) + "'",
+    "New-Item -ItemType Directory -Force -Path $bin | Out-Null",
+    "$nodeDir = $null",
+    `foreach ($candidate in @(${windowsNodeLookup(options.appRoot ?? "")})) { if (Test-Path (Join-Path $candidate 'node.exe')) { $nodeDir = $candidate; break } }`,
+    ...rmTreeScriptLines(),
+    'if (-not (Test-Path -LiteralPath $out)) { Write-Output ("DSH-MESH-MISSING=" + $out); exit 0 }',
+    "if ($null -ne $nodeDir) { & (Join-Path $nodeDir 'node.exe') (Join-Path $bin 'rm-tree.cjs') $out 2>$null | Out-Null }",
+    "if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue }",
+    "if (Test-Path -LiteralPath $out) {",
+    "  $left = (Get-ChildItem -LiteralPath $out -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count",
+    '  Write-Output ("DSH-MESH-LEFTOVER=" + $out + " files=" + $left)',
+    '} else { Write-Output ("DSH-MESH-REMOVED=" + $out) }',
     ""
   ].filter((line) => line !== "").join("\r\n");
 }
@@ -7147,16 +7226,20 @@ var RemoteBuilder = class {
       full: options.full
     });
     let percent = 1;
+    let currentTarget = typeof state.currentTarget === "string" ? state.currentTarget : null;
     const onLine = (line) => {
       void appendLog(jobDir, line);
-      const update = phaseFromLine(line, state.targets);
+      const update = phaseFromLine(line, state.targets, { currentTarget });
       if (update === null) return;
       const patch = { phase: update.phase };
       if (typeof update.percent === "number" && update.percent > percent) {
         percent = update.percent;
         patch.percent = percent;
       }
-      if (update.currentTarget !== void 0) patch.currentTarget = update.currentTarget;
+      if (update.currentTarget !== void 0) {
+        currentTarget = update.currentTarget;
+        patch.currentTarget = update.currentTarget;
+      }
       void this.#update(jobDir, patch);
     };
     try {
@@ -7342,9 +7425,10 @@ var RemoteBuilder = class {
    * The gateway keeps the job state and mirrors the member's output into its
    * own build log, so the member only needs the directory while the build
    * runs. Removing it keeps the next full build from starting on a disk that
-   * older jobs filled. Windows deletes through Node's fs.rmSync because
-   * node_modules paths are longer than MAX_PATH and Remove-Item gives up on
-   * them halfway.
+   * older jobs filled. Windows deletes through the shared `rm-tree.cjs` helper
+   * (node's fs.rmSync) because node_modules paths are longer than MAX_PATH and
+   * Remove-Item gives up on them halfway; the outcome is reported as it really
+   * is, so a half-deleted tree is not logged as "removed".
    * @param {SshRunner} runner ssh runner.
    * @param {string} jobDir local job directory (the cleanup is logged there).
    * @param {string} jobId build job id (also the remote directory name).
@@ -7353,16 +7437,16 @@ var RemoteBuilder = class {
    */
   async #cleanupRemote(runner, jobDir, jobId, windows) {
     const localPath = `$HOME/.dsh/mesh/build/${jobId}`;
-    const command = windows ? powershellCommand([
-      "$ProgressPreference = 'SilentlyContinue'",
-      `$out = Join-Path $env:USERPROFILE '.dsh\\mesh\\build\\${jobId}'`,
-      "$node = Join-Path $env:USERPROFILE '.dsh\\dsh-mesh\\current\\runtime\\node\\node.exe'",
-      "if (-not (Test-Path $node)) { $node = Join-Path $env:USERPROFILE '.dsh\\dsh-person-web\\runtime\\node\\node.exe' }",
-      `if ((Test-Path $out) -and (Test-Path $node)) { & $node -e "const fs=require('fs');fs.rmSync(process.argv[1],{recursive:true,force:true,maxRetries:5,retryDelay:200})" $out }`,
-      "if (Test-Path $out) { Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue }"
-    ].join("; ")) : `rm -rf "${localPath}"`;
+    const command = windows ? powershellCommand(windowsCleanupScript({ jobId, appRoot: runner.plan.appRoot })) : `rm -rf "${localPath}"`;
     try {
-      await runner.runProcess("ssh", [...runner.sshOptions(), runner.target(), command]);
+      const { stdout } = await runner.runProcess("ssh", [...runner.sshOptions(), runner.target(), command]);
+      const text = String(stdout);
+      const leftover = /^DSH-MESH-LEFTOVER=(.+)$/mu.exec(text)?.[1]?.trim() ?? "";
+      if (leftover !== "") {
+        await appendLog(jobDir, `member build dir partially removed: ${leftover} (the next build retries)`);
+        this.log(`remote build dir partially removed: ${leftover}`);
+        return;
+      }
       await appendLog(jobDir, `member build dir removed: ${jobId}`);
       this.log(`remote build dir removed: ${jobId}`);
     } catch (error) {
@@ -7904,8 +7988,11 @@ async function collectSystemInfo(options = {}) {
 
 // src/lib/schedule.mjs
 import path17 from "node:path";
-var DEFAULT_BUILD_SCHEDULE = Object.freeze({ enabled: true, time: "04:00" });
-var DEFAULT_UPGRADE_SCHEDULE = Object.freeze({ enabled: true, time: "06:00" });
+var SCHEDULE_FORMAT = 3;
+var DEFAULT_BUILD_SCHEDULE = Object.freeze({ enabled: false, time: "04:00" });
+var DEFAULT_UPGRADE_SCHEDULE = Object.freeze({ enabled: false, time: "06:00" });
+var LEGACY_BUILD_SCHEDULE = Object.freeze({ enabled: true, time: "04:00" });
+var LEGACY_UPGRADE_SCHEDULE = Object.freeze({ enabled: true, time: "06:00" });
 function parseClock(value) {
   if (typeof value !== "string") return null;
   const match = /^(\d{1,2}):(\d{2})$/u.exec(value.trim());
@@ -7948,6 +8035,18 @@ function normalizeSchedules(value) {
     upgrade: normalizeUpgradeSchedule(source.upgrade),
     upgrades
   };
+}
+function migrateSchedules(value) {
+  const schedule = normalizeSchedules(value);
+  const format = value !== null && typeof value === "object" ? value.format : void 0;
+  if (format === SCHEDULE_FORMAT) return schedule;
+  if (schedule.build.enabled && schedule.build.time === LEGACY_BUILD_SCHEDULE.time) {
+    schedule.build = { ...schedule.build, enabled: false };
+  }
+  if (schedule.upgrade.enabled && schedule.upgrade.time === LEGACY_UPGRADE_SCHEDULE.time) {
+    schedule.upgrade = { ...schedule.upgrade, enabled: false };
+  }
+  return schedule;
 }
 function upgradeEntryFor(schedules, memberId) {
   const entry = schedules?.upgrades?.[memberId];
@@ -8182,6 +8281,51 @@ function pickArtifactForMember(artifacts, member) {
   if (target === null) return null;
   const list = Array.isArray(artifacts) ? artifacts : [];
   return list.find((artifact) => artifact !== null && typeof artifact === "object" && artifact.target === target) ?? null;
+}
+
+// src/lib/egress-plan.mjs
+function linkFor(links, member) {
+  if (member === null || member === void 0 || !Array.isArray(links)) return null;
+  return links.find((link2) => link2?.client?.ip === member.ip || member.id !== void 0 && link2?.client?.id === member.id || member.name !== void 0 && link2?.client?.name === member.name) ?? null;
+}
+function linkHasProxy(link2) {
+  return link2 !== null && link2 !== void 0 && typeof link2.httpProxy === "string" && link2.httpProxy !== "";
+}
+function isLinkServer(proxyMember, link2) {
+  if (proxyMember === null || proxyMember === void 0) return false;
+  return proxyMember.id === link2?.server?.id || proxyMember.ip === link2?.server?.ip || proxyMember.name === link2?.server?.name;
+}
+function resolveBuildEgress(options) {
+  const proxyUrl = typeof options.proxyUrl === "string" ? options.proxyUrl.trim() : "";
+  const proxyMember = options.proxyMember ?? null;
+  if (proxyUrl !== "") return { kind: "explicit", url: proxyUrl, reason: "\u663E\u5F0F\u4EE3\u7406" };
+  if (options.direct === true) return { kind: "direct", reason: "direct=true" };
+  const link2 = linkFor(options.links ?? [], options.member ?? null);
+  if (linkHasProxy(link2) && (proxyMember === null || isLinkServer(proxyMember, link2))) {
+    return {
+      kind: "link",
+      url: link2.httpProxy,
+      link: link2,
+      reason: `\u76F4\u8FDE ${link2.server?.name ?? link2.server?.ip}\uFF08hysteria2/${link2.mode ?? "socks"}\uFF0CHTTP ${link2.httpProxy}\uFF09`
+    };
+  }
+  if (proxyMember !== null) return { kind: "proxyMember", proxyMember, reason: `\u4EE3\u7406\u6210\u5458 ${proxyMember.name}` };
+  return { kind: "direct", reason: "\u4E0D\u4F7F\u7528\u4EE3\u7406" };
+}
+function resolveDeployLinkProxy(options) {
+  const target = options.target ?? null;
+  const wanted = typeof options.wanted === "string" ? options.wanted.trim() : "";
+  if (target === null) return null;
+  const link2 = linkFor(options.links ?? [], target);
+  if (!linkHasProxy(link2)) return null;
+  if (wanted === "" || wanted === "auto") {
+    return { kind: "link", url: link2.httpProxy, name: link2.server?.name ?? link2.server?.ip ?? "direct link" };
+  }
+  const server = link2.server ?? {};
+  if (wanted === server.id || wanted === server.ip || wanted === server.name) {
+    return { kind: "link", url: link2.httpProxy, name: server.name ?? server.ip ?? "direct link" };
+  }
+  return null;
 }
 
 // src/lib/service.mjs
@@ -8603,6 +8747,48 @@ var MeshService = class {
     }
   }
   /**
+   * Direct (hysteria2) links that the gate has configured.
+   *
+   * The gate owns the link jobs and writes `links.json` beside the mesh data
+   * directory. Build and deploy read it instead of asking the operator to
+   * restate the link as a proxy URL, which is what kept the two features from
+   * ever using it.
+   * @returns {Promise<object[]>} live link records.
+   */
+  async #directLinks() {
+    try {
+      const raw = JSON.parse(await readFile13(path18.join(this.home, "hysteria", "links.json"), "utf8"));
+      return Array.isArray(raw.links) ? raw.links : [];
+    } catch {
+      return [];
+    }
+  }
+  /**
+   * The direct link whose client is this member, if any.
+   *
+   * A link only helps traffic that originates on its client: the client's
+   * packets enter the hysteria2 tunnel, the server supplies the internet
+   * egress. The server side gains nothing.
+   * @param {object|null} member member snapshot.
+   * @returns {Promise<object|null>} link record.
+   */
+  async #linkFor(member) {
+    return linkFor(await this.#directLinks(), member);
+  }
+  /**
+   * Decide how a build reaches the internet.
+   *
+   * The direct link wins when the build host is its client, because the link
+   * is a faster path to the same egress member. `proxy` and `proxyMember`
+   * remain explicit overrides; `direct: true` forces the build host's own
+   * network.
+   * @param {{member: object|null, proxyUrl: string, proxyMember: object|null, direct?: boolean}} options build request pieces.
+   * @returns {Promise<{kind: 'link'|'proxyMember'|'explicit'|'direct', url?: string, link?: object, proxyMember?: object, reason: string}>} egress plan.
+   */
+  async #resolveBuildEgress(options) {
+    return resolveBuildEgress({ links: await this.#directLinks(), ...options });
+  }
+  /**
    * Start one build job in the background.
    *
    * `member` chooses the build host: empty or `local` runs the engine here,
@@ -8643,14 +8829,30 @@ var MeshService = class {
       }
     }
     if (request.planOnly === true && member !== null) throw new Error("plan-only builds run on the local host");
-    const proxyMember = proxyMemberId === "" ? null : everyone.find((candidate) => candidate.id === proxyMemberId || candidate.name === proxyMemberId || candidate.ip === proxyMemberId) ?? null;
-    if (proxyMemberId !== "" && proxyMember === null) throw new Error(`proxy member not found: ${proxyMemberId}`);
+    let proxyMember = null;
+    if (proxyMemberId === "auto") {
+      const link2 = await this.#linkFor(member);
+      proxyMember = link2 === null ? null : everyone.find((candidate) => candidate.ip === link2.server?.ip) ?? null;
+      if (proxyMember === null) {
+        const picked = pickProxyMember(everyone);
+        proxyMember = picked === null ? null : everyone.find((candidate) => candidate.id === picked) ?? null;
+      }
+    } else if (proxyMemberId !== "") {
+      proxyMember = everyone.find((candidate) => candidate.id === proxyMemberId || candidate.name === proxyMemberId || candidate.ip === proxyMemberId) ?? null;
+      if (proxyMember === null) throw new Error(`proxy member not found: ${proxyMemberId}`);
+    }
     if (proxyMember !== null && proxyMember.id === "local") {
       throw new Error("the local host cannot proxy its own build; pick a member");
     }
     if (proxyMember !== null && String(proxyMember.system?.platform ?? "").toLowerCase().startsWith("win")) {
       throw new Error(`proxy member must be Linux; ${proxyMember.name} runs ${String(proxyMember.system?.platform)}`);
     }
+    const egressPlan = await this.#resolveBuildEgress({
+      member,
+      proxyUrl,
+      proxyMember,
+      direct: request.direct === true
+    });
     const buildStamp = await nextBuildStamp({
       stateFile: path18.join(this.dataDir, "build-stamp.json"),
       packagesDir: this.packagesDir
@@ -8661,7 +8863,7 @@ var MeshService = class {
       ref,
       targets,
       member: member?.id ?? null,
-      proxy: proxyUrl !== "" ? proxyUrl : proxyMember !== null ? `member:${proxyMember.id}` : null,
+      proxy: egressPlan.kind === "link" || egressPlan.kind === "explicit" ? egressPlan.url : proxyMember !== null ? `member:${proxyMember.id}` : null,
       mode: member === null ? "local" : "remote",
       buildStamp
     });
@@ -8671,22 +8873,25 @@ var MeshService = class {
         memberIp: member.ip,
         percent: 0,
         proxyMember: proxyMember?.id ?? null,
+        egress: egressPlan,
         pullBack,
         autoUpgrade
       });
     } else {
       await updateState(job.dir, {
         ...proxyMember !== null ? { proxyMember: proxyMember.id } : {},
+        egress: egressPlan,
         percent: 0,
         pullBack,
         autoUpgrade
       });
     }
-    this.logLine(`mesh build job ${job.id} created (${member === null ? "local" : member.name}${proxyMember === null ? "" : `, egress via ${proxyMember.name}`})`);
+    this.logLine(`mesh build job ${job.id} created (${member === null ? "local" : member.name}, egress: ${egressPlan.reason})`);
     const promise = this.#runBuild(job, {
       member,
       proxyMember,
       proxyUrl,
+      egressPlan,
       planOnly: request.planOnly === true,
       version: request.version,
       buildStamp: job.state.buildStamp,
@@ -8717,7 +8922,11 @@ var MeshService = class {
       await appendLog(job.dir, "release publish is not configured; the build will not upload to GitHub/Gitee");
     }
     try {
-      if (options.proxyMember !== null && (options.member === null || options.member.id !== options.proxyMember.id)) {
+      if (options.egressPlan?.kind === "link") {
+        proxyUrl = options.egressPlan.url;
+        await appendLog(job.dir, `outbound proxy ${proxyUrl} via direct link: ${options.egressPlan.reason}`);
+        await updateState(job.dir, { proxy: proxyUrl, egress: options.egressPlan });
+      } else if ((options.egressPlan === void 0 || options.egressPlan?.kind === "proxyMember") && options.proxyMember !== null && (options.member === null || options.member.id !== options.proxyMember.id)) {
         egress = await this.egress.start({ plan: await this.#memberSshPlan(options.proxyMember), member: options.proxyMember.name });
         proxyUrl = egress.url;
         await appendLog(job.dir, `outbound proxy ${proxyUrl} (${options.proxyMember.name})`);
@@ -9850,6 +10059,8 @@ var MeshService = class {
     if (manifests.length === 0) return null;
     if (request.direct === true || request.proxyMember === "none") return { manifests, proxy: null };
     const wanted = typeof request.proxyMember === "string" ? request.proxyMember.trim() : "";
+    const linkProxy = resolveDeployLinkProxy({ links: await this.#directLinks(), target, wanted });
+    if (linkProxy !== null) return { manifests, proxy: linkProxy };
     let proxyMember = null;
     if (wanted !== "" && wanted !== "auto") {
       proxyMember = everyone.find((candidate) => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted) ?? null;
@@ -9866,6 +10077,7 @@ var MeshService = class {
     return {
       manifests,
       proxy: {
+        kind: "ssh",
         host: plan.host,
         user: plan.user,
         port: plan.port,
@@ -10530,6 +10742,7 @@ function registerApi(ctx, service, scheduler = null) {
             member: typeof body.member === "string" ? body.member : void 0,
             proxy: typeof body.proxy === "string" ? body.proxy : void 0,
             proxyMember: typeof body.proxyMember === "string" ? body.proxyMember : void 0,
+            direct: body.direct === true,
             pullBack: typeof body.pullBack === "boolean" ? body.pullBack : void 0,
             autoUpgrade: typeof body.autoUpgrade === "boolean" ? body.autoUpgrade : void 0
           });
@@ -10675,7 +10888,7 @@ var Scheduler = class {
     this.loading = (async () => {
       try {
         const parsed = JSON.parse(await readFile14(this.file, "utf8"));
-        const normalized = normalizeSchedules(parsed);
+        const normalized = migrateSchedules(parsed);
         this.schedule = normalized;
         this.upgrades = new Map(Object.entries(normalized.upgrades));
         if (parsed?.last !== null && typeof parsed?.last === "object") {
@@ -10684,6 +10897,7 @@ var Scheduler = class {
             upgrades: parsed.last.upgrades !== null && typeof parsed.last.upgrades === "object" ? parsed.last.upgrades : {}
           };
         }
+        if (parsed?.format !== SCHEDULE_FORMAT) await this.#save();
       } catch {
       }
     })();
@@ -10694,7 +10908,7 @@ var Scheduler = class {
     try {
       await mkdir12(path21.dirname(this.file), { recursive: true });
       await writeFile12(this.file, `${JSON.stringify({
-        format: 2,
+        format: SCHEDULE_FORMAT,
         build: this.schedule.build,
         upgrade: this.schedule.upgrade,
         upgrades: Object.fromEntries(this.upgrades),
@@ -13212,7 +13426,8 @@ async function apply(ctx, config = {}) {
     service,
     file: scheduleFile(dataDirectory()),
     // Auto-upgrade is configured per member; the scheduler needs the current
-    // ids to apply the default 06:00 entry to members without an override.
+    // ids to apply the default 06:00 entry (off until enabled) to members
+    // without an override.
     members: async () => {
       const snapshot = await service.members();
       return [snapshot.local?.id, ...snapshot.members.map((member) => member.id)].filter((id) => typeof id === "string" && id !== "");

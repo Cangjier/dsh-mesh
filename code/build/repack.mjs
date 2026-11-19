@@ -25,7 +25,7 @@ import { collectStaticAssets } from './static-assets.mjs'
 const run = promisify(execFile)
 
 /** Root-level scripts copied out of `code/`. */
-const CODE_SCRIPTS = ['install.sh', 'start.sh', 'stop.sh', 'status.sh', 'doctor.sh', 'install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'start-stack.ps1']
+const CODE_SCRIPTS = ['install.sh', 'install.ps1']
 /** Scripts that live at the repository root. */
 const ROOT_SCRIPTS = ['start-interop.sh', 'install-interop-service.sh', 'uninstall-interop-service.sh', 'dsh-mesh.mjs']
 /** Plugin files copied from the repository root. */

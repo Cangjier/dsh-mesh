@@ -8,7 +8,7 @@
  * patch rows the panel and the interop service need). Both are edited in place,
  * keeping every value the operator set by hand.
  *
- * Called by `upgrade-local.sh`, which is called by `runner.mjs`; also usable on
+ * Called by `upgrade-local.mjs`, which is called by `runner.mjs`; also usable on
  * its own with `--no-restart` upgrades for inspection.
  *
  *   node code/deploy/wire-profile.mjs --root <install> --profile <dsh profile> \

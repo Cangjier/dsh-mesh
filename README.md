@@ -97,14 +97,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - **包里带什么**：每个产物固定携带 `dsh-mesh` 与 `xl` 两个插件。`dsh-mesh` 是当前仓库；`xl` 来自 `Cangjier/xl` 的 `main`，每次编译现拉，来源与归档哈希记在包的 `manifest.json`（`extraPlugins`）里。清单在 `build/plugins.json`，加插件只要加一条。
 - **部署包**：列出 `~/.dsh/packages` 里的包（平台、大小、时间），可直接删除；成员编译出的产物也会出现在这里，接着就能对成员「部署」。
 - **Release 发布**：编译成功后自动把本次最新包上传到 GitHub / Gitee 的固定 `latest` Release，旧资产随之删除。GitHub 存整包（单文件 2GB 上限，上传走编译机的外网代理）；Gitee 单附件约 100MB、仓库附件总量约 1GB，所以按 85MiB 分片上传（Gitee 直连、不走代理），客户端下载后拼接并校验 SHA-256。配置在 `~/.dsh/mesh/release.json`（0600）；面板「Release 发布」卡片**只需要贴 token**，账号与仓库由 token 自动补齐（仓库不存在会自动创建为公开仓库），Gitee 分支沿用 `master` 默认值（面板不再提供 branch 输入）。token 不会回传浏览器。详见 [Step 022](docs/Step%20022%20Release%20发布与下载升级.md)。
-- **指针布局（新骨架）**：`~/.dsh` 下只保留一个稳定启动器 `dsh-mesh.mjs` 和指针 `dsh-mesh.json`，每个版本解压到 `releases/<id>` 后就不再覆盖；升级 = 写指针 + 重启，回退 = 指针翻回 + 重启。启动器替换前自动留 `.bak`，会话/配置统一在 `~/.dsh/shared`。升级实现只有 `code/deploy/upgrade-local.mjs` 一份，网关和 Linux 成员共用；`.sh` 只是旧调用方的兼容 shim。详见 [Step 023](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md)。
+- **指针布局（新骨架）**：`~/.dsh` 下只保留一个稳定启动器 `dsh-mesh.mjs` 和指针 `dsh-mesh.json`，每个版本解压到 `releases/<id>` 后就不再覆盖；升级 = 写指针 + 重启，回退 = 指针翻回 + 重启。启动器替换前自动留 `.bak`，会话/配置统一在 `~/.dsh/shared`。升级实现只有 `code/deploy/upgrade-local.mjs` 一份，网关和成员共用；没有 `.sh` shim，也没有平铺/蓝绿布局。详见 [Step 023](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md)。
 - **升级包来源**：升级弹窗现在有三个来源：**latest tag**、**目标成员已有包**、**本机部署包**。latest tag 从 GitHub/Gitee 的 `latest.json` 读取版本信息，由目标成员自己下载（**Gitee 优先直连，Gitee 不可用时回退 GitHub**，GitHub 可经有外网成员代理），网关不传输包体；目标成员已有包会扫描该成员的 `~/.dsh/packages` 与 `~/.dsh/mesh/upgrade`，升级时在目标上重新计算 SHA-256 并直接使用（不上传、不下载，提取后保留原包）；本机部署包沿用原来的 `~/.dsh/packages`。latest tag 用于成员升级，不用于新成员安装或本机升级。
 - **升级优先从 Release 下载**：手选本机包时，升级仍会优先尝试 Release 下载（旧行为：GitHub 优先、Gitee 分片兜底）；latest tag 来源则明确优先 Gitee。部署计划只带公开的 `latest.json` URL 和一个有外网成员的代理坐标，校验 SHA-256 后原地进入 prepare/activate。下载失败、目标没有 Node、Release 里没有所选包时，有本机副本才回退上传；release-only 计划会给出明确错误，不会把归档名当成文件上传。
 
 成员也可以自己把产物推给网关（只接受组网来源，需要网关口令）：
 
 ```bash
-PW=$(grep '^DSH_GATE_PASSWORD=' ~/.dsh/dsh-mesh/shared/config/gate.env | cut -d= -f2-)
+PW=$(grep '^DSH_GATE_PASSWORD=' ~/.dsh/shared/config/gate.env | cut -d= -f2-)
 curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
   "http://10.66.66.1/__gate/packages/upload?name=dsh-mesh.tar.gz&sha256=$(sha256sum dsh-mesh.tar.gz | cut -d' ' -f1)"
 ```
@@ -161,40 +161,37 @@ pnpm build          # 生成 index.js / client.js
 
 ### 部署网关与成员
 
+只有一种安装：把离线包解压，运行包里的安装脚本。脚本把当前目录放进
+`<root>/releases/<id>`，写 `dsh-mesh.json`、稳定启动器和 systemd 单元，然后启动
+网关与控制面板。以后升级只换 release、翻指针，不再有第二种布局。
+
 Linux：
 
 ```bash
-./install.sh                       # 生成 config/gate.env、systemd、密码
-# 编辑 config/gate.env：
-#   DSH_GATE_PASSWORD=<所有成员相同的密码；成员间切换靠它签名>
-#   DSH_TRUSTED_HOSTS=<外层入口域名或 IP>
-systemctl restart dsh-web
+tar -xzf dsh-mesh-<version>-linux-x64.tar.gz
+cd dsh-mesh-<version>-linux-x64
+sudo ./install.sh                                  # 默认 /root/.dsh，监听 80
+sudo ./install.sh --root /srv/dsh --port 8080 --password '<所有成员相同的密码>'
 ```
 
-Windows（web 版成员，不是 Electron 桌面壳）：
+`--root` 是安装根（`dsh-mesh.json`、`releases/`、`shared/` 所在目录）。密码写进
+`<root>/shared/config/gate.env`，成员间切换靠它签名；改完配置后：
+
+```bash
+systemctl restart dsh-web-gate
+```
+
+Windows：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Port 8080 -ClusterKey <same-secret>
-powershell -ExecutionPolicy Bypass -File .\start.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Root C:\dsh -Port 8080 -Password '<same-secret>'
 ```
 
-要让 Windows 网关常驻、不随 DSH 退出或用户注销而停止，装成 Windows 服务：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Port 80 -ClusterKey <same-secret> -InstallService
-# 或者已经 install 过，单独装服务：
-powershell -ExecutionPolicy Bypass -File .\code\windows-service\install-service.ps1
-```
-
-服务名 `DSH-Mesh`，启动类型 Automatic，账号 LocalSystem，日志在 `data\service.log`；停止/删除：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\code\windows-service\uninstall-service.ps1
-```
+安装会注册两个 SCM 服务：`DSH-Mesh`（网关）和 `DSH-WireGuard-Control`（51821）。
+只准备文件不装服务用 `-NoService`。日志在 `<root>\data\service.log`。
 
 `dsh-mesh-service.exe` 是**守护服务**：它只负责生命周期和会话选择，不亲自跑业务进程。无人登录、或登录的不是管理员时，它在 session 0 里直接拉起 `gate`（interop 现在在 DSH Web 内，不单独起进程）；有管理员登录时，它用 `schtasks /RU <用户> /IT /RL HIGHEST` 建一个 `DSH-Mesh-Stack` 任务，由该任务执行 `start-stack.ps1` 在交互会话里跑同一套 gate + Web，成员界面「提升到交互会话」按钮就是触发这次重新判定。当前模式与原因写在 `data\session-status.json`，日志在 `data\service.log`。提升失败会退回 session 0 并冷却 5 分钟，不会反复拆栈。它和桌面版 DSH 是两个独立进程树，桌面 DSH 退出不会影响这个服务。
-
-`-InstallService` 现在会继续调用 `install-split-services.ps1`，把 DSH 也拆成独立的 `DSH-Web-App` 服务；网关进入 external-DSH 模式，只监听 `data/dsh-web.json`，不再 spawn DSH。网关、DSH、WireGuard 控制面板三者互不依赖，详见 [Step 012](docs/Step%20012%20独立服务与WireGuard控制面板.md)。
 
 要点：
 

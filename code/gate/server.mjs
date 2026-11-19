@@ -233,7 +233,7 @@ CONFIG.clusterKey = deriveClusterSecret(CONFIG.password)
  */
 const PREVIEW_COOKIE = 'dsh_gate_preview'
 
-/** The upgrade marker written by `upgrade-local.sh` / the activate script. */
+/** The upgrade marker written by `upgrade-local.mjs` / the activate script. */
 const PENDING_FILE = path.join(CONFIG.dataDir, 'upgrade-pending.json')
 
 /** Statuses that keep the acceptance page in front of DSH. */
@@ -1540,25 +1540,24 @@ function resolveDeployScript(name) {
  * @returns {Promise<{unit: string}>} how it was launched.
  */
 async function launchRollback(state) {
-  const script = resolveDeployScript('rollback-local.sh')
-  if (script === null) throw new Error('rollback-local.sh is missing from this install')
+  const script = resolveDeployScript('rollback-local.mjs')
+  if (script === null) throw new Error('rollback-local.mjs is missing from this install')
   const root = typeof state.root === 'string' && path.isAbsolute(state.root) && existsSync(state.root)
     ? state.root
     : PACKAGE_ROOT
   const tools = path.join(CONFIG.dataDir, 'rollback-tools')
   await mkdir(tools, { recursive: true })
-  const copy = path.join(tools, `rollback-local-${String(Date.now())}.sh`)
+  const copy = path.join(tools, `rollback-local-${String(Date.now())}.mjs`)
   await copyFile(script, copy)
-  await chmod(copy, 0o755)
+  const stableNode = path.join(root, 'runtime', 'node', 'bin', 'node')
+  const node = existsSync(stableNode) ? stableNode : process.execPath
   const unit = `dsh-mesh-rollback-${String(Date.now())}`
   const systemdRun = ['/usr/bin/systemd-run', '/bin/systemd-run', '/usr/local/bin/systemd-run']
     .find(candidate => existsSync(candidate))
-  const command = systemdRun === undefined ? 'bash' : systemdRun
-  const bash = existsSync('/bin/bash') ? '/bin/bash' : 'bash'
   const args = systemdRun === undefined
     ? [copy, '--root', root]
-    : ['--unit', unit, '--collect', '--property=Type=oneshot', bash, copy, '--root', root]
-  const child = spawn(command, args, { detached: true, stdio: 'ignore' })
+    : ['--unit', unit, '--collect', '--property=Type=oneshot', node, copy, '--root', root]
+  const child = spawn(systemdRun === undefined ? node : systemdRun, args, { detached: true, stdio: 'ignore' })
   child.once('error', (error) => {
     void writeUpgradeState({ ...state, status: 'failed', error: `cannot start rollback: ${error.message}` })
   })
@@ -1992,7 +1991,7 @@ log(`member clustering enabled (peer requests sign with a secret derived from th
 log(CONFIG.heapMb > 0
   ? `dsh web heap ceiling: ${String(CONFIG.heapMb)} MB (machine has ${String(Math.round(os.totalmem() / 1024 / 1024))} MB)`
   : 'dsh web heap ceiling: none (set DSH_WEB_HEAP_MB to cap it)')
-// One pid file lets stop.sh target this process, and only this process.
+// One pid file lets the operator target this process, and only this process.
 mkdirSync(CONFIG.dataDir, { recursive: true, mode: 0o700 })
 await writeFile(PID_FILE, `${String(process.pid)}\n`, { mode: 0o644 })
 for (const entry of listeners) bindListener(entry)

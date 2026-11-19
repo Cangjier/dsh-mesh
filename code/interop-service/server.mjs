@@ -39,7 +39,7 @@ const { applySessionEvent, repliesSince, summarizeReplies } = await sharedModule
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..', '..')
 // The launcher names the layout's directories. A release owns no data and no
-// config links, so only the ROOT fallbacks below keep a flat install working.
+// config links, so the ROOT fallbacks below only serve a source checkout.
 const CONFIG_DIR = path.resolve(process.env.DSH_GATE_CONFIG_DIR || path.join(ROOT, 'config'))
 const DATA = path.resolve(process.env.DSH_GATE_DATA_DIR || path.join(ROOT, 'data'))
 const DSH_ENTRY = path.join(ROOT, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')

@@ -24,8 +24,8 @@ function plan(os) {
     package: { path: windows ? 'C:\\tmp\\p.zip' : '/tmp/p.tgz', bytes: 1, sha256: 'a'.repeat(64) },
     remotePackage: windows ? 'C:\\Windows\\Temp\\p.zip' : '/tmp/p.tgz',
     services: [
-      { name: windows ? 'DSH-Web-App' : 'dsh-web-app.service', role: 'dsh', command: 'start.sh' },
-      { name: windows ? 'DSH-Mesh' : 'dsh-web-gate.service', role: 'gate', command: 'start.sh' },
+      { name: windows ? 'DSH-Web-App' : 'dsh-web-app.service', role: 'dsh' },
+      { name: windows ? 'DSH-Mesh' : 'dsh-web-gate.service', role: 'gate' },
     ],
     scope: 'all',
     gatePort: '80',

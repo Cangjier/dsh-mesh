@@ -672,9 +672,8 @@ export async function listFiles(dir) {
 /** Files and directories that make one dsh-mesh build (plugin + package payload). */
 const PLUGIN_FINGERPRINT_FILES = [
   'package.json', 'index.js', 'client.js', 'cordis.patch.yml', 'icon.svg', 'VERSION',
-  'start-dsh.sh', 'start-interop.sh', 'install-interop-service.sh', 'uninstall-interop-service.sh',
-  'install.sh', 'start.sh', 'stop.sh', 'status.sh', 'doctor.sh',
-  'install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'start-stack.ps1',
+  'start-interop.sh', 'install-interop-service.sh', 'uninstall-interop-service.sh',
+  'install.sh', 'install.ps1',
   // The stable launcher and its pointer live at the layout root; a package
   // that lacks them cannot be installed in the pointer layout.
   'dsh-mesh.mjs',
@@ -807,31 +806,28 @@ export async function assembleWebPackage(options) {
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'gate'), path.join(packageDir, 'gate'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'shared'), path.join(packageDir, 'shared'))
   // The runtime scripts under `code/` (deploy engine, target downloader) import
-  // siblings from `code/shared`; the flat installer already lays the tree out
-  // that way, and the blue-green package must too or the deploy runner fails at
+  // siblings from `code/shared`; every package must lay the tree out
+  // that way or the deploy runner fails at
   // import time on a member.
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'shared'), path.join(packageDir, 'code', 'shared'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'config'), path.join(packageDir, 'config'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'windows-service'), path.join(packageDir, 'code', 'windows-service'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'interop-service'), path.join(packageDir, 'code', 'interop-service'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'wireguard'), path.join(packageDir, 'code', 'wireguard'))
-  // The split-service supervisor and its installer: install.sh only wires the
-  // dsh-web-app / dsh-web-gate units when this directory is present, and a flat
-  // upgrade rebuilds the units from it. Leaving it out silently produced a
-  // package that installed as one monolithic service.
+  // The split-service supervisor: the gateway's dsh role runs it.
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'dsh-service'), path.join(packageDir, 'code', 'dsh-service'))
-  // A flat install upgrades itself by running code/deploy/upgrade-local.sh from
-  // the package and then re-wiring the profile with code/deploy/wire-profile.mjs.
+  // Every install and upgrade runs code/deploy/upgrade-local.mjs from the
+  // package; it rewires the profile with code/deploy/wire-profile.mjs.
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'deploy'), path.join(packageDir, 'code', 'deploy'))
   // The pointer-layout installer and the stable launcher are part of the
   // package: upgrades run them from the extracted tree.
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'install'), path.join(packageDir, 'code', 'install'))
   await copyIfExists(path.join(options.repositoryRoot, 'dsh-mesh.mjs'), path.join(packageDir, 'dsh-mesh.mjs'))
   await copyIfExists(path.join(options.repositoryRoot, 'docs'), path.join(packageDir, 'docs'))
-  for (const file of ['install.sh', 'start.sh', 'stop.sh', 'status.sh', 'doctor.sh', 'install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'start-stack.ps1', 'VERSION']) {
+  for (const file of ['install.sh', 'install.ps1', 'VERSION']) {
     await copyIfExists(path.join(options.repositoryRoot, 'code', file), path.join(packageDir, file))
   }
-  for (const file of ['start-dsh.sh', 'start-interop.sh', 'install-interop-service.sh', 'uninstall-interop-service.sh']) {
+  for (const file of ['start-interop.sh', 'install-interop-service.sh', 'uninstall-interop-service.sh']) {
     await copyIfExists(path.join(options.repositoryRoot, file), path.join(packageDir, file))
   }
   for (const file of ['index.js', 'client.js', 'cordis.patch.yml', 'package.json']) {
@@ -1335,9 +1331,8 @@ export async function assembleRuntimePackage(options) {
     fetchImpl: options.fetchImpl,
     log,
   })
-  for (const file of ['install.ps1', 'start.ps1', 'stop.ps1', 'start.cmd', 'stop.cmd', 'start-stack.ps1']) {
-    await copyIfExists(path.join(options.repositoryRoot, 'code', file), path.join(packageDir, file))
-  }
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'install.sh'), path.join(packageDir, 'install.sh'))
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'install.ps1'), path.join(packageDir, 'install.ps1'))
   await writeFile(path.join(packageDir, '.offline-payload'), 'dsh-mesh\n', 'utf8')
   await writeFile(path.join(packageDir, 'VERSION'), `${options.dshVersion}\n`, 'utf8')
   const updated = {

@@ -77,7 +77,7 @@ test('deployPackage resolves a package and queues a detached job for a member', 
     const upgrade = await service.upgradeMember({ member: 'b', package: pkg })
     const upgradeState = await readJob(upgrade.job)
     assert.equal(upgradeState.mode, 'upgrade')
-    assert.equal(upgrade.layout, 'bluegreen')
+    assert.equal(upgrade.layout, 'pointer')
 
     const raw = await service.deployPackage({ host: 'raw.example', package: pkg })
     const rawState = await readJob(raw.job)

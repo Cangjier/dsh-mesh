@@ -11,7 +11,6 @@ import { buildDeployPlan, buildLinuxActivateScript } from '../code/deploy/engine
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const gateEntry = path.join(root, 'code', 'gate', 'server.mjs')
-const rollbackScript = path.join(root, 'code', 'deploy', 'rollback-local.sh')
 
 /** A currently free loopback port. */
 function freePort() {

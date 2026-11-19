@@ -2,7 +2,7 @@
 /**
  * Pointer-layout rollback.
  *
- * The gateway's acceptance page ("回退") starts `rollback-local.sh` in its own
+ * The gateway's acceptance page ("回退") starts `rollback-local.mjs` in its own
  * transient systemd unit, because the script restarts the gateway it is
  * talking to. That shim delegates here when the install uses the pointer
  * layout (`<root>/dsh-mesh.json`).

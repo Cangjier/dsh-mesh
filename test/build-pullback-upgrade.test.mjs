@@ -81,7 +81,7 @@ async function fixture(options = {}) {
   if (options.stubDeploy !== false) {
     service.startDeploy = async request => {
       deploys.push(request)
-      return { ok: true, job: { id: 'deploy-auto-1', release: '20261118A' }, member: { id: 'b' }, layout: 'bluegreen' }
+      return { ok: true, job: { id: 'deploy-auto-1', release: '20261118A' }, member: { id: 'b' }, layout: 'pointer' }
     }
   }
   return {
@@ -196,7 +196,7 @@ test('startDeploy plans an archive that already sits on the target', async () =>
       packageOnTarget: { path: remote, bytes: 4321, sha256: SHA },
     })
     assert.equal(result.ok, true)
-    assert.equal(result.layout, 'bluegreen')
+    assert.equal(result.layout, 'pointer')
     assert.equal(result.job.packageOnTarget, true)
     const requestFile = path.join(f.dir, 'mesh', 'deploy', result.job.id, 'request.json')
     const request = JSON.parse(await readFile(requestFile, 'utf8'))

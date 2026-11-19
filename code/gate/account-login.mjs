@@ -251,7 +251,7 @@ export class AccountLogin {
   /** Launch the local browser on a fresh attempt bound to this listener. */
   async #launch() {
     if (!existsSync(this.chromeBinary)) {
-      throw new Error(`找不到 Chrome：${this.chromeBinary}（运行 sudo ./install.sh --with-chrome 安装）`)
+      throw new Error(`找不到 Chrome：${this.chromeBinary}（把 Chrome/Chromium 放进 PATH，或用 DSH_GATE_CHROME 指定路径）`)
     }
     const current = await this.state()
     if (this.#signedIn) return

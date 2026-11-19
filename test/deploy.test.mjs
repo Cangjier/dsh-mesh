@@ -22,12 +22,14 @@ import {
 
 test('normalizeServices orders control, dsh and the gateway last', () => {
   const services = normalizeServices([
-    { name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' },
-    { name: 'dsh-wg-control.service', role: 'control', command: 'start-control.sh' },
-    { name: 'dsh-web-app.service', role: 'dsh', command: 'start-dsh.sh' },
+    { name: 'dsh-web-gate.service', role: 'gate' },
+    { name: 'dsh-wg-control.service', role: 'control' },
+    { name: 'dsh-web-app.service', role: 'dsh' },
   ], 'linux')
   assert.deepEqual(services.map(service => service.role), ['control', 'dsh', 'gate'])
-  assert.equal(services[2].command, 'start.sh')
+  // The unit always runs the stable launcher; no per-role start script is part
+  // of the plan any more.
+  assert.equal('command' in services[2], false)
 })
 
 test('default service manifest matches the package layout', () => {
@@ -36,9 +38,7 @@ test('default service manifest matches the package layout', () => {
   const linux = normalizeServices(undefined, 'linux')
   assert.deepEqual(linux.map(service => service.role), ['control', 'gate'])
   assert.equal(linux[0].name, 'dsh-wireguard-control.service')
-  assert.equal(linux[0].command, 'start-control.sh')
   assert.equal(linux[1].name, 'dsh-web-gate.service')
-  assert.equal(linux[1].command, 'start.sh')
   // Windows runs one supervisor service that owns gate + interop, plus the
   // separate control-panel service so restarting the gateway leaves 51821 up.
   const windows = normalizeServices(undefined, 'windows')
@@ -98,14 +98,13 @@ test('plan separates prepare from activation and starts the gateway last', async
       appRoot: '/opt/dsh-mesh',
       repositoryRoot: dir,
       services: [
-        { name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' },
-        { name: 'dsh-web-app.service', role: 'dsh', command: 'start-dsh.sh' },
+        { name: 'dsh-web-gate.service', role: 'gate' },
+        { name: 'dsh-web-app.service', role: 'dsh' },
       ],
       release: '20261110-test',
     })
     assert.equal(plan.release, '20261110-test')
     assert.equal(plan.services.at(-1).role, 'gate')
-    assert.equal(plan.shared, '/opt/dsh-mesh/shared')
     const summary = describePlan(plan)
     assert.ok(summary.steps.some(step => step.includes('no service switch')))
     assert.ok(summary.steps.some(step => step.includes('newest 2 releases')))
@@ -150,7 +149,7 @@ test('network tuning can be switched off for a member that tunes itself', async 
     const plan = await buildDeployPlan({
       host: 'example', os: 'linux', package: packagePath, repositoryRoot: dir,
       release: 'notune', tuneNetwork: false,
-      services: [{ name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' }],
+      services: [{ name: 'dsh-web-gate.service', role: 'gate' }],
     })
     assert.equal(plan.tuneNetwork, false)
     assert.doesNotMatch(buildLinuxPrepareScript(plan), /99-dsh-mesh-net/)
@@ -167,7 +166,7 @@ test('a host name is not exposed: interop binds the wildcard address', async () 
     const plan = await buildDeployPlan({
       host: 'member.example', os: 'linux', package: packagePath, repositoryRoot: dir,
       release: 'interop2',
-      services: [{ name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' }],
+      services: [{ name: 'dsh-web-gate.service', role: 'gate' }],
     })
     assert.equal(plan.interop.bind, '0.0.0.0')
   } finally {
@@ -183,7 +182,7 @@ test('the interop step can be skipped for a member that runs it itself', async (
     const plan = await buildDeployPlan({
       host: '10.66.66.9', os: 'linux', package: packagePath, repositoryRoot: dir,
       release: 'interop3', interop: false,
-      services: [{ name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' }],
+      services: [{ name: 'dsh-web-gate.service', role: 'gate' }],
     })
     assert.equal(plan.interop, null)
     assert.doesNotMatch(buildLinuxPrepareScript(plan), /dsh-interop/)
@@ -232,7 +231,7 @@ test('DeployManager.wait settles a deployment and leaves a log', async () => {
       package: pkg,
       appRoot: path.join(dir, 'app'),
       os: 'linux',
-      services: [{ name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' }],
+      services: [{ name: 'dsh-web-gate.service', role: 'gate' }],
       gatePort: '80',
     })
     const job = await manager.wait(started.job.id)
@@ -275,7 +274,7 @@ test('release download scripts pass the manifest, digest, output and proxy', asy
     await writeFile(pkg, 'archive-bytes', 'utf8')
     const plan = await buildDeployPlan({ host: '10.66.66.3', package: pkg, os: 'linux', appRoot: '/opt/member' })
     const linux = releaseDownloadScript(plan, {
-      node: '/opt/member/current/runtime/node/bin/node',
+      node: '/opt/member/runtime/node/bin/node',
       remoteDir: '/tmp/dsh-mesh-release-deadbeef',
       manifests: [
         { provider: 'github', url: 'https://github.com/o/r/releases/download/latest/latest.json' },
@@ -293,7 +292,7 @@ test('release download scripts pass the manifest, digest, output and proxy', asy
 
     const windowsPlan = await buildDeployPlan({ host: '10.66.66.4', package: pkg, os: 'windows', appRoot: 'C:\\dsh-mesh' })
     const windows = releaseDownloadScript(windowsPlan, {
-      node: 'C:\\dsh-mesh\\current\\runtime\\node\\node.exe',
+      node: 'C:\\dsh-mesh\\runtime\\node\\node.exe',
       remoteDir: 'C:\\Windows\\Temp\\dsh-mesh-release-deadbeef',
       manifests: [{ provider: 'github', url: 'https://github.com/o/r/releases/download/latest/latest.json' }],
       proxyUrl: null,
@@ -302,8 +301,8 @@ test('release download scripts pass the manifest, digest, output and proxy', asy
     assert.match(windows, /\$LASTEXITCODE/u)
     assert.doesNotMatch(windows, /--proxy/u)
 
-    assert.match(linuxNodeProbeScript('/opt/member'), /\/opt\/member\/current\/runtime\/node\/bin\/node/u)
-    assert.ok(windowsNodeProbeScript('C:\\dsh-mesh').includes("'C:\\dsh-mesh\\current\\runtime\\node\\node.exe'"))
+    assert.match(linuxNodeProbeScript('/opt/member'), /\/opt\/member\/runtime\/node\/bin\/node/u)
+    assert.ok(windowsNodeProbeScript('C:\\dsh-mesh').includes("'C:\\dsh-mesh\\runtime\\node\\node.exe'"))
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

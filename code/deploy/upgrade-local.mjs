@@ -15,13 +15,11 @@
  * and the units — which all name the launcher — are restarted. Restarting is
  * what makes the upgrade visible.
  *
- * A pre-pointer install is converted once: `layout.mjs migrate` copies
- * config/data/workspace and the old DSH_HOME into shared/ (never moved, so the
- * old tree stays runnable until the health check passes). Later upgrades do no
- * migration at all.
+ * The layout is pointer-only: an upgrade installs a release, seeds the shared
+ * directories on a first run and never copies anything from an older install.
  *
  *   node upgrade-local.mjs --stage <package tree> [--layout-root ~/.dsh]
- *        [--app-root <old install>] [--dsh-home <old home>] [--port 80]
+ *        [--port 80]
  *        [--gate-port 80] [--gate-password <pw>]
  *        [--interop-bind IP] [--interop-port 8765] [--interop-provider p]
  *        [--interop-model m] [--llm-provider p] [--llm-model m] [--llm-effort e]
@@ -178,37 +176,13 @@ if (!existsSync(path.join(stage, 'dsh-mesh.mjs'))) {
   process.exit(2)
 }
 
-const reportedRoot = typeof args['app-root'] === 'string' && args['app-root'] !== '' ? path.resolve(args['app-root']) : ''
 const root = path.resolve(
   typeof args['layout-root'] === 'string' && args['layout-root'] !== ''
     ? args['layout-root']
     : process.env.DSH_MESH_LAYOUT_ROOT
       ? process.env.DSH_MESH_LAYOUT_ROOT
-      : reportedRoot !== '' && existsSync(path.join(reportedRoot, 'dsh-mesh.json'))
-        ? reportedRoot
-        : path.join(os.homedir(), '.dsh'),
+      : path.join(os.homedir(), '.dsh'),
 )
-
-/**
- * The pre-pointer install to convert, if the reported app root is one.
- *
- * Callers report the directory the machine runs from. On the pointer layout
- * that is `<root>/releases/<id>`, which is one of our own releases, not an old
- * install: treating it as a migration source made the copy and the target the
- * same directory (the 2026-11-19 upgrade failure). Only a root outside
- * `releases/` is migrated, exactly once, by `layout.mjs migrate`.
- * @param {string} candidate reported app root ('' when not given).
- * @param {string} layoutRoot stable install root.
- * @returns {string} the old install root, or '' when this is not a conversion.
- */
-function firstConversionSource(candidate, layoutRoot) {
-  if (candidate === '' || candidate === layoutRoot) return ''
-  const relative = path.relative(path.join(layoutRoot, 'releases'), candidate)
-  if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) return ''
-  return candidate
-}
-const legacyRoot = firstConversionSource(reportedRoot, root)
-const legacyHome = typeof args['dsh-home'] === 'string' && args['dsh-home'] !== '' ? path.resolve(args['dsh-home']) : ''
 const noRestart = args['no-restart'] === 'true'
 const gatePort = typeof args['gate-port'] === 'string' ? args['gate-port'] : (typeof args.port === 'string' ? args.port : '80')
 
@@ -241,27 +215,9 @@ const pointerFile = path.join(root, 'dsh-mesh.json')
 const pointerBefore = readJson(pointerFile)
 const previous = typeof pointerBefore?.active === 'string' && pointerBefore.active !== '' ? pointerBefore.active : ''
 
-// ── shared directories, then the one-time conversion ───────────────────────
+// ── shared directories ─────────────────────────────────────────────────────
 const shared = path.join(root, 'shared')
 for (const dir of ['config', 'data', 'home', 'workspace']) mkdirSync(path.join(shared, dir), { recursive: true })
-
-// A pre-pointer install is copied once, through `layout.mjs migrate`, before
-// any env file is seeded: the copy must see an empty shared/, and the script
-// that implements it ships with the release being installed.
-if (legacyRoot !== '') {
-  const migrateScript = path.join(stage, 'code', 'install', 'layout.mjs')
-  if (!existsSync(migrateScript)) {
-    process.stderr.write(`[upgrade] ${migrateScript} is missing; cannot migrate ${legacyRoot}\n`)
-    process.exit(2)
-  }
-  const migrateArgs = ['migrate', '--root', root, '--from', legacyRoot]
-  if (legacyHome !== '') migrateArgs.push('--home', legacyHome)
-  const result = spawnSync(process.execPath, [migrateScript, ...migrateArgs], { stdio: 'inherit', windowsHide: true })
-  if (!(result.status === 0 && !result.error)) {
-    process.stderr.write('[upgrade] migrating the old install failed; nothing was switched\n')
-    process.exit(1)
-  }
-}
 
 // ── seed the shared env files on a first install ────────────────────────────
 const envFile = path.join(shared, 'config', 'gate.env')
@@ -294,20 +250,31 @@ if (typeof args['interop-port'] === 'string' && args['interop-port'] !== '') {
 }
 
 // ── install the release tree once ───────────────────────────────────────────
-if (existsSync(releaseDir)) {
+// A package extracted directly into releases/<id> is already in place; that is
+// how install.sh runs. Everything else is moved (or copied across filesystems).
+const stageDir = path.resolve(stage)
+if (stageDir === releaseDir) {
   if (previous === `releases/${release}`) {
     process.stderr.write(`[upgrade] ${release} is already the active release\n`)
     process.exit(1)
   }
-  rmSync(releaseDir, { recursive: true, force: true })
+  log(`[upgrade] using the release already at ${releaseDir}`)
+} else {
+  if (existsSync(releaseDir)) {
+    if (previous === `releases/${release}`) {
+      process.stderr.write(`[upgrade] ${release} is already the active release\n`)
+      process.exit(1)
+    }
+    rmSync(releaseDir, { recursive: true, force: true })
+  }
+  mkdirSync(path.dirname(releaseDir), { recursive: true })
+  try {
+    renameSync(stage, releaseDir)
+  } catch {
+    cpSync(stage, releaseDir, { recursive: true, force: true })
+  }
+  log(`[upgrade] installed release ${release}`)
 }
-mkdirSync(path.dirname(releaseDir), { recursive: true })
-try {
-  renameSync(stage, releaseDir)
-} catch {
-  cpSync(stage, releaseDir, { recursive: true, force: true })
-}
-log(`[upgrade] installed release ${release}`)
 
 // The stage has just been moved into releases/: `process.execPath` may point
 // inside it (the activate script runs the staged node), so it no longer exists.

@@ -1897,7 +1897,7 @@ export class MeshService {
         member: member.id,
         mode,
       })
-      return { ok: true, job, member: identity, packagePath, layout: 'bluegreen' }
+      return { ok: true, job, member: identity, packagePath, layout: 'pointer' }
     }
     if (host === '') throw new Error('host is required')
     if (test) throw new Error('测试升级需要一个成员（要在成员的安装上演练），不能直接给裸 SSH 主机')
@@ -1909,7 +1909,7 @@ export class MeshService {
       member: null,
       mode,
     })
-    return { ok: true, job, member: null, packagePath, layout: 'bluegreen' }
+    return { ok: true, job, member: null, packagePath, layout: 'pointer' }
   }
 
   /**
@@ -2045,7 +2045,7 @@ export class MeshService {
   }
 
   /**
-   * Start one job for a blue-green target (blue-green members and plain hosts).
+   * Start one job for a member or a plain SSH host.
    *
    * The plan is built here, once: the queued job needs its release name and
    * size, and the runner must not hash a 300 MB package a second time.
@@ -2067,56 +2067,40 @@ export class MeshService {
   }
 
   /**
-   * Start the local upgrade, or a local blue-green deploy, whichever the
-   * install layout supports.
+   * Start the local upgrade.
    *
-   * A flat install (gateway) has no release symlink to switch: the package's
-   * own `upgrade-local.sh` copies the new tree over it. A blue-green install
-   * upgrades exactly like a member, using a local runner instead of SSH.
+   * The host runs the same in-place orchestrator as a member: the package's
+   * `upgrade-local.mjs` moves the tree into `releases/<id>`, rewrites the
+   * pointer and restarts the launcher-backed units.
    * @param {{member: object, packagePath: string, os: string, mode: 'install'|'upgrade', identity: object, acquire?: object}} input target.
    * @returns {Promise<object>} queued job and its layout.
    */
   async #startLocalJob(input) {
     const install = this.#localAppRoot()
     if (install === null) {
-      throw new Error('本机没有可识别的 dsh-mesh 安装目录（找不到 config/gate.env），无法升级本机')
+      throw new Error('本机没有可识别的 dsh-mesh 安装目录（找不到 dsh-mesh.json），无法升级本机')
     }
-    if (input.os === 'windows' && (install.layout === 'flat' || install.layout === 'pointer')) {
+    if (input.os === 'windows') {
       throw new Error('本机是 Linux 网关，不能安装 Windows 部署包')
     }
-    // The pointer layout runs the same in-place orchestrator as a flat install:
-    // the package's upgrade script moves the tree into releases/<id>, rewrites
-    // the pointer and restarts the launcher-backed units. A blue-green install
-    // still switches a symlink through the engine instead.
-    if (install.layout === 'flat' || install.layout === 'pointer') {
-      const job = await this.#queueJob({
-        mode: input.mode,
-        member: 'local',
-        plan: null,
-        request: {
-          kind: 'inplace',
-          inplace: {
-            package: input.packagePath,
-            appRoot: install.appRoot,
-            ...(input.acquire === undefined ? {} : { acquire: input.acquire }),
-          },
-        },
-        target: { host: '127.0.0.1', user: os.userInfo().username, port: null, os: 'linux', appRoot: install.appRoot },
-        services: ['dsh-web-app.service', 'dsh-web-gate.service', 'dsh-wireguard-control.service', 'dsh-interop.service'],
-        packagePath: input.packagePath,
-        release: typeof input.acquire?.name === 'string' ? input.acquire.name : path.basename(input.packagePath),
-      })
-      return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: install.layout }
-    }
-    if (input.acquire !== undefined) {
-      throw new Error('本机是蓝绿布局，latest tag 本机升级暂未支持；请改用本机部署包')
-    }
-    const job = await this.#startEngineJob({
-      request: { host: '127.0.0.1', local: true, package: input.packagePath, os: input.os, appRoot: install.appRoot, member: input.member.id },
-      member: input.member.id,
+    const job = await this.#queueJob({
       mode: input.mode,
+      member: 'local',
+      plan: null,
+      request: {
+        kind: 'inplace',
+        inplace: {
+          package: input.packagePath,
+          appRoot: install.appRoot,
+          ...(input.acquire === undefined ? {} : { acquire: input.acquire }),
+        },
+      },
+      target: { host: '127.0.0.1', user: os.userInfo().username, port: null, os: 'linux', appRoot: install.appRoot },
+      services: ['dsh-web-app.service', 'dsh-web-gate.service', 'dsh-wireguard-control.service'],
+      packagePath: input.packagePath,
+      release: typeof input.acquire?.name === 'string' ? input.acquire.name : path.basename(input.packagePath),
     })
-    return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: 'bluegreen' }
+    return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: 'pointer' }
   }
 
   /**
@@ -2205,22 +2189,13 @@ export class MeshService {
 
   /**
    * Locate the install that owns this plugin.
-   * @returns {{appRoot: string, layout: 'flat'|'bluegreen'|'pointer'}|null} install, or null in a source checkout.
+   * @returns {{appRoot: string, layout: 'pointer'}|null} install, or null in a source checkout.
    */
   #localAppRoot() {
     const inspect = (candidate) => {
       try {
-        const current = path.join(candidate, 'current')
-        if (existsSync(current) && existsSync(path.join(candidate, 'releases'))) {
-          return { appRoot: candidate, layout: 'bluegreen' }
-        }
-        // Pointer layout: the root owns dsh-mesh.json + releases/.
         if (existsSync(path.join(candidate, 'dsh-mesh.json')) && existsSync(path.join(candidate, 'releases'))) {
           return { appRoot: candidate, layout: 'pointer' }
-        }
-        // Flat install: config/gate.env and the packaged plugins sit together.
-        if (existsSync(path.join(candidate, 'config', 'gate.env')) && existsSync(path.join(candidate, 'plugins', 'dsh-mesh'))) {
-          return { appRoot: candidate, layout: 'flat' }
         }
       } catch {
         // A transient or unreadable candidate is simply not the install root.
@@ -2228,8 +2203,7 @@ export class MeshService {
       return null
     }
 
-    // The plugin can live inside the active release (blue-green) or a checkout;
-    // walk up from it first.
+    // The plugin can live inside the active release; walk up from it first.
     let candidate = path.resolve(this.repositoryRoot, '..')
     for (let depth = 0; depth < 5; depth += 1) {
       const found = inspect(candidate)
@@ -2242,7 +2216,7 @@ export class MeshService {
     // The running profile installs the plugin under
     // `<root>/shared/home/profiles/...`, which is farther away than the walk
     // above. DSH_HOME is `<root>/shared/home`, so walking its ancestors finds
-    // the pointer/flat root reliably.
+    // the pointer root reliably.
     candidate = path.resolve(this.home)
     for (let depth = 0; depth < 5; depth += 1) {
       const found = inspect(candidate)
@@ -2451,7 +2425,7 @@ export class MeshService {
   }
 
   /**
-   * Plan an SSH blue-green deployment without touching the network.
+   * Plan an SSH deployment without touching the network.
    * @param {object} request deploy options.
    * @returns {Promise<object>} plan.
    */
@@ -2460,7 +2434,7 @@ export class MeshService {
   }
 
   /**
-   * Start an SSH blue-green deployment.
+   * Start an SSH deployment.
    * @param {object} request deploy options.
    * @returns {Promise<object>} job.
    */
@@ -2526,8 +2500,8 @@ export class MeshService {
    *
    * This is the escape hatch for "the upgrade came up broken": the panel that
    * started the upgrade is still alive (it is a different machine), so it can
-   * put the member back without a shell. A flat install has no blue-green
-   * `previous`, so it is refused with a pointer at its upgrade backup.
+   * put the member back without a shell. The local gateway rolls back through
+   * its own acceptance page or `rollback-local.mjs`.
    * @param {{member: string}} request member id, VPN address, or name.
    * @returns {Promise<object>} rollback job.
    */
@@ -2538,7 +2512,7 @@ export class MeshService {
     const found = everyone.find(entry => entry.id === member || entry.name === member || entry.ip === member)
     if (found === undefined) throw new Error(`member not found: ${member}`)
     if (found.kind === 'self') {
-      throw new Error('本机是平铺安装，没有 blue-green 的上一版可切；回滚用 .upgrade-backup 里的备份恢复')
+      throw new Error('本机回滚请执行：node <安装根>/rollback-local.mjs --root <安装根>（面板的本机回滚入口尚未实现）')
     }
     if (found.dsh !== true) {
       throw new Error(`成员 ${found.name} 的网关没有应答，无法在线回滚；SSH 上去执行 code/deploy/cli.mjs rollback`)

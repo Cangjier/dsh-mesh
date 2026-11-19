@@ -209,11 +209,11 @@ async function acquireRelease(context) {
 /**
  * In-place upgrade of the machine the panel runs on.
  *
- * A flat install (`<root>/config/gate.env` next to `start.sh`, no `current`
- * symlink) cannot switch a release symlink atomically: the package's own
- * upgrade script copies the new tree over the old one, rewires the profile and
- * reinstalls the units. The runner only mirrors that script's output into the
- * job directory, so the panel keeps showing progress while dsh-web restarts.
+ * The local install (`<root>/dsh-mesh.json` + `releases/`) runs the same
+ * `upgrade-local.mjs` as a member: the package is moved into a new release, the
+ * pointer is rewritten, the units restart and a failed check rolls back. The
+ * runner only mirrors that script's output into the job directory, so the panel
+ * keeps showing progress while dsh-web restarts.
  * @param {object} context run context.
  * @returns {Promise<void>} completion.
  */
@@ -293,50 +293,28 @@ async function runInplace(context) {
   meter('解压安装包', { done: entries, total: entries, percent: 100 })
   await mark('prepare', 'succeeded', entries > 0 ? `${String(entries)} 项` : '已解压')
 
-  // Run the script shipped in the package being installed: it is the copy
-  // that knows the new package's layout, including which layers a rollback
-  // has to restore. The installed plugin's copy is the fallback for packages
-  // built before the script travelled with them. (This used to be the other
-  // way round; the 2026-11-16 rollback failed because the old installed script
-  // did not back up app/runtime/web, and the fix could not take effect until
-  // after an upgrade that used it.)
-  // The pointer layout has exactly one implementation, upgrade-local.mjs.
-  // A package that predates it still carries the shell shim; run whichever is
-  // there, so a single upgrade can move the machine onto the new layout.
-  const packedMjs = path.join(stage, 'code', 'deploy', 'upgrade-local.mjs')
-  const packed = path.join(stage, 'code', 'deploy', 'upgrade-local.sh')
-  const hasMjs = await stat(packedMjs).then(() => true).catch(() => false)
-  const source = hasMjs
-    ? packedMjs
-    : await stat(packed)
-      .then(() => packed)
-      .catch(async () => {
-        const installed = path.join(HERE, 'upgrade-local.sh')
-        const found = await stat(installed).then(() => true).catch(() => false)
-        if (!found) throw new Error(`upgrade script is missing: neither ${packedMjs}, ${packed} nor ${installed}`)
-        return installed
-      })
-  // Copy the script (and its profile-wiring helper) out of the install before
-  // running it: the copy step below replaces plugins/dsh-mesh, and bash reads
-  // its script lazily, so running the in-place file would edit it under the
+  // The package carries exactly one upgrade implementation.
+  const source = path.join(stage, 'code', 'deploy', 'upgrade-local.mjs')
+  if (!existsSync(source)) throw new Error(`upgrade script is missing: ${source}`)
+  // Copy it out of the install before running: the step below replaces
+  // plugins/dsh-mesh, so running the in-place file would edit it under the
   // interpreter's feet.
   const tools = path.join(jobDir, 'tools')
   await rm(tools, { recursive: true, force: true })
   await mkdir(tools, { recursive: true })
-  const script = path.join(tools, hasMjs ? 'upgrade-local.mjs' : 'upgrade-local.sh')
+  const script = path.join(tools, 'upgrade-local.mjs')
   await cp(source, script)
   await chmod(script, 0o755)
   await mark('activate', 'running')
   meter('重启服务并检查', { percent: 99, indeterminate: true })
-  const args = ['--app-root', String(settings.appRoot ?? ''), '--job-dir', jobDir, '--stage', stage]
+  const args = ['--stage', stage, '--layout-root', String(settings.appRoot ?? '')]
   // Escape hatch for validating the script against a sandbox root: copy and
   // rewire only, no service is touched.
   if (process.env.DSH_MESH_UPGRADE_NO_RESTART === '1') args.push('--no-restart')
-  if (typeof settings.dshHome === 'string' && settings.dshHome !== '') args.push('--dsh-home', settings.dshHome)
   if (typeof settings.port === 'string' && settings.port !== '') args.push('--port', settings.port)
   if (typeof settings.interopToken === 'string' && settings.interopToken !== '') args.push('--interop-token', settings.interopToken)
   await note(`running ${path.relative(stage, script)}`)
-  await run(hasMjs ? process.execPath : 'bash', [script, ...args], line => {
+  await run(process.execPath, [script, ...args], line => {
     if (/^DSH-MESH-EXTRACT /u.test(line)) return
     note(line).catch(() => {})
   })

@@ -21,7 +21,6 @@
  *
  *   prepare  --release <id> [--release-dir DIR]
  *            [--services name=role,...] [--no-units]
- *   migrate  --from OLD [--home OLD_HOME]
  *   activate --release <id> [--port 80] [--from VERSION] [--to VERSION]
  *   rollback
  *   status
@@ -33,7 +32,7 @@
  * @module dsh-mesh/install/layout
  */
 
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -152,15 +151,6 @@ function copyTree(source, destination) {
   execFileSync(process.platform === 'win32' ? 'cmd.exe' : 'cp', process.platform === 'win32'
     ? ['/d', '/c', 'xcopy', source, destination, '/E', '/I', '/Q', '/H', '/K', '/Y']
     : ['-a', `${source}/.`, destination], { stdio: 'ignore' })
-}
-
-/** Check whether a directory has any entry. */
-function hasEntries(dir) {
-  try {
-    return readdirSync(dir).length > 0
-  } catch {
-    return false
-  }
 }
 
 /**
@@ -297,153 +287,6 @@ function assertRelease(releaseDir) {
   for (const rel of ['manifest.json', 'gate/server.mjs', LAUNCHER]) {
     if (!existsSync(path.join(releaseDir, rel))) throw new Error(`release is incomplete: ${path.join(releaseDir, rel)} is missing`)
   }
-}
-
-/** Is this path inside that directory (or the directory itself)? */
-function inside(parent, child) {
-  const relative = path.relative(parent, child)
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
-}
-
-/**
- * Can this candidate be the source of a first-conversion copy?
- *
- * A symlink cannot: DSH_HOME contains plugin links (junctions on Windows) that
- * must be rebuilt from the release, not copied, and a link may point back at
- * the target itself. A source that resolves to the target would make the copy
- * a no-op followed by a delete — the 2026-11-19 upgrade failure.
- * @param {string} candidate source path.
- * @param {string} target destination in shared/.
- * @returns {boolean} whether the candidate is usable.
- */
-function isCopyable(candidate, target) {
-  if (candidate === '' || !existsSync(candidate)) return false
-  try {
-    if (lstatSync(candidate).isSymbolicLink()) return false
-    if (existsSync(target) && realpathSync(candidate) === realpathSync(target)) return false
-  } catch {
-    return false
-  }
-  return true
-}
-
-/**
- * Copy one directory into shared/, atomically enough to retry.
- *
- * Writes a sibling `.partial-<pid>` and renames it, so a crash never leaves a
- * half directory that the next run would mistake for migrated state. A source
- * that produced no copy at all leaves the target untouched.
- * @param {string} source source directory.
- * @param {string} target destination below shared/.
- * @returns {boolean} whether the copy happened.
- */
-function copyIntoShared(source, target) {
-  const partial = `${target}.partial-${String(process.pid)}`
-  rmSync(partial, { recursive: true, force: true })
-  cpSync(source, partial, {
-    recursive: true,
-    force: true,
-    filter: (src) => {
-      try {
-        if (lstatSync(src).isSymbolicLink()) return false
-      } catch {
-        return false
-      }
-      return path.basename(src) !== 'node_modules'
-    },
-  })
-  if (!existsSync(partial)) return false
-  rmSync(target, { recursive: true, force: true })
-  renameSync(partial, target)
-  return true
-}
-
-/**
- * Point the copied env files at shared/ instead of the old install.
- *
- * gate.env and interop.env carry absolute paths (TLS certificates, the DSH
- * token file); after the copy those files live under shared/ and the old tree
- * may be deleted once the upgrade is accepted.
- * @param {string} from old install root.
- * @param {string|null} oldHome old DSH_HOME, if known.
- * @param {string} shared the layout's shared directory.
- * @returns {string[]} env files that changed.
- */
-function rewriteLegacyPaths(from, oldHome, shared) {
-  const legacyPrefix = from.endsWith(path.sep) ? from : `${from}${path.sep}`
-  const sep = path.sep
-  const rewrite = text => {
-    // The longer prefixes first: `<old>/shared/data` must not become
-    // `<old>/data` through a shorter match.
-    let out = text
-      .split(`${legacyPrefix}shared${sep}config${sep}`).join(`${shared}${sep}config${sep}`)
-      .split(`${legacyPrefix}shared${sep}data${sep}`).join(`${shared}${sep}data${sep}`)
-      .split(`${legacyPrefix}shared${sep}workspace`).join(`${shared}${sep}workspace`)
-      .split(`${legacyPrefix}shared${sep}home`).join(path.join(shared, 'home'))
-      .split(`${legacyPrefix}config${sep}`).join(`${shared}${sep}config${sep}`)
-      .split(`${legacyPrefix}data${sep}`).join(`${shared}${sep}data${sep}`)
-      .split(`${legacyPrefix}workspace`).join(`${shared}${sep}workspace`)
-    if (oldHome !== null && oldHome !== '') out = out.split(oldHome).join(path.join(shared, 'home'))
-    return out
-  }
-  const rewritten = []
-  for (const name of ['gate.env', 'interop.env']) {
-    const file = path.join(shared, 'config', name)
-    if (!existsSync(file)) continue
-    const before = readFileSync(file, 'utf8')
-    const after = rewrite(before)
-    if (after === before) continue
-    writeFileSync(file, after, { mode: 0o600 })
-    rewritten.push(name)
-  }
-  return rewritten
-}
-
-/**
- * Adopt an existing install into shared/ (the one-time conversion).
- * @param {string} from old install root.
- * @param {string} home old DSH_HOME ('' to derive it from `from`).
- * @param {string} root layout root.
- * @returns {{migrated: string[], rewritten: string[]}} what was copied and rewritten.
- */
-function migrateShared(from, home, root) {
-  if (from === root || inside(path.join(root, 'releases'), from)) {
-    throw new Error('the migration source must be a pre-pointer install, not this layout or one of its releases')
-  }
-  const shared = path.join(root, 'shared')
-  for (const dir of ['config', 'data', 'home', 'workspace']) mkdirSync(path.join(shared, dir), { recursive: true })
-  const migrated = []
-  for (const dir of ['config', 'data', 'workspace']) {
-    const target = path.join(shared, dir)
-    if (hasEntries(target)) continue
-    const source = [path.join(from, 'shared', dir), path.join(from, dir)].find(candidate => isCopyable(candidate, target))
-    if (source === undefined) continue
-    if (copyIntoShared(source, target)) migrated.push(`${dir} <- ${source}`)
-  }
-  const oldHome = home !== ''
-    ? path.resolve(home)
-    : [path.join(from, 'shared', 'home'), path.join(from, 'home')].find(candidate => hasEntries(candidate)) ?? null
-  const homeTarget = path.join(shared, 'home')
-  if (oldHome !== null && hasEntries(oldHome) && !hasEntries(homeTarget) && isCopyable(oldHome, homeTarget)
-    && copyIntoShared(oldHome, homeTarget)) {
-    migrated.push(`home <- ${oldHome}`)
-  }
-  return { migrated, rewritten: rewriteLegacyPaths(from, oldHome, shared) }
-}
-
-/**
- * `migrate` implementation: the one-time conversion from a pre-pointer install.
- * @param {object} args parsed arguments.
- * @param {string} root layout root.
- */
-function migrate(args, root) {
-  const from = typeof args.from === 'string' && args.from.trim() !== '' ? path.resolve(args.from) : ''
-  if (from === '') throw new Error('--from is required')
-  if (!existsSync(from)) throw new Error(`the old install does not exist: ${from}`)
-  const home = typeof args.home === 'string' ? args.home : ''
-  const shared = path.join(root, 'shared')
-  const result = migrateShared(from, home, root)
-  process.stdout.write(`${JSON.stringify({ ok: true, root, from, shared, ...result }, null, 2)}\n`)
 }
 
 /** `prepare` implementation. */
@@ -698,13 +541,12 @@ function status(args, root) {
 const args = parseArgs(process.argv.slice(2))
 const command = process.argv[2]
 if (command === undefined || command.startsWith('--')) {
-  process.stderr.write('usage: layout.mjs prepare|migrate|activate|rollback|status [--root DIR] ...\n')
+  process.stderr.write('usage: layout.mjs prepare|activate|rollback|status [--root DIR] ...\n')
   process.exit(2)
 }
 const root = layoutRoot(args)
 try {
   if (command === 'prepare') prepare(args, root)
-  else if (command === 'migrate') migrate(args, root)
   else if (command === 'activate') activate(args, root)
   else if (command === 'rollback') rollback(args, root)
   else if (command === 'status') status(args, root)

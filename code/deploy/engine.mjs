@@ -7,7 +7,7 @@
  *                 shared/ directories, update service definitions, and
  *                 validate the new tree. The release itself keeps no links:
  *                 the launcher names shared/ through the environment.
- *   2. activate — switch `current` to the new release, restart services with
+ *   2. activate — switch the pointer to the new release, restart services with
  *                 the gateway last, and health-check. On failure the previous
  *                 release is switched back and the services are restarted.
  *
@@ -49,8 +49,8 @@ const DEFAULT_SERVICES = {
   linux: [
     // The package's start.sh runs the gate, which spawns the private DSH; the
     // split services belong to the hand-installed layout, not to a package.
-    { name: 'dsh-wireguard-control.service', role: 'control', command: 'start-control.sh' },
-    { name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' },
+    { name: 'dsh-wireguard-control.service', role: 'control' },
+    { name: 'dsh-web-gate.service', role: 'gate' },
   ],
   windows: [
     // The supervisor service owns the whole stack: it runs start-stack.ps1
@@ -58,8 +58,8 @@ const DEFAULT_SERVICES = {
     // otherwise. The old split DSH-Web-App service duplicated the gate's own
     // DSH spawn and is removed by the deploy. The control panel is its own SCM
     // service so restarting the gateway never takes 51821 down with it.
-    { name: 'DSH-WireGuard-Control', role: 'control', command: 'dsh-wireguard-control-service.exe' },
-    { name: 'DSH-Mesh', role: 'gate', command: 'dsh-mesh-service.exe' },
+    { name: 'DSH-WireGuard-Control', role: 'control' },
+    { name: 'DSH-Mesh', role: 'gate' },
   ],
 }
 
@@ -500,19 +500,14 @@ export function normalizeOs(value) {
 }
 
 /**
- * Strip a release symlink from an install root.
- *
- * A healthy member reports the release it is running from (`<root>/current`),
- * and the unit's WorkingDirectory is that symlink too. Every deployment path
- * needs the stable root instead: it is the directory that owns `releases/` and
- * `shared/`, and pointing a deploy at `current` would nest a second install.
+ * Trim a reported install root.
  * @param {string} value reported root.
  * @returns {string} stable install root ('' when empty).
  */
 export function normalizeInstallRoot(value) {
   const text = typeof value === 'string' ? value.trim() : ''
   if (text === '') return ''
-  return text.replace(/[\\/]+current$/iu, '').replace(/[\\/]+$/u, '')
+  return text.replace(/[\\/]+$/u, '')
 }
 
 /**
@@ -529,9 +524,9 @@ function inferRole(name) {
 
 /**
  * Validate and order services: control, DSH, then the gateway last.
- * @param {Array<string|{name:string,role?:string,command?:string}>|undefined} input services.
+ * @param {Array<string|{name:string,role?:string}>|undefined} input services.
  * @param {'linux'|'windows'} os target OS.
- * @returns {Array<{name:string,role:'control'|'dsh'|'gate',command:string}>} ordered services.
+ * @returns {Array<{name:string,role:'control'|'dsh'|'gate'}>} ordered services.
  */
 export function normalizeServices(input, os) {
   const source = input === undefined ? DEFAULT_SERVICES[os] : input
@@ -549,10 +544,7 @@ export function normalizeServices(input, os) {
     seen.add(name)
     const role = raw.role ?? inferRole(name)
     if (!(role in ROLE_ORDER)) throw new Error(`service ${name} has unknown role ${String(role)}`)
-    const command = typeof raw.command === 'string' && raw.command.trim() !== ''
-      ? raw.command.trim()
-      : os === 'linux' ? 'start.sh' : 'dsh-mesh-service.exe'
-    return { name, role, command }
+    return { name, role }
   })
   if (!services.some(service => service.role === 'gate')) {
     throw new Error('the service list must include one gateway service (role "gate")')
@@ -594,14 +586,11 @@ export async function findLatestPackage(repositoryRoot, os) {
 }
 
 /**
- * The stable install root that owns `releases/`, `shared/` and the pointer.
+ * The install root that owns `releases/`, `shared/` and the pointer.
  *
- * A member may report the directory it currently runs from: the release
- * (`…/releases/<id>`), or the `current` link of a legacy blue-green install
- * (`…/releases/<id>/current` after one nested itself into a pointer release).
- * Releases always live in `<root>/releases`, so the segment before it is the
- * stable root; anything else keeps the historical "parent of the directory"
- * rule that maps `<home>/.dsh/dsh-mesh` to `<home>/.dsh`.
+ * A member usually reports the root itself. A gate that reports the release it
+ * runs from (`<root>/releases/<id>`) resolves to the segment before
+ * `releases/`, because releases always live below the root.
  * @param {string} appRoot reported application root.
  * @param {'linux'|'windows'} os target OS, for path syntax.
  * @returns {string} layout root.
@@ -616,9 +605,7 @@ export function layoutRootFor(appRoot, os) {
     const prefix = parts.slice(0, index).join(separator)
     return /^[A-Za-z]:$/u.test(prefix) ? `${prefix}${separator}` : prefix
   }
-  const base = os === 'linux' ? path.posix.basename(root) : path.win32.basename(root)
-  if (base === '.dsh') return root
-  return os === 'linux' ? path.posix.dirname(root) : path.win32.dirname(root)
+  return root
 }
 
 /**
@@ -782,10 +769,6 @@ export async function buildDeployPlan(options) {
     appRoot,
     layoutRoot,
     serviceUser,
-    shared: `${appRoot}${os === 'linux' ? '/shared' : '\\shared'}`,
-    current: `${appRoot}${os === 'linux' ? '/current' : '\\current'}`,
-    previous: `${appRoot}${os === 'linux' ? '/previous' : '\\previous'}`,
-    releases: `${appRoot}${os === 'linux' ? '/releases' : '\\releases'}`,
     services,
     scope,
     gatePort,
@@ -861,8 +844,7 @@ export async function probeTarget(options) {
       '  if ($svc.PathName -match \'^"([^"]+)"\') { $exe = $matches[1] } else { $exe = ($svc.PathName -split \' \')[0] }',
       '  $root = Split-Path -Parent $exe',
       '}',
-      'if (-not $root) { $root = Join-Path $env:USERPROFILE \'.dsh\\dsh-mesh\' }',
-      '$root = $root -replace \'(?i)\\\\current$\', \'\'',
+      'if (-not $root) { $root = Join-Path $env:USERPROFILE \'.dsh\' }',
       'Write-Output $root',
       'Write-Output $env:USERNAME',
     ].join('\n')
@@ -875,7 +857,7 @@ export async function probeTarget(options) {
     const [root = ''] = stdout.split(/\r?\n/u)
     const appRoot = normalizeInstallRoot(root) !== ''
       ? normalizeInstallRoot(root)
-      : `C:\\Users\\${user ?? 'Public'}\\.dsh\\dsh-mesh`
+      : `C:\\Users\\${user ?? 'Public'}\\.dsh`
     return { appRoot, serviceUser: undefined }
   }
   const script = `#!/usr/bin/env bash
@@ -892,11 +874,8 @@ for unit in dsh-web-gate.service dsh-web.service dsh-mesh.service; do
   fi
 done
 if [ -z "$root" ]; then
-  root="\${HOME:-/root}/.dsh/dsh-mesh"
+  root="\${HOME:-/root}/.dsh"
 fi
-case "$root" in
-  */current) root=$(dirname "$root") ;;
-esac
 printf '%s\\n%s\\n' "$root" "$runuser"
 `
   const { stdout } = await runner.runProcess('ssh', [
@@ -906,8 +885,8 @@ printf '%s\\n%s\\n' "$root" "$runuser"
   ], script)
   const [root = '', serviceUser = ''] = stdout.split(/\r?\n/u)
   const fallback = user !== undefined && user !== 'root'
-    ? `/home/${user}/.dsh/dsh-mesh`
-    : '/root/.dsh/dsh-mesh'
+    ? `/home/${user}/.dsh`
+    : '/root/.dsh'
   return {
     appRoot: root.trim() !== '' ? root.trim() : fallback,
     serviceUser: serviceUser.trim() !== '' ? serviceUser.trim() : undefined,
@@ -1015,7 +994,6 @@ exec "$NODE" "$STAGE/code/deploy/upgrade-local.mjs" \
   --stage "$STAGE" \
   --layout-root "$LAYOUT_ROOT" \
   --release ${sh(plan.release)} \
-  --app-root ${sh(plan.appRoot)} \
   --port ${sh(plan.gatePort)} \
   --gate-port ${sh(plan.gatePort)} \
   --gate-password ${sh(plan.gatePassword || '')} \
@@ -1024,28 +1002,15 @@ exec "$NODE" "$STAGE/code/deploy/upgrade-local.mjs" \
 }
 
 /**
- * Build the Linux rehearsal script for a test upgrade.
+ * Retired test upgrade.
  *
- * A gateway upgrade runs `code/deploy/upgrade-local.sh` because a flat install
- * has no release symlink to switch; runner.mjs prefers the copy shipped in the
- * package being installed and falls back to the installed plugin's copy.
- * Members are blue-green, so testing there would exercise a different code
- * path entirely — the gap that let a flat-only breakage ship. This script
- * therefore rebuilds a flat install inside a sandbox on the member: the
- * package is extracted, the member's *current* release files and its real
- * `gate.env` / profile manifest are copied in, and the same script source the
- * gateway uses is run from a copy with `--stage`. A second, deliberately
- * failing run proves `restore()` puts the files back.
- *
- * It runs before `prepare`, so a package that cannot do a flat upgrade fails
- * the job before the member's live profile or `gate.env` are touched.
- * @param {object} plan deployment plan.
+ * The pointer layout rehearses on every real upgrade: a bad release fails its
+ * health check and rolls back. A separate sandbox rehearsal no longer has a
+ * code path to exercise, so the job fails with an explicit message instead of
+ * pretending it validated anything.
  * @returns {string} shell script.
  */
-export function buildLinuxRehearseScript(plan) {
-  // The pointer layout has no separate flat rehearsal: every upgrade goes
-  // through the same extract/pointer/restart path, and a failed activation
-  // rolls back to the previous release automatically.
+export function buildLinuxRehearseScript() {
   return `#!/usr/bin/env bash
 set -euo pipefail
 echo 'test upgrade is retired: the pointer layout rehearses on every real upgrade and rolls back on failure' >&2
@@ -1139,7 +1104,7 @@ $ReleaseDir = Join-Path (Join-Path $LayoutRoot 'releases') ${ps(plan.release)}
 $stageNode = Join-Path $Stage 'runtime\\node\\node.exe'
 if (-not (Test-Path $stageNode)) { $stageNode = (Get-Command node -ErrorAction Stop).Source }
 $port = ${ps(plan.gatePort)}
-& $stageNode (Join-Path $Stage 'code\\deploy\\upgrade-local.mjs') --stage $Stage --layout-root $LayoutRoot --release ${ps(plan.release)} --app-root ${ps(plan.appRoot)} --port $port --gate-port $port --gate-password ${ps(plan.gatePassword || '')} --services ${ps(serviceList)}${interop}${credentials}${llm} --no-restart
+& $stageNode (Join-Path $Stage 'code\\deploy\\upgrade-local.mjs') --stage $Stage --layout-root $LayoutRoot --release ${ps(plan.release)} --port $port --gate-port $port --gate-password ${ps(plan.gatePassword || '')} --services ${ps(serviceList)}${interop}${credentials}${llm} --no-restart
 if ($LASTEXITCODE -ne 0) { throw "pointer switch failed (exit $LASTEXITCODE)" }
 # upgrade-local.mjs moved the staging tree into $ReleaseDir (and deleted it on
 # a rename), so nothing below may resolve through the staging path. Keep a node
@@ -1255,9 +1220,9 @@ export function describePlan(plan) {
       plan.packageOnTarget === true
         ? `use the package already on the target (${plan.package.path}); no download or upload`
         : `obtain ${plan.package.archive ?? path.basename(plan.package.path)}: download from the release when configured, else upload to ${plan.remotePackage}`,
-      `extract and prepare ${plan.releases}/${plan.release} (no service switch)`,
-      `update shared config and service definitions for ${plan.appRoot}/current`,
-      `switch ${plan.current} to ${plan.release}`,
+      `extract and prepare ${plan.layoutRoot}/.staging/${plan.release} (no service switch)`,
+      `update shared config and service definitions for ${plan.layoutRoot}`,
+      `switch the pointer to ${plan.release}`,
       ...plan.services
         .filter(service => plan.scope === 'all' || service.role !== 'gate')
         .map(service => `restart ${service.name} (${service.role})`),
@@ -1734,10 +1699,9 @@ export class LocalRunner {
 export function linuxNodeProbeScript(appRoot) {
   const root = String(appRoot ?? '').replace(/[\\/]+$/u, '')
   const candidates = [
-    ...(root === '' ? [] : [`${root}/current/runtime/node/bin/node`, `${root}/current/runtime/node/node`, `${root}/runtime/node/bin/node`, `${root}/runtime/node/node`]),
-    '$HOME/.dsh/dsh-mesh/current/runtime/node/bin/node',
-    '$HOME/.dsh/dsh-mesh/current/runtime/node/node',
-    '$HOME/.dsh/dsh-person-web/current/runtime/node/bin/node',
+    ...(root === '' ? [] : [`${root}/runtime/node/bin/node`, `${root}/runtime/node/node`]),
+    '$HOME/.dsh/runtime/node/bin/node',
+    '$HOME/.dsh/runtime/node/node',
   ]
   return [
     'for candidate in \\',
@@ -1758,11 +1722,10 @@ export function linuxNodeProbeScript(appRoot) {
  */
 export function windowsNodeProbeScript(appRoot) {
   const root = String(appRoot ?? '').replace(/[\\/]+$/u, '')
-  const quoted = root === '' ? [] : [ps(`${root}\\current\\runtime\\node\\node.exe`), ps(`${root}\\runtime\\node\\node.exe`)]
+  const quoted = root === '' ? [] : [ps(`${root}\\runtime\\node\\node.exe`)]
   const candidates = [
     ...quoted,
-    "(Join-Path $env:USERPROFILE '.dsh\\dsh-mesh\\current\\runtime\\node\\node.exe')",
-    "(Join-Path $env:USERPROFILE '.dsh\\dsh-person-web\\current\\runtime\\node\\node.exe')",
+    "(Join-Path $env:USERPROFILE '.dsh\\runtime\\node\\node.exe')",
   ]
   return `$ErrorActionPreference = 'Stop'
 $candidates = @(
@@ -1880,7 +1843,7 @@ export function removeDownloadDirCommand(plan, remoteDir) {
  *
  * Cleanup is deliberately narrow: the staging tree, the downloader's temp
  * directory, the uploaded/downloaded archive, and the ephemeral credentials
- * copy. It never touches `releases/`, `current` or the shared data, so a
+ * copy. It never touches `releases/`, the pointer or the shared data, so a
  * cancelled upgrade leaves the member on the version it was running.
  * @param {object} plan deployment plan.
  * @returns {{os: 'linux'|'windows', script: string}|null} cleanup script, or null when there is nothing to remove.
@@ -2336,7 +2299,7 @@ export class DeployManager {
       state.phase = 'activate'
       meter('切换并重启服务', { percent: 99, indeterminate: true })
       await mark('activate', 'running')
-      await log('activate: switch current, restart services with the gateway last')
+      await log('activate: switch the pointer, restart services with the gateway last')
       await runner.script(scripts.activate, plan.os, line => note('activate', line))
       await mark('activate', 'succeeded')
       // The job is done: leave the shared meter at 100% instead of the

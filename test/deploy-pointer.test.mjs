@@ -21,9 +21,9 @@ const plan = {
   gatePort: '80',
   gatePassword: 'secret',
   services: [
-    { name: 'dsh-wireguard-control.service', role: 'control', command: 'start.sh' },
-    { name: 'dsh-web-app.service', role: 'dsh', command: 'start-dsh.sh' },
-    { name: 'dsh-web-gate.service', role: 'gate', command: 'start.sh' },
+    { name: 'dsh-wireguard-control.service', role: 'control' },
+    { name: 'dsh-web-app.service', role: 'dsh' },
+    { name: 'dsh-web-gate.service', role: 'gate' },
   ],
   interop: { bind: '10.66.66.2', port: 8765, provider: 'deepseek-account', model: 'deepseek-flash' },
   remoteCredentials: '/tmp/dsh-mesh-abc.account',
@@ -97,7 +97,7 @@ test('Windows prepare stages the package and never registers a service', async (
 
 test('Windows activate switches the pointer, then installs the service against the root', async () => {
   const { buildWindowsActivateScript } = await import('../code/deploy/engine.mjs')
-  const script = buildWindowsActivateScript({ ...plan, layoutRoot: 'C:\\Users\\Admin\\.dsh', appRoot: 'C:\\Users\\Admin\\.dsh\\dsh-mesh', services: [{ name: 'DSH-Mesh', role: 'gate', command: 'dsh-mesh-service.exe' }] })
+  const script = buildWindowsActivateScript({ ...plan, layoutRoot: 'C:\\Users\\Admin\\.dsh', appRoot: 'C:\\Users\\Admin\\.dsh\\dsh-mesh', services: [{ name: 'DSH-Mesh', role: 'gate' }] })
   assert.match(script, /upgrade-local\.mjs/u)
   assert.match(script, /--services 'DSH-Mesh=gate'/u)
   assert.match(script, /--no-restart/u)
@@ -125,16 +125,13 @@ test('Windows rollback delegates to the stable rollback orchestrator', async () 
   assert.doesNotMatch(script, /current/u)
 })
 
-test('the layout root is derived from whatever the member reports', () => {
-  // A member may report its release directory or a legacy `current` link; both
-  // must plan against the stable `.dsh` root, never nest one release in another.
+test('the layout root is the install root, or the parent of a release path', () => {
   assert.equal(layoutRootFor('/root/.dsh', 'linux'), '/root/.dsh')
   assert.equal(layoutRootFor('/root/.dsh/releases/20261118074449-bd82d5cb', 'linux'), '/root/.dsh')
-  assert.equal(layoutRootFor('/root/.dsh/dsh-mesh', 'linux'), '/root/.dsh')
-  assert.equal(layoutRootFor('C:\\Users\\Admin\\.dsh\\releases\\20261118071638-d90f0bcc', 'windows'), 'C:\\Users\\Admin\\.dsh')
-  assert.equal(layoutRootFor('C:\\Users\\Admin\\.dsh\\releases\\20261118071638-d90f0bcc\\current', 'windows'), 'C:\\Users\\Admin\\.dsh')
-  assert.equal(layoutRootFor('C:\\Users\\Admin\\.dsh\\dsh-mesh', 'windows'), 'C:\\Users\\Admin\\.dsh')
+  assert.equal(layoutRootFor('/opt/dsh-mesh', 'linux'), '/opt/dsh-mesh')
   assert.equal(layoutRootFor('C:\\Users\\Admin\\.dsh', 'windows'), 'C:\\Users\\Admin\\.dsh')
+  assert.equal(layoutRootFor('C:\\Users\\Admin\\.dsh\\releases\\20261118071638-d90f0bcc', 'windows'), 'C:\\Users\\Admin\\.dsh')
+  assert.equal(layoutRootFor('C:\\dsh-mesh\\releases\\20261118071638-d90f0bcc', 'windows'), 'C:\\dsh-mesh')
 })
 
 test('the member reports the install root, not the release it runs from', () => {

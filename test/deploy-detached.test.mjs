@@ -170,10 +170,9 @@ test('LocalRunner copies the package and runs its script in place', async () => 
   }
 })
 
-test('a release path is reduced to the stable install root', async () => {
-  assert.equal(normalizeInstallRoot('/root/.dsh/dsh-mesh/current'), '/root/.dsh/dsh-mesh')
-  assert.equal(normalizeInstallRoot('C:\\Users\\Admin\\.dsh\\dsh-mesh\\current'), 'C:\\Users\\Admin\\.dsh\\dsh-mesh')
+test('a reported path is trimmed and a release plans against its root', async () => {
   assert.equal(normalizeInstallRoot('/opt/dsh-mesh/'), '/opt/dsh-mesh')
+  assert.equal(normalizeInstallRoot('C:\\dsh-mesh\\'), 'C:\\dsh-mesh')
   assert.equal(normalizeInstallRoot(''), '')
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-root-'))
   try {
@@ -182,13 +181,15 @@ test('a release path is reduced to the stable install root', async () => {
     const plan = await buildDeployPlan({
       host: '10.66.66.2',
       package: pkg,
-      appRoot: '/root/.dsh/dsh-mesh/current',
+      appRoot: '/root/.dsh/releases/20261118074449-bd82d5cb',
       os: 'linux',
       repositoryRoot: process.cwd(),
     })
-    assert.equal(plan.appRoot, '/root/.dsh/dsh-mesh')
-    assert.equal(plan.current, '/root/.dsh/dsh-mesh/current')
-    assert.equal(plan.releases, '/root/.dsh/dsh-mesh/releases')
+    // The gate may report the release it runs from; the plan still targets the
+    // stable root, and there is no `current` link any more.
+    assert.equal(plan.appRoot, '/root/.dsh/releases/20261118074449-bd82d5cb')
+    assert.equal(plan.layoutRoot, '/root/.dsh')
+    assert.equal('current' in plan, false)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -210,7 +211,7 @@ test('a local plan keeps the runner off the network', async () => {
     assert.equal(plan.local, true)
     assert.equal(plan.host, '127.0.0.1')
     assert.match(plan.remotePackage, /^\/tmp\/dsh-mesh-/u)
-    assert.equal(plan.current, '/opt/dsh-mesh/current')
+    assert.equal(plan.layoutRoot, '/opt/dsh-mesh')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

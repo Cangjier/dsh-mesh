@@ -86,7 +86,7 @@ function formatBytes(value) {
  * @param {(line: string) => void} onLine stdout/stderr callback.
  * @returns {Promise<{stdout: string, stderr: string}>} captured output.
  */
-function run(command, args, onLine) {
+function run(command, args, onLine = () => {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''

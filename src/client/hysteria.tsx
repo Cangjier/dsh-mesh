@@ -308,6 +308,7 @@ export function DirectLinksModal({
     {
       title: '直连设备',
       key: 'peer',
+      width: 200,
       render: (_value, link) => {
         const other = member !== undefined && link.server.id === member.id ? link.client : link.server
         return (
@@ -321,7 +322,7 @@ export function DirectLinksModal({
     {
       title: '本机角色',
       key: 'role',
-      width: 110,
+      width: 100,
       render: (_value, link) => (
         <Tag color={member !== undefined && link.server.id === member.id ? 'blue' : 'green'}>
           {member !== undefined && link.server.id === member.id ? '服务端' : '客户端'}
@@ -331,7 +332,7 @@ export function DirectLinksModal({
     {
       title: '服务端入口',
       key: 'endpoint',
-      width: 200,
+      width: 190,
       render: (_value, link) => (
         <Typography.Text className="dsh-pw-mono">{link.publicHost}:{String(link.port)}/udp</Typography.Text>
       ),
@@ -339,7 +340,7 @@ export function DirectLinksModal({
     {
       title: '模式 / 编译出口',
       key: 'mode',
-      width: 210,
+      width: 200,
       render: (_value, link) => (
         <Space direction="vertical" size={0}>
           <Typography.Text>{link.mode.toUpperCase()} · {String(link.bandwidth)} Mbps</Typography.Text>
@@ -352,7 +353,7 @@ export function DirectLinksModal({
     {
       title: '更新时间',
       key: 'updatedAt',
-      width: 170,
+      width: 160,
       render: (_value, link) => (
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           {link.updatedAt ? new Date(link.updatedAt).toLocaleString() : '—'}
@@ -362,7 +363,7 @@ export function DirectLinksModal({
     {
       title: '操作',
       key: 'actions',
-      width: 90,
+      width: 80,
       render: (_value, link) => (
         <Popconfirm
           title="删除这条直连？"
@@ -424,6 +425,12 @@ export function DirectLinksModal({
             loading={loading}
             dataSource={related}
             columns={columns}
+            // The dialog is 860px wide, and 930px is the summed width of the
+            // columns: without this the unbreakable 10.66.66.x / member name
+            // was squeezed into a column one character wide. A number here
+            // makes rc-table scroll sideways instead, like the member table.
+            scroll={{ x: 930 }}
+            tableLayout="fixed"
             pagination={false}
             locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该设备还没有直连" /> }}
           />

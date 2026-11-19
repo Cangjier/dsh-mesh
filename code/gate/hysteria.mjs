@@ -92,6 +92,107 @@ function tail(text, count) {
   return lines.slice(-Math.max(1, count)).join('\n')
 }
 
+/**
+ * Parse the fields a second client has to reuse from a hysteria2 server config.
+ *
+ * Only `auth.password` and the certificate path matter: the certificate is what
+ * the client trusts as its CA and the password is the shared secret. The file is
+ * the YAML this module writes, so a line scanner is enough — it also keeps a
+ * hand-edited config with comments readable.
+ * @param {string} text server.yaml content.
+ * @returns {{password: string, cert: string}} parsed fields, '' when absent.
+ */
+export function parseHysteriaServerConfig(text) {
+  let inAuth = false
+  let authIndent = -1
+  let password = ''
+  let cert = ''
+  for (const raw of String(text ?? '').replace(/\r\n/gu, '\n').split('\n')) {
+    const line = raw.replace(/#.*$/u, '').trimEnd()
+    if (line.trim() === '') continue
+    const indent = line.length - line.trimStart().length
+    const entry = line.trim()
+    const certMatch = /^cert:\s*(.+)$/u.exec(entry)
+    if (certMatch !== null && cert === '') cert = certMatch[1].trim().replace(/^['"]|['"]$/gu, '')
+    if (!inAuth) {
+      if (/^auth:\s*$/u.test(entry)) {
+        inAuth = true
+        authIndent = indent
+      }
+      continue
+    }
+    if (indent <= authIndent) {
+      inAuth = false
+      continue
+    }
+    const match = /^password:\s*(.+)$/u.exec(entry)
+    if (match !== null && password === '') password = match[1].trim().replace(/^['"]|['"]$/gu, '')
+  }
+  return { password, cert }
+}
+
+/**
+ * Decide whether a new link must create the server or can reuse a running one.
+ *
+ * One member runs one hysteria2 server: `server.yaml` holds a single UDP
+ * `listen` port and one password, so a second link that rewrote it would break
+ * every client already linked to that member. A same-port link therefore reuses
+ * the live config; a different port is refused instead of being silently
+ * applied.
+ * @param {object[]} links stored direct links.
+ * @param {string} serverIp VPN address of the server side.
+ * @param {number} port requested UDP port.
+ * @returns {{reuse: boolean, link: object|null}} plan for the new link.
+ */
+export function planDirectLinkServer(links, serverIp, port) {
+  const sameServer = (Array.isArray(links) ? links : []).filter(link => link?.server?.ip === serverIp)
+  const conflict = sameServer.find(link => Number(link.port) !== Number(port))
+  if (conflict) {
+    throw new Error(`该成员已经是 udp/${String(conflict.port)} 的 hysteria2 服务端；同一成员只支持一个服务端端口，请改用 udp/${String(conflict.port)} 或先删除已有直连`)
+  }
+  return {
+    reuse: sameServer.length > 0,
+    link: sameServer.find(link => Number(link.port) === Number(port)) ?? null,
+  }
+}
+
+/** Read one remote file as text, or '' when it is missing. */
+async function readRemoteFile(target, file) {
+  const command = target.os === 'windows'
+    ? `powershell.exe -NoProfile -Command "if (Test-Path ${ps(file)}) { Get-Content -LiteralPath ${ps(file)} -Raw }"`
+    : `if [ -f ${sh(file)} ]; then cat ${sh(file)}; fi`
+  const { stdout } = await runProcess('ssh', [...sshArgs(target), command])
+  return stdout
+}
+
+/** SHA-256 of one remote file, or '' when the file does not exist. */
+async function remoteSha256(target, file) {
+  const command = target.os === 'windows'
+    ? `powershell.exe -NoProfile -Command "if (Test-Path ${ps(file)}) { (Get-FileHash -LiteralPath ${ps(file)} -Algorithm SHA256).Hash }"`
+    : `sha256sum ${sh(file)} 2>/dev/null | awk '{print $1}'`
+  const { stdout } = await runProcess('ssh', [...sshArgs(target), command])
+  return String(stdout).trim().split(/\s+/u)[0].toLowerCase()
+}
+
+/** Keep a reused server running, restarting it only when it died. */
+async function ensureServerRunning(target, port, log) {
+  if (target.os === 'linux') {
+    const state = await runScript(target, 'systemctl is-active hysteria2-server.service 2>/dev/null || true').catch(() => ({ stdout: '' }))
+    if (!/^active$/mu.test(String(state.stdout).trim())) {
+      await log('[server] hysteria2-server was not active; restarting the reused config')
+      await runScript(target, 'systemctl restart hysteria2-server.service', line => log(`[server] ${line}`))
+    }
+    const check = await runScript(target, `ss -lun | grep -q ':${String(port)} ' && echo LISTENING || (journalctl -u hysteria2-server -n 20 --no-pager; exit 1)`, line => log(`[server] ${line}`))
+    if (!String(check.stdout).includes('LISTENING')) throw new Error(`hysteria2 server is not listening on udp/${String(port)}`)
+    return
+  }
+  await runScript(target, `$ErrorActionPreference='Stop'
+if (-not (Get-ScheduledTask -TaskName 'hysteria2-server' -ErrorAction SilentlyContinue)) { throw 'the reused hysteria2 server task is missing' }
+if (-not (Get-Process hysteria -ErrorAction SilentlyContinue)) { Start-ScheduledTask -TaskName 'hysteria2-server'; Start-Sleep -Seconds 3 }
+if (-not (Get-Process hysteria -ErrorAction SilentlyContinue)) { throw 'the reused hysteria2 server is not running' }
+`, line => log(`[server] ${line}`))
+}
+
 /** Stream one local file to a remote path. */
 async function uploadFile(target, local, remote, onProgress) {
   const totalBytes = (await stat(local)).size
@@ -480,11 +581,14 @@ export class HysteriaService {
         errors.push(`${side.name ?? side.ip}: ${errorMessage(error)}`)
       }
     }
-    // The client goes first so its tun route stops steering traffic before the
-    // server disappears underneath it.
-    await stopSide(stored.client, 'client')
-    await stopSide(stored.server, 'server')
     const remaining = (links.links ?? []).filter(item => !match(item))
+    // The client goes first so its tun route stops steering traffic before the
+    // server disappears underneath it. The server is shared by every client
+    // linked to it, so it is only torn down with its last link.
+    await stopSide(stored.client, 'client')
+    if (!remaining.some(item => item.server?.ip === stored.server?.ip)) {
+      await stopSide(stored.server, 'server')
+    }
     await writeFile(path.join(this.dataDir, 'links.json'), `${JSON.stringify({ ok: true, links: remaining }, null, 2)}\n`, 'utf8')
     this.log(`hysteria link ${stored.server.name} -> ${stored.client.name} removed`)
     return { ok: true, links: remaining, errors }
@@ -517,6 +621,8 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
     if (!server) throw new Error(`member not found: ${serverId}`)
     if (!client) throw new Error(`member not found: ${clientId}`)
     if (server.id === 'local' || client.id === 'local') throw new Error('both sides must be remote members; the gateway host cannot take either role')
+    const port = Number.parseInt(String(request.port ?? DEFAULT_PORT), 10)
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('port must be between 1 and 65535')
     // A member can only run one client config at a time. Writing a second link
     // for the same client would overwrite client.yaml and orphan the previous
     // server while links.json still advertised it, so tear the old pair down.
@@ -527,8 +633,11 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
         break
       }
     }
-    const port = Number.parseInt(String(request.port ?? DEFAULT_PORT), 10)
-    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('port must be between 1 and 65535')
+    // Re-read after the removal: it may have stopped a server this link wants.
+    // A server that already has a client keeps its password and certificate;
+    // this link only adds another client to it.
+    const stored = await this.links()
+    const serverPlan = planDirectLinkServer(stored.links, server.ip, port)
     const mode = request.mode === 'socks' ? 'socks' : 'tun'
     const bandwidth = Math.max(1, Math.min(200, Number.parseInt(String(request.bandwidth ?? DEFAULT_BANDWIDTH), 10) || DEFAULT_BANDWIDTH))
     const id = `hy-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
@@ -545,6 +654,7 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
       mode,
       port,
       bandwidth,
+      reuseServer: serverPlan.reuse,
       server: { id: server.id, name: server.name, ip: server.ip, os: '', host: '' },
       client: { id: client.id, name: client.name, ip: client.ip, os: '', host: '' },
       error: null,
@@ -554,7 +664,7 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
     }
     this.states.set(id, state)
     await this.#save(stateFile, state)
-    const task = this.#run({ state, stateFile, logFile, server, client, port, mode, bandwidth, serverHost: typeof request.serverHost === 'string' ? request.serverHost.trim() : '' })
+    const task = this.#run({ state, stateFile, logFile, server, client, port, mode, bandwidth, serverHost: typeof request.serverHost === 'string' ? request.serverHost.trim() : '', reuse: serverPlan.link })
     this.running.set(id, task)
     task.catch(() => {}).finally(() => { this.running.delete(id) })
     return { ok: true, job: state }
@@ -562,7 +672,7 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
 
   /** Job body. */
   async #run(context) {
-    const { state, stateFile, logFile, server, client, port, mode, bandwidth } = context
+    const { state, stateFile, logFile, server, client, port, mode, bandwidth, reuse } = context
     const stamp = () => new Date().toISOString()
     const log = async line => {
       const text = `[${stamp()}] ${line}\n`
@@ -629,56 +739,88 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
       const serverAsset = await this.#asset(serverOs)
       const clientAsset = await this.#asset(clientOs)
       await log(`assets: hysteria ${serverAsset.sha256.slice(0, 12)}… (${formatBytes(serverAsset.bytes)})`)
-      let publicHost = context.serverHost
-      if (publicHost === '') publicHost = await detectPublicHost(serverTarget, serverOs)
-      if (publicHost === '') publicHost = hostFromEndpoint(peers.find(peer => peer?.ip === server.ip)?.endpoint)
-      if (publicHost === '') throw new Error(`cannot determine the public address of ${server.name}; fill it in the form`)
-      await log(`public endpoint: ${hostPort(publicHost, port)}`)
-      const password = randomBytes(18).toString('base64url')
-      certDir = await mkdtemp(path.join(tmpdir(), 'hy-cert-'))
-      const cert = path.join(certDir, 'cert.pem')
-      const key = path.join(certDir, 'key.pem')
-      await runProcess('openssl', ['req', '-x509', '-nodes', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-keyout', key, '-out', cert, '-days', '3650', '-subj', '/CN=bing.com', '-addext', 'subjectAltName=DNS:bing.com'])
-      await mark('preflight', 'succeeded', `${serverOs} → ${clientOs}, udp/${String(port)}`)
-
-      // ── server ────────────────────────────────────────────────────────
-      await mark('server', 'running')
-      state.phase = 'server'
       const serverDir = serverOs === 'windows' ? 'C:\\ProgramData\\hysteria2' : '/etc/hysteria'
       const serverConf = serverOs === 'windows' ? `${serverDir}\\server.yaml` : `${serverDir}/server.yaml`
       const serverCert = serverOs === 'windows' ? `${serverDir}\\cert.pem` : `${serverDir}/cert.pem`
       const serverKey = serverOs === 'windows' ? `${serverDir}\\key.pem` : `${serverDir}/key.pem`
-      const serverYaml = [
-        `listen: :${String(port)}`,
-        'tls:',
-        `  cert: ${serverCert}`,
-        `  key: ${serverKey}`,
-        'auth:',
-        '  type: password',
-        `  password: ${password}`,
-        'bandwidth:',
-        '  up: 100 mbps',
-        '  down: 100 mbps',
-        'ignoreClientBandwidth: false',
-        'quic:',
-        '  disablePathMTUDiscovery: true',
-        '',
-      ].join('\n')
-      await runScript(serverTarget, serverOs === 'linux'
-        ? 'set -e\nmkdir -p /etc/hysteria\n'
-        : `$ErrorActionPreference='Stop'\nNew-Item -ItemType Directory -Force 'C:\\ProgramData\\hysteria2' | Out-Null\nGet-Process hysteria -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue\n`, line => log(`[server] ${line}`))
-      meter('上传服务端', { indeterminate: true })
-      await uploadFile(serverTarget, serverAsset.path, serverOs === 'linux' ? '/tmp/hysteria2-server' : `${serverDir}\\hysteria.exe`, progress => meter('上传服务端', { ...progress }))
-      await uploadFile(serverTarget, cert, serverCert, progress => meter('上传服务端证书', { ...progress }))
-      await uploadFile(serverTarget, key, serverKey, progress => meter('上传服务端密钥', { ...progress }))
+      let publicHost = context.serverHost
+      // A reused link already knows its public endpoint. Asking ifconfig again
+      // can pick another address (or fail) than the clients already use.
+      if (publicHost === '' && reuse !== null) publicHost = String(reuse.publicHost ?? '').trim()
+      if (publicHost === '') publicHost = await detectPublicHost(serverTarget, serverOs)
+      if (publicHost === '') publicHost = hostFromEndpoint(peers.find(peer => peer?.ip === server.ip)?.endpoint)
+      if (publicHost === '') throw new Error(`cannot determine the public address of ${server.name}; fill it in the form`)
+      await log(`public endpoint: ${hostPort(publicHost, port)}`)
+      certDir = await mkdtemp(path.join(tmpdir(), 'hy-cert-'))
+      // A new server owns a fresh certificate and password. A reused server
+      // hands its live certificate to the new client as the CA, and the client
+      // keeps the password the server already validates.
+      const localCert = path.join(certDir, reuse === null ? 'cert.pem' : 'ca.pem')
+      const localKey = path.join(certDir, 'key.pem')
       const localServerConf = path.join(certDir, 'server.yaml')
-      await writeFile(localServerConf, serverYaml, { mode: 0o600 })
-      await uploadFile(serverTarget, localServerConf, serverConf, progress => meter('上传服务端配置', { ...progress }))
-      await log(`server config written to ${serverConf}`)
-      if (serverOs === 'linux') {
-        await runScript(serverTarget, `set -e
-install -m 0755 /tmp/hysteria2-server /usr/local/bin/hysteria2
-cat > /etc/systemd/system/hysteria2-server.service <<'UNIT'
+      let password
+      if (reuse !== null) {
+        const parsed = parseHysteriaServerConfig(await readRemoteFile(serverTarget, serverConf))
+        if (parsed.password === '') {
+          throw new Error(`${server.name} 已有直连记录，但 ${serverConf} 不可读或没有密码；请先删除该成员的直连后重试`)
+        }
+        password = parsed.password
+        const remoteCert = parsed.cert === '' ? serverCert : parsed.cert
+        await writeFile(localCert, await readRemoteFile(serverTarget, remoteCert))
+        if ((await stat(localCert)).size === 0) throw new Error(`cannot read ${remoteCert} on ${server.name}`)
+        await log(`reusing the hysteria2 server on ${server.name} (udp/${String(port)}); password and certificate stay unchanged`)
+      } else {
+        password = randomBytes(18).toString('base64url')
+        await runProcess('openssl', ['req', '-x509', '-nodes', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-keyout', localKey, '-out', localCert, '-days', '3650', '-subj', '/CN=bing.com', '-addext', 'subjectAltName=DNS:bing.com'])
+      }
+      await mark('preflight', 'succeeded', `${serverOs} → ${clientOs}, udp/${String(port)}${reuse === null ? '' : '（复用服务端）'}`)
+
+      // ── server ────────────────────────────────────────────────────────
+      await mark('server', 'running')
+      state.phase = 'server'
+      if (reuse !== null) {
+        await ensureServerRunning(serverTarget, port, log)
+        await mark('server', 'succeeded', `复用现有服务端 udp/${String(port)}`)
+      } else {
+        // Never re-upload 22.8 MiB when the member already runs this exact
+        // binary: the asset hash is the whole contract.
+        const serverBinary = serverOs === 'windows' ? `${serverDir}\\hysteria.exe` : '/usr/local/bin/hysteria2'
+        const serverBinaryCurrent = (await remoteSha256(serverTarget, serverBinary)) === serverAsset.sha256
+        if (serverBinaryCurrent) {
+          await log(`hysteria2 server binary on ${server.name} is already ${serverAsset.sha256.slice(0, 12)}…; skipping the ${formatBytes(serverAsset.bytes)} upload`)
+        }
+        const serverYaml = [
+          `listen: :${String(port)}`,
+          'tls:',
+          `  cert: ${serverCert}`,
+          `  key: ${serverKey}`,
+          'auth:',
+          '  type: password',
+          `  password: ${password}`,
+          'bandwidth:',
+          '  up: 100 mbps',
+          '  down: 100 mbps',
+          'ignoreClientBandwidth: false',
+          'quic:',
+          '  disablePathMTUDiscovery: true',
+          '',
+        ].join('\n')
+        await runScript(serverTarget, serverOs === 'linux'
+          ? 'set -e\nmkdir -p /etc/hysteria\n'
+          : `$ErrorActionPreference='Stop'\nNew-Item -ItemType Directory -Force 'C:\\ProgramData\\hysteria2' | Out-Null\nGet-Process hysteria -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue\n`, line => log(`[server] ${line}`))
+        meter('上传服务端', { indeterminate: true })
+        if (!serverBinaryCurrent) {
+          await uploadFile(serverTarget, serverAsset.path, serverOs === 'linux' ? '/tmp/hysteria2-server' : `${serverDir}\\hysteria.exe`, progress => meter('上传服务端', { ...progress }))
+        }
+        await uploadFile(serverTarget, localCert, serverCert, progress => meter('上传服务端证书', { ...progress }))
+        await uploadFile(serverTarget, localKey, serverKey, progress => meter('上传服务端密钥', { ...progress }))
+        await writeFile(localServerConf, serverYaml, { mode: 0o600 })
+        await uploadFile(serverTarget, localServerConf, serverConf, progress => meter('上传服务端配置', { ...progress }))
+        await log(`server config written to ${serverConf}`)
+        if (serverOs === 'linux') {
+          const install = serverBinaryCurrent ? '' : 'install -m 0755 /tmp/hysteria2-server /usr/local/bin/hysteria2\n'
+          await runScript(serverTarget, `set -e
+${install}cat > /etc/systemd/system/hysteria2-server.service <<'UNIT'
 [Unit]
 Description=hysteria2 server
 After=network-online.target
@@ -697,10 +839,10 @@ systemctl restart hysteria2-server.service
 sleep 2
 systemctl is-active hysteria2-server.service
 `, line => log(`[server] ${line}`))
-        const check = await runScript(serverTarget, `ss -lun | grep -q ':${String(port)} ' && echo LISTENING || (journalctl -u hysteria2-server -n 20 --no-pager; exit 1)`, line => log(`[server] ${line}`))
-        if (!String(check.stdout).includes('LISTENING')) throw new Error('hysteria2 server is not listening')
-      } else {
-        await runScript(serverTarget, `$ErrorActionPreference='Stop'
+          const check = await runScript(serverTarget, `ss -lun | grep -q ':${String(port)} ' && echo LISTENING || (journalctl -u hysteria2-server -n 20 --no-pager; exit 1)`, line => log(`[server] ${line}`))
+          if (!String(check.stdout).includes('LISTENING')) throw new Error('hysteria2 server is not listening')
+        } else {
+          await runScript(serverTarget, `$ErrorActionPreference='Stop'
 $d='C:\\ProgramData\\hysteria2'
 @'
 @echo off
@@ -717,8 +859,9 @@ Start-ScheduledTask -TaskName 'hysteria2-server'
 Start-Sleep -Seconds 4
 Get-Process hysteria -ErrorAction SilentlyContinue | Select-Object Id,Path | Format-Table -AutoSize | Out-String
 `, line => log(`[server] ${line}`))
+        }
+        await mark('server', 'succeeded', hostPort(publicHost, port))
       }
-      await mark('server', 'succeeded', hostPort(publicHost, port))
 
       // ── client ────────────────────────────────────────────────────────
       await mark('client', 'running')
@@ -729,9 +872,18 @@ Get-Process hysteria -ErrorAction SilentlyContinue | Select-Object Id,Path | For
       await runScript(clientTarget, clientOs === 'linux'
         ? 'set -e\nmkdir -p /etc/hysteria\n'
         : `$ErrorActionPreference='Stop'\nNew-Item -ItemType Directory -Force 'C:\\ProgramData\\hysteria2' | Out-Null\nGet-Process hysteria -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue\n`, line => log(`[client] ${line}`))
+      // The same reuse rule applies to the binary: a member that already runs
+      // this exact asset does not need another 22.8 MiB pushed through SSH.
+      const clientBinary = clientOs === 'windows' ? `${clientDir}\\hysteria.exe` : '/usr/local/bin/hysteria2'
+      const clientBinaryCurrent = (await remoteSha256(clientTarget, clientBinary)) === clientAsset.sha256
+      if (clientBinaryCurrent) {
+        await log(`hysteria2 client binary on ${client.name} is already ${clientAsset.sha256.slice(0, 12)}…; skipping the ${formatBytes(clientAsset.bytes)} upload`)
+      }
       meter('上传客户端', { indeterminate: true })
-      await uploadFile(clientTarget, clientAsset.path, clientOs === 'linux' ? '/tmp/hysteria2-client' : `${clientDir}\\hysteria.exe`, progress => meter('上传客户端', { ...progress }))
-      await uploadFile(clientTarget, cert, clientCert, progress => meter('上传客户端证书', { ...progress }))
+      if (!clientBinaryCurrent) {
+        await uploadFile(clientTarget, clientAsset.path, clientOs === 'linux' ? '/tmp/hysteria2-client' : `${clientDir}\\hysteria.exe`, progress => meter('上传客户端', { ...progress }))
+      }
+      await uploadFile(clientTarget, localCert, clientCert, progress => meter('上传客户端证书', { ...progress }))
 
       const clientYaml = (tun) => [
         `server: ${hostPort(publicHost, port)}`,
@@ -761,9 +913,9 @@ Get-Process hysteria -ErrorAction SilentlyContinue | Select-Object Id,Path | For
       }
       const installClient = async withTun => {
         if (clientOs === 'linux') {
+          const install = clientBinaryCurrent ? '' : 'install -m 0755 /tmp/hysteria2-client /usr/local/bin/hysteria2\n'
           await runScript(clientTarget, `set -e
-install -m 0755 /tmp/hysteria2-client /usr/local/bin/hysteria2
-cat > /etc/systemd/system/hysteria2-client.service <<'UNIT'
+${install}cat > /etc/systemd/system/hysteria2-client.service <<'UNIT'
 [Unit]
 Description=hysteria2 client
 After=network-online.target

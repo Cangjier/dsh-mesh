@@ -59,6 +59,11 @@
 - 仓库不存在时**发布用该 token 自动创建公开仓库**：`owner` 是 token 自己时建在个人名下，
   填了组织时建在该组织下（token 需要该组织的写权限）；Gitee 的 `owner` 是别人的个人账号时发布会失败并提示。
 
+> Gitee 的建库接口即使请求里带 `private: false`，新仓库仍会建成**私有**（v5 API 实测：JSON body 和 query 参数都一样）。
+> 所以插件建完仓库后会立刻 `PATCH /repos/{owner}/{repo}`（body 必须带 `name`，再加 `private: false`），
+> 再回读 `private` 确认为公开才继续发布；`PATCH` 失败只在构建日志里告警，不会把已经上传的包回滚。
+> 已有仓库如果是私有的，发布流程**不会擅自改动**，只会在日志里提示「member downloads will get 403」。
+
 ```json
 {
   "enabled": true,

@@ -39,7 +39,10 @@ async function startFakeProviders() {
   const events = []
   // Repositories that already exist. The publish path now checks (and, when
   // missing, creates) the repository before it touches a release.
-  const repos = new Set(['github:o/r', 'gitee:o/r'])
+  // Gitee's create endpoint makes new repositories private even when the body
+  // says `private: false` (verified against the v5 API), so the fake does the
+  // same: only the explicit PATCH can make a fresh repository public.
+  const repos = new Map([['github:o/r', { private: false }], ['gitee:o/r', { private: false }]])
   let nextId = 1
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://local.invalid')
@@ -54,19 +57,22 @@ async function startFakeProviders() {
     if (match !== null && request.method === 'GET') return json(200, { login: 'tester' })
     match = /^\/github\/api\/repos\/([^/]+)\/([^/]+)$/u.exec(url.pathname)
     if (match !== null && request.method === 'GET') {
-      return repos.has(`github:${match[1]}/${match[2]}`) ? json(200, { full_name: `${match[1]}/${match[2]}` }) : json(404, { message: 'Not Found' })
+      const repo = repos.get(`github:${match[1]}/${match[2]}`)
+      return repo === undefined
+        ? json(404, { message: 'Not Found' })
+        : json(200, { full_name: `${match[1]}/${match[2]}`, private: repo.private, default_branch: 'main' })
     }
     match = /^\/github\/api\/user\/repos$/u.exec(url.pathname)
     if (match !== null && request.method === 'POST') {
       const input = JSON.parse(body.toString('utf8'))
-      repos.add(`github:tester/${input.name}`)
+      repos.set(`github:tester/${input.name}`, { private: input.private === true })
       events.push(`github:repo:create:${input.name}`)
       return json(201, { name: input.name, full_name: `tester/${input.name}` })
     }
     match = /^\/github\/api\/orgs\/([^/]+)\/repos$/u.exec(url.pathname)
     if (match !== null && request.method === 'POST') {
       const input = JSON.parse(body.toString('utf8'))
-      repos.add(`github:${match[1]}/${input.name}`)
+      repos.set(`github:${match[1]}/${input.name}`, { private: input.private === true })
       events.push(`github:repo:create:${match[1]}/${input.name}`)
       return json(201, { name: input.name, full_name: `${match[1]}/${input.name}` })
     }
@@ -119,16 +125,28 @@ async function startFakeProviders() {
     if (match !== null && request.method === 'GET') return json(200, { login: 'tester' })
     match = /^\/gitee\/api\/repos\/([^/]+)\/([^/]+)$/u.exec(url.pathname)
     if (match !== null && request.method === 'GET') {
-      return repos.has(`gitee:${match[1]}/${match[2]}`)
-        ? json(200, { full_name: `${match[1]}/${match[2]}`, default_branch: 'master' })
-        : json(404, { message: 'Not Found' })
+      const repo = repos.get(`gitee:${match[1]}/${match[2]}`)
+      return repo === undefined
+        ? json(404, { message: 'Not Found' })
+        : json(200, { full_name: `${match[1]}/${match[2]}`, private: repo.private, default_branch: 'master' })
+    }
+    if (match !== null && request.method === 'PATCH') {
+      const repo = repos.get(`gitee:${match[1]}/${match[2]}`)
+      if (repo === undefined) return json(404, { message: 'Not Found' })
+      const input = JSON.parse(body.toString('utf8'))
+      // Real Gitee rejects a PATCH without a name.
+      if (typeof input.name !== 'string' || input.name === '') return json(400, { messages: ['name is missing'] })
+      if (typeof input.private === 'boolean') repo.private = input.private
+      events.push(`gitee:repo:patch:${match[2]}:${repo.private ? 'private' : 'public'}`)
+      return json(200, { full_name: `${match[1]}/${match[2]}`, private: repo.private })
     }
     match = /^\/gitee\/api\/user\/repos$/u.exec(url.pathname)
     if (match !== null && request.method === 'POST') {
       const input = JSON.parse(body.toString('utf8'))
-      repos.add(`gitee:tester/${input.name}`)
+      // Like Gitee: the create endpoint ignores private:false.
+      repos.set(`gitee:tester/${input.name}`, { private: true })
       events.push(`gitee:repo:create:${input.name}`)
-      return json(201, { full_name: `tester/${input.name}`, default_branch: 'master' })
+      return json(201, { full_name: `tester/${input.name}`, private: true, default_branch: 'master' })
     }
     match = /^\/gitee\/api\/repos\/([^/]+)\/([^/]+)\/releases\/tags\/([^/]+)$/u.exec(url.pathname)
     if (match !== null && request.method === 'GET') {
@@ -453,6 +471,14 @@ test('publishing with a token only creates the missing repository and release', 
     assert.equal(config.gitee.owner, 'tester')
     assert.ok(fake.repos.has('github:tester/dsh-web-release'))
     assert.ok(fake.repos.has('gitee:tester/dsh-web-release'))
+    // The create call leaves a fresh Gitee repository private; the publisher
+    // must flip it explicitly or members cannot download the release.
+    assert.equal(fake.repos.get('gitee:tester/dsh-web-release').private, false)
+    assert.ok(
+      fake.events.indexOf('gitee:repo:create:dsh-web-release') < fake.events.indexOf('gitee:repo:patch:dsh-web-release:public')
+      && fake.events.indexOf('gitee:repo:patch:dsh-web-release:public') < fake.events.indexOf('gitee:create:latest@master'),
+      'the repository is made public before the release is published',
+    )
     // The repository exists before the release that lives in it.
     assert.ok(fake.events.indexOf('github:repo:create:dsh-web-release') < fake.events.indexOf('github:create:latest'))
     assert.ok(fake.events.indexOf('gitee:repo:create:dsh-web-release') < fake.events.indexOf('gitee:create:latest@master'))

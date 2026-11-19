@@ -797,6 +797,12 @@ export class GiteeRelease {
       : null
     if (repository !== null) {
       this.defaultBranch = typeof repository.default_branch === 'string' && repository.default_branch !== '' ? repository.default_branch : null
+      // A private release repository cannot be downloaded by a member: the
+      // release assets answer 403 without a token. Do not change an existing
+      // repository behind the operator's back, but say it plainly.
+      if (repository.private === true) {
+        this.log(`gitee repository ${this.owner}/${this.repo} is private; member downloads will get 403 — make it public in the repository settings`)
+      }
       return { created: false }
     }
     if (found.status !== 404 && !(found.status === 200 && repository === null)) {
@@ -832,7 +838,25 @@ export class GiteeRelease {
     this.defaultBranch = typeof created.json?.default_branch === 'string' && created.json.default_branch !== ''
       ? created.json.default_branch
       : null
-    this.log(`gitee repository ${this.owner}/${this.repo} created`)
+    // Gitee's create endpoint makes the new repository private even when the
+    // request carries `private: false` (verified against the v5 API: a JSON
+    // body and query parameters both produced a private repository). Flip it
+    // explicitly, otherwise every member download of this release gets 403.
+    const patched = await this.#raw(`${this.apiBase}/repos/${this.owner}/${this.repo}`, {
+      method: 'PATCH',
+      json: { name: this.repo, private: false },
+      label: `/repos patch ${this.owner}/${this.repo}`,
+    })
+    if (!isSuccess(patched.status)) {
+      this.log(`gitee repository ${this.owner}/${this.repo} was created but switching it to public failed (HTTP ${String(patched.status)}); member downloads will get 403 until it is public`)
+      return { created: true }
+    }
+    const visible = await this.#api('')
+    if (visible.status === 200 && visible.json !== null && visible.json.private === false) {
+      this.log(`gitee repository ${this.owner}/${this.repo} created (public)`)
+    } else {
+      this.log(`gitee repository ${this.owner}/${this.repo} created but still private; member downloads will get 403 until it is public`)
+    }
     return { created: true }
   }
 

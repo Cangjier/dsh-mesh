@@ -7,11 +7,16 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+
+/** A path exists and is a symlink (the layout must not create any). */
+function isLink(target) {
+  return existsSync(target) && lstatSync(target).isSymbolicLink()
+}
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const UPGRADE = path.join(REPO, 'code', 'deploy', 'upgrade-local.mjs')
@@ -80,10 +85,18 @@ test('first upgrade converts a legacy install into the pointer layout', () => {
     assert.equal(readFileSync(path.join(root, 'shared', 'home', 'sessions', 'a.json'), 'utf8'), '{}\n')
     // Copied, not moved: the old tree is still complete.
     assert.equal(readFileSync(path.join(old, 'data', 'secret'), 'utf8'), 's\n')
-    // The adopted gate.env keeps the operator's values except the layout paths.
+    // A release owns no data links: switching releases must never touch or
+    // reuse anything under the old tree.
+    const active = JSON.parse(readFileSync(path.join(root, 'dsh-mesh.json'), 'utf8')).active
+    for (const dir of ['config', 'data', 'workspace']) {
+      assert.equal(isLink(path.join(root, active, dir)), false, `${dir} must not be a link`)
+    }
+    // The migrated gate.env keeps the operator's values except the layout paths.
     const env = readFileSync(path.join(root, 'shared', 'config', 'gate.env'), 'utf8')
     assert.match(env, /^DSH_GATE_PORT=8080$/mu)
     assert.match(env, new RegExp(`^DSH_HOME=${root}/shared/home$`, 'mu'))
+    assert.match(env, new RegExp(`^DSH_WORKDIR=${root}/shared/workspace$`, 'mu'))
+    assert.match(env, new RegExp(`^DSH_GATE_CONFIG_DIR=${root}/shared/config$`, 'mu'))
   } finally {
     rmSync(base, { recursive: true, force: true })
   }
@@ -114,23 +127,23 @@ test('a second upgrade flips the pointer and keeps the previous release', () => 
   }
 })
 
-test('a pointer install is never adopted as its own legacy source', () => {
+test('a pointer install is never treated as its own migration source', () => {
   // The 2026-11-19 member upgrade died here. The runner reports the release the
-  // machine currently runs from as --app-root; on the pointer layout that
-  // release has `workspace -> ../../shared/workspace`, so adoption picked a
-  // symlink that resolved to the empty target itself. cpSync copied nothing
-  // (the filter drops symlinks), the target was removed, and the rename of a
-  // partial that never existed failed with ENOENT.
+  // machine currently runs from as --app-root; the migration code then treated
+  // that release as a pre-pointer install. Its data directories used to be
+  // links into shared/, so the copy and the target were the same empty
+  // directory: cpSync wrote nothing, the target was removed, and renaming a
+  // partial that never existed failed with ENOENT. Releases now carry no
+  // links, and a release is never a migration source.
   const base = mkdtempSync(path.join(tmpdir(), 'dsh-upgrade-'))
   const root = path.join(base, 'root')
   try {
     const first = makeStage(base, 'stage-a', { buildStamp: '20261118D' })
     assert.equal(upgrade(first, root).status, 0)
     const active = JSON.parse(readFileSync(path.join(root, 'dsh-mesh.json'), 'utf8')).active
-    // The layout prepare of the first upgrade linked the release's data dirs
-    // into shared/; the workspace is still empty, which is what made adoption
-    // enter the copy path at all.
-    assert.equal(readlinkSync(path.join(root, active, 'workspace')), path.join('..', '..', 'shared', 'workspace'))
+    for (const dir of ['config', 'data', 'workspace']) {
+      assert.equal(isLink(path.join(root, active, dir)), false, `${dir} must not be a link`)
+    }
     assert.equal(readdirSync(path.join(root, 'shared', 'workspace')).length, 0)
 
     const second = makeStage(base, 'stage-b', { buildStamp: '20261120A' })

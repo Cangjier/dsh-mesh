@@ -21,9 +21,18 @@
     workspace/            agent 工作区
 ```
 
-release 里的 `config/`、`data/`、`workspace/` 都是指回 `shared/` 的链接
-（Linux 用符号链接，Windows 用 junction），所以切版本不会丢配置或会话。
-`home/` 不在 release 里，由启动器通过 `DSH_HOME` 指向 `shared/home`。
+release 里**没有** `config/`、`data/`、`workspace/` 的链接：每个版本只装代码，
+可变数据全部在 `shared/`，启动器通过环境变量把它注入每个角色：
+
+| 变量 | 值 |
+| --- | --- |
+| `DSH_HOME` | `<root>/shared/home` |
+| `DSH_WORKDIR` | `<root>/shared/workspace` |
+| `DSH_GATE_DATA_DIR` | `<root>/shared/data` |
+| `DSH_GATE_CONFIG_DIR` | `<root>/shared/config` |
+| `DSH_PACKAGE_ROOT` | 当前 release（只用来找代码和 `app/`） |
+
+所以切版本不需要移动、也不需要重建任何链接。
 
 ## 启动器
 
@@ -38,7 +47,8 @@ node ~/.dsh/dsh-mesh.mjs --role gate|dsh|control|interop
 1. 读 `dsh-mesh.json`，解析 `active`（也支持 `--release` 手工覆盖）；
 2. 载入 `shared/config/gate.env` 与 `interop.env`（不覆盖服务管理器已设的值）；
 3. 强制 `DSH_HOME=<root>/shared/home`、`DSH_WORKDIR=<root>/shared/workspace`、
-   `DSH_GATE_DATA_DIR=<root>/shared/data`，把 release 设为 `DSH_PACKAGE_ROOT`；
+   `DSH_GATE_DATA_DIR=<root>/shared/data`、`DSH_GATE_CONFIG_DIR=<root>/shared/config`，
+   把 release 设为 `DSH_PACKAGE_ROOT`；
 4. 用 release 自带的 node 启动对应角色，转发信号，透传退出码。
 
 它只用 Node 内置模块。当前版本坏了也能运行——这正是「改指针 + 重启」能救回来的前提。
@@ -51,10 +61,11 @@ node ~/.dsh/dsh-mesh.mjs --role gate|dsh|control|interop
 一份实现：`code/deploy/upgrade-local.mjs`，网关和 Linux 成员共用。
 
 1. 包被移到 `<root>/releases/<id>`（不覆盖运行中的树）；
-2. 首次运行把旧安装的 `config/data/workspace` 和旧 `DSH_HOME` **复制**进
-   `shared/`（旧树保持完整，健康检查失败时还能用）；
-3. `layout.mjs prepare`：shared 链接、替换启动器（先写 `.bak`）、稳定 node、
-   systemd 单元、profile 复制接线；
+2. 只有从 pointer 之前的安装升级时，才先跑一次 `layout.mjs migrate`，把旧安装的
+   `config/data/workspace` 和旧 `DSH_HOME` **复制**进 `shared/`（旧树保持完整，
+   健康检查失败时还能用）。这是唯一的迁移入口，之后的升级不再猜、不再复制；
+3. `layout.mjs prepare`：替换启动器（先写 `.bak`）、稳定 node、systemd 单元、
+   profile 复制接线；release 里不建任何数据链接；
 4. `layout.mjs activate`：原子写指针，必要时写验收 marker；
 5. 按 control → dsh → gate 顺序重启（所有单元都跑启动器）；
 6. 健康检查（网关、内嵌 interop、控制面板）；失败时翻回 previous（首次迁移则
@@ -87,8 +98,10 @@ Linux 成员的 prepare/activate/rollback 也只做三件事：
 
 ## 迁移
 
-首次升级会自动 adopt 旧安装（flat 或 blue-green 都可以），只复制数据，不移动。
-旧目录保留到人工确认后再删；`shared/` 一旦有内容就不再覆盖。
+只有从 pointer 之前的安装（flat 或 blue-green）升级时，才会先跑一次
+`layout.mjs migrate --from <旧根>`：只复制数据、不移动，旧目录保留到人工确认后
+再删；`shared/` 一旦有内容就不再覆盖。pointer 之后的上报 `appRoot` 落在
+`releases/` 里，`migrate` 会直接拒绝，不做任何复制。
 
 ## 现状（2026-11-18 实测）
 
@@ -111,10 +124,13 @@ Linux 成员的 prepare/activate/rollback 也只做三件事：
 2. Windows 上 `cpSync` 递归 DSH_HOME 里的 junction 会让 Node 崩溃
    （0xC0000409）。adoption 现在过滤 symlink/junction 与 `node_modules`，并且
    先写 `.partial-<pid>` 再改名，避免留下半个 `shared/home`。
-3. 成员已迁移到 pointer 后，上报的 `appRoot` 就是 `releases/<id>`。它被当成
-   legacy 根去 adoption，而 release 里的 `config/data/workspace` 是指回
-   `shared/` 的符号链接：`cpSync` 过滤掉链接后没有产物，`rmSync(target)` 却
-   已经把空目录删掉，最后 rename 一个不存在的 partial 直接 ENOENT（2026-11-19
-   成员 `.3` 升级失败）。`upgrade-local.mjs` 现在把 `releases/` 下的 appRoot
-   排除在 adoption 之外，并且候选源是符号链接、或 realpath 等于目标本身时
-   跳过；copy 没有产物时也不再动目标目录。
+3. 成员的 `appRoot` 在 pointer 布局下就是 `releases/<id>`，早期版本把它当成
+   “旧安装”去做迁移，而 release 里的 `config/data/workspace` 是指回 `shared/`
+   的符号链接，迁移的源和目标成了同一个目录，最后 rename 一个不存在的
+   partial 直接 ENOENT（2026-11-19 成员 `.3` 升级失败）。现在两头都收紧：
+   release 里不再建这些链接；`layout.mjs migrate` 只接受 `releases/` 之外的
+   源，候选源是符号链接或 realpath 等于目标时跳过，copy 没有产物时不动目标。
+
+设计上只保留两个 Windows junction，都跟数据无关：`<root>\code` 指向当前
+release 的 `code/`（服务壳按自己目录找脚本），`<root>\data` 指向 `shared\data`
+（服务壳把 `service.log` 写在 exe 旁边）。

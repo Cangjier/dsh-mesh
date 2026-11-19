@@ -3,9 +3,10 @@
  *
  * The deployment is deliberately split into two remote phases:
  *
- *   1. prepare  — upload/extract into `releases/<release>`, point shared
- *                 config/data/home/workspace at the stable `shared` directory,
- *                 update service definitions, and validate the new tree.
+ *   1. prepare  — upload/extract into `releases/<release>`, seed the stable
+ *                 shared/ directories, update service definitions, and
+ *                 validate the new tree. The release itself keeps no links:
+ *                 the launcher names shared/ through the environment.
  *   2. activate — switch `current` to the new release, restart services with
  *                 the gateway last, and health-check. On failure the previous
  *                 release is switched back and the services are restarted.

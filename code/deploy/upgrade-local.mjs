@@ -15,9 +15,10 @@
  * and the units — which all name the launcher — are restarted. Restarting is
  * what makes the upgrade visible.
  *
- * The first run adopts an existing install: config/data/workspace and the old
- * DSH_HOME are copied into shared/ (never moved, so the old tree stays runnable
- * until the health check passes).
+ * A pre-pointer install is converted once: `layout.mjs migrate` copies
+ * config/data/workspace and the old DSH_HOME into shared/ (never moved, so the
+ * old tree stays runnable until the health check passes). Later upgrades do no
+ * migration at all.
  *
  *   node upgrade-local.mjs --stage <package tree> [--layout-root ~/.dsh]
  *        [--app-root <old install>] [--dsh-home <old home>] [--port 80]
@@ -32,7 +33,7 @@
 
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -189,26 +190,24 @@ const root = path.resolve(
 )
 
 /**
- * Decide whether the reported app root is an older install worth adopting.
+ * The pre-pointer install to convert, if the reported app root is one.
  *
- * Callers report the directory the machine runs from. Once the pointer layout
- * is in place that is `<root>/releases/<id>`, which is not a separate install:
- * it is one of our own releases, and its `config`/`data`/`workspace` entries
- * are symlinks back into `<root>/shared`. Adopting from it copied the target
- * onto itself; because the copy filter drops symlinks the partial tree was
- * never created, and the rename that followed failed with ENOENT — the
- * 2026-11-19 member upgrade that died in its activate step.
+ * Callers report the directory the machine runs from. On the pointer layout
+ * that is `<root>/releases/<id>`, which is one of our own releases, not an old
+ * install: treating it as a migration source made the copy and the target the
+ * same directory (the 2026-11-19 upgrade failure). Only a root outside
+ * `releases/` is migrated, exactly once, by `layout.mjs migrate`.
  * @param {string} candidate reported app root ('' when not given).
  * @param {string} layoutRoot stable install root.
- * @returns {string} a legacy root to adopt from, or '' when there is none.
+ * @returns {string} the old install root, or '' when this is not a conversion.
  */
-function adoptableLegacyRoot(candidate, layoutRoot) {
+function firstConversionSource(candidate, layoutRoot) {
   if (candidate === '' || candidate === layoutRoot) return ''
   const relative = path.relative(path.join(layoutRoot, 'releases'), candidate)
   if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) return ''
   return candidate
 }
-const legacyRoot = adoptableLegacyRoot(reportedRoot, root)
+const legacyRoot = firstConversionSource(reportedRoot, root)
 const legacyHome = typeof args['dsh-home'] === 'string' && args['dsh-home'] !== '' ? path.resolve(args['dsh-home']) : ''
 const noRestart = args['no-restart'] === 'true'
 const gatePort = typeof args['gate-port'] === 'string' ? args['gate-port'] : (typeof args.port === 'string' ? args.port : '80')
@@ -242,97 +241,30 @@ const pointerFile = path.join(root, 'dsh-mesh.json')
 const pointerBefore = readJson(pointerFile)
 const previous = typeof pointerBefore?.active === 'string' && pointerBefore.active !== '' ? pointerBefore.active : ''
 
-// ── adopt the existing install on the first conversion ──────────────────────
+// ── shared directories, then the one-time conversion ───────────────────────
 const shared = path.join(root, 'shared')
 for (const dir of ['config', 'data', 'home', 'workspace']) mkdirSync(path.join(shared, dir), { recursive: true })
-const adopt = []
-const copyIfEmpty = (target, sources) => {
-  if (readdirSync(target).length > 0) return
-  const targetReal = realpathSync(target)
-  const source = sources.find(candidate => {
-    if (candidate === '' || !existsSync(candidate)) return false
-    // The copy filter below refuses symlinks, so a symlinked candidate would
-    // contribute nothing even when it points somewhere legitimate. It can also
-    // resolve to the target itself (`<release>/workspace -> shared/workspace`),
-    // which made adoption delete the target and then rename a partial copy
-    // that was never written.
-    try {
-      if (lstatSync(candidate).isSymbolicLink()) return false
-      if (realpathSync(candidate) === targetReal) return false
-    } catch {
-      return false
-    }
-    return true
-  })
-  if (source === undefined) return
-  // DSH's home contains plugin links, often as Windows junctions. Copying a
-  // junction tree crashed Node on Windows (0xC0000409) and would have copied
-  // the plugins twice anyway; layout prepare redoes that wiring from the
-  // release. Copy into a sibling first so a crash cannot leave a half target
-  // that the next attempt would mistake for an adopted directory.
-  const partial = `${target}.partial-${String(process.pid)}`
-  rmSync(partial, { recursive: true, force: true })
-  cpSync(source, partial, {
-    recursive: true,
-    force: true,
-    filter: (src) => {
-      try {
-        if (lstatSync(src).isSymbolicLink()) return false
-      } catch {
-        return false
-      }
-      return path.basename(src) !== 'node_modules'
-    },
-  })
-  // A source that copied nothing must not cost the target its directory.
-  if (!existsSync(partial)) {
-    log(`[upgrade] skipped adopting ${path.relative(root, target)}: ${source} produced no copy`)
-    return
-  }
-  rmSync(target, { recursive: true, force: true })
-  renameSync(partial, target)
-  adopt.push(`${path.relative(root, target)} <- ${source}`)
-}
-if (legacyRoot !== '' && legacyRoot !== root) {
-  for (const dir of ['config', 'data', 'workspace']) {
-    copyIfEmpty(path.join(shared, dir), [path.join(legacyRoot, 'shared', dir), path.join(legacyRoot, dir)])
-  }
-}
-copyIfEmpty(path.join(shared, 'home'), [
-  legacyHome,
-  legacyRoot !== '' ? path.join(legacyRoot, 'shared', 'home') : '',
-  legacyRoot !== '' ? path.join(legacyRoot, 'home') : '',
-])
-if (adopt.length > 0) log(`[upgrade] adopted ${adopt.join(', ')}`)
 
-// ── point the adopted env at shared/, not at the old install ───────────────
-// gate.env carries absolute paths (TLS certificates, the DSH token file); after
-// adoption the files live under shared/ and the old tree may later be deleted.
-const envFile = path.join(shared, 'config', 'gate.env')
-if (legacyRoot !== '' && existsSync(envFile)) {
-  const legacyPrefix = legacyRoot.endsWith(path.sep) ? legacyRoot : `${legacyRoot}${path.sep}`
-  const sep = path.sep
-  const rewrite = text => {
-    // Blue-green installs keep the same directories below shared/; rewrite the
-    // longer prefix first so `<old>/shared/data` does not first become
-    // `<old>/data` through a shorter match.
-    let out = text
-      .split(`${legacyPrefix}shared${sep}config${sep}`).join(`${shared}${sep}config${sep}`)
-      .split(`${legacyPrefix}shared${sep}data${sep}`).join(`${shared}${sep}data${sep}`)
-      .split(`${legacyPrefix}shared${sep}workspace`).join(`${shared}${sep}workspace`)
-      .split(`${legacyPrefix}shared${sep}home`).join(path.join(shared, 'home'))
-      .split(`${legacyPrefix}config${sep}`).join(`${shared}${sep}config${sep}`)
-      .split(`${legacyPrefix}data${sep}`).join(`${shared}${sep}data${sep}`)
-      .split(`${legacyPrefix}workspace`).join(`${shared}${sep}workspace`)
-    if (legacyHome !== '') out = out.split(legacyHome).join(path.join(shared, 'home'))
-    return out
+// A pre-pointer install is copied once, through `layout.mjs migrate`, before
+// any env file is seeded: the copy must see an empty shared/, and the script
+// that implements it ships with the release being installed.
+if (legacyRoot !== '') {
+  const migrateScript = path.join(stage, 'code', 'install', 'layout.mjs')
+  if (!existsSync(migrateScript)) {
+    process.stderr.write(`[upgrade] ${migrateScript} is missing; cannot migrate ${legacyRoot}\n`)
+    process.exit(2)
   }
-  writeFileSync(envFile, rewrite(readFileSync(envFile, 'utf8')), { mode: 0o600 })
-  const interopFile = path.join(shared, 'config', 'interop.env')
-  if (existsSync(interopFile) && legacyHome !== '') writeFileSync(interopFile, rewrite(readFileSync(interopFile, 'utf8')), { mode: 0o600 })
+  const migrateArgs = ['migrate', '--root', root, '--from', legacyRoot]
+  if (legacyHome !== '') migrateArgs.push('--home', legacyHome)
+  const result = spawnSync(process.execPath, [migrateScript, ...migrateArgs], { stdio: 'inherit', windowsHide: true })
+  if (!(result.status === 0 && !result.error)) {
+    process.stderr.write('[upgrade] migrating the old install failed; nothing was switched\n')
+    process.exit(1)
+  }
 }
 
 // ── seed the shared env files on a first install ────────────────────────────
+const envFile = path.join(shared, 'config', 'gate.env')
 if (!existsSync(envFile)) {
   writeFileSync(envFile, [
     '# dsh-mesh: generated by the pointer-layout installer',

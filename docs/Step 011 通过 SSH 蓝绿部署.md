@@ -2,6 +2,9 @@
 
 > 工具名已收敛：当前模型工具是 `deploy`（同步执行，返回 `logFile`），没有 `action`。
 > `planOnly` / `rollback` 是参数。本文保留当时的设计记录。
+>
+> 后续：Step 023 的 pointer 布局去掉了 release 里的 `config/data/workspace`
+> 链接，数据路径改由启动器注入的环境变量指定，本文的链接方案只作历史记录。
 
 这个步骤给 `dsh-mesh` 增加第二个模型工具 `dsh_mesh_deploy`：从 A 通过 SSH 部署成员 B，不覆盖正在运行的目录；先解压到新的 `releases/<release>` 并完成全部准备，最后才切换 `current` 并重启服务。**gateway 永远是最后一个重启的服务**。
 

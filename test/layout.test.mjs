@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readlinkSync, writeFileSync, rmSync, lstatSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -55,6 +55,8 @@ process.stdout.write(JSON.stringify({
   home: process.env.DSH_HOME,
   workdir: process.env.DSH_WORKDIR,
   data: process.env.DSH_GATE_DATA_DIR,
+  config: process.env.DSH_GATE_CONFIG_DIR,
+  interopConfig: process.env.DSH_INTEROP_CONFIG,
   cwd: process.cwd(),
 }) + '\\n')
 `)
@@ -79,7 +81,7 @@ process.stdout.write(JSON.stringify({
   return dir
 }
 
-test('prepare creates shared links, launcher and stable runtime', () => {
+test('prepare creates shared state, launcher and stable runtime without links', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'dsh-layout-'))
   try {
     makeRelease(root, '20261118D-aaaaaaaa')
@@ -88,11 +90,17 @@ test('prepare creates shared links, launcher and stable runtime', () => {
     assert.equal(summary.launcher, 'written')
     assert.equal(summary.runtime, 'installed')
 
+    // A release is immutable and owns no data: everything mutable lives in
+    // shared/ and is named through the environment, never through a link.
     for (const dir of ['config', 'data', 'workspace']) {
-      const link = path.join(root, 'releases', '20261118D-aaaaaaaa', dir)
-      assert.ok(lstatSync(link).isSymbolicLink(), `${dir} should be a symlink`)
-      assert.equal(readlinkSync(link), `../../shared/${dir}`)
+      const releasePath = path.join(root, 'releases', '20261118D-aaaaaaaa', dir)
+      assert.equal(existsSync(releasePath), false, `${dir} must not be linked into the release`)
+      assert.ok(existsSync(path.join(root, 'shared', dir)), `${dir} lives in shared/`)
     }
+    const env = readFileSync(path.join(root, 'shared', 'config', 'gate.env'), 'utf8')
+    assert.match(env, /^DSH_WORKDIR=.*shared[/\\]workspace$/mu)
+    assert.match(env, /^DSH_GATE_DATA_DIR=.*shared[/\\]data$/mu)
+    assert.match(env, /^DSH_GATE_CONFIG_DIR=.*shared[/\\]config$/mu)
     assert.ok(existsSync(path.join(root, 'shared', 'home')))
     assert.ok(existsSync(path.join(root, 'dsh-mesh.mjs')))
     // The profile gets copies of both packaged plugins and their bundles.
@@ -132,6 +140,8 @@ test('activate writes the pointer and the launcher starts the active release', (
     assert.equal(report.home, path.join(root, 'shared', 'home'))
     assert.equal(report.workdir, path.join(root, 'shared', 'workspace'))
     assert.equal(report.data, path.join(root, 'shared', 'data'))
+    assert.equal(report.config, path.join(root, 'shared', 'config'))
+    assert.equal(report.interopConfig, path.join(root, 'shared', 'config', 'interop.env'))
     assert.equal(report.cwd, path.join(root, 'releases', '20261118D-aaaaaaaa'))
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -207,9 +217,11 @@ test('first conversion copies config, data, home and workspace from the old inst
     writeFileSync(path.join(oldHome, 'sessions', 's1.json'), '{"id":"s1"}\n')
 
     makeRelease(root, '20261118D-aaaaaaaa')
-    const summary = layout(['prepare', '--root', root, '--release', '20261118D-aaaaaaaa', '--no-units',
-      '--migrate-from', oldRoot, '--migrate-home', oldHome])
+    // Production order: the one-time migration runs before prepare seeds
+    // gate.env, so the old config is copied instead of skipped.
+    const summary = layout(['migrate', '--root', root, '--from', oldRoot, '--home', oldHome])
     assert.equal(summary.migrated.length, 4)
+    layout(['prepare', '--root', root, '--release', '20261118D-aaaaaaaa', '--no-units'])
     const env = readFileSync(path.join(root, 'shared', 'config', 'gate.env'), 'utf8')
     assert.match(env, /^DSH_GATE_PORT=8080$/mu)
     assert.match(env, /^DSH_GATE_PASSWORD=secret$/mu)
@@ -222,6 +234,42 @@ test('first conversion copies config, data, home and workspace from the old inst
     // passes its health check.
     assert.equal(readFileSync(path.join(oldRoot, 'config', 'gate.env'), 'utf8'), 'DSH_GATE_PORT=8080\nDSH_GATE_PASSWORD=secret\nDSH_HOME=/old/home\n')
     assert.equal(readFileSync(path.join(oldHome, 'sessions', 's1.json'), 'utf8'), '{"id":"s1"}\n')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a second migration never overwrites shared data', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dsh-layout-'))
+  const oldRoot = path.join(root, 'legacy-install')
+  try {
+    mkdirSync(path.join(oldRoot, 'data'), { recursive: true })
+    writeFileSync(path.join(oldRoot, 'data', 'secret'), 'first\n')
+    makeRelease(root, '20261118D-aaaaaaaa')
+    layout(['migrate', '--root', root, '--from', oldRoot])
+    layout(['prepare', '--root', root, '--release', '20261118D-aaaaaaaa', '--no-units'])
+    assert.equal(readFileSync(path.join(root, 'shared', 'data', 'secret'), 'utf8'), 'first\n')
+    // The old tree may still change after the conversion; the new layout must
+    // not pick that up on a retry.
+    writeFileSync(path.join(oldRoot, 'data', 'secret'), 'second\n')
+    const summary = layout(['migrate', '--root', root, '--from', oldRoot])
+    assert.deepEqual(summary.migrated, [])
+    assert.equal(readFileSync(path.join(root, 'shared', 'data', 'secret'), 'utf8'), 'first\n')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('migrate refuses one of the layout releases as its source', () => {
+  // The 2026-11-19 failure in one assertion: a release used to carry links
+  // back into shared/, so copying from it and into it were the same operation.
+  const root = mkdtempSync(path.join(tmpdir(), 'dsh-layout-'))
+  try {
+    makeRelease(root, '20261118D-aaaaaaaa')
+    layout(['prepare', '--root', root, '--release', '20261118D-aaaaaaaa', '--no-units'])
+    const result = runNode(LAYOUT, ['migrate', '--root', root, '--from', path.join(root, 'releases', '20261118D-aaaaaaaa')])
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /pre-pointer install/u)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

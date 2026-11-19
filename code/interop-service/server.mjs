@@ -38,11 +38,14 @@ const { applySessionEvent, repliesSince, summarizeReplies } = await sharedModule
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..', '..')
-const DATA = path.join(ROOT, 'data')
+// The launcher names the layout's directories. A release owns no data and no
+// config links, so only the ROOT fallbacks below keep a flat install working.
+const CONFIG_DIR = path.resolve(process.env.DSH_GATE_CONFIG_DIR || path.join(ROOT, 'config'))
+const DATA = path.resolve(process.env.DSH_GATE_DATA_DIR || path.join(ROOT, 'data'))
 const DSH_ENTRY = path.join(ROOT, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const TOKEN_FILE = path.join(DATA, 'interop-token')
 const STATE_FILE = path.join(DATA, 'conversations.json')
-const CONFIG_FILE = path.join(ROOT, 'config', 'interop.env')
+const CONFIG_FILE = path.resolve(process.env.DSH_INTEROP_CONFIG || path.join(CONFIG_DIR, 'interop.env'))
 
 mkdirSync(DATA, { recursive: true })
 
@@ -68,7 +71,7 @@ function setting(name, fallback) {
 const HOST = setting('DSH_INTEROP_BIND', '127.0.0.1')
 const PORT = Number.parseInt(setting('DSH_INTEROP_PORT', '8765'), 10)
 const DSH_HOME = setting('DSH_HOME', path.join(DATA, 'home'))
-const WORKDIR = setting('DSH_WORKDIR', path.join(ROOT, 'workspace'))
+const WORKDIR = setting('DSH_WORKDIR', path.join(path.dirname(DATA), 'workspace'))
 const WORKSPACES_ROOT = path.resolve(setting('DSH_WORKSPACES_DIR', path.join(os.homedir(), '.dsh', 'workspaces')))
 const PROVIDER = setting('DSH_INTEROP_PROVIDER', 'deepseek-official')
 const MODEL = setting('DSH_INTEROP_MODEL', 'deepseek-flash')
@@ -102,7 +105,7 @@ function log(line) {
 
 function loadToken() {
   if (setting('DSH_INTEROP_USE_GATE_PASSWORD', '0') === '1') {
-    const gate = readEnvFile(path.join(ROOT, 'config', 'gate.env'))
+    const gate = readEnvFile(path.join(CONFIG_DIR, 'gate.env'))
     const password = gate.DSH_GATE_PASSWORD
     if (typeof password !== 'string' || password === '') {
       throw new Error('DSH_INTEROP_USE_GATE_PASSWORD=1 but config/gate.env has no DSH_GATE_PASSWORD')

@@ -621,6 +621,36 @@ export function layoutRootFor(appRoot, os) {
 }
 
 /**
+ * The extension a package should keep when it is copied to a temp path.
+ *
+ * `path.extname('foo.tar.gz')` is `.gz`, which still extracts correctly but
+ * makes logs and stale-package cleanup harder to read. Keep the full suffix.
+ * @param {string} file archive path or name.
+ * @returns {string} `.tar.gz`, `.tgz`, `.zip`, or the last extension.
+ */
+function archiveSuffix(file) {
+  const name = path.basename(String(file ?? ''))
+  if (name.endsWith('.tar.gz')) return '.tar.gz'
+  if (name.endsWith('.tgz')) return '.tgz'
+  const extension = path.extname(name)
+  return extension === '' ? '.tar.gz' : extension
+}
+
+/**
+ * The basename of an archive path on the target's own OS.
+ *
+ * The gateway is usually Linux even when it deploys Windows, so `path.basename`
+ * would keep the whole `C:\Users\...` path as one "name".
+ * @param {string} file archive path.
+ * @param {'linux'|'windows'} os target OS.
+ * @returns {string} basename.
+ */
+function archiveNameFor(file, os) {
+  const text = String(file ?? '')
+  return os === 'windows' ? path.win32.basename(text) : path.posix.basename(text)
+}
+
+/**
  * Build the immutable deployment plan.
  * @param {object} options deployment input.
  * @param {string} options.host SSH host.
@@ -649,9 +679,18 @@ export async function buildDeployPlan(options) {
   const onTarget = options.packageOnTarget !== null && typeof options.packageOnTarget === 'object'
     ? options.packageOnTarget
     : null
+  // A package selected from a release has no file on this machine either. The
+  // descriptor carries the archive name, size and digest the target-side
+  // downloader needs; `local: false` tells the upload step that falling back to
+  // a local upload is impossible.
+  const descriptor = options.packageDescriptor !== null && typeof options.packageDescriptor === 'object'
+    ? options.packageDescriptor
+    : null
   let packagePath = ''
   let packageInfo = null
   let sha256 = ''
+  let packageLocal = true
+  let packageKeep = false
   if (onTarget !== null) {
     packagePath = typeof onTarget.path === 'string' ? onTarget.path.trim() : ''
     const bytes = Number(onTarget.bytes)
@@ -660,6 +699,19 @@ export async function buildDeployPlan(options) {
     if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error('packageOnTarget.bytes must be a positive integer')
     if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error('packageOnTarget.sha256 must be a 64-character hex digest')
     packageInfo = { size: bytes }
+    // A build-host staging archive is deleted after extraction. An archive the
+    // operator picked from the member's own package cache is not: it belongs to
+    // the member and may be needed again.
+    packageKeep = onTarget.keep === true
+  } else if (descriptor !== null) {
+    packagePath = typeof descriptor.name === 'string' ? descriptor.name.trim() : ''
+    const bytes = Number(descriptor.bytes)
+    sha256 = typeof descriptor.sha256 === 'string' ? descriptor.sha256.trim().toLowerCase() : ''
+    if (packagePath === '' || packagePath !== path.basename(packagePath)) throw new Error('packageDescriptor.name must be an archive name')
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error('packageDescriptor.bytes must be a positive integer')
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error('packageDescriptor.sha256 must be a 64-character hex digest')
+    packageInfo = { size: bytes }
+    packageLocal = descriptor.local !== false
   } else if (options.skipPackage !== true) {
     packagePath = options.package
       ? path.resolve(options.package)
@@ -713,7 +765,15 @@ export async function buildDeployPlan(options) {
       ? path.resolve(options.identityFile)
       : undefined,
     os,
-    package: { path: packagePath, bytes: packageInfo?.size ?? 0, sha256, onTarget: onTarget !== null },
+    package: {
+      path: packagePath,
+      archive: archiveNameFor(packagePath, os),
+      bytes: packageInfo?.size ?? 0,
+      sha256,
+      local: packageLocal,
+      keep: packageKeep,
+      onTarget: onTarget !== null,
+    },
     // The archive is already on the target, so upload/download must be skipped
     // and the target path doubles as `remotePackage`.
     packageOnTarget: onTarget !== null,
@@ -746,8 +806,8 @@ export async function buildDeployPlan(options) {
     remotePackage: onTarget !== null
       ? packagePath
       : os === 'linux'
-        ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path.extname(packagePath)}`
-        : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path.extname(packagePath)}`,
+        ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${archiveSuffix(packagePath)}`
+        : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${archiveSuffix(packagePath)}`,
     // A test upgrade rehearses the *flat* upgrade (the path the gateway uses
     // on itself) in a sandbox on the member before touching it, then runs the
     // normal blue-green upgrade. Without this a member test proves nothing
@@ -909,9 +969,10 @@ tar -xzf "$PACKAGE" -C "$STAGE" --strip-components=1 -v | {
     if [ $((extracted % ${String(EXTRACT_CHECKPOINT)})) -eq 0 ]; then printf 'DSH-MESH-EXTRACT %s\\n' "$extracted"; fi
   done
 }
-# The archive is 300+ MiB and /tmp is often a small tmpfs; one copy left
-# behind per job eventually fills it.
-rm -f "$PACKAGE"
+# The archive is 300+ MiB and /tmp is often a small tmpfs; a temp copy is
+# deleted after extraction. A package chosen from the member's own cache is
+# not a temp copy and is kept.
+${plan.package?.keep === true ? '# keep the package: it was selected from the member\'s own cache' : 'rm -f "$PACKAGE"'}
 chmod +x "$STAGE"/*.sh "$STAGE/dsh-mesh.mjs" 2>/dev/null || true
 chmod +x "$STAGE/runtime/node/bin/node" 2>/dev/null || true
 NODE="$STAGE/runtime/node/bin/node"
@@ -1040,9 +1101,10 @@ if (-not (Test-Path $node)) { $node = (Get-Command node -ErrorAction Stop).Sourc
 & $node --check (Join-Path $Stage 'gate\\server.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'gate/server.mjs failed node --check' }
 # One 300–420 MiB archive per upgrade must not pile up in the temp directory.
-# Linux prepare already deletes its copy; Windows did not, and the build-host
-# archive staged for an automatic upgrade is no longer needed once extracted.
-Remove-Item -LiteralPath $Package -Force -ErrorAction SilentlyContinue
+# A staging archive is deleted after extraction; a package chosen from the
+# member's own cache is kept.
+$KeepPackage = ${plan.package?.keep === true ? '$true' : '$false'}
+if (-not $KeepPackage) { Remove-Item -LiteralPath $Package -Force -ErrorAction SilentlyContinue }
 Write-Output "prepared ${plan.release} at $Stage"
 `
 }
@@ -1191,7 +1253,7 @@ export function describePlan(plan) {
     steps: [
       plan.packageOnTarget === true
         ? `use the package already on the target (${plan.package.path}); no download or upload`
-        : `obtain ${path.basename(plan.package.path)}: download from the release when configured, else upload to ${plan.remotePackage}`,
+        : `obtain ${plan.package.archive ?? path.basename(plan.package.path)}: download from the release when configured, else upload to ${plan.remotePackage}`,
       `extract and prepare ${plan.releases}/${plan.release} (no service switch)`,
       `update shared config and service definitions for ${plan.appRoot}/current`,
       `switch ${plan.current} to ${plan.release}`,
@@ -1746,11 +1808,12 @@ export function normalizeDownloadManifests(download) {
 /**
  * The command that runs the target-side downloader.
  * @param {object} plan deployment plan.
- * @param {{node: string, remoteDir: string, manifests: string[], proxyUrl: string|null}} options options.
+ * @param {{node: string, remoteDir: string, manifests: string[], proxyUrl: string|null, prefer?: 'github'|'gitee'}} options options.
  * @returns {string} bash or PowerShell script.
  */
 export function releaseDownloadScript(plan, options) {
-  const archive = path.basename(plan.package.path)
+  const archive = plan.package.archive ?? path.basename(plan.package.path)
+  const prefer = options.prefer === 'gitee' ? '--prefer gitee' : ''
   const manifestArgs = options.manifests
     .map(entry => `--manifest-${entry.provider} ${plan.os === 'windows' ? ps(entry.url) : sh(entry.url)}`)
     .join(' ')
@@ -1763,6 +1826,7 @@ export function releaseDownloadScript(plan, options) {
       `--output ${ps(plan.remotePackage)}`,
       options.proxyUrl === null ? '' : `--proxy ${ps(options.proxyUrl)}`,
       `--workdir ${ps(`${options.remoteDir}\\parts`)}`,
+      prefer,
     ].filter(Boolean).join(' ')
     return `$ErrorActionPreference = 'Stop'
 & ${ps(options.node)} ${ps(script)} ${args}
@@ -1777,6 +1841,7 @@ exit $LASTEXITCODE
     `--output ${sh(plan.remotePackage)}`,
     options.proxyUrl === null ? '' : `--proxy ${sh(options.proxyUrl)}`,
     `--workdir ${sh(`${options.remoteDir}/parts`)}`,
+    prefer,
   ].filter(Boolean).join(' ')
   return `set -u
 ${sh(options.node)} ${sh(script)} ${args}
@@ -1993,9 +2058,10 @@ export class DeployManager {
         if (existingBytes !== plan.package.bytes) {
           throw new Error(`编译机上的安装包不可用：${plan.package.path} ${existingBytes === null ? '不存在' : `只有 ${formatBytes(existingBytes)}，应为 ${formatBytes(plan.package.bytes)}`}`)
         }
-        meter('使用编译机上的安装包', { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 })
-        await mark('upload', 'succeeded', `${formatBytes(existingBytes)} · 编译机本地包，跳过下载/上传`)
-        await log(`using the package already on the build host (${plan.package.path}), skipping download and upload`)
+        const localLabel = plan.package.keep === true ? '目标成员本地包' : '编译机本地包'
+        meter(`使用${localLabel}`, { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 })
+        await mark('upload', 'succeeded', `${formatBytes(existingBytes)} · ${localLabel}，跳过下载/上传`)
+        await log(`using the package already on the target (${plan.package.path}), skipping download and upload`)
       } else if (existingBytes === plan.package.bytes) {
         await log(`package already present on the target (${formatBytes(existingBytes)}), skipping download and upload`)
         meter('获取安装包', { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 })
@@ -2029,6 +2095,15 @@ export class DeployManager {
         // existing gateway upload instead of failing the upgrade.
         const downloaded = await this.#downloadFromRelease(plan, runner, { log, meter, mark })
         if (!downloaded) {
+          // A release-only plan carries an archive *name*, not a file. Uploading
+          // it would scp a path that does not exist on the gateway and hide the
+          // real reason behind an SSH error.
+          if (plan.package.local === false) {
+            throw Object.assign(
+              new Error('Release 下载失败，且网关没有这个包的本地副本；请改用「目标成员已有包」，或把包放到本机 ~/.dsh/packages 后重试'),
+              { code: 'release_download_failed' },
+            )
+          }
           await log(`uploading to ${plan.remotePackage}`)
           await runner.upload(plan.package.path, plan.remotePackage, progress => {
             const totalBytes = progress.totalBytes ?? plan.package.bytes
@@ -2238,7 +2313,10 @@ export class DeployManager {
         await log('release download has no proxy configured; GitHub and Gitee are both fetched directly')
       }
       meter('从 Release 下载安装包', { percent: 0, indeterminate: true })
-      const script = releaseDownloadScript(plan, { node, remoteDir, manifests, proxyUrl })
+      if (download.prefer === 'gitee') {
+        await log('release download prefers Gitee; GitHub is the fallback (and may use the proxy)')
+      }
+      const script = releaseDownloadScript(plan, { node, remoteDir, manifests, proxyUrl, prefer: download.prefer })
       let total = plan.package.bytes
       let bytes = 0
       let source = ''
@@ -2304,10 +2382,10 @@ export class DeployManager {
         await log(`downloaded the package from ${source === '' ? 'the release' : source} (${via})`)
         return true
       }
-      await log(`release download did not produce a usable package (${failure ?? `size ${String(landed)} instead of ${String(plan.package.bytes)}`}); falling back to a gateway upload`)
+      await log(`release download did not produce a usable package (${failure ?? `size ${String(landed)} instead of ${String(plan.package.bytes)}`}); ${plan.package.local === false ? 'there is no local copy to upload' : 'falling back to a gateway upload'}`)
       return false
     } catch (error) {
-      await log(`release download failed (${error instanceof Error ? error.message : String(error)}); falling back to a gateway upload`)
+      await log(`release download failed (${error instanceof Error ? error.message : String(error)}); ${plan.package.local === false ? 'there is no local copy to upload' : 'falling back to a gateway upload'}`)
       return false
     } finally {
       egress?.closeAll()

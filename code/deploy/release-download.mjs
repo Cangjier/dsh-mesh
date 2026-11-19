@@ -215,15 +215,20 @@ async function main() {
   const proxy = valueOf(values, 'proxy')
   const expected = valueOf(values, 'sha256')
   const workdir = valueOf(values, 'workdir')
+  // The caller picks the first download source. GitHub is the default because
+  // it serves one whole file; the panel's "latest tag" source prefers Gitee so
+  // a domestic member usually does not detour through an overseas proxy.
+  const prefer = valueOf(values, 'prefer') === 'gitee' ? 'gitee' : 'github'
+  const providerOrder = prefer === 'gitee' ? ['gitee', 'github'] : ['github', 'gitee']
   // GitHub goes through the proxy; Gitee never does.
   const proxyFor = (provider) => (provider === 'github' && proxy !== '' ? proxy : null)
+  const manifestUrl = { github: githubManifest, gitee: giteeManifest }
   const manifests = [
-    ...(githubManifest === '' ? [] : [{ provider: 'github', url: githubManifest }]),
-    ...(giteeManifest === '' ? [] : [{ provider: 'gitee', url: giteeManifest }]),
+    ...providerOrder.filter(provider => manifestUrl[provider] !== '').map(provider => ({ provider, url: manifestUrl[provider] })),
     ...legacy.map(url => ({ provider: /github/iu.test(url) ? 'github' : 'gitee', url })),
   ]
   if (manifests.length === 0 || archive === '' || output === '') {
-    process.stderr.write('usage: release-download.mjs --manifest-github <url> --manifest-gitee <url> --archive <name> --output <file> [--sha256 <hex>] [--proxy <url>] [--workdir <dir>]\n')
+    process.stderr.write('usage: release-download.mjs --manifest-github <url> --manifest-gitee <url> --archive <name> --output <file> [--sha256 <hex>] [--proxy <url>] [--workdir <dir>] [--prefer github|gitee]\n')
     process.exitCode = 5
     return
   }
@@ -275,56 +280,67 @@ async function main() {
     return
   }
 
-  // GitHub first: one whole file, no assembly. Gitee is the split fallback.
-  const githubUrl = typeof asset.github?.url === 'string' ? asset.github.url : ''
-  if (githubUrl !== '') {
+  // Try the preferred provider first and fall back to the other one. A Gitee
+  // download is a set of parts that must be assembled; a GitHub download is one
+  // whole file and may need the egress proxy.
+  for (const provider of providerOrder) {
+    if (provider === 'github') {
+      const githubUrl = typeof asset.github?.url === 'string' ? asset.github.url : ''
+      if (githubUrl === '') continue
+      try {
+        marker('DSH-MESH-DOWNLOAD-SOURCE github')
+        const result = await fetchFile(githubUrl, output, { proxy: proxyFor('github'), sha256, label: 'github', retries: 2, offset: 0, overallTotal: totalBytes })
+        marker(`DSH-MESH-DOWNLOAD-DONE ${String(result.bytes)} ${result.sha256}`)
+        return
+      } catch (error) {
+        errors.push(`github: ${error instanceof Error ? error.message : String(error)}`)
+        await rm(output, { force: true }).catch(() => {})
+      }
+      continue
+    }
+
+    const parts = Array.isArray(asset.gitee?.parts) ? asset.gitee.parts : []
+    const urls = Array.isArray(asset.gitee?.urls) ? asset.gitee.urls : []
+    if (parts.length === 0 || urls.length === 0) {
+      errors.push('gitee: release has no split parts')
+      continue
+    }
+    marker('DSH-MESH-DOWNLOAD-SOURCE gitee')
+    const base = workdir === '' ? await mkdtemp(path.join(tmpdir(), 'dsh-mesh-download-')) : workdir
+    await mkdir(base, { recursive: true })
     try {
-      marker('DSH-MESH-DOWNLOAD-SOURCE github')
-      const result = await fetchFile(githubUrl, output, { proxy: proxyFor('github'), sha256, label: 'github', retries: 2, offset: 0, overallTotal: totalBytes })
-      marker(`DSH-MESH-DOWNLOAD-DONE ${String(result.bytes)} ${result.sha256}`)
+      const files = []
+      let offset = 0
+      const overallTotal = totalBytes > 0 ? totalBytes : parts.reduce((sum, part) => sum + Number(part?.bytes ?? 0), 0)
+      for (let index = 0; index < parts.length; index += 1) {
+        const part = parts[index]
+        const name = part?.name ?? `part${String(index + 1).padStart(3, '0')}`
+        const url = urls[index] ?? urls[0]
+        const file = path.join(base, path.basename(name))
+        const downloaded = await fetchFile(url, file, {
+          proxy: proxyFor('gitee'),
+          sha256: typeof part?.sha256 === 'string' ? part.sha256 : '',
+          label: name,
+          retries: 2,
+          offset,
+          overallTotal,
+        })
+        files.push({ file, name })
+        offset += downloaded.bytes
+        marker(`DSH-MESH-DOWNLOAD-PART ${String(index + 1)}/${String(parts.length)}`)
+      }
+      const assembled = await concatenate(files, output, sha256)
+      marker(`DSH-MESH-DOWNLOAD-DONE ${String(assembled.bytes)} ${assembled.sha256}`)
       return
     } catch (error) {
-      errors.push(`github: ${error instanceof Error ? error.message : String(error)}`)
+      errors.push(`gitee: ${error instanceof Error ? error.message : String(error)}`)
       await rm(output, { force: true }).catch(() => {})
+    } finally {
+      if (workdir === '') await rm(base, { recursive: true, force: true }).catch(() => {})
     }
   }
-
-  const parts = Array.isArray(asset.gitee?.parts) ? asset.gitee.parts : []
-  const urls = Array.isArray(asset.gitee?.urls) ? asset.gitee.urls : []
-  if (parts.length === 0 || urls.length === 0) {
-    process.stderr.write(`no usable download for ${archive}\n${errors.join('\n')}\n`)
-    process.exitCode = 4
-    return
-  }
-  marker('DSH-MESH-DOWNLOAD-SOURCE gitee')
-  const base = workdir === '' ? await mkdtemp(path.join(tmpdir(), 'dsh-mesh-download-')) : workdir
-  await mkdir(base, { recursive: true })
-  try {
-    const files = []
-    let offset = 0
-    const overallTotal = totalBytes > 0 ? totalBytes : parts.reduce((sum, part) => sum + Number(part?.bytes ?? 0), 0)
-    for (let index = 0; index < parts.length; index += 1) {
-      const part = parts[index]
-      const name = part?.name ?? `part${String(index + 1).padStart(3, '0')}`
-      const url = urls[index] ?? urls[0]
-      const file = path.join(base, path.basename(name))
-      const downloaded = await fetchFile(url, file, {
-        proxy: proxyFor('gitee'),
-        sha256: typeof part?.sha256 === 'string' ? part.sha256 : '',
-        label: name,
-        retries: 2,
-        offset,
-        overallTotal,
-      })
-      files.push({ file, name })
-      offset += downloaded.bytes
-      marker(`DSH-MESH-DOWNLOAD-PART ${String(index + 1)}/${String(parts.length)}`)
-    }
-    const assembled = await concatenate(files, output, sha256)
-    marker(`DSH-MESH-DOWNLOAD-DONE ${String(assembled.bytes)} ${assembled.sha256}`)
-  } finally {
-    if (workdir === '') await rm(base, { recursive: true, force: true }).catch(() => {})
-  }
+  process.stderr.write(`no usable download for ${archive}\n${errors.join('\n')}\n`)
+  process.exitCode = 4
 }
 
 main().catch((error) => {

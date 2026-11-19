@@ -219,3 +219,42 @@ test('upgrade routes forward the download proxy choice', async () => {
   assert.equal(direct.status, 202)
   assert.deepEqual(seen[1], { kind: 'test', request: { member: 'b', package: 'p.tar.gz', direct: true } })
 })
+
+test('package source routes expose the latest tag and the target member archives', async () => {
+  const calls = []
+  const call = apiCaller({
+    async latestRelease(options) {
+      calls.push({ latest: options })
+      return { ok: true, configured: true, assets: [{ target: 'win-x64' }], manifestUrls: [] }
+    },
+    async memberPackages(member) {
+      calls.push({ member })
+      return { ok: true, member, packages: [{ name: 'a.zip', path: 'C:\\a.zip' }] }
+    },
+  })
+  const latest = await call('GET', '/api/dsh-mesh/release/latest?refresh=1')
+  assert.equal(latest.status, 200)
+  assert.deepEqual(latest.body.assets, [{ target: 'win-x64' }])
+  const listed = await call('GET', '/api/dsh-mesh/member-packages?member=10.66.66.4')
+  assert.equal(listed.status, 200)
+  assert.equal(listed.body.packages[0].name, 'a.zip')
+  assert.deepEqual(calls, [{ latest: { refresh: true } }, { member: '10.66.66.4' }])
+})
+
+test('the upgrade route passes the latest and target-package sources through', async () => {
+  const calls = []
+  const call = apiCaller({
+    async upgradeMember(request) {
+      calls.push(request)
+      return { ok: true, job: { id: 'deploy-source', status: 'queued' }, member: { id: '10.66.66.4' }, layout: 'bluegreen' }
+    },
+  })
+  const latest = await call('POST', '/api/dsh-mesh/upgrade', { member: '10.66.66.4', release: { target: 'win-x64' } })
+  assert.equal(latest.status, 202)
+  const target = await call('POST', '/api/dsh-mesh/upgrade', { member: '10.66.66.4', targetPackage: { path: 'C:\\Users\\Admin\\.dsh\\packages\\a.zip' } })
+  assert.equal(target.status, 202)
+  assert.deepEqual(calls, [
+    { member: '10.66.66.4', package: undefined, release: { target: 'win-x64' } },
+    { member: '10.66.66.4', package: undefined, targetPackage: { path: 'C:\\Users\\Admin\\.dsh\\packages\\a.zip' } },
+  ])
+})

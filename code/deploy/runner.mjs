@@ -18,6 +18,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { chmod, cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import path from 'node:path'
@@ -124,6 +125,88 @@ function run(command, args, onLine) {
 }
 
 /**
+ * Fetch the selected release archive on the machine running this job.
+ *
+ * A local (`self`) upgrade used to require a file in `~/.dsh/packages`. The
+ * latest-tag source has no such file yet; download it here, in the detached
+ * job, so the panel stays responsive and the progress is visible. The archive
+ * is cached in `~/.dsh/packages`, which also makes it available to the
+ * "target member has this package" source afterwards.
+ * @param {object} context run context.
+ * @returns {Promise<void>} completion.
+ */
+async function acquireRelease(context) {
+  const { request, note, mark, meter } = context
+  const settings = request.inplace ?? {}
+  const acquire = settings.acquire
+  const output = String(settings.package ?? '')
+  if (acquire === null || typeof acquire !== 'object') throw new Error('request.inplace.acquire is missing')
+  if (output === '') throw new Error('request.inplace.package is missing')
+  const name = typeof acquire.name === 'string' ? acquire.name.trim() : ''
+  const sha256 = typeof acquire.sha256 === 'string' ? acquire.sha256.trim().toLowerCase() : ''
+  if (name === '' || name !== path.basename(name) || !/^[a-f0-9]{64}$/u.test(sha256)) {
+    throw new Error('request.inplace.acquire has an invalid archive or digest')
+  }
+  const downloader = path.join(REPOSITORY_ROOT, 'code', 'deploy', 'release-download.mjs')
+  if (!existsSync(downloader)) throw new Error(`release downloader is missing: ${downloader}`)
+  const args = []
+  for (const entry of Array.isArray(acquire.manifests) ? acquire.manifests : []) {
+    if (entry !== null && typeof entry === 'object' && typeof entry.url === 'string' && entry.url !== '') {
+      const provider = entry.provider === 'gitee' ? 'gitee' : entry.provider === 'github' ? 'github' : ''
+      if (provider === '') continue
+      args.push(`--manifest-${provider}`, entry.url)
+    } else if (typeof entry === 'string' && entry !== '') {
+      args.push(/gitee\./iu.test(entry) ? '--manifest-gitee' : '--manifest-github', entry)
+    }
+  }
+  args.push('--archive', name, '--sha256', sha256, '--output', output)
+  if (acquire.prefer === 'gitee') args.push('--prefer', 'gitee')
+  if (typeof acquire.proxy === 'string' && acquire.proxy !== '') args.push('--proxy', acquire.proxy)
+  await mkdir(path.dirname(output), { recursive: true })
+  await mark('upload', 'running')
+  meter('从 latest tag 下载安装包', { percent: 0, indeterminate: true })
+  await note(`downloading ${name} from the latest tag`)
+  let total = Number(acquire.bytes) || 0
+  let bytes = 0
+  let source = ''
+  try {
+    await run(process.execPath, [downloader, ...args], (line) => {
+      const planMatch = /^DSH-MESH-DOWNLOAD-PLAN (\d+)$/u.exec(line)
+      if (planMatch !== null) {
+        total = Number.parseInt(planMatch[1], 10) || total
+        return
+      }
+      const sourceMatch = /^DSH-MESH-DOWNLOAD-SOURCE (github|gitee)$/u.exec(line)
+      if (sourceMatch !== null) {
+        source = sourceMatch[1] === 'gitee' ? 'Gitee' : 'GitHub'
+        return
+      }
+      const progressMatch = /^DSH-MESH-DOWNLOAD (\d+) (\d+)$/u.exec(line)
+      if (progressMatch !== null) {
+        bytes = Number.parseInt(progressMatch[1], 10)
+        total = Number.parseInt(progressMatch[2], 10) || total
+        meter('从 latest tag 下载安装包', {
+          bytes,
+          totalBytes: total,
+          percent: total > 0 ? Math.min(100, Math.round((bytes / total) * 100)) : 0,
+          indeterminate: total <= 0,
+        })
+        return
+      }
+      if (/^DSH-MESH-DOWNLOAD-(?:MANIFEST|PART|PROGRESS|OK|DONE) /u.test(line)) return
+      void note(line)
+    })
+  } catch (error) {
+    throw new Error(`latest tag 下载失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+  const info = await stat(output)
+  if (!info.isFile() || info.size <= 0) throw new Error(`latest tag 下载没有生成可用文件：${output}`)
+  await mark('upload', 'succeeded', `${formatBytes(info.size)} · ${source === '' ? 'Release' : source} 下载`)
+  meter('从 latest tag 下载安装包', { bytes: info.size, totalBytes: info.size, percent: 100, indeterminate: false })
+  await note(`downloaded ${name} from ${source === '' ? 'the release' : source} (${formatBytes(info.size)})`)
+}
+
+/**
  * In-place upgrade of the machine the panel runs on.
  *
  * A flat install (`<root>/config/gate.env` next to `start.sh`, no `current`
@@ -139,11 +222,14 @@ async function runInplace(context) {
   const settings = request.inplace ?? {}
   const packagePath = String(settings.package ?? '')
   if (packagePath === '') throw new Error('request.inplace.package is missing')
+  if (settings.acquire !== null && typeof settings.acquire === 'object') await acquireRelease(context)
   const info = await stat(packagePath)
   if (!info.isFile()) throw new Error(`package is not a file: ${packagePath}`)
   await note(`local upgrade of ${String(settings.appRoot ?? '')} from ${path.basename(packagePath)}`)
   meter('准备本地升级', { percent: 100, indeterminate: false })
-  await mark('upload', 'succeeded', '本地部署包，无需上传')
+  if (settings.acquire === null || typeof settings.acquire !== 'object') {
+    await mark('upload', 'succeeded', '本地部署包，无需上传')
+  }
 
   const stage = path.join(jobDir, 'stage')
   await rm(stage, { recursive: true, force: true })

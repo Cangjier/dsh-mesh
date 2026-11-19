@@ -1,6 +1,6 @@
 // src/index.ts
 import { homedir as homedir4 } from "node:os";
-import path24 from "node:path";
+import path25 from "node:path";
 
 // src/lib/service.mjs
 import { mkdir as mkdir11, readFile as readFile13, readdir as readdir7, rm as rm12, stat as stat11, writeFile as writeFile11 } from "node:fs/promises";
@@ -8,7 +8,7 @@ import { existsSync as existsSync11, readFileSync as readFileSync4, realpathSync
 import { spawn as spawn6 } from "node:child_process";
 import { createHash as createHash7 } from "node:crypto";
 import os8 from "node:os";
-import path18 from "node:path";
+import path19 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // code/shared/wireguard.mjs
@@ -4542,6 +4542,38 @@ async function publishRelease(options) {
     for (const dir of splits) await removeSplit(dir);
   }
 }
+async function fetchLatestManifest(options) {
+  const log = options.log ?? (() => {
+  });
+  const errors = [];
+  for (const url of options.urls ?? []) {
+    try {
+      let host = "";
+      try {
+        host = new URL(url).hostname;
+      } catch {
+        host = "";
+      }
+      const proxy2 = /(?:^|\.)github\.com$|githubusercontent\.com$/iu.test(host) ? options.proxy ?? null : null;
+      const response = await requestJson(url, {
+        proxy: proxy2,
+        timeoutMs: options.timeoutMs ?? 3e4,
+        idleTimeoutMs: options.timeoutMs ?? 3e4,
+        headers: { accept: "application/json" }
+      });
+      if (!isSuccess(response.status) || response.json === null || typeof response.json !== "object") {
+        errors.push(`${url}: HTTP ${String(response.status)}`);
+        continue;
+      }
+      log(`release manifest ${url}`);
+      return { manifest: response.json, url };
+    } catch (error) {
+      errors.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw new Error(`no release manifest is reachable
+${errors.join("\n")}`);
+}
 
 // code/build/job.mjs
 function defaultJobRoot() {
@@ -5340,14 +5372,28 @@ function layoutRootFor(appRoot, os9) {
   if (base === ".dsh") return root;
   return os9 === "linux" ? path14.posix.dirname(root) : path14.win32.dirname(root);
 }
+function archiveSuffix(file) {
+  const name = path14.basename(String(file ?? ""));
+  if (name.endsWith(".tar.gz")) return ".tar.gz";
+  if (name.endsWith(".tgz")) return ".tgz";
+  const extension = path14.extname(name);
+  return extension === "" ? ".tar.gz" : extension;
+}
+function archiveNameFor(file, os9) {
+  const text = String(file ?? "");
+  return os9 === "windows" ? path14.win32.basename(text) : path14.posix.basename(text);
+}
 async function buildDeployPlan(options) {
   if (typeof options.host !== "string" || options.host.trim() === "") throw new Error("host is required");
   const os9 = normalizeOs(options.os ?? "linux");
   const repositoryRoot = options.repositoryRoot ?? process.cwd();
   const onTarget = options.packageOnTarget !== null && typeof options.packageOnTarget === "object" ? options.packageOnTarget : null;
+  const descriptor = options.packageDescriptor !== null && typeof options.packageDescriptor === "object" ? options.packageDescriptor : null;
   let packagePath = "";
   let packageInfo2 = null;
   let sha256 = "";
+  let packageLocal = true;
+  let packageKeep = false;
   if (onTarget !== null) {
     packagePath = typeof onTarget.path === "string" ? onTarget.path.trim() : "";
     const bytes = Number(onTarget.bytes);
@@ -5356,6 +5402,16 @@ async function buildDeployPlan(options) {
     if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error("packageOnTarget.bytes must be a positive integer");
     if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error("packageOnTarget.sha256 must be a 64-character hex digest");
     packageInfo2 = { size: bytes };
+    packageKeep = onTarget.keep === true;
+  } else if (descriptor !== null) {
+    packagePath = typeof descriptor.name === "string" ? descriptor.name.trim() : "";
+    const bytes = Number(descriptor.bytes);
+    sha256 = typeof descriptor.sha256 === "string" ? descriptor.sha256.trim().toLowerCase() : "";
+    if (packagePath === "" || packagePath !== path14.basename(packagePath)) throw new Error("packageDescriptor.name must be an archive name");
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error("packageDescriptor.bytes must be a positive integer");
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error("packageDescriptor.sha256 must be a 64-character hex digest");
+    packageInfo2 = { size: bytes };
+    packageLocal = descriptor.local !== false;
   } else if (options.skipPackage !== true) {
     packagePath = options.package ? path14.resolve(options.package) : await findLatestPackage(repositoryRoot, os9);
     packageInfo2 = await stat8(packagePath);
@@ -5396,7 +5452,15 @@ async function buildDeployPlan(options) {
     port: Number.isSafeInteger(options.port) ? options.port : 22,
     identityFile: typeof options.identityFile === "string" && options.identityFile.trim() !== "" ? path14.resolve(options.identityFile) : void 0,
     os: os9,
-    package: { path: packagePath, bytes: packageInfo2?.size ?? 0, sha256, onTarget: onTarget !== null },
+    package: {
+      path: packagePath,
+      archive: archiveNameFor(packagePath, os9),
+      bytes: packageInfo2?.size ?? 0,
+      sha256,
+      local: packageLocal,
+      keep: packageKeep,
+      onTarget: onTarget !== null
+    },
     // The archive is already on the target, so upload/download must be skipped
     // and the target path doubles as `remotePackage`.
     packageOnTarget: onTarget !== null,
@@ -5426,7 +5490,7 @@ async function buildDeployPlan(options) {
     interop: options.interop === false || process.env.DSH_DEPLOY_INTEROP === "0" ? null : interop,
     // Named by content, not by release, so a retried deploy of the same package
     // reuses the upload instead of pushing hundreds of megabytes again.
-    remotePackage: onTarget !== null ? packagePath : os9 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${path14.extname(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${path14.extname(packagePath)}`,
+    remotePackage: onTarget !== null ? packagePath : os9 === "linux" ? `/tmp/dsh-mesh-${sha256.slice(0, 12)}${archiveSuffix(packagePath)}` : `C:\\Windows\\Temp\\dsh-mesh-${sha256.slice(0, 12)}${archiveSuffix(packagePath)}`,
     // A test upgrade rehearses the *flat* upgrade (the path the gateway uses
     // on itself) in a sandbox on the member before touching it, then runs the
     // normal blue-green upgrade. Without this a member test proves nothing
@@ -5551,9 +5615,10 @@ tar -xzf "$PACKAGE" -C "$STAGE" --strip-components=1 -v | {
     if [ $((extracted % ${String(EXTRACT_CHECKPOINT)})) -eq 0 ]; then printf 'DSH-MESH-EXTRACT %s\\n' "$extracted"; fi
   done
 }
-# The archive is 300+ MiB and /tmp is often a small tmpfs; one copy left
-# behind per job eventually fills it.
-rm -f "$PACKAGE"
+# The archive is 300+ MiB and /tmp is often a small tmpfs; a temp copy is
+# deleted after extraction. A package chosen from the member's own cache is
+# not a temp copy and is kept.
+${plan.package?.keep === true ? "# keep the package: it was selected from the member's own cache" : 'rm -f "$PACKAGE"'}
 chmod +x "$STAGE"/*.sh "$STAGE/dsh-mesh.mjs" 2>/dev/null || true
 chmod +x "$STAGE/runtime/node/bin/node" 2>/dev/null || true
 NODE="$STAGE/runtime/node/bin/node"
@@ -5621,9 +5686,10 @@ if (-not (Test-Path $node)) { $node = (Get-Command node -ErrorAction Stop).Sourc
 & $node --check (Join-Path $Stage 'gate\\server.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'gate/server.mjs failed node --check' }
 # One 300\u2013420 MiB archive per upgrade must not pile up in the temp directory.
-# Linux prepare already deletes its copy; Windows did not, and the build-host
-# archive staged for an automatic upgrade is no longer needed once extracted.
-Remove-Item -LiteralPath $Package -Force -ErrorAction SilentlyContinue
+# A staging archive is deleted after extraction; a package chosen from the
+# member's own cache is kept.
+$KeepPackage = ${plan.package?.keep === true ? "$true" : "$false"}
+if (-not $KeepPackage) { Remove-Item -LiteralPath $Package -Force -ErrorAction SilentlyContinue }
 Write-Output "prepared ${plan.release} at $Stage"
 `;
 }
@@ -5742,7 +5808,7 @@ function describePlan(plan) {
     services: plan.services,
     scope: plan.scope,
     steps: [
-      plan.packageOnTarget === true ? `use the package already on the target (${plan.package.path}); no download or upload` : `obtain ${path14.basename(plan.package.path)}: download from the release when configured, else upload to ${plan.remotePackage}`,
+      plan.packageOnTarget === true ? `use the package already on the target (${plan.package.path}); no download or upload` : `obtain ${plan.package.archive ?? path14.basename(plan.package.path)}: download from the release when configured, else upload to ${plan.remotePackage}`,
       `extract and prepare ${plan.releases}/${plan.release} (no service switch)`,
       `update shared config and service definitions for ${plan.appRoot}/current`,
       `switch ${plan.current} to ${plan.release}`,
@@ -6227,7 +6293,8 @@ function normalizeDownloadManifests(download2) {
   return normalized;
 }
 function releaseDownloadScript(plan, options) {
-  const archive = path14.basename(plan.package.path);
+  const archive = plan.package.archive ?? path14.basename(plan.package.path);
+  const prefer = options.prefer === "gitee" ? "--prefer gitee" : "";
   const manifestArgs = options.manifests.map((entry) => `--manifest-${entry.provider} ${plan.os === "windows" ? ps(entry.url) : sh(entry.url)}`).join(" ");
   if (plan.os === "windows") {
     const script2 = `${options.remoteDir}\\deploy\\release-download.mjs`;
@@ -6237,7 +6304,8 @@ function releaseDownloadScript(plan, options) {
       `--sha256 ${ps(plan.package.sha256)}`,
       `--output ${ps(plan.remotePackage)}`,
       options.proxyUrl === null ? "" : `--proxy ${ps(options.proxyUrl)}`,
-      `--workdir ${ps(`${options.remoteDir}\\parts`)}`
+      `--workdir ${ps(`${options.remoteDir}\\parts`)}`,
+      prefer
     ].filter(Boolean).join(" ");
     return `$ErrorActionPreference = 'Stop'
 & ${ps(options.node)} ${ps(script2)} ${args2}
@@ -6251,7 +6319,8 @@ exit $LASTEXITCODE
     `--sha256 ${sh(plan.package.sha256)}`,
     `--output ${sh(plan.remotePackage)}`,
     options.proxyUrl === null ? "" : `--proxy ${sh(options.proxyUrl)}`,
-    `--workdir ${sh(`${options.remoteDir}/parts`)}`
+    `--workdir ${sh(`${options.remoteDir}/parts`)}`,
+    prefer
   ].filter(Boolean).join(" ");
   return `set -u
 ${sh(options.node)} ${sh(script)} ${args}
@@ -6433,9 +6502,10 @@ var DeployManager = class {
         if (existingBytes !== plan.package.bytes) {
           throw new Error(`\u7F16\u8BD1\u673A\u4E0A\u7684\u5B89\u88C5\u5305\u4E0D\u53EF\u7528\uFF1A${plan.package.path} ${existingBytes === null ? "\u4E0D\u5B58\u5728" : `\u53EA\u6709 ${formatBytes2(existingBytes)}\uFF0C\u5E94\u4E3A ${formatBytes2(plan.package.bytes)}`}`);
         }
-        meter("\u4F7F\u7528\u7F16\u8BD1\u673A\u4E0A\u7684\u5B89\u88C5\u5305", { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 });
-        await mark("upload", "succeeded", `${formatBytes2(existingBytes)} \xB7 \u7F16\u8BD1\u673A\u672C\u5730\u5305\uFF0C\u8DF3\u8FC7\u4E0B\u8F7D/\u4E0A\u4F20`);
-        await log(`using the package already on the build host (${plan.package.path}), skipping download and upload`);
+        const localLabel = plan.package.keep === true ? "\u76EE\u6807\u6210\u5458\u672C\u5730\u5305" : "\u7F16\u8BD1\u673A\u672C\u5730\u5305";
+        meter(`\u4F7F\u7528${localLabel}`, { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 });
+        await mark("upload", "succeeded", `${formatBytes2(existingBytes)} \xB7 ${localLabel}\uFF0C\u8DF3\u8FC7\u4E0B\u8F7D/\u4E0A\u4F20`);
+        await log(`using the package already on the target (${plan.package.path}), skipping download and upload`);
       } else if (existingBytes === plan.package.bytes) {
         await log(`package already present on the target (${formatBytes2(existingBytes)}), skipping download and upload`);
         meter("\u83B7\u53D6\u5B89\u88C5\u5305", { bytes: existingBytes, totalBytes: plan.package.bytes, percent: 100 });
@@ -6457,6 +6527,12 @@ var DeployManager = class {
         }
         const downloaded = await this.#downloadFromRelease(plan, runner, { log, meter, mark });
         if (!downloaded) {
+          if (plan.package.local === false) {
+            throw Object.assign(
+              new Error("Release \u4E0B\u8F7D\u5931\u8D25\uFF0C\u4E14\u7F51\u5173\u6CA1\u6709\u8FD9\u4E2A\u5305\u7684\u672C\u5730\u526F\u672C\uFF1B\u8BF7\u6539\u7528\u300C\u76EE\u6807\u6210\u5458\u5DF2\u6709\u5305\u300D\uFF0C\u6216\u628A\u5305\u653E\u5230\u672C\u673A ~/.dsh/packages \u540E\u91CD\u8BD5"),
+              { code: "release_download_failed" }
+            );
+          }
           await log(`uploading to ${plan.remotePackage}`);
           await runner.upload(plan.package.path, plan.remotePackage, (progress) => {
             const totalBytes = progress.totalBytes ?? plan.package.bytes;
@@ -6646,7 +6722,10 @@ var DeployManager = class {
         await log("release download has no proxy configured; GitHub and Gitee are both fetched directly");
       }
       meter("\u4ECE Release \u4E0B\u8F7D\u5B89\u88C5\u5305", { percent: 0, indeterminate: true });
-      const script = releaseDownloadScript(plan, { node, remoteDir, manifests, proxyUrl });
+      if (download2.prefer === "gitee") {
+        await log("release download prefers Gitee; GitHub is the fallback (and may use the proxy)");
+      }
+      const script = releaseDownloadScript(plan, { node, remoteDir, manifests, proxyUrl, prefer: download2.prefer });
       let total = plan.package.bytes;
       let bytes = 0;
       let source = "";
@@ -6704,10 +6783,10 @@ var DeployManager = class {
         await log(`downloaded the package from ${source === "" ? "the release" : source} (${via})`);
         return true;
       }
-      await log(`release download did not produce a usable package (${failure ?? `size ${String(landed)} instead of ${String(plan.package.bytes)}`}); falling back to a gateway upload`);
+      await log(`release download did not produce a usable package (${failure ?? `size ${String(landed)} instead of ${String(plan.package.bytes)}`}); ${plan.package.local === false ? "there is no local copy to upload" : "falling back to a gateway upload"}`);
       return false;
     } catch (error) {
-      await log(`release download failed (${error instanceof Error ? error.message : String(error)}); falling back to a gateway upload`);
+      await log(`release download failed (${error instanceof Error ? error.message : String(error)}); ${plan.package.local === false ? "there is no local copy to upload" : "falling back to a gateway upload"}`);
       return false;
     } finally {
       egress?.closeAll();
@@ -7584,8 +7663,8 @@ function signClusterRequest(secret, request) {
   const signature = createHmac("sha256", secret).update(payload).digest("base64url");
   return `${VERSION}.${String(timestamp)}.${nonce}.${signature}`;
 }
-function payloadOf(method, path25, timestamp, nonce) {
-  return [VERSION, String(method).toUpperCase(), path25, String(timestamp), nonce].join("\n");
+function payloadOf(method, path26, timestamp, nonce) {
+  return [VERSION, String(method).toUpperCase(), path26, String(timestamp), nonce].join("\n");
 }
 
 // code/build/repack.mjs
@@ -8328,8 +8407,164 @@ function resolveDeployLinkProxy(options) {
   return null;
 }
 
+// src/lib/package-sources.mjs
+import path18 from "node:path";
+var PACKAGE_ARCHIVE_RE = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(x64|arm64)\.(tar\.gz|tgz|zip)$/u;
+var RELEASE_TARGET_RE = /^(linux|win)-(x64|arm64)$/u;
+function packageTargetFromName(name) {
+  const match = PACKAGE_ARCHIVE_RE.exec(String(name ?? ""));
+  if (match === null) return null;
+  const os9 = match[3].startsWith("win") ? "windows" : "linux";
+  const arch = match[4];
+  return {
+    version: match[1],
+    buildStamp: match[2],
+    os: os9,
+    arch,
+    target: `${os9 === "windows" ? "win" : "linux"}-${arch}`
+  };
+}
+function normalizeLatestManifest(manifest, options = {}) {
+  const assets = [];
+  const entries = manifest?.assets !== null && typeof manifest?.assets === "object" ? manifest.assets : {};
+  for (const [target, entry] of Object.entries(entries)) {
+    if (!RELEASE_TARGET_RE.test(target)) continue;
+    if (entry === null || typeof entry !== "object") continue;
+    const name = typeof entry.archive === "string" ? entry.archive.trim() : "";
+    const parsed = packageTargetFromName(name);
+    if (parsed === null || parsed.target !== target) continue;
+    const bytes = Number(entry.bytes);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) continue;
+    const sha256 = typeof entry.sha256 === "string" ? entry.sha256.trim().toLowerCase() : "";
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) continue;
+    const providers = [];
+    if (typeof entry.github?.url === "string" && entry.github.url !== "") providers.push("github");
+    if (Array.isArray(entry.gitee?.parts) && entry.gitee.parts.length > 0 && Array.isArray(entry.gitee?.urls) && entry.gitee.urls.length > 0) providers.push("gitee");
+    assets.push({ target, os: parsed.os, arch: parsed.arch, name, bytes, sha256, providers });
+  }
+  assets.sort((left, right) => left.target.localeCompare(right.target));
+  return {
+    ok: assets.length > 0,
+    configured: true,
+    provider: typeof options.provider === "string" && options.provider !== "" ? options.provider : null,
+    version: typeof manifest?.version === "string" ? manifest.version : null,
+    buildStamp: typeof manifest?.buildStamp === "string" ? manifest.buildStamp : null,
+    publishedAt: typeof manifest?.publishedAt === "string" ? manifest.publishedAt : null,
+    assets,
+    manifestUrls: Array.isArray(options.manifestUrls) ? options.manifestUrls.filter((url) => typeof url === "string") : [],
+    ...assets.length === 0 ? { error: "\u53D1\u5E03\u6E05\u5355\u91CC\u6CA1\u6709\u53EF\u7528\u7684\u90E8\u7F72\u5305" } : {}
+  };
+}
+function selectLatestAsset(release, target) {
+  const wanted = normalizeTarget(target);
+  if (wanted === "") return null;
+  const assets = Array.isArray(release?.assets) ? release.assets : [];
+  return assets.find((asset) => asset.target === wanted) ?? null;
+}
+function normalizeTarget(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  const match = /^(linux|win(?:dows)?|win32)-(x64|arm64)$/u.exec(text);
+  if (match === null) return "";
+  return `${match[1].startsWith("linux") ? "linux" : "win"}-${match[2]}`;
+}
+function packageRoots(home, os9) {
+  const base = String(home ?? "").replace(/[\\/]+$/u, "");
+  if (base === "") return [];
+  const join = os9 === "windows" ? path18.win32.join : path18.posix.join;
+  return [join(base, ".dsh", "packages"), join(base, ".dsh", "mesh", "upgrade")];
+}
+function isAllowedPackagePath(candidate, home, os9) {
+  const text = String(candidate ?? "").trim();
+  if (text === "") return false;
+  const p = os9 === "windows" ? path18.win32 : path18.posix;
+  const normalized = p.normalize(text);
+  if (packageTargetFromName(p.basename(normalized)) === null) return false;
+  const roots = packageRoots(home, os9).map((root) => p.normalize(root));
+  const comparand = os9 === "windows" ? normalized.toLowerCase() : normalized;
+  return roots.some((root) => {
+    const prefix = os9 === "windows" ? root.toLowerCase() : root;
+    return comparand === prefix || comparand.startsWith(`${prefix}${p.sep}`);
+  });
+}
+function parseTargetPackageList(stdout) {
+  const packages = [];
+  for (const line of String(stdout ?? "").split(/\r?\n/u)) {
+    const text = line.trim();
+    if (text === "") continue;
+    const [file, rawBytes, rawMtime, rawSha] = text.split("	");
+    if (file === void 0 || rawBytes === void 0) continue;
+    const parsed = packageTargetFromName(file.split(/[\\/]/u).pop() ?? "");
+    if (parsed === null) continue;
+    const bytes = Number(rawBytes);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) continue;
+    const sha256 = typeof rawSha === "string" && /^[a-f0-9]{64}$/u.test(rawSha.trim()) ? rawSha.trim().toLowerCase() : null;
+    const mtime = normalizeMtime(rawMtime);
+    packages.push({ name: file.split(/[\\/]/u).pop() ?? file, path: file, bytes, mtime, sha256, ...parsed });
+  }
+  packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
+  return packages;
+}
+function normalizeMtime(value) {
+  const text = String(value ?? "").trim();
+  if (text === "") return "";
+  if (/^\d+$/u.test(text)) {
+    const seconds = Number.parseInt(text, 10);
+    return Number.isSafeInteger(seconds) && seconds > 0 ? new Date(seconds * 1e3).toISOString() : "";
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : "";
+}
+function listPackagesScript(os9, home = "") {
+  const homeDir = String(home ?? "").trim();
+  if (os9 === "windows") {
+    const base2 = homeDir === "" ? "$env:USERPROFILE" : powershellQuote(homeDir);
+    return `$ErrorActionPreference = 'SilentlyContinue'
+$base = ${base2}
+$roots = @(
+  (Join-Path $base '.dsh\\packages'),
+  (Join-Path $base '.dsh\\mesh\\upgrade')
+)
+$rows = @()
+foreach ($root in $roots) {
+  if (-not (Test-Path -LiteralPath $root)) { continue }
+  Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.Name -match '^dsh-mesh-.*\\.(zip|tar\\.gz|tgz)$' } | ForEach-Object {
+    $sha = ''
+    $side = "$($_.FullName).sha256"
+    if (Test-Path -LiteralPath $side) {
+      $first = Get-Content -LiteralPath $side -TotalCount 1
+      if ($first) { $sha = ($first -split '\\s+')[0] }
+    }
+    $rows += ($_.FullName + [char]9 + $_.Length + [char]9 + $_.LastWriteTimeUtc.ToString('o') + [char]9 + $sha)
+  }
+}
+$rows | ForEach-Object { Write-Output $_ }
+`;
+  }
+  const base = homeDir === "" ? '"$HOME"' : shellQuote(homeDir);
+  return `BASE=${base}
+for root in "$BASE/.dsh/packages" "$BASE/.dsh/mesh/upgrade"; do
+  [ -d "$root" ] || continue
+  find "$root" -maxdepth 3 -type f \\( -name 'dsh-mesh-*.tar.gz' -o -name 'dsh-mesh-*.tgz' -o -name 'dsh-mesh-*.zip' \\) -print0 2>/dev/null |
+  while IFS= read -r -d '' file; do
+    bytes=$(stat -c %s -- "$file" 2>/dev/null || echo 0)
+    mtime=$(stat -c %Y -- "$file" 2>/dev/null || echo 0)
+    sha=''
+    side="$file.sha256"
+    if [ -f "$side" ]; then sha=$(sed -n '1s/[[:space:]].*//p' "$side" 2>/dev/null || true); fi
+    printf '%s\\t%s\\t%s\\t%s\\n' "$file" "$bytes" "$mtime" "$sha"
+  done
+done
+`;
+}
+function shellQuote(value) {
+  return `'${String(value).replace(/'/gu, `'\\''`)}'`;
+}
+function powershellQuote(value) {
+  return `'${String(value).replace(/'/gu, "''")}'`;
+}
+
 // src/lib/service.mjs
-var HERE2 = path18.dirname(fileURLToPath2(import.meta.url));
+var HERE2 = path19.dirname(fileURLToPath2(import.meta.url));
 var PROBE_GRACE_MS = 10 * 6e4;
 var PROBE_TIMEOUT_MS = 4500;
 var PROBE_RETRY_MS = 4500;
@@ -8337,19 +8572,19 @@ var PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 6e4;
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync11(path18.join(current, "build", "recipes.json")) && existsSync11(path18.join(current, "code", "build"))) {
+    if (existsSync11(path19.join(current, "build", "recipes.json")) && existsSync11(path19.join(current, "code", "build"))) {
       return current;
     }
-    const parent = path18.dirname(current);
+    const parent = path19.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return path18.resolve(start, "..", "..");
+  return path19.resolve(start, "..", "..");
 }
 var REPOSITORY_ROOT = findRepositoryRoot(HERE2);
 function packageVersion() {
   try {
-    const parsed = JSON.parse(readFileSync4(path18.join(REPOSITORY_ROOT, "package.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync4(path19.join(REPOSITORY_ROOT, "package.json"), "utf8"));
     return typeof parsed.version === "string" ? parsed.version : "0.0.0";
   } catch {
     return "0.0.0";
@@ -8380,21 +8615,22 @@ var MeshService = class {
     this.config = options.config ?? {};
     this.logLine = options.log ?? (() => {
     });
-    this.jobRoot = path18.join(this.dataDir, "build");
-    this.cacheDir = path18.join(this.dataDir, "cache");
+    this.jobRoot = path19.join(this.dataDir, "build");
+    this.cacheDir = path19.join(this.dataDir, "cache");
     this.version = packageVersion();
     this.repositoryRoot = REPOSITORY_ROOT;
-    this.recipesPath = path18.join(REPOSITORY_ROOT, "build", "recipes.json");
-    this.overlayRoot = path18.join(REPOSITORY_ROOT, "build", "overlays");
-    this.home = path18.dirname(this.dataDir);
-    this.deployRoot = path18.join(this.dataDir, "deploy");
-    this.memberTagsFile = path18.join(this.dataDir, "member-tags.json");
-    this.packagesDir = path18.join(os8.homedir(), ".dsh", "packages");
-    this.releaseConfigFile = path18.join(this.dataDir, "release.json");
+    this.recipesPath = path19.join(REPOSITORY_ROOT, "build", "recipes.json");
+    this.overlayRoot = path19.join(REPOSITORY_ROOT, "build", "overlays");
+    this.home = path19.dirname(this.dataDir);
+    this.deployRoot = path19.join(this.dataDir, "deploy");
+    this.memberTagsFile = path19.join(this.dataDir, "member-tags.json");
+    this.packagesDir = path19.join(os8.homedir(), ".dsh", "packages");
+    this.releaseConfigFile = path19.join(this.dataDir, "release.json");
+    this.latestReleaseCache = null;
     const geoConfig = this.config.geo === false ? { enabled: false } : this.config.geo !== null && typeof this.config.geo === "object" ? this.config.geo : {};
     this.geo = options.geoLookup ?? new GeoLookup({
       enabled: geoConfig.enabled !== false,
-      cacheFile: path18.join(this.dataDir, "geo-cache.json"),
+      cacheFile: path19.join(this.dataDir, "geo-cache.json"),
       provider: typeof geoConfig.provider === "string" && geoConfig.provider !== "" ? geoConfig.provider : void 0,
       timeoutMs: typeof geoConfig.timeoutMs === "number" ? geoConfig.timeoutMs : void 0,
       fetchImpl: typeof geoConfig.fetchImpl === "function" ? geoConfig.fetchImpl : void 0,
@@ -8411,7 +8647,7 @@ var MeshService = class {
     this.remoteBuilder = new RemoteBuilder({ packagesDir: this.packagesDir, log: (line) => this.logLine(line) });
     this.systemCache = null;
     this.probes = /* @__PURE__ */ new Map();
-    this.probeCacheFile = path18.join(this.dataDir, "probe-cache.json");
+    this.probeCacheFile = path19.join(this.dataDir, "probe-cache.json");
     this.probeCacheLoaded = false;
     this.fetchImpl = options.fetchImpl;
   }
@@ -8451,7 +8687,7 @@ var MeshService = class {
   /** Persist the probe map; a failed write is not worth reporting. */
   async #saveProbes() {
     try {
-      await mkdir11(path18.dirname(this.probeCacheFile), { recursive: true });
+      await mkdir11(path19.dirname(this.probeCacheFile), { recursive: true });
       await writeFile11(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.probes)), "utf8");
     } catch {
     }
@@ -8473,7 +8709,7 @@ var MeshService = class {
    * @returns {Promise<object>} status.
    */
   async status() {
-    const stateFile = path18.join(this.home, "wireguard", "state.json");
+    const stateFile = path19.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     return {
@@ -8538,10 +8774,10 @@ var MeshService = class {
     let host = String(member.ip ?? "");
     if (host === "") throw new Error(`member ${member.id} has no VPN address`);
     if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
-    const path25 = "/__gate/cluster/__gate/session/promote";
-    const response = await fetch(`http://${host}${path25}`, {
+    const path26 = "/__gate/cluster/__gate/session/promote";
+    const response = await fetch(`http://${host}${path26}`, {
       method: "POST",
-      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path25 }) }
+      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path26 }) }
     });
     const text = await response.text();
     if (!response.ok) throw new Error(`member ${member.name} refused the request: HTTP ${String(response.status)} ${text.slice(0, 120)}`);
@@ -8554,7 +8790,7 @@ var MeshService = class {
   }
   async members() {
     await this.#loadProbes();
-    const stateFile = path18.join(this.home, "wireguard", "state.json");
+    const stateFile = path19.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     const self = {
@@ -8710,7 +8946,7 @@ var MeshService = class {
     const removed = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path18.join(this.jobRoot, entry.name);
+      const dir = path19.join(this.jobRoot, entry.name);
       let state;
       try {
         state = await readState(dir);
@@ -8719,12 +8955,12 @@ var MeshService = class {
       }
       if (this.running.has(state.id) && state.id !== options.keep) continue;
       if (state.status === "created" || state.status === "needs-fix" || state.status === "learned") continue;
-      await rm12(path18.join(dir, "src"), { recursive: true, force: true });
-      if (state.id !== options.keep) await rm12(path18.join(dir, "smoke"), { recursive: true, force: true });
-      await rm12(path18.join(dir, "work-order"), { recursive: true, force: true });
+      await rm12(path19.join(dir, "src"), { recursive: true, force: true });
+      if (state.id !== options.keep) await rm12(path19.join(dir, "smoke"), { recursive: true, force: true });
+      await rm12(path19.join(dir, "work-order"), { recursive: true, force: true });
       if (options.keepDist !== true) {
-        if (state.status === "done") await this.#pruneDist(path18.join(dir, "dist"));
-        else await rm12(path18.join(dir, "dist"), { recursive: true, force: true });
+        if (state.status === "done") await this.#pruneDist(path19.join(dir, "dist"));
+        else await rm12(path19.join(dir, "dist"), { recursive: true, force: true });
       }
       removed.push(state.id);
     }
@@ -8743,7 +8979,7 @@ var MeshService = class {
     const entries = await readdir7(distDir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      await rm12(path18.join(distDir, entry.name), { recursive: true, force: true });
+      await rm12(path19.join(distDir, entry.name), { recursive: true, force: true });
     }
   }
   /**
@@ -8757,7 +8993,7 @@ var MeshService = class {
    */
   async #directLinks() {
     try {
-      const raw = JSON.parse(await readFile13(path18.join(this.home, "hysteria", "links.json"), "utf8"));
+      const raw = JSON.parse(await readFile13(path19.join(this.home, "hysteria", "links.json"), "utf8"));
       return Array.isArray(raw.links) ? raw.links : [];
     } catch {
       return [];
@@ -8854,7 +9090,7 @@ var MeshService = class {
       direct: request.direct === true
     });
     const buildStamp = await nextBuildStamp({
-      stateFile: path18.join(this.dataDir, "build-stamp.json"),
+      stateFile: path19.join(this.dataDir, "build-stamp.json"),
       packagesDir: this.packagesDir
     });
     const job = await createJob({
@@ -9086,14 +9322,14 @@ var MeshService = class {
     let user = "root";
     let identityFile;
     let port = 22;
-    const { state } = await readWireGuardState({ file: path18.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path19.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (Number.isSafeInteger(peer.sshPort)) port = peer.sshPort;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
         const digest = createHash7("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path18.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        const candidate = path19.join(this.home, "wireguard", "ssh", `${digest}.key`);
         if (existsSync11(candidate)) identityFile = candidate;
       }
     }
@@ -9181,8 +9417,8 @@ var MeshService = class {
     const state = await readState(dir);
     return {
       ...state,
-      logFile: path18.join(dir, "build.log"),
-      stateFile: path18.join(dir, "state.json"),
+      logFile: path19.join(dir, "build.log"),
+      stateFile: path19.join(dir, "state.json"),
       logTail: await readLogTail(dir, 60),
       running: this.running.has(id),
       workOrderMarkdown: state.workOrder?.markdown ?? null,
@@ -9200,7 +9436,7 @@ var MeshService = class {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       try {
-        const state = await readState(path18.join(this.jobRoot, entry.name));
+        const state = await readState(path19.join(this.jobRoot, entry.name));
         jobs.push(this.#summary(state));
       } catch {
       }
@@ -9296,6 +9532,208 @@ var MeshService = class {
     };
   }
   /**
+   * The newest package published under the configured `latest` tag.
+   *
+   * Gitee is probed first because a domestic gateway usually reaches it
+   * directly; GitHub is the fallback and may be slow or blocked. The result is
+   * cached for a few seconds so opening the dialog and then starting the
+   * upgrade do not read the manifest twice.
+   * @param {{refresh?: boolean}} [options] refresh forces a new read.
+   * @returns {Promise<object>} normalized release.
+   */
+  async latestRelease(options = {}) {
+    const config = await loadReleaseConfig({ file: this.releaseConfigFile });
+    const sources = latestManifestSources(config);
+    const manifests = [];
+    if (typeof sources.gitee === "string" && sources.gitee !== "") manifests.push({ provider: "gitee", url: sources.gitee });
+    if (typeof sources.github === "string" && sources.github !== "") manifests.push({ provider: "github", url: sources.github });
+    const urls = manifests.map((entry) => entry.url);
+    if (urls.length === 0) {
+      return { ok: false, configured: false, assets: [], manifestUrls: [], manifests: [], error: "\u8FD8\u6CA1\u6709\u914D\u7F6E Release \u53D1\u5E03" };
+    }
+    const cached = this.latestReleaseCache;
+    if (options.refresh !== true && cached !== null && Date.now() - cached.at < 3e4) return cached.value;
+    try {
+      const found = await fetchLatestManifest({ urls, timeoutMs: 15e3 });
+      let provider = "github";
+      try {
+        provider = /(?:^|\.)gitee\.com$/iu.test(new URL(found.url).hostname) ? "gitee" : "github";
+      } catch {
+      }
+      const value = { ...normalizeLatestManifest(found.manifest, { provider, manifestUrls: urls }), manifests };
+      this.latestReleaseCache = { at: Date.now(), value };
+      return value;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (cached !== null) return { ...cached.value, stale: true, error: message };
+      return { ok: false, configured: true, assets: [], manifestUrls: urls, manifests, error: message };
+    }
+  }
+  /**
+   * Archives already present on one member.
+   *
+   * The gateway lists its own `~/.dsh/packages` (plus the build staging it may
+   * have). A peer is asked over SSH; both `~/.dsh/packages` and
+   * `~/.dsh/mesh/upgrade` are scanned, because a build host leaves its archive
+   * in the latter rather than pulling it back to the gateway.
+   * @param {string} memberId member id, name, or VPN address.
+   * @returns {Promise<{ok: boolean, member: string, packages: object[], error?: string}>} listing.
+   */
+  async memberPackages(memberId) {
+    const wanted = typeof memberId === "string" ? memberId.trim() : "";
+    if (wanted === "") throw new Error("member is required");
+    const snapshot = await this.members();
+    const all = [snapshot.local, ...snapshot.members].filter(Boolean);
+    const member = all.find((candidate) => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted);
+    if (member === void 0) throw new Error(`member not found: ${wanted}`);
+    if (member.id === "local" || member.kind === "self") {
+      return { ok: true, member: member.id, packages: await this.#localTargetPackages() };
+    }
+    try {
+      return { ok: true, member: member.id, packages: await this.#remoteTargetPackages(member) };
+    } catch (error) {
+      return { ok: false, member: member.id, packages: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  /**
+   * Read archives from the gateway's own package cache and build staging.
+   * @returns {Promise<object[]>} packages.
+   */
+  async #localTargetPackages() {
+    const packages = [];
+    const seen = /* @__PURE__ */ new Set();
+    const walk = async (dir, depth) => {
+      if (depth < 0) return;
+      const entries = await readdir7(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        const file = path19.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (depth > 0) await walk(file, depth - 1);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const parsed = packageTargetFromName(entry.name);
+        if (parsed === null || seen.has(file)) continue;
+        const info = await stat11(file).catch(() => null);
+        if (info === null) continue;
+        seen.add(file);
+        const sidecar = await readFile13(`${file}.sha256`, "utf8").catch(() => "");
+        const sha256 = /^([a-f0-9]{64})\b/iu.exec(sidecar)?.[1]?.toLowerCase() ?? null;
+        packages.push({ name: entry.name, path: file, bytes: info.size, mtime: info.mtime.toISOString(), sha256, ...parsed });
+      }
+    };
+    await walk(this.packagesDir, 0);
+    await walk(path19.join(this.dataDir, "upgrade"), 2);
+    packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
+    return packages;
+  }
+  /**
+   * The home a member's service runs under.
+   *
+   * The SSH user and the service user can differ; the member reports its own
+   * home, so prefer that over the SSH login's `$HOME`.
+   * @param {object} member member snapshot.
+   * @param {{user: string, os: 'linux'|'windows'}} plan SSH plan.
+   * @returns {string} home directory.
+   */
+  #memberHome(member, plan) {
+    const reported = typeof member.system?.home === "string" ? member.system.home.trim() : "";
+    if (reported !== "") return reported;
+    if (plan.os === "windows") return `C:\\Users\\${plan.user}`;
+    return plan.user === "root" ? "/root" : `/home/${plan.user}`;
+  }
+  /**
+   * Ask a peer for its archives over SSH.
+   * @param {object} member member snapshot.
+   * @returns {Promise<object[]>} packages.
+   */
+  async #remoteTargetPackages(member) {
+    const plan = await this.#memberSshPlan(member);
+    const runner = new SshRunner({ ...plan, os: plan.os });
+    const script = listPackagesScript(plan.os, this.#memberHome(member, plan));
+    let stdout = "";
+    if (plan.os === "windows") {
+      const encoded = Buffer.from(script, "utf16le").toString("base64");
+      ({ stdout } = await runner.runProcess("ssh", [
+        ...runner.sshOptions(),
+        runner.target(),
+        `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
+      ]));
+    } else {
+      ;
+      ({ stdout } = await runner.runProcess("ssh", [
+        ...runner.sshOptions(),
+        runner.target(),
+        "bash -s"
+      ], script));
+    }
+    return parseTargetPackageList(stdout);
+  }
+  /**
+   * Validate one archive the operator picked from the target member.
+   *
+   * The path must be under that member's package cache or build staging, the
+   * archive name must match the target's platform, and the digest is computed
+   * here instead of trusted from the browser.
+   * @param {object} member target member.
+   * @param {{path?: string, bytes?: number, sha256?: string}} request selected package.
+   * @returns {Promise<{path: string, bytes: number, sha256: string, name: string, os: 'linux'|'windows'}>} verified package.
+   */
+  async #resolveTargetPackage(member, request) {
+    const file = typeof request?.path === "string" ? request.path.trim() : "";
+    if (file === "") throw new Error("targetPackage.path is required");
+    const plan = await this.#memberSshPlan(member);
+    const os9 = plan.os === "windows" ? "windows" : "linux";
+    const home = this.#memberHome(member, plan);
+    if (!isAllowedPackagePath(file, home, os9)) {
+      throw new Error("\u76EE\u6807\u5305\u4E0D\u5728\u8BE5\u6210\u5458\u7684 ~/.dsh/packages \u6216 ~/.dsh/mesh/upgrade \u76EE\u5F55\u5185");
+    }
+    const name = file.split(/[\\/]/u).pop() ?? "";
+    const parsed = packageTargetFromName(name);
+    if (parsed === null) throw new Error(`\u4E0D\u662F\u53EF\u8BC6\u522B\u7684\u90E8\u7F72\u5305\uFF1A${name}`);
+    if (parsed.os !== os9) throw new Error(`\u5305\u5E73\u53F0 ${parsed.os} \u4E0E\u6210\u5458 ${os9} \u4E0D\u5339\u914D`);
+    const memberTarget = memberBuildTarget(member);
+    if (memberTarget !== null && memberTarget !== parsed.target) {
+      throw new Error(`\u5305\u5E73\u53F0 ${parsed.target} \u4E0E\u6210\u5458 ${memberTarget} \u4E0D\u5339\u914D`);
+    }
+    let bytes = 0;
+    let sha256 = "";
+    if (member.id === "local" || member.kind === "self") {
+      const info = await stat11(file).catch(() => null);
+      if (info === null || !info.isFile()) throw new Error(`\u76EE\u6807\u5305\u4E0D\u5B58\u5728\uFF1A${file}`);
+      bytes = info.size;
+      sha256 = await sha256File(file);
+    } else {
+      const runner = new SshRunner({ ...plan, os: os9 });
+      const size = await runner.remoteSize(file);
+      if (size === null) throw new Error(`\u76EE\u6807\u5305\u4E0D\u5B58\u5728\uFF1A${file}`);
+      bytes = size;
+      if (os9 === "windows") {
+        const { stdout } = await runner.runProcess("ssh", [
+          ...runner.sshOptions(),
+          runner.target(),
+          `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath ${powershellQuote(file)}).Hash"`
+        ]);
+        sha256 = String(stdout).trim().toLowerCase();
+      } else {
+        const { stdout } = await runner.runProcess("ssh", [
+          ...runner.sshOptions(),
+          runner.target(),
+          `sha256sum -- ${shellQuote(file)}`
+        ]);
+        sha256 = String(stdout).trim().split(/\s+/u)[0]?.toLowerCase() ?? "";
+      }
+    }
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error(`\u65E0\u6CD5\u8BA1\u7B97\u76EE\u6807\u5305\u7684\u6821\u9A8C\u548C\uFF1A${name}`);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error(`\u76EE\u6807\u5305\u662F\u7A7A\u6587\u4EF6\uFF1A${name}`);
+    if (Number.isSafeInteger(Number(request?.bytes)) && Number(request.bytes) > 0 && Number(request.bytes) !== bytes) {
+      throw new Error(`\u76EE\u6807\u5305\u5927\u5C0F\u53D8\u4E86\uFF1A\u671F\u671B ${String(request.bytes)}\uFF0C\u5B9E\u9645 ${String(bytes)}`);
+    }
+    const expected = typeof request?.sha256 === "string" ? request.sha256.trim().toLowerCase() : "";
+    if (expected !== "" && expected !== sha256) throw new Error("\u76EE\u6807\u5305\u7684\u6821\u9A8C\u548C\u4E0E\u5217\u8868\u4E0D\u4E00\u81F4\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5");
+    return { path: file, bytes, sha256, name, os: os9 };
+  }
+  /**
    * Local deployment packages. The fixed directory is `~/.dsh/packages`.
    * @returns {Promise<object>} package list.
    */
@@ -9305,7 +9743,7 @@ var MeshService = class {
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(entry.name)) continue;
-      const file = path18.join(this.packagesDir, entry.name);
+      const file = path19.join(this.packagesDir, entry.name);
       const info = await stat11(file).catch(() => null);
       if (info === null) continue;
       packages.push({
@@ -9420,7 +9858,7 @@ var MeshService = class {
   #applyInferredDeployment(member, deployJobs) {
     if (memberDeployment(member) !== null) return;
     const job = deployJobs.find((candidate) => candidate.status === "succeeded" && candidate.package !== void 0 && (candidate.member === member.id || candidate.target?.host === member.ip));
-    const parsed = packageInfo(path18.basename(job?.package ?? ""));
+    const parsed = packageInfo(path19.basename(job?.package ?? ""));
     if (parsed === null) return;
     member.deployment = { version: parsed.version, buildStamp: parsed.buildStamp, inferred: true };
   }
@@ -9604,11 +10042,11 @@ var MeshService = class {
    */
   async removePackage(request) {
     const name = typeof request?.name === "string" ? request.name.trim() : "";
-    if (name === "" || name !== path18.basename(name) || name.startsWith(".")) {
+    if (name === "" || name !== path19.basename(name) || name.startsWith(".")) {
       throw new Error("package name is invalid");
     }
     if (!/\.(?:zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`);
-    const file = path18.join(this.packagesDir, name);
+    const file = path19.join(this.packagesDir, name);
     const info = await stat11(file).catch(() => null);
     if (info === null || !info.isFile()) throw new Error(`package not found: ${name}`);
     const removed = [];
@@ -9631,7 +10069,7 @@ var MeshService = class {
   async resolvePackage(input) {
     const raw = typeof input === "string" ? input.trim() : "";
     if (raw === "") throw new Error("package is required");
-    const candidates = path18.isAbsolute(raw) ? [raw] : [path18.join(this.packagesDir, raw), path18.join(this.repositoryRoot, "dist", raw)];
+    const candidates = path19.isAbsolute(raw) ? [raw] : [path19.join(this.packagesDir, raw), path19.join(this.repositoryRoot, "dist", raw)];
     for (const file of candidates) {
       const info = await stat11(file).catch(() => null);
       if (info?.isFile()) return file;
@@ -9645,7 +10083,7 @@ var MeshService = class {
    * member — including this gateway — can restart dsh-web and the gateway while
    * its own upgrade keeps going. This method only writes the job directory and
    * returns; `waitDeploy()` is what the model tool uses to block.
-   * @param {{host?: string, member?: string, package?: string, packageOnTarget?: {path: string, bytes: number, sha256: string}, mode?: 'install'|'upgrade'}} request target and package.
+   * @param {{host?: string, member?: string, package?: string, packageOnTarget?: {path: string, bytes: number, sha256: string}, release?: {target: string, sha256?: string, refresh?: boolean}, targetPackage?: {path: string, bytes?: number, sha256?: string}, mode?: 'install'|'upgrade'}} request target and package source.
    * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string, layout: string}>} queued job.
    */
   async startDeploy(request) {
@@ -9654,9 +10092,12 @@ var MeshService = class {
     if (test) throw new Error("\u6307\u9488\u5E03\u5C40\u6CA1\u6709\u5355\u72EC\u7684\u300C\u6D4B\u8BD5\u5347\u7EA7\u300D\uFF1A\u76F4\u63A5\u8FD0\u884C\u300C\u5347\u7EA7\u300D\uFF0C\u5065\u5EB7\u68C0\u67E5\u5931\u8D25\u4F1A\u81EA\u52A8\u56DE\u9000\u5230\u4E0A\u4E00\u4E2A release");
     const host = typeof request.host === "string" ? request.host.trim() : "";
     const memberId = typeof request.member === "string" ? request.member.trim() : "";
-    const packageOnTarget = request.packageOnTarget !== null && typeof request.packageOnTarget === "object" ? request.packageOnTarget : null;
-    const packagePath = packageOnTarget === null ? await this.resolvePackage(request.package) : String(packageOnTarget.path ?? "").trim();
-    if (packagePath === "") throw new Error("packageOnTarget.path is required");
+    let packageOnTarget = request.packageOnTarget !== null && typeof request.packageOnTarget === "object" ? request.packageOnTarget : null;
+    const releaseRequest = request.release !== null && typeof request.release === "object" ? request.release : null;
+    const targetPackageRequest = request.targetPackage !== null && typeof request.targetPackage === "object" ? request.targetPackage : null;
+    if (releaseRequest !== null && targetPackageRequest !== null) {
+      throw new Error("\u4E00\u6B21\u5347\u7EA7\u53EA\u80FD\u9009\u62E9\u4E00\u4E2A\u5305\u6765\u6E90");
+    }
     const snapshot = await this.members();
     const all = [snapshot.local, ...snapshot.members].filter(Boolean);
     const member = memberId !== "" ? all.find((candidate) => candidate.id === memberId) : all.find((candidate) => candidate.id === host || candidate.name === host || candidate.ip === host);
@@ -9668,23 +10109,82 @@ var MeshService = class {
         { status: 409 }
       );
     }
-    if (member !== void 0) {
-      const os10 = /win(?:dows)?/iu.test(path18.basename(packagePath)) ? "windows" : member.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
-      const identity = { id: member.id, name: member.name, ip: member.ip };
-      const packageOs = /win(?:dows)?/iu.test(path18.basename(packagePath)) ? "windows" : "linux";
-      if (test) assertTestUpgradeTarget(member, { packageOs });
-      if (member.kind === "self" || member.id === "local") {
-        return this.#startLocalJob({ member, packagePath, os: os10, mode, identity });
+    let packagePath = "";
+    let os9 = "linux";
+    let packageDescriptor = null;
+    let acquire = null;
+    let downloadRequest = request;
+    if (targetPackageRequest !== null) {
+      if (member === void 0) throw new Error("\u76EE\u6807\u6210\u5458\u5DF2\u6709\u5305\u9700\u8981\u4E00\u4E2A\u6210\u5458");
+      const resolved = await this.#resolveTargetPackage(member, targetPackageRequest);
+      packagePath = resolved.path;
+      os9 = resolved.os;
+      packageOnTarget = { path: resolved.path, bytes: resolved.bytes, sha256: resolved.sha256, keep: true };
+    } else if (releaseRequest !== null) {
+      if (member === void 0) throw new Error("latest tag \u9700\u8981\u6307\u5B9A\u4E00\u4E2A\u6210\u5458");
+      if (mode === "install") {
+        throw new Error("\u65B0\u6210\u5458\u5B89\u88C5\u8BF7\u4F7F\u7528\u672C\u673A\u90E8\u7F72\u5305\u6216\u76EE\u6807\u6210\u5458\u5DF2\u6709\u5305\uFF1Blatest tag \u53EA\u7528\u4E8E\u5347\u7EA7");
       }
-      const deployRequest = await this.#memberDeployRequest(member, packagePath, os10);
-      const download3 = mode === "install" || packageOnTarget !== null ? null : await this.#deployDownload(request, member, all);
+      const target = typeof releaseRequest.target === "string" ? releaseRequest.target.trim() : "";
+      if (target === "") throw new Error("release.target is required");
+      const memberTarget = memberBuildTarget(member);
+      if (memberTarget !== null && memberTarget !== target) {
+        throw new Error(`\u5305\u5E73\u53F0 ${target} \u4E0E\u6210\u5458 ${memberTarget} \u4E0D\u5339\u914D`);
+      }
+      const latest = await this.latestRelease({ refresh: releaseRequest.refresh === true });
+      if (latest.ok !== true) throw new Error(latest.error ?? "\u53D1\u5E03\u6E05\u5355\u4E0D\u53EF\u7528");
+      const asset = selectLatestAsset(latest, target);
+      if (asset === null) throw new Error(`latest tag \u91CC\u6CA1\u6709 ${target} \u7684\u90E8\u7F72\u5305`);
+      const manifests = latest.manifests ?? latest.manifestUrls;
+      if (member.id === "local" || member.kind === "self") {
+        const link2 = request.direct === true ? null : resolveDeployLinkProxy({
+          links: await this.#directLinks(),
+          target: member,
+          wanted: typeof request.proxyMember === "string" ? request.proxyMember : ""
+        });
+        acquire = {
+          name: asset.name,
+          bytes: asset.bytes,
+          sha256: asset.sha256,
+          manifests,
+          prefer: "gitee",
+          ...link2 === null || typeof link2.url !== "string" || link2.url === "" ? {} : { proxy: link2.url }
+        };
+        packagePath = path19.join(this.packagesDir, asset.name);
+        os9 = asset.os;
+      } else {
+        packagePath = asset.name;
+        os9 = asset.os;
+        packageDescriptor = { name: asset.name, bytes: asset.bytes, sha256: asset.sha256, local: false };
+        downloadRequest = {
+          ...request,
+          release: { ...releaseRequest, manifests, prefer: "gitee" }
+        };
+      }
+    } else if (packageOnTarget !== null) {
+      packagePath = String(packageOnTarget.path ?? "").trim();
+      if (packagePath === "") throw new Error("packageOnTarget.path is required");
+      os9 = /win(?:dows)?/iu.test(path19.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+    } else {
+      packagePath = await this.resolvePackage(request.package);
+      os9 = /win(?:dows)?/iu.test(path19.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+    }
+    if (member !== void 0) {
+      const identity = { id: member.id, name: member.name, ip: member.ip };
+      if (test) assertTestUpgradeTarget(member, { packageOs: os9 });
+      if (member.kind === "self" || member.id === "local") {
+        return this.#startLocalJob({ member, packagePath, os: os9, mode, identity, ...acquire === null ? {} : { acquire } });
+      }
+      const deployRequest = await this.#memberDeployRequest(member, packagePath, os9);
+      const download3 = mode === "install" || packageOnTarget !== null ? null : await this.#deployDownload(downloadRequest, member, all);
       const job2 = await this.#startEngineJob({
         request: {
           ...deployRequest,
           member: member.id,
           test,
           download: download3,
-          ...packageOnTarget === null ? {} : { packageOnTarget }
+          ...packageOnTarget === null ? {} : { packageOnTarget },
+          ...packageDescriptor === null ? {} : { packageDescriptor }
         },
         member: member.id,
         mode
@@ -9693,7 +10193,7 @@ var MeshService = class {
     }
     if (host === "") throw new Error("host is required");
     if (test) throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u9700\u8981\u4E00\u4E2A\u6210\u5458\uFF08\u8981\u5728\u6210\u5458\u7684\u5B89\u88C5\u4E0A\u6F14\u7EC3\uFF09\uFF0C\u4E0D\u80FD\u76F4\u63A5\u7ED9\u88F8 SSH \u4E3B\u673A");
-    const os9 = /win(?:dows)?/iu.test(path18.basename(packagePath)) ? "windows" : "linux";
+    if (packageDescriptor !== null) throw new Error("latest tag \u9700\u8981\u4E00\u4E2A\u5DF2\u53D1\u73B0\u7684\u6210\u5458\uFF0C\u4E0D\u80FD\u76F4\u63A5\u7ED9\u88F8 SSH \u4E3B\u673A");
     const appRoot = os9 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
     const download2 = mode === "install" || packageOnTarget !== null ? null : await this.#deployDownload(request, null, all);
     const job = await this.#startEngineJob({
@@ -9706,11 +10206,17 @@ var MeshService = class {
   /**
    * Deploy one local package to a discovered member, without waiting.
    * Kept for the panel API, which returns a job id immediately.
-   * @param {{member?: string, package?: string, mode?: 'install'|'upgrade'}} request member id/ip and package filename.
+   * @param {{member?: string, package?: string, release?: object, targetPackage?: object, mode?: 'install'|'upgrade'}} request member id/ip and package source.
    * @returns {Promise<object>} started deploy job.
    */
   async deployMember(request) {
-    const result = await this.startDeploy({ member: request.member, package: request.package, mode: request.mode });
+    const result = await this.startDeploy({
+      member: request.member,
+      package: request.package,
+      mode: request.mode,
+      ...request.release === void 0 ? {} : { release: request.release },
+      ...request.targetPackage === void 0 ? {} : { targetPackage: request.targetPackage }
+    });
     return {
       ok: true,
       job: result.job,
@@ -9725,7 +10231,7 @@ var MeshService = class {
    * Same flow as a first deploy; the difference is that an installed member is
    * upgraded by the package instead of being installed from scratch, and the
    * panel labels the job as an upgrade.
-   * @param {{member?: string, package?: string}} request member id/ip and package filename.
+   * @param {{member?: string, package?: string, release?: object, targetPackage?: object}} request member id/ip and package source.
    * @returns {Promise<object>} queued job.
    */
   async upgradeMember(request) {
@@ -9733,6 +10239,8 @@ var MeshService = class {
       member: request.member,
       package: request.package,
       mode: "upgrade",
+      ...request.release === void 0 ? {} : { release: request.release },
+      ...request.targetPackage === void 0 ? {} : { targetPackage: request.targetPackage },
       ...typeof request.proxyMember === "string" ? { proxyMember: request.proxyMember } : {},
       ...request.direct === true ? { direct: true } : {}
     });
@@ -9787,7 +10295,7 @@ var MeshService = class {
     return {
       job,
       member: started.member,
-      logFile: path18.join(this.deployRoot, started.job.id, "deploy.log"),
+      logFile: path19.join(this.deployRoot, started.job.id, "deploy.log"),
       log: await this.deployLogs(started.job.id, 80)
     };
   }
@@ -9849,7 +10357,7 @@ var MeshService = class {
    * A flat install (gateway) has no release symlink to switch: the package's
    * own `upgrade-local.sh` copies the new tree over it. A blue-green install
    * upgrades exactly like a member, using a local runner instead of SSH.
-   * @param {{member: object, packagePath: string, os: string, mode: 'install'|'upgrade', identity: object}} input target.
+   * @param {{member: object, packagePath: string, os: string, mode: 'install'|'upgrade', identity: object, acquire?: object}} input target.
    * @returns {Promise<object>} queued job and its layout.
    */
   async #startLocalJob(input) {
@@ -9865,13 +10373,23 @@ var MeshService = class {
         mode: input.mode,
         member: "local",
         plan: null,
-        request: { kind: "inplace", inplace: { package: input.packagePath, appRoot: install.appRoot } },
+        request: {
+          kind: "inplace",
+          inplace: {
+            package: input.packagePath,
+            appRoot: install.appRoot,
+            ...input.acquire === void 0 ? {} : { acquire: input.acquire }
+          }
+        },
         target: { host: "127.0.0.1", user: os8.userInfo().username, port: null, os: "linux", appRoot: install.appRoot },
         services: ["dsh-web-app.service", "dsh-web-gate.service", "dsh-wireguard-control.service", "dsh-interop.service"],
         packagePath: input.packagePath,
-        release: path18.basename(input.packagePath)
+        release: typeof input.acquire?.name === "string" ? input.acquire.name : path19.basename(input.packagePath)
       });
       return { ok: true, job: job2, member: input.identity, packagePath: input.packagePath, layout: install.layout };
+    }
+    if (input.acquire !== void 0) {
+      throw new Error("\u672C\u673A\u662F\u84DD\u7EFF\u5E03\u5C40\uFF0Clatest tag \u672C\u673A\u5347\u7EA7\u6682\u672A\u652F\u6301\uFF1B\u8BF7\u6539\u7528\u672C\u673A\u90E8\u7F72\u5305");
     }
     const job = await this.#startEngineJob({
       request: { host: "127.0.0.1", local: true, package: input.packagePath, os: input.os, appRoot: install.appRoot, member: input.member.id },
@@ -9887,7 +10405,7 @@ var MeshService = class {
    */
   async #queueJob(job) {
     const id = newJobId();
-    const dir = path18.join(this.deployRoot, id);
+    const dir = path19.join(this.deployRoot, id);
     await mkdir11(dir, { recursive: true });
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const bytes = job.plan?.package?.bytes ?? (await stat11(job.packagePath).catch(() => null))?.size ?? 0;
@@ -9929,7 +10447,7 @@ var MeshService = class {
    * @returns {Promise<{mode: string, unit: string|null}>} how it was started.
    */
   async #spawnRunner(dir, id) {
-    const script = path18.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
+    const script = path19.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
     if (!existsSync11(script)) throw new Error(`deploy runner is missing: ${script}`);
     const node = process.execPath;
     const unit = `dsh-mesh-job-${id.replace(/^deploy-/u, "")}`;
@@ -9974,25 +10492,35 @@ var MeshService = class {
    * @returns {{appRoot: string, layout: 'flat'|'bluegreen'|'pointer'}|null} install, or null in a source checkout.
    */
   #localAppRoot() {
-    let candidate = path18.resolve(this.repositoryRoot, "..");
-    for (let depth = 0; depth < 5; depth += 1) {
-      const parent = path18.dirname(candidate);
-      const current = path18.join(parent, "current");
-      if (existsSync11(current)) {
-        try {
-          if (realpathSync2(candidate) === realpathSync2(current)) return { appRoot: parent, layout: "bluegreen" };
-        } catch {
+    const inspect = (candidate2) => {
+      try {
+        const current = path19.join(candidate2, "current");
+        if (existsSync11(current) && existsSync11(path19.join(candidate2, "releases"))) {
+          return { appRoot: candidate2, layout: "bluegreen" };
         }
+        if (existsSync11(path19.join(candidate2, "dsh-mesh.json")) && existsSync11(path19.join(candidate2, "releases"))) {
+          return { appRoot: candidate2, layout: "pointer" };
+        }
+        if (existsSync11(path19.join(candidate2, "config", "gate.env")) && existsSync11(path19.join(candidate2, "plugins", "dsh-mesh"))) {
+          return { appRoot: candidate2, layout: "flat" };
+        }
+      } catch {
       }
-      if (existsSync11(path18.join(candidate, "current")) && existsSync11(path18.join(candidate, "releases"))) {
-        return { appRoot: candidate, layout: "bluegreen" };
-      }
-      if (existsSync11(path18.join(candidate, "dsh-mesh.json")) && existsSync11(path18.join(candidate, "releases"))) {
-        return { appRoot: candidate, layout: "pointer" };
-      }
-      if (existsSync11(path18.join(candidate, "config", "gate.env")) && existsSync11(path18.join(candidate, "plugins", "dsh-mesh"))) {
-        return { appRoot: candidate, layout: "flat" };
-      }
+      return null;
+    };
+    let candidate = path19.resolve(this.repositoryRoot, "..");
+    for (let depth = 0; depth < 5; depth += 1) {
+      const found = inspect(candidate);
+      if (found !== null) return found;
+      const parent = path19.dirname(candidate);
+      if (parent === candidate) break;
+      candidate = parent;
+    }
+    candidate = path19.resolve(this.home);
+    for (let depth = 0; depth < 5; depth += 1) {
+      const found = inspect(candidate);
+      if (found !== null) return found;
+      const parent = path19.dirname(candidate);
       if (parent === candidate) break;
       candidate = parent;
     }
@@ -10010,7 +10538,7 @@ var MeshService = class {
     if (this.running.has(state.id) || state.status === "running") {
       throw new Error("\u7F16\u8BD1\u8FD8\u5728\u8FD0\u884C\uFF0C\u7ED3\u675F\u540E\u518D\u6E05\u7A7A\u65E5\u5FD7");
     }
-    await writeFile11(path18.join(dir, "build.log"), "", "utf8");
+    await writeFile11(path19.join(dir, "build.log"), "", "utf8");
     return { ok: true, id: state.id };
   }
   /**
@@ -10028,7 +10556,7 @@ var MeshService = class {
     const entries = await readdir7(this.jobRoot, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path18.join(this.jobRoot, entry.name);
+      const dir = path19.join(this.jobRoot, entry.name);
       const state = await readState(dir).catch(() => null);
       if (state === null) continue;
       if (this.running.has(state.id) || state.status === "running" || state.status === "queued") continue;
@@ -10051,16 +10579,33 @@ var MeshService = class {
    * @returns {Promise<object|null>} download spec for the deploy plan.
    */
   async #deployDownload(request, target, everyone) {
-    const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile });
-    const sources = latestManifestSources(releaseConfig);
+    const explicit = Array.isArray(request.release?.manifests) ? request.release.manifests : null;
     const manifests = [];
-    if (sources.github !== null) manifests.push({ provider: "github", url: sources.github });
-    if (sources.gitee !== null) manifests.push({ provider: "gitee", url: sources.gitee });
+    if (explicit !== null) {
+      for (const entry of explicit) {
+        if (typeof entry === "string" && entry !== "") {
+          let provider = "github";
+          try {
+            provider = /(?:^|\.)gitee\.com$/iu.test(new URL(entry).hostname) ? "gitee" : "github";
+          } catch {
+          }
+          manifests.push({ provider, url: entry });
+        } else if (entry !== null && typeof entry === "object" && typeof entry.url === "string" && entry.url !== "") {
+          manifests.push({ provider: entry.provider === "gitee" ? "gitee" : "github", url: entry.url });
+        }
+      }
+    } else {
+      const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile });
+      const sources = latestManifestSources(releaseConfig);
+      if (sources.github !== null) manifests.push({ provider: "github", url: sources.github });
+      if (sources.gitee !== null) manifests.push({ provider: "gitee", url: sources.gitee });
+    }
+    const prefer = request.release?.prefer === "gitee" ? "gitee" : void 0;
     if (manifests.length === 0) return null;
-    if (request.direct === true || request.proxyMember === "none") return { manifests, proxy: null };
+    if (request.direct === true || request.proxyMember === "none") return { manifests, proxy: null, ...prefer === void 0 ? {} : { prefer } };
     const wanted = typeof request.proxyMember === "string" ? request.proxyMember.trim() : "";
     const linkProxy = resolveDeployLinkProxy({ links: await this.#directLinks(), target, wanted });
-    if (linkProxy !== null) return { manifests, proxy: linkProxy };
+    if (linkProxy !== null) return { manifests, proxy: linkProxy, ...prefer === void 0 ? {} : { prefer } };
     let proxyMember = null;
     if (wanted !== "" && wanted !== "auto") {
       proxyMember = everyone.find((candidate) => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted) ?? null;
@@ -10072,7 +10617,7 @@ var MeshService = class {
       const picked = pickProxyMember(everyone);
       proxyMember = picked === null ? null : everyone.find((candidate) => candidate.id === picked) ?? null;
     }
-    if (proxyMember === null) return { manifests, proxy: null };
+    if (proxyMember === null) return { manifests, proxy: null, ...prefer === void 0 ? {} : { prefer } };
     const plan = await this.#memberSshPlan(proxyMember);
     return {
       manifests,
@@ -10084,7 +10629,8 @@ var MeshService = class {
         identityFile: plan.identityFile,
         appRoot: plan.appRoot,
         name: proxyMember.name
-      }
+      },
+      ...prefer === void 0 ? {} : { prefer }
     };
   }
   /**
@@ -10098,13 +10644,13 @@ var MeshService = class {
     if (member.ip === "") throw new Error(`member ${member.id} has no VPN address`);
     let user = "root";
     let identityFile;
-    const { state } = await readWireGuardState({ file: path18.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path19.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
         const digest = createHash7("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path18.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        const candidate = path19.join(this.home, "wireguard", "ssh", `${digest}.key`);
         if (existsSync11(candidate)) identityFile = candidate;
       }
     }
@@ -10238,15 +10784,15 @@ var MeshService = class {
    */
   _jobDir(id) {
     if (typeof id !== "string" || !/^[A-Za-z0-9._-]+$/u.test(id)) throw new Error("invalid job id");
-    const dir = path18.resolve(this.jobRoot, id);
-    if (!dir.startsWith(`${path18.resolve(this.jobRoot)}${path18.sep}`)) throw new Error("invalid job id");
+    const dir = path19.resolve(this.jobRoot, id);
+    if (!dir.startsWith(`${path19.resolve(this.jobRoot)}${path19.sep}`)) throw new Error("invalid job id");
     return dir;
   }
 };
 
 // code/shared/event-stream.mjs
 import { mkdirSync, readdirSync, watch } from "node:fs";
-import path19 from "node:path";
+import path20 from "node:path";
 var HEARTBEAT_MS = 15e3;
 var DEBOUNCE_MS = 120;
 var EventHub = class {
@@ -10401,7 +10947,7 @@ var JobDirectoryWatcher = class {
     for (const entry of entries) {
       if (!entry.isDirectory() || this.watchers.has(entry.name)) continue;
       try {
-        const watcher = watch(path19.join(this.root, entry.name), { persistent: false }, (_event, file) => {
+        const watcher = watch(path20.join(this.root, entry.name), { persistent: false }, (_event, file) => {
           this.#queue(entry.name, String(file ?? ""));
         });
         watcher.on("error", () => {
@@ -10439,7 +10985,7 @@ var JobDirectoryWatcher = class {
 };
 
 // src/lib/job-events.mjs
-import path20 from "node:path";
+import path21 from "node:path";
 var LOG_THROTTLE_MS = 400;
 var LOG_LINES = 300;
 var JOB_ID = /^[A-Za-z0-9._-]+$/u;
@@ -10456,12 +11002,12 @@ function startJobEvents(options) {
   }
   const watchers = [
     new JobDirectoryWatcher({
-      root: path20.join(service.dataDir, "build"),
+      root: path21.join(service.dataDir, "build"),
       log,
       onChange: (dir, file) => handle("build", dir, file)
     }),
     new JobDirectoryWatcher({
-      root: path20.join(service.dataDir, "deploy"),
+      root: path21.join(service.dataDir, "deploy"),
       log,
       onChange: (dir, file) => handle("deploy", dir, file)
     })
@@ -10565,20 +11111,20 @@ function registerApi(ctx, service, scheduler = null) {
       try {
         const method = request.method ?? "GET";
         const url = new URL(request.url ?? "/", "http://local.invalid");
-        const path25 = url.pathname.slice(API_PREFIX.length) || "/";
-        if (method === "GET" && path25 === "/status") {
+        const path26 = url.pathname.slice(API_PREFIX.length) || "/";
+        if (method === "GET" && path26 === "/status") {
           writeJson(response, 200, await service.status());
           return;
         }
-        if (method === "GET" && path25 === "/members") {
+        if (method === "GET" && path26 === "/members") {
           writeJson(response, 200, await service.members());
           return;
         }
-        if (method === "GET" && path25 === "/member-tags") {
+        if (method === "GET" && path26 === "/member-tags") {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() });
           return;
         }
-        if (method === "GET" && path25 === "/schedule") {
+        if (method === "GET" && path26 === "/schedule") {
           if (scheduler === null) {
             writeJson(response, 503, { ok: false, error: { code: "unavailable", message: "\u5B9A\u65F6\u4EFB\u52A1\u8FD8\u6CA1\u6709\u542F\u52A8\u3002" } });
             return;
@@ -10587,33 +11133,43 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, { ok: true, schedule: scheduler.status(member === "" ? void 0 : member) });
           return;
         }
-        if (method === "POST" && path25 === "/packages/delete") {
+        if (method === "POST" && path26 === "/packages/delete") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.removePackage({ name: typeof body.name === "string" ? body.name : "" }));
           return;
         }
-        if (method === "GET" && path25 === "/events") {
+        if (method === "GET" && path26 === "/events") {
           hub.subscribe(request, response);
           return;
         }
-        if (method === "GET" && path25 === "/jobs") {
+        if (method === "GET" && path26 === "/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() });
           return;
         }
-        if (method === "GET" && path25 === "/packages") {
+        if (method === "GET" && path26 === "/packages") {
           writeJson(response, 200, await service.packages());
           return;
         }
-        if (method === "GET" && path25 === "/release") {
+        if (method === "GET" && path26 === "/release/latest") {
+          writeJson(response, 200, await service.latestRelease({
+            refresh: url.searchParams.get("refresh") === "1"
+          }));
+          return;
+        }
+        if (method === "GET" && path26 === "/member-packages") {
+          writeJson(response, 200, await service.memberPackages(url.searchParams.get("member") ?? ""));
+          return;
+        }
+        if (method === "GET" && path26 === "/release") {
           writeJson(response, 200, await service.releaseSettings());
           return;
         }
-        if (method === "GET" && path25 === "/deploy/jobs") {
+        if (method === "GET" && path26 === "/deploy/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) });
           return;
         }
         if (method === "GET") {
-          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path25);
+          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path26);
           if (deployRead !== null) {
             const lines = Number.parseInt(url.searchParams.get("lines") ?? "200", 10);
             const job = await service.deployStatus(deployRead[1]);
@@ -10630,7 +11186,7 @@ function registerApi(ctx, service, scheduler = null) {
             });
             return;
           }
-          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path25);
+          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path26);
           if (read !== null) {
             if (read[2] === "/log") {
               const lines = Number.parseInt(url.searchParams.get("lines") ?? "80", 10);
@@ -10652,26 +11208,28 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 403, { ok: false, error: { code: "forbidden", message: `Missing the ${AGENT_HEADER} header.` } });
           return;
         }
-        if (method === "POST" && path25 === "/release") {
+        if (method === "POST" && path26 === "/release") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.saveReleaseSettings(body));
           return;
         }
-        if (path25 === "/deploy") {
+        if (path26 === "/deploy") {
           const body = await readJson2(request);
           const result = await service.deployMember({
             member: typeof body.member === "string" ? body.member : void 0,
-            package: typeof body.package === "string" ? body.package : void 0
+            package: typeof body.package === "string" ? body.package : void 0,
+            release: body.release !== null && typeof body.release === "object" ? body.release : void 0,
+            targetPackage: body.targetPackage !== null && typeof body.targetPackage === "object" ? body.targetPackage : void 0
           });
           writeJson(response, 202, result);
           return;
         }
-        if (path25 === "/session/promote") {
+        if (path26 === "/session/promote") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.promoteSession(String(body.member ?? "")));
           return;
         }
-        if (path25 === "/member-tags") {
+        if (path26 === "/member-tags") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.setMemberTag(
             typeof body.id === "string" ? body.id : "",
@@ -10679,37 +11237,41 @@ function registerApi(ctx, service, scheduler = null) {
           ));
           return;
         }
-        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path25);
+        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path26);
         if (clearLog !== null) {
           writeJson(response, 200, await service.clearBuildLog(clearLog[1]));
           return;
         }
-        if (path25 === "/build/logs/clear") {
+        if (path26 === "/build/logs/clear") {
           writeJson(response, 200, await service.clearFinishedBuilds());
           return;
         }
-        if (path25 === "/deploy/rollback") {
+        if (path26 === "/deploy/rollback") {
           const body = await readJson2(request);
           writeJson(response, 202, await service.rollbackMember({
             member: typeof body.member === "string" ? body.member : ""
           }));
           return;
         }
-        if (path25 === "/upgrade" || path25 === "/test-upgrade") {
+        if (path26 === "/upgrade" || path26 === "/test-upgrade") {
           const body = await readJson2(request);
           const request_ = {
             member: typeof body.member === "string" ? body.member : void 0,
             package: typeof body.package === "string" ? body.package : void 0,
+            // The two extra package sources: the public latest tag and an
+            // archive already on the target member.
+            ...body.release !== null && typeof body.release === "object" ? { release: body.release } : {},
+            ...body.targetPackage !== null && typeof body.targetPackage === "object" ? { targetPackage: body.targetPackage } : {},
             // Upgrade downloads default to the external proxy; the panel can
             // pick a different member or ask for a direct download.
             ...typeof body.proxyMember === "string" && body.proxyMember.trim() !== "" ? { proxyMember: body.proxyMember.trim() } : {},
             ...body.direct === true ? { direct: true } : {}
           };
-          const test = path25 === "/test-upgrade" || body.test === true;
+          const test = path26 === "/test-upgrade" || body.test === true;
           writeJson(response, 202, test ? await service.testUpgradeMember(request_) : await service.upgradeMember(request_));
           return;
         }
-        if (path25 === "/schedule") {
+        if (path26 === "/schedule") {
           if (scheduler === null) {
             writeJson(response, 503, { ok: false, error: { code: "unavailable", message: "\u5B9A\u65F6\u4EFB\u52A1\u8FD8\u6CA1\u6709\u542F\u52A8\u3002" } });
             return;
@@ -10731,7 +11293,7 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, { ok: true, schedule: await scheduler.update(patch) });
           return;
         }
-        if (path25 === "/build") {
+        if (path26 === "/build") {
           const body = await readJson2(request);
           const job = await service.startBuild({
             source: typeof body.source === "string" ? body.source : void 0,
@@ -10749,12 +11311,12 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 202, { ok: true, job });
           return;
         }
-        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path25);
+        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path26);
         if (resume !== null) {
           writeJson(response, 202, { ok: true, job: await service.resumeBuild(resume[1]) });
           return;
         }
-        const match = /^\/build\/([^/]+)\/learn$/u.exec(path25);
+        const match = /^\/build\/([^/]+)\/learn$/u.exec(path26);
         if (match !== null) {
           writeJson(response, 200, { ok: true, job: await service.learn(match[1]) });
           return;
@@ -10775,7 +11337,7 @@ function registerApi(ctx, service, scheduler = null) {
 
 // src/lib/scheduler.mjs
 import { mkdir as mkdir12, readFile as readFile14, writeFile as writeFile12 } from "node:fs/promises";
-import path21 from "node:path";
+import path22 from "node:path";
 var TICK_TOLERANCE_MS = 9e4;
 var DUPLICATE_WINDOW_MS = 10 * 6e4;
 var Scheduler = class {
@@ -10906,7 +11468,7 @@ var Scheduler = class {
   /** Persist the current settings and last outcomes. */
   async #save() {
     try {
-      await mkdir12(path21.dirname(this.file), { recursive: true });
+      await mkdir12(path22.dirname(this.file), { recursive: true });
       await writeFile12(this.file, `${JSON.stringify({
         format: SCHEDULE_FORMAT,
         build: this.schedule.build,
@@ -11077,7 +11639,7 @@ function registerWireGuardApi(ctx) {
 import { randomUUID } from "node:crypto";
 import { mkdir as mkdir13, readFile as readFile15, readdir as readdir8, rename as rename8, writeFile as writeFile13 } from "node:fs/promises";
 import { existsSync as existsSync12, readFileSync as readFileSync5 } from "node:fs";
-import path22 from "node:path";
+import path23 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
@@ -11110,7 +11672,7 @@ var MemberTaskService = class {
     this.dataDir = options.dataDir;
     this.logLine = options.log ?? (() => {
     });
-    this.taskRoot = path22.join(this.dataDir, "member-tasks");
+    this.taskRoot = path23.join(this.dataDir, "member-tasks");
     this.tasks = /* @__PURE__ */ new Map();
     this.monitors = /* @__PURE__ */ new Map();
     this.controllers = /* @__PURE__ */ new Map();
@@ -11149,7 +11711,7 @@ var MemberTaskService = class {
     for (const file of files) {
       if (!file.endsWith(".json")) continue;
       try {
-        const task = JSON.parse(await readFile15(path22.join(this.taskRoot, file), "utf8"));
+        const task = JSON.parse(await readFile15(path23.join(this.taskRoot, file), "utf8"));
         if (task?.id === void 0) continue;
         if (task.status === "running" || task.status === "starting") {
           task.status = "interrupted";
@@ -11166,7 +11728,7 @@ var MemberTaskService = class {
   }
   async #save(task) {
     task.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const file = path22.join(this.taskRoot, `${task.id}.json`);
+    const file = path23.join(this.taskRoot, `${task.id}.json`);
     const temporary = `${file}.${process.pid}.tmp`;
     await mkdir13(this.taskRoot, { recursive: true });
     await writeFile13(temporary, `${JSON.stringify(task, null, 2)}
@@ -11177,7 +11739,7 @@ var MemberTaskService = class {
     const text = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
 `;
     try {
-      await writeFile13(path22.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
+      await writeFile13(path23.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
     } catch {
     }
     try {
@@ -11197,9 +11759,9 @@ var MemberTaskService = class {
     if (this.service.config?.interopUseGatePassword !== false) {
       if (process.env.DSH_GATE_PASSWORD) return process.env.DSH_GATE_PASSWORD;
       const candidates = [
-        path22.join(this.service.repositoryRoot, "..", "config", "gate.env"),
-        path22.join(this.service.repositoryRoot, "config", "gate.env"),
-        path22.join(this.service.dataDir, "..", "..", "config", "gate.env")
+        path23.join(this.service.repositoryRoot, "..", "config", "gate.env"),
+        path23.join(this.service.repositoryRoot, "config", "gate.env"),
+        path23.join(this.service.dataDir, "..", "..", "config", "gate.env")
       ];
       for (const file of candidates) {
         const password = envFile(file).DSH_GATE_PASSWORD;
@@ -11727,7 +12289,7 @@ var MemberTaskService = class {
     const task = this.tasks.get(String(taskId));
     if (task === void 0) return "";
     try {
-      const text = await readFile15(path22.join(this.taskRoot, `${task.id}.log`), "utf8");
+      const text = await readFile15(path23.join(this.taskRoot, `${task.id}.log`), "utf8");
       return text.split("\n").slice(-Math.max(1, Math.min(lines, 500))).join("\n");
     } catch {
       return "";
@@ -11739,7 +12301,7 @@ var MemberTaskService = class {
    * @returns {string} log path.
    */
   logPath(taskId) {
-    return path22.join(this.taskRoot, `${String(taskId)}.log`);
+    return path23.join(this.taskRoot, `${String(taskId)}.log`);
   }
 };
 
@@ -12208,7 +12770,7 @@ import { createHash as createHash8, randomBytes as randomBytes3, randomUUID as r
 import { existsSync as existsSync13, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, writeFileSync } from "node:fs";
 import http3 from "node:http";
 import { homedir as homedir3 } from "node:os";
-import path23 from "node:path";
+import path24 from "node:path";
 import { promisify as promisify3 } from "node:util";
 
 // code/shared/conversation-meta.mjs
@@ -12391,20 +12953,20 @@ function readEnvFile(file) {
 function configCandidates() {
   const candidates = [];
   const explicit = process.env.DSH_INTEROP_CONFIG;
-  if (typeof explicit === "string" && explicit.trim() !== "") candidates.push(path23.resolve(explicit));
+  if (typeof explicit === "string" && explicit.trim() !== "") candidates.push(path24.resolve(explicit));
   const packageRoot = process.env.DSH_PACKAGE_ROOT;
   if (typeof packageRoot === "string" && packageRoot.trim() !== "") {
-    candidates.push(path23.join(packageRoot, "config", "interop.env"));
+    candidates.push(path24.join(packageRoot, "config", "interop.env"));
   }
   const home = process.env.DSH_HOME;
   if (typeof home === "string" && home.trim() !== "") {
-    candidates.push(path23.join(path23.dirname(home), "config", "interop.env"));
-    candidates.push(path23.join(home, "config", "interop.env"));
+    candidates.push(path24.join(path24.dirname(home), "config", "interop.env"));
+    candidates.push(path24.join(home, "config", "interop.env"));
   }
   let current = process.cwd();
   for (let depth = 0; depth < 7; depth += 1) {
-    candidates.push(path23.join(current, "config", "interop.env"));
-    const parent = path23.dirname(current);
+    candidates.push(path24.join(current, "config", "interop.env"));
+    const parent = path24.dirname(current);
     if (parent === current) break;
     current = parent;
   }
@@ -12423,7 +12985,7 @@ function asBool(value, fallback) {
 }
 function resolveInteropSettings(config = {}) {
   const file = findInteropConfig();
-  const root = file === null ? null : path23.dirname(path23.dirname(file));
+  const root = file === null ? null : path24.dirname(path24.dirname(file));
   const values = file === null ? {} : readEnvFile(file);
   const setting = (name, fallback) => {
     const fromEnv = process.env[name];
@@ -12435,11 +12997,11 @@ function resolveInteropSettings(config = {}) {
     setting("DSH_INTEROP_USE_GATE_PASSWORD", config.interopUseGatePassword === true ? "1" : "0"),
     false
   );
-  const dataDir = root === null ? path23.join(process.env.DSH_HOME ?? path23.join(process.cwd(), ".dsh"), "mesh", "interop") : path23.join(root, "data");
-  const tokenFile = path23.join(dataDir, "interop-token");
+  const dataDir = root === null ? path24.join(process.env.DSH_HOME ?? path24.join(process.cwd(), ".dsh"), "mesh", "interop") : path24.join(root, "data");
+  const tokenFile = path24.join(dataDir, "interop-token");
   let gatePassword = typeof process.env.DSH_GATE_PASSWORD === "string" ? process.env.DSH_GATE_PASSWORD : "";
   if (useGatePassword && gatePassword === "" && root !== null) {
-    gatePassword = readEnvFile(path23.join(root, "config", "gate.env")).DSH_GATE_PASSWORD ?? "";
+    gatePassword = readEnvFile(path24.join(root, "config", "gate.env")).DSH_GATE_PASSWORD ?? "";
   }
   let token = "";
   if (useGatePassword) {
@@ -12471,15 +13033,15 @@ function resolveInteropSettings(config = {}) {
   const reasoning = setting("DSH_INTEROP_REASONING_EFFORT", "");
   const workdir = setting(
     "DSH_WORKDIR",
-    root === null ? process.cwd() : path23.join(root, "workspace")
+    root === null ? process.cwd() : path24.join(root, "workspace")
   );
   return {
     file,
     root,
     dataDir,
     tokenFile,
-    logFile: path23.join(dataDir, "interop-service.log"),
-    stateFile: path23.join(dataDir, "conversations.json"),
+    logFile: path24.join(dataDir, "interop-service.log"),
+    stateFile: path24.join(dataDir, "conversations.json"),
     token,
     useGatePassword,
     tokenSource: useGatePassword ? "gate password" : file === null ? "generated token file" : "interop.env",
@@ -12491,10 +13053,10 @@ function resolveInteropSettings(config = {}) {
     approve: asBool(setting("DSH_INTEROP_APPROVE", "0"), false),
     preset,
     agentPreset,
-    workdir: path23.resolve(workdir),
+    workdir: path24.resolve(workdir),
     // Task workspaces are always below this root, so a workspace name sent by
     // the panel can never address an arbitrary directory on the member.
-    workspaceRoot: path23.resolve(setting("DSH_WORKSPACES_DIR", path23.join(homedir3(), ".dsh", "workspaces"))),
+    workspaceRoot: path24.resolve(setting("DSH_WORKSPACES_DIR", path24.join(homedir3(), ".dsh", "workspaces"))),
     requestTimeoutMs: Number.parseInt(setting("DSH_INTEROP_REQUEST_TIMEOUT_MS", "180000"), 10)
   };
 }
@@ -12508,11 +13070,11 @@ function normalizeWorkspaceName(value) {
   return name;
 }
 function workspacePath(settings, name) {
-  return path23.join(workspaceRootOf(settings), name);
+  return path24.join(workspaceRootOf(settings), name);
 }
 function workspaceRootOf(settings) {
   const root = settings.workspaceRoot;
-  return typeof root === "string" && root.trim() !== "" ? path23.resolve(root) : path23.join(homedir3(), ".dsh", "workspaces");
+  return typeof root === "string" && root.trim() !== "" ? path24.resolve(root) : path24.join(homedir3(), ".dsh", "workspaces");
 }
 function listWorkspaces(settings) {
   const dir = workspaceRootOf(settings);
@@ -12524,7 +13086,7 @@ function listWorkspaces(settings) {
   try {
     for (const entry of readdirSync2(dir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      workspaces.push({ name: entry.name, path: path23.join(dir, entry.name) });
+      workspaces.push({ name: entry.name, path: path24.join(dir, entry.name) });
     }
   } catch {
   }
@@ -12897,7 +13459,7 @@ data: ${JSON.stringify(payload)}
     }
     const id = randomUUID2();
     const workspace = normalizeWorkspaceName(request.workspace);
-    const cwd = workspace !== "" ? workspacePath(settings, workspace) : typeof request.cwd === "string" && request.cwd !== "" ? path23.resolve(request.cwd) : settings.workdir;
+    const cwd = workspace !== "" ? workspacePath(settings, workspace) : typeof request.cwd === "string" && request.cwd !== "" ? path24.resolve(request.cwd) : settings.workdir;
     const prompt = request.prompt;
     try {
       mkdirSync2(cwd, { recursive: true });
@@ -13410,8 +13972,8 @@ data: ${JSON.stringify(event)}
 // src/index.ts
 var inject = ["webServer"];
 function dataDirectory() {
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path24.join(homedir4(), ".dsh");
-  return path24.join(home, "mesh");
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path25.join(homedir4(), ".dsh");
+  return path25.join(home, "mesh");
 }
 async function apply(ctx, config = {}) {
   const service = new MeshService({

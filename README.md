@@ -98,7 +98,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p -JoinCode <join-code>
 - **部署包**：列出 `~/.dsh/packages` 里的包（平台、大小、时间），可直接删除；成员编译出的产物也会出现在这里，接着就能对成员「部署」。
 - **Release 发布**：编译成功后自动把本次最新包上传到 GitHub / Gitee 的固定 `latest` Release，旧资产随之删除。GitHub 存整包（单文件 2GB 上限，上传走编译机的外网代理）；Gitee 单附件约 100MB、仓库附件总量约 1GB，所以按 85MiB 分片上传（Gitee 直连、不走代理），客户端下载后拼接并校验 SHA-256。配置在 `~/.dsh/mesh/release.json`（0600）；面板「Release 发布」卡片**只需要贴 token**，账号与仓库由 token 自动补齐（仓库不存在会自动创建为公开仓库），Gitee 分支沿用 `master` 默认值（面板不再提供 branch 输入）。token 不会回传浏览器。详见 [Step 022](docs/Step%20022%20Release%20发布与下载升级.md)。
 - **指针布局（新骨架）**：`~/.dsh` 下只保留一个稳定启动器 `dsh-mesh.mjs` 和指针 `dsh-mesh.json`，每个版本解压到 `releases/<id>` 后就不再覆盖；升级 = 写指针 + 重启，回退 = 指针翻回 + 重启。启动器替换前自动留 `.bak`，会话/配置统一在 `~/.dsh/shared`。升级实现只有 `code/deploy/upgrade-local.mjs` 一份，网关和 Linux 成员共用；`.sh` 只是旧调用方的兼容 shim。详见 [Step 023](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md)。
-- **升级优先从 Release 下载**：成员升级不再必须由网关上传整个包。部署计划只带公开的 `latest.json` URL 和一个有外网成员的代理坐标；目标成员直接下载（GitHub 优先、Gitee 分片兜底），校验 SHA-256 后原地进入 prepare/activate。下载失败、目标没有 Node、Release 里没有所选包时自动回退到原有的网关上传。代理默认按「公网 IP 非 CN 的 Linux 成员」选择，只作用于 GitHub；Gitee 不走代理。升级弹窗里可以改成直连或指定成员。
+- **升级包来源**：升级弹窗现在有三个来源：**latest tag**、**目标成员已有包**、**本机部署包**。latest tag 从 GitHub/Gitee 的 `latest.json` 读取版本信息，由目标成员自己下载（**Gitee 优先直连，Gitee 不可用时回退 GitHub**，GitHub 可经有外网成员代理），网关不传输包体；目标成员已有包会扫描该成员的 `~/.dsh/packages` 与 `~/.dsh/mesh/upgrade`，升级时在目标上重新计算 SHA-256 并直接使用（不上传、不下载，提取后保留原包）；本机部署包沿用原来的 `~/.dsh/packages`。latest tag 用于成员升级，不用于新成员安装或本机升级。
+- **升级优先从 Release 下载**：手选本机包时，升级仍会优先尝试 Release 下载（旧行为：GitHub 优先、Gitee 分片兜底）；latest tag 来源则明确优先 Gitee。部署计划只带公开的 `latest.json` URL 和一个有外网成员的代理坐标，校验 SHA-256 后原地进入 prepare/activate。下载失败、目标没有 Node、Release 里没有所选包时，有本机副本才回退上传；release-only 计划会给出明确错误，不会把归档名当成文件上传。
 
 成员也可以自己把产物推给网关（只接受组网来源，需要网关口令）：
 

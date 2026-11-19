@@ -12,6 +12,7 @@ import {
   Modal,
   Popconfirm,
   Progress,
+  Segmented,
   Select,
   Space,
   Spin,
@@ -51,10 +52,12 @@ import {
   OFFLINE_MESSAGE,
   type DeployJob,
   type DeploymentInfo,
+  type LatestRelease,
   type Member,
   type PackageInfo,
   type Snapshot,
   type SystemInfo,
+  type TargetPackageInfo,
 } from './api'
 import { WireGuardPanel } from './wireguard'
 import { PackagesPanel } from './packages'
@@ -125,6 +128,23 @@ function preferredTarget(member: Member): 'linux' | 'windows' | undefined {
   const name = member.name.toLowerCase()
   if (/windows|(^|[-_.])win($|[-_.])/.test(name)) return 'windows'
   if (/ubuntu|debian|centos|alma|rocky|fedora|linux|suse|redhat/.test(name)) return 'linux'
+  return undefined
+}
+
+/**
+ * The release asset key for a member (`linux-x64`, `win-x64`).
+ *
+ * The probe reports `x64`/`arm64`; an older member may not report the arch, in
+ * which case x64 is the only artifact a normal build produces.
+ * @param {Member | null} member member row.
+ * @returns {string | undefined} target key.
+ */
+function memberTargetKey(member: Member | null): string | undefined {
+  if (member === null) return undefined
+  const os = preferredTarget(member)
+  const arch = String(member.system?.arch ?? '').toLowerCase() === 'arm64' ? 'arm64' : 'x64'
+  if (os === 'windows') return `win-${arch}`
+  if (os === 'linux') return `linux-${arch}`
   return undefined
 }
 
@@ -395,11 +415,22 @@ function Panel({ ctx }: { ctx: any }) {
   // The same dialog installs a fresh member and upgrades an existing one; the
   // intent only decides the wording and which API is called.
   const [deployIntent, setDeployIntent] = useState<'install' | 'upgrade' | 'test'>('install')
+  // Three package sources: the gateway cache, the public latest tag, and an
+  // archive that is already on the target member.
+  const [packageSource, setPackageSource] = useState<'local' | 'latest' | 'target'>('local')
   const [packages, setPackages] = useState<PackageInfo[]>([])
   const [packagesDir, setPackagesDir] = useState('')
   const [packagesLoading, setPackagesLoading] = useState(false)
   const [packagesError, setPackagesError] = useState('')
   const [selectedPackage, setSelectedPackage] = useState<string | undefined>(undefined)
+  const [latestRelease, setLatestRelease] = useState<LatestRelease | null>(null)
+  const [latestLoading, setLatestLoading] = useState(false)
+  const [latestError, setLatestError] = useState('')
+  const [selectedAsset, setSelectedAsset] = useState<string | undefined>(undefined)
+  const [targetPackages, setTargetPackages] = useState<TargetPackageInfo[]>([])
+  const [targetPackagesLoading, setTargetPackagesLoading] = useState(false)
+  const [targetPackagesError, setTargetPackagesError] = useState('')
+  const [selectedTargetPackage, setSelectedTargetPackage] = useState<string | undefined>(undefined)
   // Upgrade downloads prefer the release; `auto` lets the server pick the
   // external-network member, `none` uses the target's own network.
   const [downloadProxy, setDownloadProxy] = useState<string>('auto')
@@ -633,19 +664,95 @@ function Panel({ ctx }: { ctx: any }) {
     }
   }, [])
 
+  /** Read the public latest tag and preselect the asset for this member. */
+  const loadLatest = useCallback(async (member: Member, refresh = false) => {
+    setLatestLoading(true)
+    setLatestError('')
+    try {
+      const result = await api.latestRelease(refresh)
+      setLatestRelease(result)
+      // With no release configured there is nothing to pick here; show the
+      // local package list instead of an empty source the operator must guess
+      // their way out of.
+      if (result.configured === false) setPackageSource('local')
+      const wanted = memberTargetKey(member)
+      const os = preferredTarget(member)
+      const match = result.assets.find(asset => asset.target === wanted)
+        ?? result.assets.find(asset => asset.os === os)
+        ?? (os === undefined ? result.assets[0] : undefined)
+      setSelectedAsset(match?.target)
+      if (result.ok !== true && result.configured !== false) setLatestError(result.error ?? '发布清单里没有可用的包')
+    } catch (failure) {
+      setLatestRelease(null)
+      setSelectedAsset(undefined)
+      setLatestError(errorText(failure))
+    } finally {
+      setLatestLoading(false)
+    }
+  }, [])
+
+  /** Read archives that already exist on the target member. */
+  const loadTargetPackages = useCallback(async (member: Member, keepCurrent = false) => {
+    setTargetPackagesLoading(true)
+    setTargetPackagesError('')
+    try {
+      const result = await api.targetPackages(member.id)
+      const wanted = preferredTarget(member)
+      const packages = wanted === undefined
+        ? result.packages
+        : result.packages.filter(item => item.os === wanted)
+      setTargetPackages(packages)
+      setSelectedTargetPackage(current => {
+        const keep = keepCurrent && current !== undefined
+          ? packages.find(item => item.path === current)
+          : undefined
+        return (keep ?? packages[0])?.path
+      })
+      if (result.ok !== true) setTargetPackagesError(result.error ?? '读取目标成员的包失败')
+    } catch (failure) {
+      setTargetPackages([])
+      setSelectedTargetPackage(undefined)
+      setTargetPackagesError(errorText(failure))
+    } finally {
+      setTargetPackagesLoading(false)
+    }
+  }, [])
+
   const openDeploy = useCallback((member: Member, intent: 'install' | 'upgrade' | 'test') => {
+    const remote = member.kind !== 'self' && member.id !== 'local'
+    // latest tag is an upgrade source for both the current gateway (the
+    // detached runner downloads into the local cache) and remote members.
+    const canLatest = intent === 'upgrade'
+    const canTarget = remote && intent !== 'test'
     setDeployTarget(member)
     setDeployIntent(intent)
+    setPackageSource(canLatest ? 'latest' : 'local')
     setPackages([])
     setPackagesDir('')
     setPackagesError('')
     setSelectedPackage(undefined)
+    setLatestRelease(null)
+    setLatestError('')
+    setSelectedAsset(undefined)
+    setTargetPackages([])
+    setTargetPackagesError('')
+    setSelectedTargetPackage(undefined)
     setDownloadProxy('auto')
     void loadPackages(preferredTarget(member))
-  }, [loadPackages])
+    if (canLatest) void loadLatest(member)
+    if (canTarget) void loadTargetPackages(member)
+  }, [loadLatest, loadPackages, loadTargetPackages])
 
   const deploy = useCallback(async () => {
-    if (deployTarget === null || selectedPackage === undefined) return
+    if (deployTarget === null) return
+    const asset = latestRelease?.assets.find(item => item.target === selectedAsset)
+    const targetPackage = targetPackages.find(item => item.path === selectedTargetPackage)
+    const ready = packageSource === 'latest'
+      ? asset !== undefined
+      : packageSource === 'target'
+        ? targetPackage !== undefined
+        : selectedPackage !== undefined
+    if (!ready) return
     setBusy(deployTarget.id)
     try {
       const downloadOptions = downloadProxy === 'none'
@@ -653,11 +760,17 @@ function Panel({ ctx }: { ctx: any }) {
         : downloadProxy === 'auto'
           ? {}
           : { proxyMember: downloadProxy }
-      const result = deployIntent === 'upgrade'
-        ? await api.upgrade(deployTarget.id, selectedPackage, downloadOptions)
-        : deployIntent === 'test'
-          ? await api.testUpgrade(deployTarget.id, selectedPackage, downloadOptions)
-          : await api.deploy(deployTarget.id, selectedPackage)
+      const result = packageSource === 'latest' && asset !== undefined
+        ? await api.upgradeLatest(deployTarget.id, asset.target, downloadOptions)
+        : packageSource === 'target' && targetPackage !== undefined
+          ? deployIntent === 'install'
+            ? await api.deployTargetPackage(deployTarget.id, targetPackage.path)
+            : await api.upgradeTargetPackage(deployTarget.id, targetPackage.path)
+          : deployIntent === 'upgrade' && selectedPackage !== undefined
+            ? await api.upgrade(deployTarget.id, selectedPackage, downloadOptions)
+            : deployIntent === 'test' && selectedPackage !== undefined
+              ? await api.testUpgrade(deployTarget.id, selectedPackage, downloadOptions)
+              : await api.deploy(deployTarget.id, selectedPackage ?? '')
       setDeployTarget(null)
       setError(null)
       setDeployJobs(current => [result.job, ...current.filter(job => job.id !== result.job.id)])
@@ -671,7 +784,7 @@ function Panel({ ctx }: { ctx: any }) {
     } finally {
       setBusy('')
     }
-  }, [deployIntent, deployTarget, selectedPackage, downloadProxy, messageApi, openProgress])
+  }, [deployIntent, deployTarget, downloadProxy, latestRelease, messageApi, openProgress, packageSource, selectedAsset, selectedPackage, selectedTargetPackage, targetPackages])
 
   const columns: ColumnsType<Member> = useMemo(() => {
     const actionColumn: ColumnsType<Member>[number] = {
@@ -919,6 +1032,21 @@ function Panel({ ctx }: { ctx: any }) {
       </ConfigProvider>
     )
   }
+
+  const selectedReleaseAsset = latestRelease?.assets.find(asset => asset.target === selectedAsset)
+  const memberOs = deployTarget === null ? undefined : preferredTarget(deployTarget)
+  const memberTarget = deployTarget === null ? undefined : memberTargetKey(deployTarget)
+  const latestAssets = latestRelease === null
+    ? []
+    : latestRelease.assets.filter(asset => memberTarget !== undefined
+      ? asset.target === memberTarget
+      : memberOs === undefined || asset.os === memberOs)
+  const deployReady = packageSource === 'latest'
+    ? selectedReleaseAsset !== undefined && latestRelease?.ok === true
+    : packageSource === 'target'
+      ? selectedTargetPackage !== undefined
+      : selectedPackage !== undefined
+  const remoteTarget = deployTarget !== null && deployTarget.kind !== 'self' && deployTarget.id !== 'local'
 
   return (
     <ConfigProvider
@@ -1197,16 +1325,49 @@ function Panel({ ctx }: { ctx: any }) {
         okText={deployIntent === 'upgrade' ? '开始升级' : deployIntent === 'test' ? '开始测试升级' : '开始部署'}
         cancelText="取消"
         confirmLoading={busy !== ''}
-        okButtonProps={{ disabled: selectedPackage === undefined }}
+        okButtonProps={{ disabled: !deployReady }}
         onCancel={() => setDeployTarget(null)}
         onOk={() => { void deploy() }}
         destroyOnHidden
       >
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {deployIntent === 'install' ? '部署包来自本机：' : '升级包来自本机：'}
-            <span className="dsh-pw-mono">{packagesDir || '~/.dsh/packages'}</span>
+            {packageSource === 'latest'
+              ? '升级包来自 latest tag：'
+              : packageSource === 'target'
+                ? (deployIntent === 'install' ? '部署包来自目标成员：' : '升级包来自目标成员：')
+                : deployIntent === 'install' ? '部署包来自本机：' : '升级包来自本机：'}
+            <span className="dsh-pw-mono">
+              {packageSource === 'latest'
+                ? 'GitHub / Gitee Release'
+                : packageSource === 'target'
+                  ? `${deployTarget?.system?.home ?? '目标成员'} · ~/.dsh/packages 或 ~/.dsh/mesh/upgrade`
+                  : (packagesDir || '~/.dsh/packages')}
+            </span>
           </Typography.Text>
+          <Segmented
+            block
+            value={packageSource}
+            onChange={value => setPackageSource(value as 'local' | 'latest' | 'target')}
+            options={[
+              {
+                label: 'latest tag',
+                value: 'latest',
+                disabled: deployIntent !== 'upgrade',
+              },
+              {
+                label: '目标成员已有包',
+                value: 'target',
+                disabled: !(remoteTarget && deployIntent !== 'test'),
+              },
+              { label: '本机部署包', value: 'local' },
+            ]}
+          />
+          {deployIntent === 'install' ? (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              latest tag 只用于升级；新成员安装请选择本机部署包（目标成员已有包在安装时也可用）。
+            </Typography.Text>
+          ) : null}
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             目标安装目录：<span className="dsh-pw-mono">{memberAppRoot(deployTarget) || '沿用成员现有安装目录（部署时自动探测）'}</span>
             {deployTarget?.system?.home !== undefined && deployTarget.system.home !== ''
@@ -1231,7 +1392,7 @@ function Panel({ ctx }: { ctx: any }) {
                   : '升级进程独立运行，本页面不受影响；成员切到新版本后会重启自己的 dsh / gate，健康检查失败时自动切回上一版。')
               : '部署包从本机上传到成员，安装完成后成员上的 dsh / gate / 控制服务会重启一次；进度在任务对话框里查看。'}
           />
-          {deployIntent !== 'install' && deployTarget?.kind !== 'self' ? (
+          {deployIntent === 'upgrade' && remoteTarget && packageSource !== 'target' ? (
             <Space direction="vertical" size={4} style={{ width: '100%' }}>
               <Space size={6}>
                 <Typography.Text type="secondary">下载代理</Typography.Text>
@@ -1256,7 +1417,9 @@ function Panel({ ctx }: { ctx: any }) {
                 />
               </Space>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                升级包优先从 Release 下载：GitHub 默认经有外网成员代理，Gitee 一律直连；下载失败自动回退到本机上传。
+                {packageSource === 'latest'
+                  ? '成员自己下载：Gitee 优先直连；Gitee 不可用时回退 GitHub（GitHub 可经上面的成员代理）。网关不传输包体。'
+                  : '本机包升级仍会先尝试 Release 下载（GitHub 优先）；失败后才把本机包上传到成员。'}
               </Typography.Text>
             </Space>
           ) : null}
@@ -1285,30 +1448,161 @@ function Panel({ ctx }: { ctx: any }) {
               </Space>
             )
           })() : null}
-          <Space.Compact style={{ width: '100%' }}>
-            <Select
-              style={{ width: '100%' }}
-              loading={packagesLoading}
-              value={selectedPackage}
-              placeholder={packages.length === 0 ? '目录里没有部署包' : '选择部署包'}
-              onChange={value => setSelectedPackage(value)}
-              options={packages.map(item => ({
-                value: item.name,
-                label: `${item.name}  ·  ${item.target === 'windows' ? 'Windows' : 'Linux'}  ·  ${formatBytes(item.bytes)}`,
-              }))}
-            />
-            <Button icon={<ReloadOutlined />} loading={packagesLoading} onClick={() => { void loadPackages(undefined, true) }}>
-              刷新
-            </Button>
-          </Space.Compact>
-          {packagesError !== '' ? <Alert type="error" showIcon message={packagesError} /> : null}
-          {!packagesLoading && packages.length === 0 && packagesError === '' ? (
-            <Alert
-              type="info"
-              showIcon
-              message="没有可用的部署包"
-              description="把 .tar.gz / .zip 部署包放进本机 ~/.dsh/packages/，再点刷新。"
-            />
+          {packageSource === 'latest' ? (
+            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+              {latestLoading ? (
+                <Space size={6}>
+                  <Spin size="small" />
+                  <Typography.Text type="secondary">正在读取 latest tag…</Typography.Text>
+                </Space>
+              ) : null}
+              {!latestLoading && latestError !== '' ? (
+                <Alert
+                  type={latestRelease?.ok === true ? 'warning' : 'error'}
+                  showIcon
+                  message={latestRelease?.stale === true ? '显示的是上次成功读取的发布清单' : '发布清单不可用'}
+                  description={latestError}
+                  action={deployTarget !== null ? (
+                    <Button size="small" onClick={() => { void loadLatest(deployTarget, true) }}>重试</Button>
+                  ) : null}
+                />
+              ) : null}
+              {!latestLoading && latestRelease?.configured === false ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="未配置 Release 发布"
+                  description="到「包管理 → Release 发布」配置 token 后，才能从 latest tag 升级。"
+                />
+              ) : null}
+              {latestRelease?.ok === true && latestAssets.length > 0 ? (
+                <>
+                  <Space size={6} wrap>
+                    <Tag color="blue">{`v${latestRelease.version ?? '?'} / ${latestRelease.buildStamp ?? '?'}`}</Tag>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {`清单来自 ${latestRelease.provider === 'gitee' ? 'Gitee' : 'GitHub'}`}
+                      {latestRelease.publishedAt !== null ? ` · 发布于 ${new Date(latestRelease.publishedAt).toLocaleString()}` : ''}
+                    </Typography.Text>
+                    <Button
+                      size="small"
+                      type="text"
+                      icon={<ReloadOutlined />}
+                      loading={latestLoading}
+                      onClick={() => { if (deployTarget !== null) void loadLatest(deployTarget, true) }}
+                    >
+                      刷新
+                    </Button>
+                  </Space>
+                  {latestAssets.length > 1 ? (
+                    <Select
+                      style={{ width: '100%' }}
+                      value={selectedAsset}
+                      onChange={value => setSelectedAsset(value)}
+                      options={latestAssets.map(asset => ({
+                        value: asset.target,
+                        label: `${asset.target}  ·  ${formatBytes(asset.bytes)}  ·  ${asset.providers.join(' / ')}`,
+                      }))}
+                    />
+                  ) : null}
+                  {selectedReleaseAsset !== undefined ? (
+                    <Alert
+                      type="info"
+                      showIcon
+                      message={`${selectedReleaseAsset.name}  ·  ${formatBytes(selectedReleaseAsset.bytes)}`}
+                      description={`${deployTarget?.kind === 'self' || deployTarget?.id === 'local'
+                        ? '由当前服务器下载并校验，然后就地升级并重启 dsh / gate'
+                        : '目标成员自己下载'}：优先 Gitee，Gitee 不可用时回退 GitHub。SHA-256 ${selectedReleaseAsset.sha256.slice(0, 12)}…`}
+                    />
+                  ) : (
+                    <Alert type="warning" showIcon message="这次发布没有该成员平台的包" />
+                  )}
+                </>
+              ) : null}
+              {!latestLoading && latestRelease?.ok === true && latestAssets.length === 0 ? (
+                <Alert type="warning" showIcon message="这次发布没有该成员平台的部署包" />
+              ) : null}
+            </Space>
+          ) : null}
+          {packageSource === 'target' ? (
+            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+              {targetPackagesLoading ? (
+                <Space size={6}>
+                  <Spin size="small" />
+                  <Typography.Text type="secondary">正在读取目标成员的包…</Typography.Text>
+                </Space>
+              ) : null}
+              {targetPackagesError !== '' ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  message="读取目标成员的包失败"
+                  description={targetPackagesError}
+                  action={deployTarget !== null ? (
+                    <Button size="small" onClick={() => { void loadTargetPackages(deployTarget, true) }}>重试</Button>
+                  ) : null}
+                />
+              ) : null}
+              <Space.Compact style={{ width: '100%' }}>
+                <Select
+                  style={{ width: '100%' }}
+                  loading={targetPackagesLoading}
+                  value={selectedTargetPackage}
+                  placeholder={targetPackages.length === 0 ? '目标成员上没有 dsh-mesh 包' : '选择目标成员上的包'}
+                  onChange={value => setSelectedTargetPackage(value)}
+                  options={targetPackages.map(item => ({
+                    value: item.path,
+                    label: `${item.name}  ·  ${item.os === 'windows' ? 'Windows' : 'Linux'}  ·  ${formatBytes(item.bytes)}`,
+                  }))}
+                />
+                <Button
+                  icon={<ReloadOutlined />}
+                  loading={targetPackagesLoading}
+                  onClick={() => { if (deployTarget !== null) void loadTargetPackages(deployTarget, true) }}
+                >
+                  刷新
+                </Button>
+              </Space.Compact>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                直接使用目标成员上的文件，不下载、不上传；开始升级时会在目标上重新计算 SHA-256。
+              </Typography.Text>
+              {!targetPackagesLoading && targetPackages.length === 0 && targetPackagesError === '' ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="目标成员上没有可用包"
+                  description="检查该成员的 ~/.dsh/packages 或 ~/.dsh/mesh/upgrade 目录。"
+                />
+              ) : null}
+            </Space>
+          ) : null}
+          {packageSource === 'local' ? (
+            <>
+              <Space.Compact style={{ width: '100%' }}>
+                <Select
+                  style={{ width: '100%' }}
+                  loading={packagesLoading}
+                  value={selectedPackage}
+                  placeholder={packages.length === 0 ? '目录里没有部署包' : '选择部署包'}
+                  onChange={value => setSelectedPackage(value)}
+                  options={packages.map(item => ({
+                    value: item.name,
+                    label: `${item.name}  ·  ${item.target === 'windows' ? 'Windows' : 'Linux'}  ·  ${formatBytes(item.bytes)}`,
+                  }))}
+                />
+                <Button icon={<ReloadOutlined />} loading={packagesLoading} onClick={() => { void loadPackages(undefined, true) }}>
+                  刷新
+                </Button>
+              </Space.Compact>
+              {packagesError !== '' ? <Alert type="error" showIcon message={packagesError} /> : null}
+              {!packagesLoading && packages.length === 0 && packagesError === '' ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="没有可用的部署包"
+                  description="可以切换到「latest tag」或「目标成员已有包」，也可以把 .tar.gz / .zip 放进本机 ~/.dsh/packages/ 后点刷新。"
+                />
+              ) : null}
+            </>
           ) : null}
         </Space>
       </Modal>

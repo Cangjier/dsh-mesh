@@ -266,3 +266,49 @@ test('release download reuses an already verified file', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('release download prefers Gitee when both providers are offered', async () => {
+  const fixture = await startFixture()
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-release-prefer-gitee-'))
+  try {
+    const output = path.join(dir, 'pkg.tar.gz')
+    const result = await run([
+      '--manifest-gitee', `http://127.0.0.1:${fixture.port}/latest-gitee.json`,
+      '--manifest-github', `http://127.0.0.1:${fixture.port}/latest-github.json`,
+      '--archive', 'pkg.tar.gz',
+      '--sha256', fixture.digest,
+      '--output', output,
+      '--prefer', 'gitee',
+    ])
+    assert.equal(result.code, 0, result.stderr)
+    assert.equal(sha256(await readFile(output)), fixture.digest)
+    assert.match(result.stdout, /DSH-MESH-DOWNLOAD-SOURCE gitee/u)
+    assert.ok(fixture.requests.some(url => url.startsWith('/part')), 'the Gitee parts should be fetched first')
+    assert.equal(fixture.requests.includes('/archive'), false, 'GitHub must not be used when Gitee works')
+  } finally {
+    fixture.server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('release download falls back to GitHub when the preferred Gitee manifest is missing', async () => {
+  const fixture = await startFixture()
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-release-prefer-fallback-'))
+  try {
+    const output = path.join(dir, 'pkg.tar.gz')
+    const result = await run([
+      '--manifest-gitee', `http://127.0.0.1:${fixture.port}/latest-missing.json`,
+      '--manifest-github', `http://127.0.0.1:${fixture.port}/latest-github.json`,
+      '--archive', 'pkg.tar.gz',
+      '--sha256', fixture.digest,
+      '--output', output,
+      '--prefer', 'gitee',
+    ])
+    assert.equal(result.code, 0, result.stderr)
+    assert.equal(sha256(await readFile(output)), fixture.digest)
+    assert.match(result.stdout, /DSH-MESH-DOWNLOAD-SOURCE github/u)
+  } finally {
+    fixture.server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

@@ -31,7 +31,7 @@ import {
   runJob,
   updateState,
 } from '../../code/build/job.mjs'
-import { DEFAULT_REF, DEFAULT_SOURCE, pluginFingerprint, readExtraPlugins, remoteRevision } from '../../code/build/engine.mjs'
+import { DEFAULT_REF, DEFAULT_SOURCE, pluginFingerprint, readExtraPlugins, remoteRevision, sha256File } from '../../code/build/engine.mjs'
 import { nextBuildStamp } from '../../code/build/stamp.mjs'
 import {
   appendDeployLog,
@@ -43,6 +43,7 @@ import {
   newJobId,
   readDeployState,
   writeDeployState,
+  SshRunner,
 } from '../../code/deploy/engine.mjs'
 import { EgressProxy } from './egress.mjs'
 import { RemoteBuilder } from './remote-build.mjs'
@@ -50,11 +51,21 @@ import { CLUSTER_HEADER, deriveClusterSecret, signClusterRequest } from '../../c
 import { repackArchive } from '../../code/build/repack.mjs'
 import { quickSystemInfo } from '../../code/shared/system-info.mjs'
 import { GeoLookup } from '../../code/shared/geo.mjs'
-import { detectReleaseOwner, latestManifestSources, latestManifestUrls, loadReleaseConfig, sanitizeReleaseConfig, saveReleaseConfig } from '../../code/shared/release.mjs'
+import { detectReleaseOwner, fetchLatestManifest, latestManifestSources, latestManifestUrls, loadReleaseConfig, sanitizeReleaseConfig, saveReleaseConfig } from '../../code/shared/release.mjs'
 import { buildUpdateReasons, memberDeployment, packageInfo, planUpgrades } from './schedule.mjs'
 import { autoUpgradeEnabled, pickBuildMember, pickProxyMember, pullBackEnabled } from './build-defaults.mjs'
 import { memberBuildTarget, pickArtifactForMember } from './build-artifacts.mjs'
 import { linkFor, resolveBuildEgress, resolveDeployLinkProxy } from './egress-plan.mjs'
+import {
+  isAllowedPackagePath,
+  listPackagesScript,
+  normalizeLatestManifest,
+  packageTargetFromName,
+  parseTargetPackageList,
+  powershellQuote,
+  selectLatestAsset,
+  shellQuote,
+} from './package-sources.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -151,6 +162,13 @@ export class MeshService {
     this.memberTagsFile = path.join(this.dataDir, 'member-tags.json')
     this.packagesDir = path.join(os.homedir(), '.dsh', 'packages')
     this.releaseConfigFile = path.join(this.dataDir, 'release.json')
+    /**
+     * Last successful `latest.json` read, shared by the dialog and the upgrade
+     * start. A few seconds of reuse keeps a slow provider from being hit twice
+     * (once to render the source, once to resolve the asset).
+     * @type {{at: number, value: object}|null}
+     */
+    this.latestReleaseCache = null
     const geoConfig = this.config.geo === false
       ? { enabled: false }
       : (this.config.geo !== null && typeof this.config.geo === 'object' ? this.config.geo : {})
@@ -1149,6 +1167,214 @@ export class MeshService {
   }
 
   /**
+   * The newest package published under the configured `latest` tag.
+   *
+   * Gitee is probed first because a domestic gateway usually reaches it
+   * directly; GitHub is the fallback and may be slow or blocked. The result is
+   * cached for a few seconds so opening the dialog and then starting the
+   * upgrade do not read the manifest twice.
+   * @param {{refresh?: boolean}} [options] refresh forces a new read.
+   * @returns {Promise<object>} normalized release.
+   */
+  async latestRelease(options = {}) {
+    const config = await loadReleaseConfig({ file: this.releaseConfigFile })
+    const sources = latestManifestSources(config)
+    const manifests = []
+    if (typeof sources.gitee === 'string' && sources.gitee !== '') manifests.push({ provider: 'gitee', url: sources.gitee })
+    if (typeof sources.github === 'string' && sources.github !== '') manifests.push({ provider: 'github', url: sources.github })
+    const urls = manifests.map(entry => entry.url)
+    if (urls.length === 0) {
+      return { ok: false, configured: false, assets: [], manifestUrls: [], manifests: [], error: '还没有配置 Release 发布' }
+    }
+    const cached = this.latestReleaseCache
+    if (options.refresh !== true && cached !== null && Date.now() - cached.at < 30_000) return cached.value
+    try {
+      const found = await fetchLatestManifest({ urls, timeoutMs: 15_000 })
+      let provider = 'github'
+      try {
+        provider = /(?:^|\.)gitee\.com$/iu.test(new URL(found.url).hostname) ? 'gitee' : 'github'
+      } catch {
+        // Keep the GitHub label; the URL came from the configured sources.
+      }
+      const value = { ...normalizeLatestManifest(found.manifest, { provider, manifestUrls: urls }), manifests }
+      this.latestReleaseCache = { at: Date.now(), value }
+      return value
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (cached !== null) return { ...cached.value, stale: true, error: message }
+      return { ok: false, configured: true, assets: [], manifestUrls: urls, manifests, error: message }
+    }
+  }
+
+  /**
+   * Archives already present on one member.
+   *
+   * The gateway lists its own `~/.dsh/packages` (plus the build staging it may
+   * have). A peer is asked over SSH; both `~/.dsh/packages` and
+   * `~/.dsh/mesh/upgrade` are scanned, because a build host leaves its archive
+   * in the latter rather than pulling it back to the gateway.
+   * @param {string} memberId member id, name, or VPN address.
+   * @returns {Promise<{ok: boolean, member: string, packages: object[], error?: string}>} listing.
+   */
+  async memberPackages(memberId) {
+    const wanted = typeof memberId === 'string' ? memberId.trim() : ''
+    if (wanted === '') throw new Error('member is required')
+    const snapshot = await this.members()
+    const all = [snapshot.local, ...snapshot.members].filter(Boolean)
+    const member = all.find(candidate => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted)
+    if (member === undefined) throw new Error(`member not found: ${wanted}`)
+    if (member.id === 'local' || member.kind === 'self') {
+      return { ok: true, member: member.id, packages: await this.#localTargetPackages() }
+    }
+    try {
+      return { ok: true, member: member.id, packages: await this.#remoteTargetPackages(member) }
+    } catch (error) {
+      return { ok: false, member: member.id, packages: [], error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /**
+   * Read archives from the gateway's own package cache and build staging.
+   * @returns {Promise<object[]>} packages.
+   */
+  async #localTargetPackages() {
+    const packages = []
+    const seen = new Set()
+    const walk = async (dir, depth) => {
+      if (depth < 0) return
+      const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+      for (const entry of entries) {
+        const file = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          if (depth > 0) await walk(file, depth - 1)
+          continue
+        }
+        if (!entry.isFile()) continue
+        const parsed = packageTargetFromName(entry.name)
+        if (parsed === null || seen.has(file)) continue
+        const info = await stat(file).catch(() => null)
+        if (info === null) continue
+        seen.add(file)
+        const sidecar = await readFile(`${file}.sha256`, 'utf8').catch(() => '')
+        const sha256 = /^([a-f0-9]{64})\b/iu.exec(sidecar)?.[1]?.toLowerCase() ?? null
+        packages.push({ name: entry.name, path: file, bytes: info.size, mtime: info.mtime.toISOString(), sha256, ...parsed })
+      }
+    }
+    await walk(this.packagesDir, 0)
+    await walk(path.join(this.dataDir, 'upgrade'), 2)
+    packages.sort((left, right) => right.mtime.localeCompare(left.mtime))
+    return packages
+  }
+
+  /**
+   * The home a member's service runs under.
+   *
+   * The SSH user and the service user can differ; the member reports its own
+   * home, so prefer that over the SSH login's `$HOME`.
+   * @param {object} member member snapshot.
+   * @param {{user: string, os: 'linux'|'windows'}} plan SSH plan.
+   * @returns {string} home directory.
+   */
+  #memberHome(member, plan) {
+    const reported = typeof member.system?.home === 'string' ? member.system.home.trim() : ''
+    if (reported !== '') return reported
+    if (plan.os === 'windows') return `C:\\Users\\${plan.user}`
+    return plan.user === 'root' ? '/root' : `/home/${plan.user}`
+  }
+
+  /**
+   * Ask a peer for its archives over SSH.
+   * @param {object} member member snapshot.
+   * @returns {Promise<object[]>} packages.
+   */
+  async #remoteTargetPackages(member) {
+    const plan = await this.#memberSshPlan(member)
+    const runner = new SshRunner({ ...plan, os: plan.os })
+    const script = listPackagesScript(plan.os, this.#memberHome(member, plan))
+    let stdout = ''
+    if (plan.os === 'windows') {
+      const encoded = Buffer.from(script, 'utf16le').toString('base64')
+      ;({ stdout } = await runner.runProcess('ssh', [
+        ...runner.sshOptions(),
+        runner.target(),
+        `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`,
+      ]))
+    } else {
+      ;({ stdout } = await runner.runProcess('ssh', [
+        ...runner.sshOptions(),
+        runner.target(),
+        'bash -s',
+      ], script))
+    }
+    return parseTargetPackageList(stdout)
+  }
+
+  /**
+   * Validate one archive the operator picked from the target member.
+   *
+   * The path must be under that member's package cache or build staging, the
+   * archive name must match the target's platform, and the digest is computed
+   * here instead of trusted from the browser.
+   * @param {object} member target member.
+   * @param {{path?: string, bytes?: number, sha256?: string}} request selected package.
+   * @returns {Promise<{path: string, bytes: number, sha256: string, name: string, os: 'linux'|'windows'}>} verified package.
+   */
+  async #resolveTargetPackage(member, request) {
+    const file = typeof request?.path === 'string' ? request.path.trim() : ''
+    if (file === '') throw new Error('targetPackage.path is required')
+    const plan = await this.#memberSshPlan(member)
+    const os = plan.os === 'windows' ? 'windows' : 'linux'
+    const home = this.#memberHome(member, plan)
+    if (!isAllowedPackagePath(file, home, os)) {
+      throw new Error('目标包不在该成员的 ~/.dsh/packages 或 ~/.dsh/mesh/upgrade 目录内')
+    }
+    const name = file.split(/[\\/]/u).pop() ?? ''
+    const parsed = packageTargetFromName(name)
+    if (parsed === null) throw new Error(`不是可识别的部署包：${name}`)
+    if (parsed.os !== os) throw new Error(`包平台 ${parsed.os} 与成员 ${os} 不匹配`)
+    const memberTarget = memberBuildTarget(member)
+    if (memberTarget !== null && memberTarget !== parsed.target) {
+      throw new Error(`包平台 ${parsed.target} 与成员 ${memberTarget} 不匹配`)
+    }
+    let bytes = 0
+    let sha256 = ''
+    if (member.id === 'local' || member.kind === 'self') {
+      const info = await stat(file).catch(() => null)
+      if (info === null || !info.isFile()) throw new Error(`目标包不存在：${file}`)
+      bytes = info.size
+      sha256 = await sha256File(file)
+    } else {
+      const runner = new SshRunner({ ...plan, os })
+      const size = await runner.remoteSize(file)
+      if (size === null) throw new Error(`目标包不存在：${file}`)
+      bytes = size
+      if (os === 'windows') {
+        const { stdout } = await runner.runProcess('ssh', [
+          ...runner.sshOptions(),
+          runner.target(),
+          `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath ${powershellQuote(file)}).Hash"`,
+        ])
+        sha256 = String(stdout).trim().toLowerCase()
+      } else {
+        const { stdout } = await runner.runProcess('ssh', [
+          ...runner.sshOptions(),
+          runner.target(),
+          `sha256sum -- ${shellQuote(file)}`,
+        ])
+        sha256 = String(stdout).trim().split(/\s+/u)[0]?.toLowerCase() ?? ''
+      }
+    }
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error(`无法计算目标包的校验和：${name}`)
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error(`目标包是空文件：${name}`)
+    if (Number.isSafeInteger(Number(request?.bytes)) && Number(request.bytes) > 0 && Number(request.bytes) !== bytes) {
+      throw new Error(`目标包大小变了：期望 ${String(request.bytes)}，实际 ${String(bytes)}`)
+    }
+    const expected = typeof request?.sha256 === 'string' ? request.sha256.trim().toLowerCase() : ''
+    if (expected !== '' && expected !== sha256) throw new Error('目标包的校验和与列表不一致，请刷新后重试')
+    return { path: file, bytes, sha256, name, os }
+  }
+
+  /**
    * Local deployment packages. The fixed directory is `~/.dsh/packages`.
    * @returns {Promise<object>} package list.
    */
@@ -1519,7 +1745,7 @@ export class MeshService {
    * member — including this gateway — can restart dsh-web and the gateway while
    * its own upgrade keeps going. This method only writes the job directory and
    * returns; `waitDeploy()` is what the model tool uses to block.
-   * @param {{host?: string, member?: string, package?: string, packageOnTarget?: {path: string, bytes: number, sha256: string}, mode?: 'install'|'upgrade'}} request target and package.
+   * @param {{host?: string, member?: string, package?: string, packageOnTarget?: {path: string, bytes: number, sha256: string}, release?: {target: string, sha256?: string, refresh?: boolean}, targetPackage?: {path: string, bytes?: number, sha256?: string}, mode?: 'install'|'upgrade'}} request target and package source.
    * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string, layout: string}>} queued job.
    */
   async startDeploy(request) {
@@ -1537,13 +1763,18 @@ export class MeshService {
     // The post-build upgrade already has its archive on the target. It is not
     // in `~/.dsh/packages`, so it is described by path/bytes/digest instead of
     // being resolved as a local package.
-    const packageOnTarget = request.packageOnTarget !== null && typeof request.packageOnTarget === 'object'
+    let packageOnTarget = request.packageOnTarget !== null && typeof request.packageOnTarget === 'object'
       ? request.packageOnTarget
       : null
-    const packagePath = packageOnTarget === null
-      ? await this.resolvePackage(request.package)
-      : String(packageOnTarget.path ?? '').trim()
-    if (packagePath === '') throw new Error('packageOnTarget.path is required')
+    // Two package sources besides the gateway cache: the public `latest` tag
+    // and an archive already on the target member.
+    const releaseRequest = request.release !== null && typeof request.release === 'object' ? request.release : null
+    const targetPackageRequest = request.targetPackage !== null && typeof request.targetPackage === 'object'
+      ? request.targetPackage
+      : null
+    if (releaseRequest !== null && targetPackageRequest !== null) {
+      throw new Error('一次升级只能选择一个包来源')
+    }
     const snapshot = await this.members()
     const all = [snapshot.local, ...snapshot.members].filter(Boolean)
     const member = memberId !== ''
@@ -1560,17 +1791,89 @@ export class MeshService {
         { status: 409 },
       )
     }
-    if (member !== undefined) {
-      const os = /win(?:dows)?/iu.test(path.basename(packagePath))
+
+    let packagePath = ''
+    let os = 'linux'
+    let packageDescriptor = null
+    let acquire = null
+    let downloadRequest = request
+    if (targetPackageRequest !== null) {
+      if (member === undefined) throw new Error('目标成员已有包需要一个成员')
+      const resolved = await this.#resolveTargetPackage(member, targetPackageRequest)
+      packagePath = resolved.path
+      os = resolved.os
+      // `keep` is what stops prepare from deleting an archive that belongs to
+      // the member's cache (the build-host staging copy is still deleted).
+      packageOnTarget = { path: resolved.path, bytes: resolved.bytes, sha256: resolved.sha256, keep: true }
+    } else if (releaseRequest !== null) {
+      if (member === undefined) throw new Error('latest tag 需要指定一个成员')
+      // An install target has no Node runtime yet, so it cannot run the
+      // target-side downloader. Keep install on the gateway cache / target
+      // package sources.
+      if (mode === 'install') {
+        throw new Error('新成员安装请使用本机部署包或目标成员已有包；latest tag 只用于升级')
+      }
+      const target = typeof releaseRequest.target === 'string' ? releaseRequest.target.trim() : ''
+      if (target === '') throw new Error('release.target is required')
+      const memberTarget = memberBuildTarget(member)
+      if (memberTarget !== null && memberTarget !== target) {
+        throw new Error(`包平台 ${target} 与成员 ${memberTarget} 不匹配`)
+      }
+      const latest = await this.latestRelease({ refresh: releaseRequest.refresh === true })
+      if (latest.ok !== true) throw new Error(latest.error ?? '发布清单不可用')
+      const asset = selectLatestAsset(latest, target)
+      if (asset === null) throw new Error(`latest tag 里没有 ${target} 的部署包`)
+      const manifests = latest.manifests ?? latest.manifestUrls
+      if (member.id === 'local' || member.kind === 'self') {
+        // The gateway upgrades itself in place; its runner downloads the
+        // archive into the package cache and then runs the same in-place
+        // upgrade as a hand-picked local package.
+        const link = request.direct === true
+          ? null
+          : resolveDeployLinkProxy({
+              links: await this.#directLinks(),
+              target: member,
+              wanted: typeof request.proxyMember === 'string' ? request.proxyMember : '',
+            })
+        acquire = {
+          name: asset.name,
+          bytes: asset.bytes,
+          sha256: asset.sha256,
+          manifests,
+          prefer: 'gitee',
+          ...(link === null || typeof link.url !== 'string' || link.url === '' ? {} : { proxy: link.url }),
+        }
+        packagePath = path.join(this.packagesDir, asset.name)
+        os = asset.os
+      } else {
+        packagePath = asset.name
+        os = asset.os
+        packageDescriptor = { name: asset.name, bytes: asset.bytes, sha256: asset.sha256, local: false }
+        downloadRequest = {
+          ...request,
+          release: { ...releaseRequest, manifests, prefer: 'gitee' },
+        }
+      }
+    } else if (packageOnTarget !== null) {
+      packagePath = String(packageOnTarget.path ?? '').trim()
+      if (packagePath === '') throw new Error('packageOnTarget.path is required')
+      os = /win(?:dows)?/iu.test(path.basename(packagePath))
         ? 'windows'
-        : member.system?.platform?.toLowerCase().startsWith('win') ? 'windows' : 'linux'
+        : member?.system?.platform?.toLowerCase().startsWith('win') ? 'windows' : 'linux'
+    } else {
+      packagePath = await this.resolvePackage(request.package)
+      os = /win(?:dows)?/iu.test(path.basename(packagePath))
+        ? 'windows'
+        : member?.system?.platform?.toLowerCase().startsWith('win') ? 'windows' : 'linux'
+    }
+
+    if (member !== undefined) {
       const identity = { id: member.id, name: member.name, ip: member.ip }
       // The package platform is what decides whether the target can take it;
       // `os` above falls back to the member's platform when the name is silent.
-      const packageOs = /win(?:dows)?/iu.test(path.basename(packagePath)) ? 'windows' : 'linux'
-      if (test) assertTestUpgradeTarget(member, { packageOs })
+      if (test) assertTestUpgradeTarget(member, { packageOs: os })
       if (member.kind === 'self' || member.id === 'local') {
-        return this.#startLocalJob({ member, packagePath, os, mode, identity })
+        return this.#startLocalJob({ member, packagePath, os, mode, identity, ...(acquire === null ? {} : { acquire }) })
       }
       const deployRequest = await this.#memberDeployRequest(member, packagePath, os)
       // Upgrades prefer the published release: the member downloads the
@@ -1579,7 +1882,9 @@ export class MeshService {
       // the release tokens. An install has no Node runtime to run the
       // downloader, so it keeps the direct gateway upload. An archive already
       // on the target needs neither path.
-      const download = mode === 'install' || packageOnTarget !== null ? null : await this.#deployDownload(request, member, all)
+      const download = mode === 'install' || packageOnTarget !== null
+        ? null
+        : await this.#deployDownload(downloadRequest, member, all)
       const job = await this.#startEngineJob({
         request: {
           ...deployRequest,
@@ -1587,6 +1892,7 @@ export class MeshService {
           test,
           download,
           ...(packageOnTarget === null ? {} : { packageOnTarget }),
+          ...(packageDescriptor === null ? {} : { packageDescriptor }),
         },
         member: member.id,
         mode,
@@ -1595,7 +1901,7 @@ export class MeshService {
     }
     if (host === '') throw new Error('host is required')
     if (test) throw new Error('测试升级需要一个成员（要在成员的安装上演练），不能直接给裸 SSH 主机')
-    const os = /win(?:dows)?/iu.test(path.basename(packagePath)) ? 'windows' : 'linux'
+    if (packageDescriptor !== null) throw new Error('latest tag 需要一个已发现的成员，不能直接给裸 SSH 主机')
     const appRoot = os === 'windows' ? 'C:\\dsh-mesh' : '/opt/dsh-mesh'
     const download = mode === 'install' || packageOnTarget !== null ? null : await this.#deployDownload(request, null, all)
     const job = await this.#startEngineJob({
@@ -1609,11 +1915,17 @@ export class MeshService {
   /**
    * Deploy one local package to a discovered member, without waiting.
    * Kept for the panel API, which returns a job id immediately.
-   * @param {{member?: string, package?: string, mode?: 'install'|'upgrade'}} request member id/ip and package filename.
+   * @param {{member?: string, package?: string, release?: object, targetPackage?: object, mode?: 'install'|'upgrade'}} request member id/ip and package source.
    * @returns {Promise<object>} started deploy job.
    */
   async deployMember(request) {
-    const result = await this.startDeploy({ member: request.member, package: request.package, mode: request.mode })
+    const result = await this.startDeploy({
+      member: request.member,
+      package: request.package,
+      mode: request.mode,
+      ...(request.release === undefined ? {} : { release: request.release }),
+      ...(request.targetPackage === undefined ? {} : { targetPackage: request.targetPackage }),
+    })
     return {
       ok: true,
       job: result.job,
@@ -1629,7 +1941,7 @@ export class MeshService {
    * Same flow as a first deploy; the difference is that an installed member is
    * upgraded by the package instead of being installed from scratch, and the
    * panel labels the job as an upgrade.
-   * @param {{member?: string, package?: string}} request member id/ip and package filename.
+   * @param {{member?: string, package?: string, release?: object, targetPackage?: object}} request member id/ip and package source.
    * @returns {Promise<object>} queued job.
    */
   async upgradeMember(request) {
@@ -1637,6 +1949,8 @@ export class MeshService {
       member: request.member,
       package: request.package,
       mode: 'upgrade',
+      ...(request.release === undefined ? {} : { release: request.release }),
+      ...(request.targetPackage === undefined ? {} : { targetPackage: request.targetPackage }),
       ...(typeof request.proxyMember === 'string' ? { proxyMember: request.proxyMember } : {}),
       ...(request.direct === true ? { direct: true } : {}),
     })
@@ -1759,7 +2073,7 @@ export class MeshService {
    * A flat install (gateway) has no release symlink to switch: the package's
    * own `upgrade-local.sh` copies the new tree over it. A blue-green install
    * upgrades exactly like a member, using a local runner instead of SSH.
-   * @param {{member: object, packagePath: string, os: string, mode: 'install'|'upgrade', identity: object}} input target.
+   * @param {{member: object, packagePath: string, os: string, mode: 'install'|'upgrade', identity: object, acquire?: object}} input target.
    * @returns {Promise<object>} queued job and its layout.
    */
   async #startLocalJob(input) {
@@ -1779,13 +2093,23 @@ export class MeshService {
         mode: input.mode,
         member: 'local',
         plan: null,
-        request: { kind: 'inplace', inplace: { package: input.packagePath, appRoot: install.appRoot } },
+        request: {
+          kind: 'inplace',
+          inplace: {
+            package: input.packagePath,
+            appRoot: install.appRoot,
+            ...(input.acquire === undefined ? {} : { acquire: input.acquire }),
+          },
+        },
         target: { host: '127.0.0.1', user: os.userInfo().username, port: null, os: 'linux', appRoot: install.appRoot },
         services: ['dsh-web-app.service', 'dsh-web-gate.service', 'dsh-wireguard-control.service', 'dsh-interop.service'],
         packagePath: input.packagePath,
-        release: path.basename(input.packagePath),
+        release: typeof input.acquire?.name === 'string' ? input.acquire.name : path.basename(input.packagePath),
       })
       return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: install.layout }
+    }
+    if (input.acquire !== undefined) {
+      throw new Error('本机是蓝绿布局，latest tag 本机升级暂未支持；请改用本机部署包')
     }
     const job = await this.#startEngineJob({
       request: { host: '127.0.0.1', local: true, package: input.packagePath, os: input.os, appRoot: install.appRoot, member: input.member.id },
@@ -1884,35 +2208,51 @@ export class MeshService {
    * @returns {{appRoot: string, layout: 'flat'|'bluegreen'|'pointer'}|null} install, or null in a source checkout.
    */
   #localAppRoot() {
+    const inspect = (candidate) => {
+      try {
+        const current = path.join(candidate, 'current')
+        if (existsSync(current) && existsSync(path.join(candidate, 'releases'))) {
+          return { appRoot: candidate, layout: 'bluegreen' }
+        }
+        // Pointer layout: the root owns dsh-mesh.json + releases/.
+        if (existsSync(path.join(candidate, 'dsh-mesh.json')) && existsSync(path.join(candidate, 'releases'))) {
+          return { appRoot: candidate, layout: 'pointer' }
+        }
+        // Flat install: config/gate.env and the packaged plugins sit together.
+        if (existsSync(path.join(candidate, 'config', 'gate.env')) && existsSync(path.join(candidate, 'plugins', 'dsh-mesh'))) {
+          return { appRoot: candidate, layout: 'flat' }
+        }
+      } catch {
+        // A transient or unreadable candidate is simply not the install root.
+      }
+      return null
+    }
+
+    // The plugin can live inside the active release (blue-green) or a checkout;
+    // walk up from it first.
     let candidate = path.resolve(this.repositoryRoot, '..')
     for (let depth = 0; depth < 5; depth += 1) {
+      const found = inspect(candidate)
+      if (found !== null) return found
       const parent = path.dirname(candidate)
-      const current = path.join(parent, 'current')
-      if (existsSync(current)) {
-        try {
-          if (realpathSync(candidate) === realpathSync(current)) return { appRoot: parent, layout: 'bluegreen' }
-        } catch {
-          // Fall through to the flat-install checks.
-        }
-      }
-      if (existsSync(path.join(candidate, 'current')) && existsSync(path.join(candidate, 'releases'))) {
-        return { appRoot: candidate, layout: 'bluegreen' }
-      }
-      // Pointer layout: the root owns dsh-mesh.json + releases/; the release
-      // directory itself (where this plugin lives) has config/gate.env through
-      // its shared symlink, so this check must come before the flat one.
-      if (existsSync(path.join(candidate, 'dsh-mesh.json')) && existsSync(path.join(candidate, 'releases'))) {
-        return { appRoot: candidate, layout: 'pointer' }
-      }
-      if (existsSync(path.join(candidate, 'config', 'gate.env')) && existsSync(path.join(candidate, 'plugins', 'dsh-mesh'))) {
-        return { appRoot: candidate, layout: 'flat' }
-      }
+      if (parent === candidate) break
+      candidate = parent
+    }
+
+    // The running profile installs the plugin under
+    // `<root>/shared/home/profiles/...`, which is farther away than the walk
+    // above. DSH_HOME is `<root>/shared/home`, so walking its ancestors finds
+    // the pointer/flat root reliably.
+    candidate = path.resolve(this.home)
+    for (let depth = 0; depth < 5; depth += 1) {
+      const found = inspect(candidate)
+      if (found !== null) return found
+      const parent = path.dirname(candidate)
       if (parent === candidate) break
       candidate = parent
     }
     return null
   }
-
   /**
    * Empty one finished build job's log.
    * @param {string} id job id.
@@ -1968,19 +2308,41 @@ export class MeshService {
    * @returns {Promise<object|null>} download spec for the deploy plan.
    */
   async #deployDownload(request, target, everyone) {
-    const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile })
-    const sources = latestManifestSources(releaseConfig)
+    // A `latest` selection already resolved the manifest URLs; using them keeps
+    // the provider order (Gitee first) and works on a member gate that has no
+    // local release.json. A hand-picked local package still reads the config,
+    // preserving the old "download the release instead of uploading" behaviour.
+    const explicit = Array.isArray(request.release?.manifests) ? request.release.manifests : null
     const manifests = []
-    if (sources.github !== null) manifests.push({ provider: 'github', url: sources.github })
-    if (sources.gitee !== null) manifests.push({ provider: 'gitee', url: sources.gitee })
+    if (explicit !== null) {
+      for (const entry of explicit) {
+        if (typeof entry === 'string' && entry !== '') {
+          let provider = 'github'
+          try {
+            provider = /(?:^|\.)gitee\.com$/iu.test(new URL(entry).hostname) ? 'gitee' : 'github'
+          } catch {
+            // Keep GitHub as the safe label.
+          }
+          manifests.push({ provider, url: entry })
+        } else if (entry !== null && typeof entry === 'object' && typeof entry.url === 'string' && entry.url !== '') {
+          manifests.push({ provider: entry.provider === 'gitee' ? 'gitee' : 'github', url: entry.url })
+        }
+      }
+    } else {
+      const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile })
+      const sources = latestManifestSources(releaseConfig)
+      if (sources.github !== null) manifests.push({ provider: 'github', url: sources.github })
+      if (sources.gitee !== null) manifests.push({ provider: 'gitee', url: sources.gitee })
+    }
+    const prefer = request.release?.prefer === 'gitee' ? 'gitee' : undefined
     if (manifests.length === 0) return null
-    if (request.direct === true || request.proxyMember === 'none') return { manifests, proxy: null }
+    if (request.direct === true || request.proxyMember === 'none') return { manifests, proxy: null, ...(prefer === undefined ? {} : { prefer }) }
     const wanted = typeof request.proxyMember === 'string' ? request.proxyMember.trim() : ''
     // A direct link is the best route to the egress member: the target is the
     // link's client, and its local HTTP listener already forwards through the
     // server's internet access. No egress proxy needs to be started at all.
     const linkProxy = resolveDeployLinkProxy({ links: await this.#directLinks(), target, wanted })
-    if (linkProxy !== null) return { manifests, proxy: linkProxy }
+    if (linkProxy !== null) return { manifests, proxy: linkProxy, ...(prefer === undefined ? {} : { prefer }) }
     let proxyMember = null
     if (wanted !== '' && wanted !== 'auto') {
       proxyMember = everyone.find(candidate => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted) ?? null
@@ -1994,7 +2356,7 @@ export class MeshService {
     }
     // A target proxying for itself is allowed (the listener binds its VPN
     // address), but there is no gain; keep it so an explicit choice is honoured.
-    if (proxyMember === null) return { manifests, proxy: null }
+    if (proxyMember === null) return { manifests, proxy: null, ...(prefer === undefined ? {} : { prefer }) }
     const plan = await this.#memberSshPlan(proxyMember)
     return {
       manifests,
@@ -2007,6 +2369,7 @@ export class MeshService {
         appRoot: plan.appRoot,
         name: proxyMember.name,
       },
+      ...(prefer === undefined ? {} : { prefer }),
     }
   }
 

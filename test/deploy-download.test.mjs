@@ -163,3 +163,44 @@ test('a failed release download falls back to the gateway upload', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a release-only plan fails instead of uploading a name that is not a file', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-deploy-release-only-'))
+  const remote = path.join(dir, 'remote.tar.gz')
+  let fixture = null
+  try {
+    const archive = Buffer.alloc(2048, 9)
+    fixture = await startFixture(archive, 'pkg.tar.gz')
+    const plan = await buildDeployPlan({
+      host: '10.66.66.3',
+      os: 'linux',
+      appRoot: '/opt/member',
+      packageDescriptor: {
+        name: 'dsh-mesh-1.0-20261119F-linux-x64.tar.gz',
+        bytes: archive.length,
+        sha256: sha256(archive),
+        local: false,
+      },
+      download: {
+        manifests: [{ provider: 'gitee', url: `http://127.0.0.1:${fixture.port}/latest.json` }],
+        proxy: null,
+        prefer: 'gitee',
+      },
+    })
+    plan.remotePackage = remote
+    const runner = fakeRunner(plan, { source: remote, downloadFailed: true })
+    const manager = new DeployManager({
+      repositoryRoot: path.resolve(import.meta.dirname, '..'),
+      dataDir: path.join(dir, 'jobs'),
+      runnerFactory: () => runner,
+    })
+    const started = await manager.start({ plan })
+    const final = await manager.wait(started.job.id)
+    assert.equal(final.status, 'failed', JSON.stringify(final))
+    assert.match(final.error, /本地副本/u)
+    assert.equal(runner.uploaded.includes(remote), false, 'a release-only plan must never upload')
+  } finally {
+    fixture?.server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

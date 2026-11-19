@@ -231,6 +231,54 @@ export interface PackagesResponse {
   packages: PackageInfo[]
 }
 
+/** One archive published under the `latest` tag. */
+export interface LatestReleaseAsset {
+  target: string
+  os: 'linux' | 'windows'
+  arch: 'x64' | 'arm64'
+  name: string
+  bytes: number
+  sha256: string
+  providers: Array<'github' | 'gitee'>
+}
+
+/** The newest release manifest, normalized by the host. */
+export interface LatestRelease {
+  ok: boolean
+  configured: boolean
+  provider: string | null
+  version: string | null
+  buildStamp: string | null
+  publishedAt: string | null
+  assets: LatestReleaseAsset[]
+  manifestUrls: string[]
+  /** Provider-tagged manifest URLs, in download priority order. */
+  manifests?: Array<{ provider: 'github' | 'gitee', url: string }>
+  stale?: boolean
+  error?: string
+}
+
+/** One archive that already exists on a member. */
+export interface TargetPackageInfo {
+  name: string
+  path: string
+  bytes: number
+  mtime: string
+  sha256: string | null
+  target: string
+  os: 'linux' | 'windows'
+  arch: 'x64' | 'arm64'
+  version: string
+  buildStamp: string
+}
+
+export interface TargetPackagesResponse {
+  ok: boolean
+  member: string
+  packages: TargetPackageInfo[]
+  error?: string
+}
+
 /** Result of one timed run, as recorded by the scheduler. */
 export interface ScheduleLastRun {
   at?: string
@@ -461,6 +509,16 @@ export const api = {
     return request<ReleaseSettingsResponse>('/api/dsh-mesh/release')
   },
 
+  /** The newest packages published under the configured `latest` tag. */
+  latestRelease(refresh = false): Promise<LatestRelease> {
+    return request<LatestRelease>(`/api/dsh-mesh/release/latest${refresh ? '?refresh=1' : ''}`)
+  },
+
+  /** Archives already present on one member. */
+  targetPackages(member: string): Promise<TargetPackagesResponse> {
+    return request<TargetPackagesResponse>(`/api/dsh-mesh/member-packages?member=${encodeURIComponent(member)}`)
+  },
+
   saveReleaseSettings(config: {
     enabled?: boolean
     tag?: string
@@ -488,6 +546,33 @@ export const api = {
       method: 'POST',
       headers: { 'x-dsh-mesh': '1' },
       body: JSON.stringify({ member, package: packageName, ...options }),
+    })
+  },
+
+  /** Upgrade a member from the public `latest` tag (Gitee first, GitHub fallback). */
+  upgradeLatest(member: string, target: string, options: { proxyMember?: string, direct?: boolean } = {}): Promise<DeployResponse> {
+    return request<DeployResponse>('/api/dsh-mesh/upgrade', {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: JSON.stringify({ member, release: { target }, ...options }),
+    })
+  },
+
+  /** Upgrade a member from an archive that is already on that member. */
+  upgradeTargetPackage(member: string, targetPath: string): Promise<DeployResponse> {
+    return request<DeployResponse>('/api/dsh-mesh/upgrade', {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: JSON.stringify({ member, targetPackage: { path: targetPath } }),
+    })
+  },
+
+  /** Install onto a member from an archive that is already on that member. */
+  deployTargetPackage(member: string, targetPath: string): Promise<DeployResponse> {
+    return request<DeployResponse>('/api/dsh-mesh/deploy', {
+      method: 'POST',
+      headers: { 'x-dsh-mesh': '1' },
+      body: JSON.stringify({ member, targetPackage: { path: targetPath } }),
     })
   },
 

@@ -114,6 +114,16 @@ export function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, await service.packages())
           return
         }
+        if (method === 'GET' && path === '/release/latest') {
+          writeJson(response, 200, await service.latestRelease({
+            refresh: url.searchParams.get('refresh') === '1',
+          }))
+          return
+        }
+        if (method === 'GET' && path === '/member-packages') {
+          writeJson(response, 200, await service.memberPackages(url.searchParams.get('member') ?? ''))
+          return
+        }
         if (method === 'GET' && path === '/release') {
           writeJson(response, 200, await service.releaseSettings())
           return
@@ -172,6 +182,8 @@ export function registerApi(ctx, service, scheduler = null) {
           const result = await service.deployMember({
             member: typeof body.member === 'string' ? body.member : undefined,
             package: typeof body.package === 'string' ? body.package : undefined,
+            release: body.release !== null && typeof body.release === 'object' ? body.release : undefined,
+            targetPackage: body.targetPackage !== null && typeof body.targetPackage === 'object' ? body.targetPackage : undefined,
           })
           writeJson(response, 202, result)
           return
@@ -210,6 +222,10 @@ export function registerApi(ctx, service, scheduler = null) {
           const request_ = {
             member: typeof body.member === 'string' ? body.member : undefined,
             package: typeof body.package === 'string' ? body.package : undefined,
+            // The two extra package sources: the public latest tag and an
+            // archive already on the target member.
+            ...(body.release !== null && typeof body.release === 'object' ? { release: body.release } : {}),
+            ...(body.targetPackage !== null && typeof body.targetPackage === 'object' ? { targetPackage: body.targetPackage } : {}),
             // Upgrade downloads default to the external proxy; the panel can
             // pick a different member or ask for a direct download.
             ...(typeof body.proxyMember === 'string' && body.proxyMember.trim() !== '' ? { proxyMember: body.proxyMember.trim() } : {}),

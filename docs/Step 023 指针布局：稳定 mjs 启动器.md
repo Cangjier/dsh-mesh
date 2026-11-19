@@ -104,10 +104,17 @@ Linux 成员的 prepare/activate/rollback 也只做三件事：
 - Linux/Windows 的 engine prepare/activate/rollback 都只剩“解压到 staging /
   调 `upgrade-local.mjs` / 调 `rollback-local.mjs`”。
 
-真实升级中发现并修掉的两个坑：
+真实升级中发现并修掉的坑：
 
 1. activate 用 staged node 启动 mjs 后，stage 被 move 进 `releases/`，再拿
    `process.execPath` 去 spawn layout 会 ENOENT。现在按 release 里的 node 重新解析。
 2. Windows 上 `cpSync` 递归 DSH_HOME 里的 junction 会让 Node 崩溃
    （0xC0000409）。adoption 现在过滤 symlink/junction 与 `node_modules`，并且
    先写 `.partial-<pid>` 再改名，避免留下半个 `shared/home`。
+3. 成员已迁移到 pointer 后，上报的 `appRoot` 就是 `releases/<id>`。它被当成
+   legacy 根去 adoption，而 release 里的 `config/data/workspace` 是指回
+   `shared/` 的符号链接：`cpSync` 过滤掉链接后没有产物，`rmSync(target)` 却
+   已经把空目录删掉，最后 rename 一个不存在的 partial 直接 ENOENT（2026-11-19
+   成员 `.3` 升级失败）。`upgrade-local.mjs` 现在把 `releases/` 下的 appRoot
+   排除在 adoption 之外，并且候选源是符号链接、或 realpath 等于目标本身时
+   跳过；copy 没有产物时也不再动目标目录。

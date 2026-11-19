@@ -32,7 +32,7 @@
 
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -177,16 +177,38 @@ if (!existsSync(path.join(stage, 'dsh-mesh.mjs'))) {
   process.exit(2)
 }
 
-const legacyRoot = typeof args['app-root'] === 'string' && args['app-root'] !== '' ? path.resolve(args['app-root']) : ''
+const reportedRoot = typeof args['app-root'] === 'string' && args['app-root'] !== '' ? path.resolve(args['app-root']) : ''
 const root = path.resolve(
   typeof args['layout-root'] === 'string' && args['layout-root'] !== ''
     ? args['layout-root']
     : process.env.DSH_MESH_LAYOUT_ROOT
       ? process.env.DSH_MESH_LAYOUT_ROOT
-      : legacyRoot !== '' && existsSync(path.join(legacyRoot, 'dsh-mesh.json'))
-        ? legacyRoot
+      : reportedRoot !== '' && existsSync(path.join(reportedRoot, 'dsh-mesh.json'))
+        ? reportedRoot
         : path.join(os.homedir(), '.dsh'),
 )
+
+/**
+ * Decide whether the reported app root is an older install worth adopting.
+ *
+ * Callers report the directory the machine runs from. Once the pointer layout
+ * is in place that is `<root>/releases/<id>`, which is not a separate install:
+ * it is one of our own releases, and its `config`/`data`/`workspace` entries
+ * are symlinks back into `<root>/shared`. Adopting from it copied the target
+ * onto itself; because the copy filter drops symlinks the partial tree was
+ * never created, and the rename that followed failed with ENOENT — the
+ * 2026-11-19 member upgrade that died in its activate step.
+ * @param {string} candidate reported app root ('' when not given).
+ * @param {string} layoutRoot stable install root.
+ * @returns {string} a legacy root to adopt from, or '' when there is none.
+ */
+function adoptableLegacyRoot(candidate, layoutRoot) {
+  if (candidate === '' || candidate === layoutRoot) return ''
+  const relative = path.relative(path.join(layoutRoot, 'releases'), candidate)
+  if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) return ''
+  return candidate
+}
+const legacyRoot = adoptableLegacyRoot(reportedRoot, root)
 const legacyHome = typeof args['dsh-home'] === 'string' && args['dsh-home'] !== '' ? path.resolve(args['dsh-home']) : ''
 const noRestart = args['no-restart'] === 'true'
 const gatePort = typeof args['gate-port'] === 'string' ? args['gate-port'] : (typeof args.port === 'string' ? args.port : '80')
@@ -226,7 +248,22 @@ for (const dir of ['config', 'data', 'home', 'workspace']) mkdirSync(path.join(s
 const adopt = []
 const copyIfEmpty = (target, sources) => {
   if (readdirSync(target).length > 0) return
-  const source = sources.find(candidate => candidate !== '' && existsSync(candidate))
+  const targetReal = realpathSync(target)
+  const source = sources.find(candidate => {
+    if (candidate === '' || !existsSync(candidate)) return false
+    // The copy filter below refuses symlinks, so a symlinked candidate would
+    // contribute nothing even when it points somewhere legitimate. It can also
+    // resolve to the target itself (`<release>/workspace -> shared/workspace`),
+    // which made adoption delete the target and then rename a partial copy
+    // that was never written.
+    try {
+      if (lstatSync(candidate).isSymbolicLink()) return false
+      if (realpathSync(candidate) === targetReal) return false
+    } catch {
+      return false
+    }
+    return true
+  })
   if (source === undefined) return
   // DSH's home contains plugin links, often as Windows junctions. Copying a
   // junction tree crashed Node on Windows (0xC0000409) and would have copied
@@ -247,6 +284,11 @@ const copyIfEmpty = (target, sources) => {
       return path.basename(src) !== 'node_modules'
     },
   })
+  // A source that copied nothing must not cost the target its directory.
+  if (!existsSync(partial)) {
+    log(`[upgrade] skipped adopting ${path.relative(root, target)}: ${source} produced no copy`)
+    return
+  }
   rmSync(target, { recursive: true, force: true })
   renameSync(partial, target)
   adopt.push(`${path.relative(root, target)} <- ${source}`)

@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -109,6 +109,39 @@ test('a second upgrade flips the pointer and keeps the previous release', () => 
     const marker = JSON.parse(readFileSync(path.join(root, 'shared', 'data', 'upgrade-pending.json'), 'utf8'))
     assert.equal(marker.layout, 'pointer')
     assert.equal(marker.previous, path.join(root, firstActive))
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('a pointer install is never adopted as its own legacy source', () => {
+  // The 2026-11-19 member upgrade died here. The runner reports the release the
+  // machine currently runs from as --app-root; on the pointer layout that
+  // release has `workspace -> ../../shared/workspace`, so adoption picked a
+  // symlink that resolved to the empty target itself. cpSync copied nothing
+  // (the filter drops symlinks), the target was removed, and the rename of a
+  // partial that never existed failed with ENOENT.
+  const base = mkdtempSync(path.join(tmpdir(), 'dsh-upgrade-'))
+  const root = path.join(base, 'root')
+  try {
+    const first = makeStage(base, 'stage-a', { buildStamp: '20261118D' })
+    assert.equal(upgrade(first, root).status, 0)
+    const active = JSON.parse(readFileSync(path.join(root, 'dsh-mesh.json'), 'utf8')).active
+    // The layout prepare of the first upgrade linked the release's data dirs
+    // into shared/; the workspace is still empty, which is what made adoption
+    // enter the copy path at all.
+    assert.equal(readlinkSync(path.join(root, active, 'workspace')), path.join('..', '..', 'shared', 'workspace'))
+    assert.equal(readdirSync(path.join(root, 'shared', 'workspace')).length, 0)
+
+    const second = makeStage(base, 'stage-b', { buildStamp: '20261120A' })
+    const result = upgrade(second, root, ['--app-root', path.join(root, active)])
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+    assert.doesNotMatch(result.stderr, /ENOENT/u)
+    const pointer = JSON.parse(readFileSync(path.join(root, 'dsh-mesh.json'), 'utf8'))
+    assert.notEqual(pointer.active, active)
+    assert.equal(pointer.previous, active)
+    assert.ok(existsSync(path.join(root, 'shared', 'workspace')))
+    assert.equal(readdirSync(path.join(root, 'shared', 'workspace')).length, 0)
   } finally {
     rmSync(base, { recursive: true, force: true })
   }

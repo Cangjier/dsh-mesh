@@ -26,8 +26,8 @@
  *   status
  *
  * `prepare` is side-effect free for the running system: it only writes inside
- * the root and rewrites unit drop-ins. `activate` flips the pointer and writes
- * the acceptance marker. A restart is what makes it visible.
+ * the root and rewrites unit drop-ins. `activate` flips the pointer; a restart
+ * is what makes it visible.
  *
  * @module dsh-mesh/install/layout
  */
@@ -367,8 +367,8 @@ function prepare(args, root) {
     if (!existsSync(dataLink)) linkDirectory(dataLink, path.join(shared, 'data'))
   }
 
-  // The rollback orchestrator is stable too: the acceptance page restarts the
-  // gateway, so it must run from a path that does not move with the release.
+  // The rollback orchestrator is stable too: it restarts the gateway it is run
+  // from, so it must live at a path that does not move with the release.
   const rollbackSource = path.join(releaseDir, 'code', 'deploy', 'rollback-local.mjs')
   let rollbackState = 'absent'
   if (existsSync(rollbackSource)) {
@@ -443,10 +443,6 @@ function activate(args, root) {
   const previous = previousPointer !== null && typeof previousPointer.active === 'string' && previousPointer.active !== '' && previousPointer.active !== active
     ? previousPointer.active
     : (previousPointer?.previous ?? null)
-  // Version labels are read from the manifests so a manual `activate` (or a
-  // script that forgets --from/--to) still writes a useful acceptance marker.
-  const activeManifest = readJson(path.join(releaseDir, 'manifest.json'))
-  const previousManifest = previous === null ? null : readJson(path.join(root, previous, 'manifest.json'))
   const state = {
     format: 1,
     layout: 'pointer',
@@ -456,27 +452,7 @@ function activate(args, root) {
   }
   writeJson(pointerFile, state)
   linkRootCode(root, releaseDir)
-  // The acceptance page reads this marker. A first install has no previous
-  // release and nothing to accept.
-  let marker = null
-  if (previous !== null && existsSync(path.join(releaseDir, 'gate', 'server.mjs'))) {
-    const markerFile = path.join(root, 'shared', 'data', 'upgrade-pending.json')
-    marker = {
-      format: 1,
-      status: 'pending',
-      layout: 'pointer',
-      root,
-      release: releaseDir,
-      previous: path.join(root, previous),
-      from: typeof args.from === 'string' && args.from !== '' ? args.from : (previousManifest?.version ?? 'unknown'),
-      to: typeof args.to === 'string' && args.to !== '' ? args.to : (activeManifest?.version ?? 'unknown'),
-      port: Number.parseInt(typeof args.port === 'string' ? args.port : '80', 10) || 80,
-      dshHome: path.join(root, 'shared', 'home'),
-      upgradedAt: new Date().toISOString(),
-    }
-    writeJson(markerFile, marker, 0o600)
-  }
-  process.stdout.write(`${JSON.stringify({ ok: true, pointerFile, ...state, marker }, null, 2)}\n`)
+  process.stdout.write(`${JSON.stringify({ ok: true, pointerFile, ...state }, null, 2)}\n`)
 }
 
 /** `rollback` implementation: make previous active again. */
@@ -512,7 +488,6 @@ function rollback(args, root) {
   // The profile copies plugins from the release; point them back so the old
   // release does not load the failed one's code.
   const plugins = wireProfile(previousDir, path.join(root, 'shared', 'home', 'profiles', 'web'))
-  rmSync(path.join(root, 'shared', 'data', 'upgrade-pending.json'), { force: true })
   process.stdout.write(`${JSON.stringify({ ok: true, pointerFile, ...state, launcher, plugins }, null, 2)}\n`)
 }
 

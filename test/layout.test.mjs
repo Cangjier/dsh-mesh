@@ -171,17 +171,12 @@ test('upgrade replaces the launcher but keeps the previous one as .bak', () => {
     const pointer = JSON.parse(readFileSync(path.join(root, 'dsh-mesh.json'), 'utf8'))
     assert.equal(pointer.active, 'releases/20261120A-bbbbbbbb')
     assert.equal(pointer.previous, 'releases/20261118D-aaaaaaaa')
-    // The acceptance marker names both releases and the shared home.
-    const marker = JSON.parse(readFileSync(path.join(root, 'shared', 'data', 'upgrade-pending.json'), 'utf8'))
-    assert.equal(marker.layout, 'pointer')
-    assert.equal(marker.previous, path.join(root, 'releases', '20261118D-aaaaaaaa'))
-    assert.equal(marker.to, '0.2.2-rc.4')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('rollback flips the pointer back and clears the acceptance marker', () => {
+test('rollback flips the pointer back', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'dsh-layout-'))
   try {
     makeRelease(root, '20261118D-aaaaaaaa', { version: '0.2.2-rc.3' })
@@ -194,7 +189,6 @@ test('rollback flips the pointer back and clears the acceptance marker', () => {
     const state = layout(['rollback', '--root', root])
     assert.equal(state.active, 'releases/20261118D-aaaaaaaa')
     assert.equal(state.previous, 'releases/20261120A-bbbbbbbb')
-    assert.equal(existsSync(path.join(root, 'shared', 'data', 'upgrade-pending.json')), false)
     const status = JSON.parse(runNode(LAUNCHER, ['--root', root, '--status']).stdout)
     assert.equal(status.version, '0.2.2-rc.3')
   } finally {

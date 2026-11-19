@@ -2501,7 +2501,7 @@ export class MeshService {
    * This is the escape hatch for "the upgrade came up broken": the panel that
    * started the upgrade is still alive (it is a different machine), so it can
    * put the member back without a shell. The local gateway rolls back through
-   * its own acceptance page or `rollback-local.mjs`.
+   * `rollback-local.mjs`.
    * @param {{member: string}} request member id, VPN address, or name.
    * @returns {Promise<object>} rollback job.
    */
@@ -2512,7 +2512,7 @@ export class MeshService {
     const found = everyone.find(entry => entry.id === member || entry.name === member || entry.ip === member)
     if (found === undefined) throw new Error(`member not found: ${member}`)
     if (found.kind === 'self') {
-      throw new Error('本机回滚请执行：node <安装根>/rollback-local.mjs --root <安装根>（面板的本机回滚入口尚未实现）')
+      throw new Error('本机回滚请执行：node <安装根>/rollback-local.mjs --root <安装根>')
     }
     if (found.dsh !== true) {
       throw new Error(`成员 ${found.name} 的网关没有应答，无法在线回滚；SSH 上去执行 code/deploy/cli.mjs rollback`)

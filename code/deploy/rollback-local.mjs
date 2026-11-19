@@ -2,10 +2,8 @@
 /**
  * Pointer-layout rollback.
  *
- * The gateway's acceptance page ("回退") starts `rollback-local.mjs` in its own
- * transient systemd unit, because the script restarts the gateway it is
- * talking to. That shim delegates here when the install uses the pointer
- * layout (`<root>/dsh-mesh.json`).
+ * Run it by hand (or from a panel action): it restarts the gateway it is run
+ * from, so it must not be started inside that gateway's own cgroup.
  *
  * The rollback is three steps:
  *
@@ -15,16 +13,15 @@
  *   3. health-check the gateway, the embedded interop listener and the
  *      WireGuard control panel.
  *
- * If the health check fails the acceptance marker is put back with
- * `status: "failed"` so the page tells the operator instead of silently
- * forgetting that the rollback did not work.
+ * If the health check fails the log keeps the reason and the process exits
+ * non-zero, so the operator (or the panel) sees the rollback did not work.
  *
  *   node code/deploy/rollback-local.mjs --root /root/.dsh [--no-restart]
  *
  * @module dsh-mesh/deploy/rollback-local
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import process from 'node:process'
@@ -60,14 +57,6 @@ function readJson(file) {
   }
 }
 
-/** Write atomically so a crash cannot leave a half marker. */
-function writeJson(file, value, mode = 0o600) {
-  mkdirSync(path.dirname(file), { recursive: true })
-  const temporary = `${file}.${String(process.pid)}.tmp`
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode })
-  renameSync(temporary, file)
-}
-
 /** Read one KEY=VALUE file. */
 function readEnv(file) {
   const values = {}
@@ -90,7 +79,6 @@ if (root === '' || !existsSync(root)) {
 }
 const noRestart = args['no-restart'] === 'true'
 const pointerFile = path.join(root, 'dsh-mesh.json')
-const markerFile = path.join(root, 'shared', 'data', 'upgrade-pending.json')
 const logFile = path.join(root, 'shared', 'data', 'upgrade-rollback.log')
 
 mkdirSync(path.dirname(logFile), { recursive: true })
@@ -110,7 +98,6 @@ if (previous === '') {
   process.stderr.write('[rollback] no previous release in the pointer\n')
   process.exit(1)
 }
-const markerBefore = readJson(markerFile) ?? {}
 log(`[rollback ${new Date().toISOString()}] layout=pointer root=${root}`)
 log(`[rollback] ${active} -> ${previous}`)
 
@@ -129,7 +116,6 @@ const node = process.execPath
 const flip = spawnSync(node, [layoutScript, 'rollback', '--root', root], { encoding: 'utf8' })
 if (flip.status !== 0) {
   log(`[rollback] pointer flip failed: ${(flip.stderr || flip.stdout || '').trim()}`)
-  writeJson(markerFile, { ...markerBefore, status: 'failed', error: '指针回退失败', rollbackFinishedAt: new Date().toISOString() })
   process.exit(1)
 }
 log(`[rollback] pointer now ${previous}`)
@@ -160,7 +146,7 @@ async function curlOk(url) {
 
 const env = readEnv(path.join(root, 'shared', 'config', 'gate.env'))
 const interopEnv = readEnv(path.join(root, 'shared', 'config', 'interop.env'))
-const port = env.DSH_GATE_PORT || markerBefore.port || '80'
+const port = env.DSH_GATE_PORT || '80'
 const interopPort = interopEnv.DSH_INTEROP_PORT || '8765'
 const interopBind = interopEnv.DSH_INTEROP_BIND && interopEnv.DSH_INTEROP_BIND !== '0.0.0.0' ? interopEnv.DSH_INTEROP_BIND : '127.0.0.1'
 const tokenFile = path.join(root, 'shared', 'data', 'dsh-web.json')
@@ -185,8 +171,6 @@ if (isWindows) {
   if (existsSync('/etc/systemd/system/dsh-web-app.service')) {
     run('systemctl', ['restart', 'dsh-web-app.service'])
     await waitFor(() => Promise.resolve(existsSync(tokenFile)), 60, 1000)
-  } else {
-    run('systemctl', ['restart', 'dsh-web.service'])
   }
   gateRestarted = run('systemctl', ['restart', 'dsh-web-gate.service'])
   run('systemctl', ['stop', 'dsh-interop.service'])
@@ -202,7 +186,6 @@ const controlOk = isWindows && !run('sc.exe', ['query', 'DSH-WireGuard-Control']
 if (!gateOk || !interopOk || !controlOk) {
   const failed = [!gateOk && 'gate', !interopOk && 'interop', !controlOk && 'control'].filter(Boolean).join(', ')
   log(`[rollback] health check failed after rollback: ${failed}`)
-  writeJson(markerFile, { ...markerBefore, status: 'failed', error: `回退后健康检查失败：${failed}`, rollbackFinishedAt: new Date().toISOString() })
   process.exit(1)
 }
 log(`[rollback ${new Date().toISOString()}] rolled back to ${previous}; healthy`)

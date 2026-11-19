@@ -12,11 +12,11 @@
   dsh-mesh.mjs            稳定启动器：读指针，起具体版本
   dsh-mesh.mjs.bak        上一次的启动器（替换前自动保留）
   dsh-mesh.json           指针：{"format":1,"active":"releases/<id>","previous":"releases/<旧id>"}
-  rollback-local.mjs      稳定回退编排（验收页「回退」用）
+  rollback-local.mjs      稳定回退编排（翻转指针、重启）
   releases/<id>/          每个版本解压一次，之后只读
   shared/
     config/               gate.env、TLS 证书
-    data/                 secret、token、pid、日志、验收 marker
+    data/                 secret、token、pid、日志
     home/                 DSH_HOME（会话、附件、profiles）
     workspace/            agent 工作区
 ```
@@ -64,7 +64,7 @@ node ~/.dsh/dsh-mesh.mjs --role gate|dsh|control|interop
    `shared/{config,data,home,workspace}` 里写 `gate.env` / `interop.env`；
 2. `layout.mjs prepare`：替换启动器（先写 `.bak`）、稳定 node、systemd 单元、
    profile 复制接线；release 里不建任何数据链接；
-3. `layout.mjs activate`：原子写指针，必要时写验收 marker；
+3. `layout.mjs activate`：原子写指针；
 4. 按 control → dsh → gate 顺序重启（所有单元都跑启动器）；
 5. 健康检查（网关、内嵌 interop、控制面板）；失败时翻回 previous（首次安装则
    恢复原单元），再验一次；
@@ -79,7 +79,7 @@ node ~/.dsh/dsh-mesh.mjs --role gate|dsh|control|interop
 - 指针翻回 `previous`；
 - 从 `dsh-mesh.mjs.bak` 恢复启动器，并删掉 `.bak`；
 - profile 重新指向回退后的 release（复制插件，不留符号链接）；
-- 重启单元并健康检查；失败时把 marker 写成 `status: "failed"`，页面上能看到原因。
+- 重启单元并健康检查；失败时把原因写进 `shared/data/upgrade-rollback.log` 并以非零退出。
 
 ## 部署脚本
 

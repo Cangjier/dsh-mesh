@@ -104,10 +104,6 @@ test('a second upgrade flips the pointer and keeps the previous release', () => 
     assert.equal(pointer.previous, firstActive)
     assert.match(readFileSync(path.join(root, 'dsh-mesh.mjs'), 'utf8'), /second/)
     assert.match(readFileSync(path.join(root, 'dsh-mesh.mjs.bak'), 'utf8'), /dsh-mesh stable launcher/)
-    // The acceptance marker points at both releases.
-    const marker = JSON.parse(readFileSync(path.join(root, 'shared', 'data', 'upgrade-pending.json'), 'utf8'))
-    assert.equal(marker.layout, 'pointer')
-    assert.equal(marker.previous, path.join(root, firstActive))
   } finally {
     rmSync(base, { recursive: true, force: true })
   }

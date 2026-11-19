@@ -115,30 +115,6 @@ const STYLE = `
   }
   .foot { margin-top: 18px; font-size: 12px; color: var(--faint); text-align: center; }
   .body-text { color: var(--muted); margin: 0; font-size: 14.5px; }
-  .upgrade-card { width: min(480px, 100%); }
-  .upgrade-versions {
-    display: flex; align-items: center; justify-content: center; gap: 8px;
-    margin: 0 0 18px; padding: 10px 12px; border-radius: var(--radius-sm);
-    background: var(--surface-2); border: 1px solid var(--border);
-    color: var(--text); font-size: 14px; font-weight: 600;
-  }
-  .upgrade-versions span:nth-child(2) { color: var(--faint); font-weight: 400; }
-  .upgrade-actions { display: flex; gap: 10px; margin-top: 18px; }
-  .upgrade-actions > * { flex: 1 1 0; min-width: 0; }
-  .upgrade-actions form { display: flex; margin: 0; }
-  .upgrade-actions .button, .upgrade-actions button { width: 100%; margin-top: 0; white-space: nowrap; }
-  .upgrade-actions .button {
-    display: flex; align-items: center; justify-content: center;
-    padding: 11px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border);
-    background: var(--surface-2); color: var(--text); font-size: 15px; font-weight: 500;
-    text-decoration: none; transition: opacity .15s ease;
-  }
-  .upgrade-actions .button:hover { opacity: .88; }
-  .upgrade-actions button.danger {
-    background: color-mix(in srgb, var(--danger) 12%, var(--surface));
-    color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent);
-  }
-  .upgrade-actions button:disabled { opacity: .45; cursor: not-allowed; }
   .spinner {
     width: 16px; height: 16px; border-radius: 50%;
     border: 2px solid color-mix(in srgb, var(--text) 20%, transparent);
@@ -334,53 +310,6 @@ export function page(options) {
   ${BRAND}
   <h1>${spinner}${escapeHtml(heading)}</h1>
   <p class="body-text">${rawBody === undefined ? escapeHtml(body ?? '') : rawBody}</p>
-</main>`,
-  })
-}
-
-/**
- * The post-upgrade acceptance page.
- *
- * A freshly upgraded gate must not pretend the new version is accepted: the
- * operator gets one page with three explicit choices. `查看` opens the new
- * version in another tab, `验收` makes it the default, and `回退` restores the
- * previous release. The page is deliberately self-contained (no script) so it
- * works while DSH itself is still starting or broken.
- * @param {{from?: string, to?: string, upgradedAt?: string, status?: string, error?: string, canRollback?: boolean}} options upgrade state.
- * @returns {string} HTML.
- */
-export function fallbackPage(options = {}) {
-  const { from = '', to = '', upgradedAt = '', status = 'pending', error = '', canRollback = true } = options
-  const rollingBack = status === 'rolling-back'
-  const failed = status === 'failed'
-  const versionLine = from !== '' || to !== ''
-    ? `<div class="upgrade-versions"><span>${escapeHtml(from === '' ? '上一版本' : from)}</span><span>→</span><span>${escapeHtml(to === '' ? '当前版本' : to)}</span></div>`
-    : ''
-  const timeLine = upgradedAt === ''
-    ? ''
-    : `<p class="foot">升级时间：${escapeHtml(upgradedAt)}</p>`
-  const errorHtml = failed && error !== ''
-    ? `<div class="error" role="alert">${escapeHtml(error)}</div>`
-    : ''
-  const actions = rollingBack
-    ? `<p class="body-text">正在回退到上一版本，服务会重启。约 15 秒后自动刷新；如果页面没有恢复，请手动刷新。</p>`
-    : `<p class="body-text">新版本已经安装，但还没有验收。你可以先打开看看，再决定验收或回退。</p>
-  <div class="upgrade-actions">
-    <a class="button" href="/__gate/fallback/view" target="_blank" rel="noopener">查看</a>
-    <form method="post" action="/__gate/fallback/accept"><button type="submit">验收</button></form>
-    <form method="post" action="/__gate/fallback/rollback"><button type="submit" class="danger"${canRollback ? '' : ' disabled title="没有可回退的上一版本"'}>回退</button></form>
-  </div>
-  <p class="foot">验收后打开网页会直接进入 DSH；回退会把文件和 DSH 恢复到升级前的版本。</p>`
-  return shell({
-    title: '升级待验收',
-    refresh: rollingBack ? 15 : undefined,
-    body: `<main class="card upgrade-card">
-  ${BRAND}
-  <h1>${rollingBack ? '<span class="spinner"></span>' : ''}升级待验收</h1>
-  ${versionLine}
-  ${errorHtml}
-  ${actions}
-  ${timeLine}
 </main>`,
   })
 }

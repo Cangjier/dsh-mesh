@@ -6,7 +6,6 @@
 
 - **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` 工具。
 - **可观察的部署**：点「部署」后按钮变为「正在部署」，随时点开查看获取安装包（Release 下载或网关上传）的进度（字节、速度、剩余时间）、获取/解压准备/切换重启三步状态与远端脚本日志尾部，结束后直接给出成功或失败原因。进度与日志走 **SSE 推送**（`/api/dsh-mesh/events`、`/__gate/hysteria/events`），面板里没有定时轮询。
-- **升级验收页**：升级成功后，浏览器第一次打开网页先到 `/__gate/fallback`，有「查看 / 验收 / 回退」三个按钮：查看在新标签页打开 DSH，验收后以后直接进 DSH，回退恢复到升级前的版本并重启。marker 由升级脚本写、由网关拦截 `GET /` 读取；回退在独立 systemd 临时单元里跑。详见 [Step 019](docs/Step%20019%20升级验收与回退页.md)。
 - **网关**：`code/gate/`，负责密码门、反向代理、成员 cluster 认证、目标 cookie。
 - **构建引擎**：`code/build/`，从 DSH GitHub 源码确定性地应用覆盖层、构建 Web 前端、按目标系统和架构打包。
 - **WireGuard 控制服务源码**：`src/wireguard/`（引擎 + 51821 面板），`pnpm build` 会把 `code/wireguard/control-service.js` 从源码重建；引擎测试在 `test/wireguard/`，用 `pnpm test:wireguard` 跑。
@@ -128,7 +127,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.tar.gz \
 - 健康检查失败自动切回 `previous` 并重启；`rollback` 可手动回滚。
 - 成功激活后只保留当前和上一个 release（正好两个解压包），升级时其余 release 目录会被删除。
 - **自动升级**：每个成员单独配置，入口在成员行的「更多」菜单 →「自动升级」；默认关闭，打开后默认每天 06:00，可开关和改时间。对每个成员选它对应系统的最新部署包（按构建号，不按文件 mtime），与成员上报的当前部署（`manifest.version` + `buildStamp`）比较；一致或最新包更旧就跳过；需要升级时只启动这个成员的升级 job。
-- 面板的「升级」对本机和每个已安装的成员都开放，收在操作列的纯图标「更多」菜单里；成员表还有一列「版本」，显示每台成员当前运行的部署包。升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的网关不会把升级本身打断，也不会带走发起升级的面板。安装和升级走同一个 `upgrade-local.mjs`：包进 `releases/<id>` → 写启动器/单元 → 翻指针 → 健康检查，失败自动翻回上一版；成功后写待验收 marker，浏览器第一次打开会先看到「查看 / 验收 / 回退」页（Step 019）。
+- 面板的「升级」对本机和每个已安装的成员都开放，收在操作列的纯图标「更多」菜单里；成员表还有一列「版本」，显示每台成员当前运行的部署包。升级进程跑在独立的 systemd 临时单元里（`dsh-mesh-job-<id>`），所以重启目标机的网关不会把升级本身打断，也不会带走发起升级的面板。安装和升级走同一个 `upgrade-local.mjs`：包进 `releases/<id>` → 写启动器/单元 → 翻指针 → 健康检查，失败自动翻回上一版。
 - 详见 [Step 018](docs/Step%20018%20成员升级与独立升级进程.md)。
 
 ### 6. 内嵌 DSH 交互 HTTP 服务
@@ -306,7 +305,6 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 022 Release 发布与下载升级](docs/Step%20022%20Release%20发布与下载升级.md) | 固定 latest tag、GitHub 整包/Gitee 分片、仅保留最新版、成员经外网代理下载、失败回退上传 |
 | [Step 023 指针布局：稳定 mjs 启动器](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md) | 稳定 launcher + 指针文件、releases/shared 布局、环境变量注入、安装/升级/回退一条路径 |
 | [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、升级/取消、包内容 |
-| [Step 019 升级验收与回退页](docs/Step%20019%20升级验收与回退页.md) | 升级后先看后验收、查看/验收/回退三个按钮、marker、独立进程回退 |
 | [Step 020 内嵌 interop 服务](docs/Step%20020%20内嵌interop服务.md) | 会话由 DSH Web 拥有、嵌入式 :8765、部署/回滚、冷读「已停止」根因 |
 
 ## 代码位置
@@ -325,7 +323,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `code/deploy/upgrade-local.mjs` | 安装与升级的唯一实现：release、指针、单元、健康检查、回滚 |
 | `code/install/layout.mjs` | prepare / activate / rollback：启动器、单元、profile 接线、指针 |
 | `code/deploy/wire-profile.mjs` | `gate.env` 与 profile 接线 |
-| `code/deploy/rollback-local.mjs` | 验收页「回退」：翻转指针、恢复启动器 .bak |
+| `code/deploy/rollback-local.mjs` | 本地回退：翻转指针、恢复启动器 .bak、重启并健康检查 |
 | `src/lib/interop-service.mjs` | 内嵌 HTTP 服务：`ctx.agents` 创建/恢复、等待/通知/事件/回调 |
 | `code/interop-service/server.mjs` | 旧独立 HTTP 服务（回退用，默认不启动） |
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |

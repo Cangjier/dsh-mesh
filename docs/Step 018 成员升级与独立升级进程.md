@@ -49,7 +49,7 @@
    - 首次运行时在 `shared/{config,data,home,workspace}` 里写入 `gate.env` / `interop.env`，并设置 `DSH_HOME` / `DSH_WORKDIR` / `DSH_GATE_DATA_DIR` / `DSH_GATE_CONFIG_DIR`；
    - 把 staging 移进 `releases/<release>`；
    - `layout.mjs prepare`：写 `<root>/dsh-mesh.mjs`（替换前留 `.bak`）、稳定 node、systemd 单元、profile 插件接线；release 里不建任何数据链接；
-   - `layout.mjs activate`：原子写 `dsh-mesh.json`，写验收 marker；
+   - `layout.mjs activate`：原子写 `dsh-mesh.json`；
    - 按 control → gate 重启（所有单元都跑稳定启动器），等 `/__gate/health`、内嵌 interop 和 51821；
    - 任一失败：把指针翻回 previous、重启、再验一次；没有 previous（首次安装）就停在这里并留下日志。
 4. **收尾**：只保留 active + previous 两个 release（`retention: 2`），旧目录删除。
@@ -67,10 +67,6 @@
 - `plugins/dsh-mesh/`（host 插件与客户端 bundle）。
 
 少任意一项，prepare 或 activate 会在切换前失败，成员仍停在旧版本。
-
-## 升级后的验收页
-
-成功切换后写 `<root>/shared/data/upgrade-pending.json`，网关会把浏览器先带到 `/__gate/fallback`，给「查看 / 验收 / 回退」三个选择。验收删 marker；回退在独立 systemd 临时单元里跑 `<root>/rollback-local.mjs`。详见 [Step 019](Step%20019%20升级验收与回退页.md)。
 
 ## 取消升级
 

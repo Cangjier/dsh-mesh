@@ -337,10 +337,17 @@ export function DirectLinksModal({
       ),
     },
     {
-      title: '模式 / 带宽',
+      title: '模式 / 编译出口',
       key: 'mode',
-      width: 150,
-      render: (_value, link) => `${link.mode.toUpperCase()} · ${String(link.bandwidth)} Mbps`,
+      width: 210,
+      render: (_value, link) => (
+        <Space direction="vertical" size={0}>
+          <Typography.Text>{link.mode.toUpperCase()} · {String(link.bandwidth)} Mbps</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 11 }} className="dsh-pw-mono">
+            {link.tunRoute === true ? 'TUN 路由 10.66.66.x' : (link.httpProxy ?? '127.0.0.1:8080')}
+          </Typography.Text>
+        </Space>
+      ),
     },
     {
       title: '更新时间',

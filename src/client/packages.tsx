@@ -35,7 +35,7 @@ import {
   RocketOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import { api, ApiError, type BuildJob, type Member, type PackageInfo } from './api'
+import { api, ApiError, type BuildJob, type HysteriaLink, type Member, type PackageInfo } from './api'
 import { useEventStream } from './events'
 import { ScheduleCard } from './schedule'
 import { ReleaseCard } from './release'
@@ -318,6 +318,7 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
   const [logLines, setLogLines] = useState<string[]>([])
   const [logLoading, setLogLoading] = useState(false)
   const logRef = useRef<HTMLPreElement | null>(null)
+  const [directLinks, setDirectLinks] = useState<HysteriaLink[]>([])
 
   const loadPackages = useCallback(async () => {
     setPackagesLoading(true)
@@ -363,11 +364,30 @@ export function PackagesPanel({ members, active }: { members: Member[]; active: 
 
   const running = useMemo(() => jobs.some(job => ACTIVE_STATUSES.has(job.status)), [jobs])
 
+  // Links are refreshed when the panel becomes active. A failure only means
+  // the default egress falls back to the classic proxy-member heuristic.
+  useEffect(() => {
+    if (!active) return
+    let cancelled = false
+    void api.hysteriaLinks().then(result => {
+      if (!cancelled) setDirectLinks(Array.isArray(result.links) ? result.links : [])
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [active])
+
   // Defaults are derived, not copied into state: members arrive after the
   // panel mounts, so a state initializer would freeze on "本机 / 直连".
   const defaultBuildMember = useMemo(() => pickBuildMember(members), [members])
-  const defaultProxyMember = useMemo(() => pickProxyMember(members), [members])
   const selectedBuildMember = buildMember ?? defaultBuildMember
+  // When the build host has a direct link, its server is the best default
+  // egress: the link already carries that traffic at full speed. An explicit
+  // member picked in the dropdown still wins.
+  const defaultProxyMember = useMemo(() => {
+    const buildRow = members.find(member => member.id === selectedBuildMember)
+    const link = buildRow === undefined ? undefined : directLinks.find(item => item.client?.ip === buildRow.ip)
+    const linked = link === undefined ? undefined : members.find(member => member.ip === link.server?.ip)
+    return linked?.id ?? pickProxyMember(members)
+  }, [directLinks, members, selectedBuildMember])
   const selectedProxyMode = proxyMode ?? (defaultProxyMember === null ? 'none' : 'member')
   const selectedProxyMember = proxyMember ?? defaultProxyMember ?? undefined
   const selectedPullBack = pullBack ?? false

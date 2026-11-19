@@ -2214,16 +2214,23 @@ export class DeployManager {
       await runner.upload(localClient, join('shared/http-client.mjs'))
       const needsProxy = manifests.some(entry => entry.provider === 'github')
       if (download.proxy !== null && typeof download.proxy === 'object' && needsProxy) {
-        try {
-          egress = new EgressProxy({ log: line => { void log(`download proxy: ${line}`) } })
-          const started = await egress.start({ plan: download.proxy, member: download.proxy.name ?? download.proxy.host })
-          proxyUrl = started.url
-          await log(`release download through ${download.proxy.name ?? download.proxy.host} proxy (${proxyUrl}); Gitee is fetched directly`)
-        } catch (error) {
-          egress?.closeAll()
-          egress = null
-          proxyUrl = null
-          await log(`download proxy unavailable (${error instanceof Error ? error.message : String(error)}); trying a direct release download`)
+        if (download.proxy.kind === 'link' && typeof download.proxy.url === 'string' && download.proxy.url !== '') {
+          // The link's HTTP proxy runs on the target itself and forwards over
+          // hysteria2, so there is no egress process to start here.
+          proxyUrl = download.proxy.url
+          await log(`release download through direct link ${download.proxy.name ?? ''} (${proxyUrl}); Gitee is fetched directly`)
+        } else {
+          try {
+            egress = new EgressProxy({ log: line => { void log(`download proxy: ${line}`) } })
+            const started = await egress.start({ plan: download.proxy, member: download.proxy.name ?? download.proxy.host })
+            proxyUrl = started.url
+            await log(`release download through ${download.proxy.name ?? download.proxy.host} proxy (${proxyUrl}); Gitee is fetched directly`)
+          } catch (error) {
+            egress?.closeAll()
+            egress = null
+            proxyUrl = null
+            await log(`download proxy unavailable (${error instanceof Error ? error.message : String(error)}); trying a direct release download`)
+          }
         }
       } else if (download.proxy !== null && typeof download.proxy === 'object') {
         await log('release download has only Gitee manifests; the proxy is not used')

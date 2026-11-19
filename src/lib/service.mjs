@@ -54,6 +54,7 @@ import { detectReleaseOwner, latestManifestSources, latestManifestUrls, loadRele
 import { buildUpdateReasons, memberDeployment, packageInfo, planUpgrades } from './schedule.mjs'
 import { autoUpgradeEnabled, pickBuildMember, pickProxyMember, pullBackEnabled } from './build-defaults.mjs'
 import { memberBuildTarget, pickArtifactForMember } from './build-artifacts.mjs'
+import { linkFor, resolveBuildEgress, resolveDeployLinkProxy } from './egress-plan.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -558,6 +559,52 @@ export class MeshService {
   }
 
   /**
+   * Direct (hysteria2) links that the gate has configured.
+   *
+   * The gate owns the link jobs and writes `links.json` beside the mesh data
+   * directory. Build and deploy read it instead of asking the operator to
+   * restate the link as a proxy URL, which is what kept the two features from
+   * ever using it.
+   * @returns {Promise<object[]>} live link records.
+   */
+  async #directLinks() {
+    try {
+      const raw = JSON.parse(await readFile(path.join(this.home, 'hysteria', 'links.json'), 'utf8'))
+      return Array.isArray(raw.links) ? raw.links : []
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * The direct link whose client is this member, if any.
+   *
+   * A link only helps traffic that originates on its client: the client's
+   * packets enter the hysteria2 tunnel, the server supplies the internet
+   * egress. The server side gains nothing.
+   * @param {object|null} member member snapshot.
+   * @returns {Promise<object|null>} link record.
+   */
+  async #linkFor(member) {
+    return linkFor(await this.#directLinks(), member)
+  }
+
+  /**
+   * Decide how a build reaches the internet.
+   *
+   * The direct link wins when the build host is its client, because the link
+   * is a faster path to the same egress member. `proxy` and `proxyMember`
+   * remain explicit overrides; `direct: true` forces the build host's own
+   * network.
+   * @param {{member: object|null, proxyUrl: string, proxyMember: object|null, direct?: boolean}} options build request pieces.
+   * @returns {Promise<{kind: 'link'|'proxyMember'|'explicit'|'direct', url?: string, link?: object, proxyMember?: object, reason: string}>} egress plan.
+   */
+  async #resolveBuildEgress(options) {
+    return resolveBuildEgress({ links: await this.#directLinks(), ...options })
+  }
+
+
+  /**
    * Start one build job in the background.
    *
    * `member` chooses the build host: empty or `local` runs the engine here,
@@ -606,10 +653,24 @@ export class MeshService {
       }
     }
     if (request.planOnly === true && member !== null) throw new Error('plan-only builds run on the local host')
-    const proxyMember = proxyMemberId === ''
-      ? null
-      : everyone.find(candidate => candidate.id === proxyMemberId || candidate.name === proxyMemberId || candidate.ip === proxyMemberId) ?? null
-    if (proxyMemberId !== '' && proxyMember === null) throw new Error(`proxy member not found: ${proxyMemberId}`)
+    // `auto` means the panel did not make an explicit choice: prefer the
+    // server of a direct link to the build host, then the classic heuristic.
+    // An explicit member id still wins so an operator can force a different
+    // egress (for example a domestic member).
+    let proxyMember = null
+    if (proxyMemberId === 'auto') {
+      const link = await this.#linkFor(member)
+      proxyMember = link === null
+        ? null
+        : everyone.find(candidate => candidate.ip === link.server?.ip) ?? null
+      if (proxyMember === null) {
+        const picked = pickProxyMember(everyone)
+        proxyMember = picked === null ? null : everyone.find(candidate => candidate.id === picked) ?? null
+      }
+    } else if (proxyMemberId !== '') {
+      proxyMember = everyone.find(candidate => candidate.id === proxyMemberId || candidate.name === proxyMemberId || candidate.ip === proxyMemberId) ?? null
+      if (proxyMember === null) throw new Error(`proxy member not found: ${proxyMemberId}`)
+    }
     if (proxyMember !== null && proxyMember.id === 'local') {
       throw new Error('the local host cannot proxy its own build; pick a member')
     }
@@ -617,6 +678,12 @@ export class MeshService {
       // The egress proxy is one small Node script started with `bash -s`.
       throw new Error(`proxy member must be Linux; ${proxyMember.name} runs ${String(proxyMember.system?.platform)}`)
     }
+    const egressPlan = await this.#resolveBuildEgress({
+      member,
+      proxyUrl,
+      proxyMember,
+      direct: request.direct === true,
+    })
     const buildStamp = await nextBuildStamp({
       stateFile: path.join(this.dataDir, 'build-stamp.json'),
       packagesDir: this.packagesDir,
@@ -627,7 +694,9 @@ export class MeshService {
       ref,
       targets,
       member: member?.id ?? null,
-      proxy: proxyUrl !== '' ? proxyUrl : proxyMember !== null ? `member:${proxyMember.id}` : null,
+      proxy: egressPlan.kind === 'link' || egressPlan.kind === 'explicit'
+        ? egressPlan.url
+        : proxyMember !== null ? `member:${proxyMember.id}` : null,
       mode: member === null ? 'local' : 'remote',
       buildStamp,
     })
@@ -637,22 +706,25 @@ export class MeshService {
         memberIp: member.ip,
         percent: 0,
         proxyMember: proxyMember?.id ?? null,
+        egress: egressPlan,
         pullBack,
         autoUpgrade,
       })
     } else {
       await updateState(job.dir, {
         ...(proxyMember !== null ? { proxyMember: proxyMember.id } : {}),
+        egress: egressPlan,
         percent: 0,
         pullBack,
         autoUpgrade,
       })
     }
-    this.logLine(`mesh build job ${job.id} created (${member === null ? 'local' : member.name}${proxyMember === null ? '' : `, egress via ${proxyMember.name}`})`)
+    this.logLine(`mesh build job ${job.id} created (${member === null ? 'local' : member.name}, egress: ${egressPlan.reason})`)
     const promise = this.#runBuild(job, {
       member,
       proxyMember,
       proxyUrl,
+      egressPlan,
       planOnly: request.planOnly === true,
       version: request.version,
       buildStamp: job.state.buildStamp,
@@ -684,7 +756,16 @@ export class MeshService {
       await appendLog(job.dir, 'release publish is not configured; the build will not upload to GitHub/Gitee')
     }
     try {
-      if (options.proxyMember !== null && (options.member === null || options.member.id !== options.proxyMember.id)) {
+      if (options.egressPlan?.kind === 'link') {
+        // The link's HTTP proxy runs on the build host itself, so the engine
+        // reaches it over loopback and the hysteria2 tunnel supplies egress.
+        // No extra egress proxy is started on the server member.
+        proxyUrl = options.egressPlan.url
+        await appendLog(job.dir, `outbound proxy ${proxyUrl} via direct link: ${options.egressPlan.reason}`)
+        await updateState(job.dir, { proxy: proxyUrl, egress: options.egressPlan })
+      } else if ((options.egressPlan === undefined || options.egressPlan?.kind === 'proxyMember')
+        && options.proxyMember !== null
+        && (options.member === null || options.member.id !== options.proxyMember.id)) {
         egress = await this.egress.start({ plan: await this.#memberSshPlan(options.proxyMember), member: options.proxyMember.name })
         proxyUrl = egress.url
         await appendLog(job.dir, `outbound proxy ${proxyUrl} (${options.proxyMember.name})`)
@@ -1895,6 +1976,11 @@ export class MeshService {
     if (manifests.length === 0) return null
     if (request.direct === true || request.proxyMember === 'none') return { manifests, proxy: null }
     const wanted = typeof request.proxyMember === 'string' ? request.proxyMember.trim() : ''
+    // A direct link is the best route to the egress member: the target is the
+    // link's client, and its local HTTP listener already forwards through the
+    // server's internet access. No egress proxy needs to be started at all.
+    const linkProxy = resolveDeployLinkProxy({ links: await this.#directLinks(), target, wanted })
+    if (linkProxy !== null) return { manifests, proxy: linkProxy }
     let proxyMember = null
     if (wanted !== '' && wanted !== 'auto') {
       proxyMember = everyone.find(candidate => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted) ?? null
@@ -1913,6 +1999,7 @@ export class MeshService {
     return {
       manifests,
       proxy: {
+        kind: 'ssh',
         host: plan.host,
         user: plan.user,
         port: plan.port,

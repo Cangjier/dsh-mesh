@@ -517,6 +517,16 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
     if (!server) throw new Error(`member not found: ${serverId}`)
     if (!client) throw new Error(`member not found: ${clientId}`)
     if (server.id === 'local' || client.id === 'local') throw new Error('both sides must be remote members; the gateway host cannot take either role')
+    // A member can only run one client config at a time. Writing a second link
+    // for the same client would overwrite client.yaml and orphan the previous
+    // server while links.json still advertised it, so tear the old pair down.
+    const existing = await this.links()
+    for (const link of existing.links ?? []) {
+      if (link?.client?.ip === client.ip) {
+        await this.remove({ server: link.server?.ip, client: link.client?.ip })
+        break
+      }
+    }
     const port = Number.parseInt(String(request.port ?? DEFAULT_PORT), 10)
     if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('port must be between 1 and 65535')
     const mode = request.mode === 'socks' ? 'socks' : 'tun'
@@ -737,6 +747,11 @@ Get-Process hysteria -ErrorAction SilentlyContinue | Select-Object Id,Path | For
         ...(tun ? ['tun:', '  name: hysteria2', '  mtu: 1500', '  routes:', `    - ${server.ip}/32`] : []),
         'socks5:',
         '  listen: 127.0.0.1:1080',
+        // Always expose an HTTP proxy beside SOCKS. Build and release
+        // downloads only speak HTTP proxies, so this listener is what lets
+        // them use the link even when the tun device cannot be created.
+        'http:',
+        '  listen: 127.0.0.1:8080',
         '',
       ].join('\n')
       const localClientConf = path.join(certDir, 'client.yaml')
@@ -844,7 +859,7 @@ if (-not (Get-NetRoute -DestinationPrefix '${server.ip}/32' -InterfaceIndex $idx
   New-NetRoute -DestinationPrefix '${server.ip}/32' -InterfaceIndex $idx -NextHop 0.0.0.0 -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
 }
 Write-Output 'route-ready'
-`, () => {}).catch(() => {})
+`, line => log(`[client-route] ${line}`)).catch(error => log(`[client-route] failed: ${errorMessage(error)}`))
       }
       const restoreRoute = async () => {
         if (!clientTarget) return
@@ -890,6 +905,12 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
       if (mode === 'tun') {
         let routed = false
         if (connected) {
+          // Register and run the elevated route task before polling. The SSH
+          // session may not own the privilege (or the timing) to insert a
+          // route; the task runs as SYSTEM and retries until the tun adapter
+          // exists, so a failure here becomes a real log line instead of a
+          // silent fallback to SOCKS.
+          await ensureRouteTask(clientTarget, server.ip)
           for (let attempt = 0; attempt < 24; attempt += 1) {
             // The tun device appears a moment after the handshake, so both the
             // route insert and the check are retried together.
@@ -901,7 +922,6 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
             await new Promise(resolve => setTimeout(resolve, 1000))
           }
           routed = routed && (await tunnelReachable())
-          if (routed) await ensureRouteTask(clientTarget, server.ip)
         }
         if (!connected) {
           warning = 'TUN 模式未建立，已回退 SOCKS5'
@@ -950,7 +970,20 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
       const next = {
         ok: true,
         links: [
-          { server: state.server, client: state.client, publicHost, port, mode: usedMode, bandwidth, updatedAt: stamp() },
+          {
+            server: state.server,
+            client: state.client,
+            publicHost,
+            port,
+            mode: usedMode,
+            bandwidth,
+            // The HTTP listener is always written. `tunRoute` says whether the
+            // server's VPN address is also steered through the link, which is
+            // what arbitrary-IP traffic (SSH, package URLs) needs.
+            httpProxy: 'http://127.0.0.1:8080',
+            tunRoute: usedMode === 'tun',
+            updatedAt: stamp(),
+          },
           ...(links.links ?? []).filter(item => item.server?.ip !== server.ip || item.client?.ip !== client.ip),
         ],
       }
@@ -1061,20 +1094,35 @@ if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyCont
   }
 }
 
-/** Recreate the tun route after a reboot: the tun adapter gets a new index. */
+/** Recreate the tun route now and after a reboot: the tun adapter gets a new index. */
 async function ensureRouteTask(target, serverIp) {
   if (target.os !== 'windows') return
   const script = `$target = '${serverIp}'
+$log = 'C:\\ProgramData\\hysteria2\\client-route.log'
+function Say([string]$m) { "$(Get-Date -Format o) $m" | Out-File -FilePath $log -Append -Encoding utf8 }
+Say "start target=$target"
+$done = $false
 for ($i = 0; $i -lt 300; $i++) {
   $idx = (Get-NetAdapter -Name 'hysteria2' -ErrorAction SilentlyContinue).ifIndex
   if ($idx) {
-    if (-not (Get-NetRoute -DestinationPrefix "$target/32" -InterfaceIndex $idx -ErrorAction SilentlyContinue)) {
-      New-NetRoute -DestinationPrefix "$target/32" -InterfaceIndex $idx -NextHop 0.0.0.0 -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
+    try {
+      $existing = Get-NetRoute -DestinationPrefix "$target/32" -InterfaceIndex $idx -ErrorAction SilentlyContinue
+      if (-not $existing) {
+        New-NetRoute -DestinationPrefix "$target/32" -InterfaceIndex $idx -NextHop 0.0.0.0 -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
+        Say "added route via ifIndex $idx"
+      } else {
+        Say "route already on ifIndex $idx"
+      }
+      $done = $true
+      break
+    } catch {
+      Say "route add failed: $($_.Exception.Message)"
     }
-    break
   }
   Start-Sleep -Seconds 1
 }
+Say "done=$done"
+if (-not $done) { exit 1 }
 `
   const name = `hysteria-route-${Date.now().toString(36)}.ps1`
   const local = path.join(tmpdir(), name)
@@ -1092,6 +1140,8 @@ $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(10))
 Unregister-ScheduledTask -TaskName 'hysteria2-client-route' -Confirm:$false -ErrorAction SilentlyContinue
 Register-ScheduledTask -TaskName 'hysteria2-client-route' -Action $action -Trigger $trigger -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
+# Run it now too: the task is registered for boot, but this boot already started.
+Start-ScheduledTask -TaskName 'hysteria2-client-route'
 `, () => {}).catch(() => {})
 }
 

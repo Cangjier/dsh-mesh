@@ -254,6 +254,12 @@ function runRole(options) {
   env.DSH_HOME = gateEnv.DSH_HOME || path.join(root, 'shared', 'home')
   env.DSH_WORKDIR = gateEnv.DSH_WORKDIR || path.join(root, 'shared', 'workspace')
   env.DSH_GATE_DATA_DIR = gateEnv.DSH_GATE_DATA_DIR || path.join(root, 'shared', 'data')
+  // Config and interop files live in the layout's shared/, not in the release:
+  // a release is replaced on every upgrade and carries no data links. Name
+  // them explicitly so a gate or interop started from the launcher never has
+  // to guess through its package root.
+  env.DSH_GATE_CONFIG_DIR = gateEnv.DSH_GATE_CONFIG_DIR || path.join(root, 'shared', 'config')
+  env.DSH_INTEROP_CONFIG = env.DSH_INTEROP_CONFIG || path.join(env.DSH_GATE_CONFIG_DIR, 'interop.env')
   // The control service prefers this variable over PATH; point it at the same
   // node that runs the rest of the release.
   if (role === 'control') env.DSH_WIREGUARD_NODE = env.DSH_WIREGUARD_NODE || node

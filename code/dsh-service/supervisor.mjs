@@ -21,12 +21,16 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 // An explicit root lets a smoke test run this supervisor from a symlinked
 // scratch install without writing its data into the package directory.
 const ROOT = path.resolve(process.env.DSH_PACKAGE_ROOT || path.join(HERE, '..', '..'))
-const DATA = path.join(ROOT, 'data')
+// The layout's directories are named by the launcher. A release is replaced on
+// every upgrade and owns no data, so nothing here may resolve through ROOT
+// except the code and app the release itself carries.
+const CONFIG_DIR = path.resolve(process.env.DSH_GATE_CONFIG_DIR || path.join(ROOT, 'config'))
+const DATA = path.resolve(process.env.DSH_GATE_DATA_DIR || path.join(ROOT, 'data'))
 const TOKEN_FILE = path.join(DATA, 'dsh-web.json')
 const LOG_FILE = path.join(DATA, 'dsh-service.log')
 const DSH_ENTRY = path.join(ROOT, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-const PATCH_FILE = path.join(ROOT, 'config', 'browse-picker.patch.yml')
-const ENV_FILE = path.join(ROOT, 'config', 'gate.env')
+const PATCH_FILE = path.join(CONFIG_DIR, 'browse-picker.patch.yml')
+const ENV_FILE = path.join(CONFIG_DIR, 'gate.env')
 
 mkdirSync(DATA, { recursive: true })
 
@@ -50,8 +54,8 @@ function readEnvFile(file) {
 }
 
 const envFile = readEnvFile(ENV_FILE)
-const dshHome = process.env.DSH_HOME || envFile.DSH_HOME || path.join(DATA, 'home')
-const workdir = process.env.DSH_WORKDIR || envFile.DSH_WORKDIR || path.join(ROOT, 'workspace')
+const dshHome = process.env.DSH_HOME || envFile.DSH_HOME || path.join(path.dirname(DATA), 'home')
+const workdir = process.env.DSH_WORKDIR || envFile.DSH_WORKDIR || path.join(path.dirname(DATA), 'workspace')
 const agentsHome = process.env.DSH_AGENTS_HOME || envFile.DSH_AGENTS_HOME || path.join(DATA, 'agents')
 const heapMb = Number.parseInt(process.env.DSH_WEB_HEAP_MB || envFile.DSH_WEB_HEAP_MB || '0', 10)
 // A fixed listener port keeps the browser-session cookie's authority stable

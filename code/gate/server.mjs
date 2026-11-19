@@ -48,6 +48,10 @@ import { TARGET_COOKIE, readWireGuardState } from '../shared/wireguard.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = path.resolve(HERE, '..')
+// Config files (gate.env, the picker patch) belong to the layout, not to the
+// release: the launcher names that directory so switching releases never has
+// to move or link them.
+const CONFIG_DIR = path.resolve(env('DSH_GATE_CONFIG_DIR', path.join(PACKAGE_ROOT, 'config')))
 const PACKAGE_VERSION = (() => {
   try {
     const pkg = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8'))
@@ -177,7 +181,7 @@ const CONFIG = {
   /** JSON handoff file written by the independent DSH service. */
   externalTokenFile: env('DSH_WEB_TOKEN_FILE', ''),
   /** Loader overlay that pins the in-browser directory picker. */
-  patchFile: env('DSH_GATE_PATCH', path.join(PACKAGE_ROOT, 'config', 'browse-picker.patch.yml')),
+  patchFile: env('DSH_GATE_PATCH', path.join(CONFIG_DIR, 'browse-picker.patch.yml')),
   /** Log every request line. */
   accessLog: env('DSH_GATE_ACCESS_LOG', '0') === '1',
   /**
@@ -1429,10 +1433,7 @@ function redirectPlainHttp(req, res, url, pathname) {
 
 /** Ask the Windows supervisor to re-evaluate where the stack runs. */
 async function handleSessionPromote(res) {
-  const root = process.env.DSH_PACKAGE_ROOT && process.env.DSH_PACKAGE_ROOT.trim() !== ''
-    ? process.env.DSH_PACKAGE_ROOT.trim()
-    : process.cwd()
-  const dataDir = path.join(root, 'data')
+  const dataDir = CONFIG.dataDir
   const commandFile = path.join(dataDir, 'session-command.json')
   const statusFile = path.join(dataDir, 'session-status.json')
   try { mkdirSync(dataDir, { recursive: true }) } catch { }

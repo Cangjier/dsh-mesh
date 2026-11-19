@@ -550,10 +550,11 @@ export class MemberService {
   async _promoteSession(res) {
     const fs = await import('node:fs')
     const path = await import('node:path')
-    const root = process.env.DSH_PACKAGE_ROOT && process.env.DSH_PACKAGE_ROOT.trim() !== ''
-      ? process.env.DSH_PACKAGE_ROOT.trim()
-      : process.cwd()
-    const dataDir = path.join(root, 'data')
+    const dataDir = process.env.DSH_GATE_DATA_DIR && process.env.DSH_GATE_DATA_DIR.trim() !== ''
+      ? path.resolve(process.env.DSH_GATE_DATA_DIR.trim())
+      : path.join(process.env.DSH_PACKAGE_ROOT && process.env.DSH_PACKAGE_ROOT.trim() !== ''
+        ? process.env.DSH_PACKAGE_ROOT.trim()
+        : process.cwd(), 'data')
     try { fs.mkdirSync(dataDir, { recursive: true }) } catch { }
     try {
       fs.writeFileSync(path.join(dataDir, 'session-command.json'), `${JSON.stringify({ action: 'promote', at: new Date().toISOString() })}\n`)

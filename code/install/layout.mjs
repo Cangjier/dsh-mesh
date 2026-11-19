@@ -426,6 +426,7 @@ function prepare(args, root) {
     ['DSH_HOME', path.join(shared, 'home')],
     ['DSH_WORKDIR', path.join(shared, 'workspace')],
     ['DSH_GATE_DATA_DIR', path.join(shared, 'data')],
+    ['DSH_GATE_CONFIG_DIR', path.join(shared, 'config')],
   ])
 
   const units = parseServices(args.services)

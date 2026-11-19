@@ -133,7 +133,10 @@ async function startFakeProviders() {
     match = /^\/gitee\/api\/repos\/([^/]+)\/([^/]+)\/releases\/tags\/([^/]+)$/u.exec(url.pathname)
     if (match !== null && request.method === 'GET') {
       const release = releases.get(keyOf('gitee', match[3]))
-      if (release === undefined) return json(404, { message: 'Not Found' })
+      // Real Gitee answers a missing tag with HTTP 200 and a literal `null`
+      // body (verified against openplugin/dsh-web-release). The first publish
+      // to a fresh repository has to treat that as "create it", not an error.
+      if (release === undefined) return json(200, null)
       return json(200, { id: release.id, tag_name: release.tag, html_url: `${base}/gitee/web/tag/${release.tag}` })
     }
     match = /^\/gitee\/api\/repos\/([^/]+)\/([^/]+)\/releases$/u.exec(url.pathname)

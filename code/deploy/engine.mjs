@@ -1070,13 +1070,30 @@ export function buildWindowsActivateScript(plan) {
   return `$ErrorActionPreference = 'Stop'
 $LayoutRoot = ${ps(plan.layoutRoot)}
 $Stage = Join-Path $LayoutRoot ${ps(`.staging\\${plan.release}`)}
-$node = Join-Path $Stage 'runtime\\node\\node.exe'
-if (-not (Test-Path $node)) { $node = (Get-Command node -ErrorAction Stop).Source }
+$ReleaseDir = Join-Path (Join-Path $LayoutRoot 'releases') ${ps(plan.release)}
+# Before the switch the package lives in $Stage, so that is where the staged
+# node and the upgrade entry point are.
+$stageNode = Join-Path $Stage 'runtime\\node\\node.exe'
+if (-not (Test-Path $stageNode)) { $stageNode = (Get-Command node -ErrorAction Stop).Source }
 $port = ${ps(plan.gatePort)}
-& $node (Join-Path $Stage 'code\\deploy\\upgrade-local.mjs') --stage $Stage --layout-root $LayoutRoot --release ${ps(plan.release)} --app-root ${ps(plan.appRoot)} --port $port --gate-port $port --gate-password ${ps(plan.gatePassword || '')} --services ${ps(serviceList)}${interop}${credentials}${llm} --no-restart
+& $stageNode (Join-Path $Stage 'code\\deploy\\upgrade-local.mjs') --stage $Stage --layout-root $LayoutRoot --release ${ps(plan.release)} --app-root ${ps(plan.appRoot)} --port $port --gate-port $port --gate-password ${ps(plan.gatePassword || '')} --services ${ps(serviceList)}${interop}${credentials}${llm} --no-restart
 if ($LASTEXITCODE -ne 0) { throw "pointer switch failed (exit $LASTEXITCODE)" }
-$installer = Join-Path $Stage 'code\\windows-service\\install-service.ps1'
-if (-not (Test-Path $installer)) { throw "missing $installer" }
+# upgrade-local.mjs moved the staging tree into $ReleaseDir (and deleted it on
+# a rename), so nothing below may resolve through the staging path. Keep a node
+# that survives the move: the layout's stable runtime, then the release copy.
+$node = Join-Path $LayoutRoot 'runtime\\node\\node.exe'
+if (-not (Test-Path $node)) { $node = Join-Path $ReleaseDir 'runtime\\node\\node.exe' }
+if (-not (Test-Path $node)) { $node = (Get-Command node -ErrorAction Stop).Source }
+# The pointer now names the new release and the root code junction points at
+# it. Read the installer there (never from the stage) and roll back when it is
+# missing instead of leaving a half-switched install with an old service.
+$installer = Join-Path $LayoutRoot 'code\\windows-service\\install-service.ps1'
+if (-not (Test-Path $installer)) { $installer = Join-Path $ReleaseDir 'code\\windows-service\\install-service.ps1' }
+if (-not (Test-Path $installer)) {
+  & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+  if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a missing service installer also failed' }
+  throw "missing $installer"
+}
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -Root $LayoutRoot
 if ($LASTEXITCODE -ne 0) {
   & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
@@ -1089,9 +1106,14 @@ if ($LASTEXITCODE -ne 0) {
 # The stage may already be gone (a successful rename moves it into releases/),
 # so read the installer through the stable code junction when it exists.
 $controlInstaller = Join-Path $LayoutRoot 'code\\wireguard\\windows-service\\install-control-service.ps1'
-if (-not (Test-Path $controlInstaller)) { $controlInstaller = Join-Path $Stage 'code\\wireguard\\windows-service\\install-control-service.ps1' }
-if (-not (Test-Path $controlInstaller)) { throw 'missing the control panel installer in the new release' }
+if (-not (Test-Path $controlInstaller)) { $controlInstaller = Join-Path $ReleaseDir 'code\\wireguard\\windows-service\\install-control-service.ps1' }
+if (-not (Test-Path $controlInstaller)) {
+  & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+  if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a missing control panel installer also failed' }
+  throw 'missing the control panel installer in the new release'
+}
 $stableNode = Join-Path $LayoutRoot 'runtime\\node\\node.exe'
+if (-not (Test-Path $stableNode)) { $stableNode = Join-Path $ReleaseDir 'runtime\\node\\node.exe' }
 if (-not (Test-Path $stableNode)) { $stableNode = $node }
 $dshHome = Join-Path $LayoutRoot 'shared\\home'
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $controlInstaller -Root $LayoutRoot -NodePath $stableNode -DshHome $dshHome

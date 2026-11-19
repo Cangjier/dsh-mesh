@@ -3233,7 +3233,7 @@ import { createReadStream as createReadStream2, createWriteStream as createWrite
 import { rm as rm6, rename as rename4, stat as stat4 } from "node:fs/promises";
 import http2 from "node:http";
 import https2 from "node:https";
-import { PassThrough, Readable as Readable4 } from "node:stream";
+import { PassThrough, Readable as Readable4, Transform } from "node:stream";
 import tls2 from "node:tls";
 var MAX_REDIRECTS2 = 10;
 var MAX_ERROR_BODY = 64 * 1024;
@@ -3508,25 +3508,30 @@ async function uploadFile(url, options) {
       log(`upload retry ${String(attempt)}/${String(retries)} in ${String(delay)}ms: ${lastError === null ? "" : lastError.message}`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
-    const stream = createReadStream2(options.file);
-    const started = Date.now();
     let sent = 0;
     let lastReport = 0;
     let lastSent = 0;
-    stream.on("data", (chunk) => {
-      sent += chunk.length;
-      const now = Date.now();
-      if (now - lastReport < 250) return;
-      const speed = (sent - lastSent) / Math.max(1e-3, (now - lastReport) / 1e3);
-      lastReport = now;
-      lastSent = sent;
-      options.onProgress?.({
-        bytes: sent,
-        totalBytes: info.size,
-        percent: info.size > 0 ? Math.min(100, Math.round(sent / info.size * 100)) : 0,
-        speed
-      });
+    const stream = new Transform({
+      transform(chunk, _encoding, callback) {
+        sent += chunk.length;
+        const now = Date.now();
+        if (now - lastReport >= 250) {
+          const speed = (sent - lastSent) / Math.max(1e-3, (now - lastReport) / 1e3);
+          lastReport = now;
+          lastSent = sent;
+          options.onProgress?.({
+            bytes: sent,
+            totalBytes: info.size,
+            percent: info.size > 0 ? Math.min(100, Math.round(sent / info.size * 100)) : 0,
+            speed
+          });
+        }
+        callback(null, chunk);
+      }
     });
+    const file = createReadStream2(options.file);
+    file.once("error", (error) => stream.destroy(error));
+    file.pipe(stream);
     try {
       const response = await openResponse(url, {
         method: options.method ?? "POST",
@@ -3545,13 +3550,19 @@ async function uploadFile(url, options) {
       } catch {
         json2 = null;
       }
-      if (response.statusCode === 429 || response.statusCode >= 500) {
+      if (response.statusCode === 408 || response.statusCode === 429 || response.statusCode >= 500) {
         lastError = new Error(`upload ${url} answered HTTP ${String(response.statusCode)}: ${text.trim().slice(0, 300)}`);
+        file.destroy();
+        stream.destroy();
         if (attempt < retries) continue;
         throw lastError;
       }
+      if (isSuccess(response.statusCode)) {
+        options.onProgress?.({ bytes: info.size, totalBytes: info.size, percent: 100, speed: 0 });
+      }
       return { status: response.statusCode, headers: response.headers, text, json: json2, bytes: info.size };
     } catch (error) {
+      file.destroy();
       stream.destroy();
       lastError = error instanceof Error ? error : new Error(String(error));
       if (attempt >= retries) throw lastError;
@@ -4105,10 +4116,12 @@ var GiteeRelease = class {
   async ensureRelease(tag, options = {}) {
     this.tag = tag;
     const found = await this.#api(`/releases/tags/${encodeURIComponent(tag)}`);
-    if (found.status === 200 && found.json !== null) {
-      return { id: found.json.id, tag_name: found.json.tag_name, html_url: found.json.html_url };
+    const foundRelease = found.status === 200 && found.json !== null && typeof found.json === "object" && Object.keys(found.json).length > 0 ? found.json : null;
+    if (foundRelease !== null) {
+      return { id: foundRelease.id, tag_name: foundRelease.tag_name, html_url: foundRelease.html_url };
     }
-    if (found.status !== 404) {
+    const missing = found.status === 404 || found.status === 200 && foundRelease === null;
+    if (!missing) {
       throw new Error(`Gitee release lookup failed: HTTP ${String(found.status)} ${found.text.slice(0, 300)}`);
     }
     const create = async (branch) => await this.#api("/releases", {
@@ -4146,11 +4159,12 @@ var GiteeRelease = class {
    */
   async ensureRepo() {
     const found = await this.#api("");
-    if (found.status === 200) {
-      this.defaultBranch = typeof found.json?.default_branch === "string" && found.json.default_branch !== "" ? found.json.default_branch : null;
+    const repository = found.status === 200 && found.json !== null && typeof found.json === "object" && Object.keys(found.json).length > 0 ? found.json : null;
+    if (repository !== null) {
+      this.defaultBranch = typeof repository.default_branch === "string" && repository.default_branch !== "" ? repository.default_branch : null;
       return { created: false };
     }
-    if (found.status !== 404) {
+    if (found.status !== 404 && !(found.status === 200 && repository === null)) {
       throw new Error(`Gitee repository lookup failed for ${this.owner}/${this.repo}: HTTP ${String(found.status)} ${found.text.slice(0, 300)}`);
     }
     const me = await this.#raw(`${this.apiBase}/user`, { label: "/user" });
@@ -5602,13 +5616,30 @@ function buildWindowsActivateScript(plan) {
   return `$ErrorActionPreference = 'Stop'
 $LayoutRoot = ${ps(plan.layoutRoot)}
 $Stage = Join-Path $LayoutRoot ${ps(`.staging\\${plan.release}`)}
-$node = Join-Path $Stage 'runtime\\node\\node.exe'
-if (-not (Test-Path $node)) { $node = (Get-Command node -ErrorAction Stop).Source }
+$ReleaseDir = Join-Path (Join-Path $LayoutRoot 'releases') ${ps(plan.release)}
+# Before the switch the package lives in $Stage, so that is where the staged
+# node and the upgrade entry point are.
+$stageNode = Join-Path $Stage 'runtime\\node\\node.exe'
+if (-not (Test-Path $stageNode)) { $stageNode = (Get-Command node -ErrorAction Stop).Source }
 $port = ${ps(plan.gatePort)}
-& $node (Join-Path $Stage 'code\\deploy\\upgrade-local.mjs') --stage $Stage --layout-root $LayoutRoot --release ${ps(plan.release)} --app-root ${ps(plan.appRoot)} --port $port --gate-port $port --gate-password ${ps(plan.gatePassword || "")} --services ${ps(serviceList)}${interop}${credentials}${llm} --no-restart
+& $stageNode (Join-Path $Stage 'code\\deploy\\upgrade-local.mjs') --stage $Stage --layout-root $LayoutRoot --release ${ps(plan.release)} --app-root ${ps(plan.appRoot)} --port $port --gate-port $port --gate-password ${ps(plan.gatePassword || "")} --services ${ps(serviceList)}${interop}${credentials}${llm} --no-restart
 if ($LASTEXITCODE -ne 0) { throw "pointer switch failed (exit $LASTEXITCODE)" }
-$installer = Join-Path $Stage 'code\\windows-service\\install-service.ps1'
-if (-not (Test-Path $installer)) { throw "missing $installer" }
+# upgrade-local.mjs moved the staging tree into $ReleaseDir (and deleted it on
+# a rename), so nothing below may resolve through the staging path. Keep a node
+# that survives the move: the layout's stable runtime, then the release copy.
+$node = Join-Path $LayoutRoot 'runtime\\node\\node.exe'
+if (-not (Test-Path $node)) { $node = Join-Path $ReleaseDir 'runtime\\node\\node.exe' }
+if (-not (Test-Path $node)) { $node = (Get-Command node -ErrorAction Stop).Source }
+# The pointer now names the new release and the root code junction points at
+# it. Read the installer there (never from the stage) and roll back when it is
+# missing instead of leaving a half-switched install with an old service.
+$installer = Join-Path $LayoutRoot 'code\\windows-service\\install-service.ps1'
+if (-not (Test-Path $installer)) { $installer = Join-Path $ReleaseDir 'code\\windows-service\\install-service.ps1' }
+if (-not (Test-Path $installer)) {
+  & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+  if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a missing service installer also failed' }
+  throw "missing $installer"
+}
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -Root $LayoutRoot
 if ($LASTEXITCODE -ne 0) {
   & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
@@ -5621,9 +5652,14 @@ if ($LASTEXITCODE -ne 0) {
 # The stage may already be gone (a successful rename moves it into releases/),
 # so read the installer through the stable code junction when it exists.
 $controlInstaller = Join-Path $LayoutRoot 'code\\wireguard\\windows-service\\install-control-service.ps1'
-if (-not (Test-Path $controlInstaller)) { $controlInstaller = Join-Path $Stage 'code\\wireguard\\windows-service\\install-control-service.ps1' }
-if (-not (Test-Path $controlInstaller)) { throw 'missing the control panel installer in the new release' }
+if (-not (Test-Path $controlInstaller)) { $controlInstaller = Join-Path $ReleaseDir 'code\\wireguard\\windows-service\\install-control-service.ps1' }
+if (-not (Test-Path $controlInstaller)) {
+  & $node (Join-Path $LayoutRoot 'rollback-local.mjs') --root $LayoutRoot
+  if ($LASTEXITCODE -ne 0) { Write-Output 'rollback after a missing control panel installer also failed' }
+  throw 'missing the control panel installer in the new release'
+}
 $stableNode = Join-Path $LayoutRoot 'runtime\\node\\node.exe'
+if (-not (Test-Path $stableNode)) { $stableNode = Join-Path $ReleaseDir 'runtime\\node\\node.exe' }
 if (-not (Test-Path $stableNode)) { $stableNode = $node }
 $dshHome = Join-Path $LayoutRoot 'shared\\home'
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $controlInstaller -Root $LayoutRoot -NodePath $stableNode -DshHome $dshHome

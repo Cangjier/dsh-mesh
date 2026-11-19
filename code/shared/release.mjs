@@ -739,10 +739,18 @@ export class GiteeRelease {
   async ensureRelease(tag, options = {}) {
     this.tag = tag
     const found = await this.#api(`/releases/tags/${encodeURIComponent(tag)}`)
-    if (found.status === 200 && found.json !== null) {
-      return { id: found.json.id, tag_name: found.json.tag_name, html_url: found.json.html_url }
+    // Gitee answers a missing tag with HTTP 200 and a literal `null` body, not
+    // the 404 its documentation implies. Treat that — and an empty object — as
+    // "no release yet" and fall through to creating it; calling it an error is
+    // what broke the first publish to a freshly created repository.
+    const foundRelease = found.status === 200 && found.json !== null && typeof found.json === 'object' && Object.keys(found.json).length > 0
+      ? found.json
+      : null
+    if (foundRelease !== null) {
+      return { id: foundRelease.id, tag_name: foundRelease.tag_name, html_url: foundRelease.html_url }
     }
-    if (found.status !== 404) {
+    const missing = found.status === 404 || (found.status === 200 && foundRelease === null)
+    if (!missing) {
       throw new Error(`Gitee release lookup failed: HTTP ${String(found.status)} ${found.text.slice(0, 300)}`)
     }
     const create = async (branch) => await this.#api('/releases', {
@@ -784,11 +792,14 @@ export class GiteeRelease {
    */
   async ensureRepo() {
     const found = await this.#api('')
-    if (found.status === 200) {
-      this.defaultBranch = typeof found.json?.default_branch === 'string' && found.json.default_branch !== '' ? found.json.default_branch : null
+    const repository = found.status === 200 && found.json !== null && typeof found.json === 'object' && Object.keys(found.json).length > 0
+      ? found.json
+      : null
+    if (repository !== null) {
+      this.defaultBranch = typeof repository.default_branch === 'string' && repository.default_branch !== '' ? repository.default_branch : null
       return { created: false }
     }
-    if (found.status !== 404) {
+    if (found.status !== 404 && !(found.status === 200 && repository === null)) {
       throw new Error(`Gitee repository lookup failed for ${this.owner}/${this.repo}: HTTP ${String(found.status)} ${found.text.slice(0, 300)}`)
     }
     const me = await this.#raw(`${this.apiBase}/user`, { label: '/user' })

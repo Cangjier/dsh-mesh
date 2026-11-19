@@ -18,7 +18,7 @@ import { createReadStream, createWriteStream } from 'node:fs'
 import { rm, rename, stat } from 'node:fs/promises'
 import http from 'node:http'
 import https from 'node:https'
-import { PassThrough, Readable } from 'node:stream'
+import { PassThrough, Readable, Transform } from 'node:stream'
 import { finished } from 'node:stream/promises'
 import tls from 'node:tls'
 
@@ -472,27 +472,39 @@ export async function uploadFile(url, options) {
       log(`upload retry ${String(attempt)}/${String(retries)} in ${String(delay)}ms: ${lastError === null ? '' : lastError.message}`)
       await new Promise(resolve => setTimeout(resolve, delay))
     }
-    const stream = createReadStream(options.file)
-    const started = Date.now()
+    // Count the chunks the request pulls instead of listening for `data` on
+    // the file stream. A `data` listener switches the stream to flowing mode
+    // immediately, so a slow CONNECT/TLS setup would consume and silently
+    // discard the beginning of the file before `body.pipe(request)` attaches;
+    // GitHub then sees a request that stops mid-body and answers 408. A
+    // Transform only runs while the request drains it, and it preserves
+    // backpressure.
     let sent = 0
     // One progress event per chunk would flood an SSH mirror with thousands of
     // log lines; report at most four times a second.
     let lastReport = 0
     let lastSent = 0
-    stream.on('data', chunk => {
-      sent += chunk.length
-      const now = Date.now()
-      if (now - lastReport < 250) return
-      const speed = (sent - lastSent) / Math.max(0.001, (now - lastReport) / 1000)
-      lastReport = now
-      lastSent = sent
-      options.onProgress?.({
-        bytes: sent,
-        totalBytes: info.size,
-        percent: info.size > 0 ? Math.min(100, Math.round((sent / info.size) * 100)) : 0,
-        speed,
-      })
+    const stream = new Transform({
+      transform(chunk, _encoding, callback) {
+        sent += chunk.length
+        const now = Date.now()
+        if (now - lastReport >= 250) {
+          const speed = (sent - lastSent) / Math.max(0.001, (now - lastReport) / 1000)
+          lastReport = now
+          lastSent = sent
+          options.onProgress?.({
+            bytes: sent,
+            totalBytes: info.size,
+            percent: info.size > 0 ? Math.min(100, Math.round((sent / info.size) * 100)) : 0,
+            speed,
+          })
+        }
+        callback(null, chunk)
+      },
     })
+    const file = createReadStream(options.file)
+    file.once('error', error => stream.destroy(error))
+    file.pipe(stream)
     try {
       const response = await openResponse(url, {
         method: options.method ?? 'POST',
@@ -511,13 +523,23 @@ export async function uploadFile(url, options) {
       } catch {
         json = null
       }
-      if (response.statusCode === 429 || response.statusCode >= 500) {
+      // 408 is GitHub's "upload body timed out due to inactivity": the request
+      // started but the bytes stalled. Like 429/5xx it is worth another try.
+      if (response.statusCode === 408 || response.statusCode === 429 || response.statusCode >= 500) {
         lastError = new Error(`upload ${url} answered HTTP ${String(response.statusCode)}: ${text.trim().slice(0, 300)}`)
+        // A rejected early response leaves the file stream mid-flight; close it
+        // before the next attempt opens its own.
+        file.destroy()
+        stream.destroy()
         if (attempt < retries) continue
         throw lastError
       }
+      if (isSuccess(response.statusCode)) {
+        options.onProgress?.({ bytes: info.size, totalBytes: info.size, percent: 100, speed: 0 })
+      }
       return { status: response.statusCode, headers: response.headers, text, json, bytes: info.size }
     } catch (error) {
+      file.destroy()
       stream.destroy()
       lastError = error instanceof Error ? error : new Error(String(error))
       if (attempt >= retries) throw lastError

@@ -102,6 +102,14 @@ test('Windows activate switches the pointer, then installs the service against t
   assert.match(script, /--services 'DSH-Mesh=gate'/u)
   assert.match(script, /--no-restart/u)
   assert.match(script, /install-service\.ps1[\s\S]*-Root \$LayoutRoot/u)
+  // upgrade-local.mjs moves the stage into releases/ before it returns, so
+  // the service installer and the rollback node may not be resolved through
+  // $Stage afterwards. This is the regression that broke the 2026-11-19B
+  // Windows upgrade after the pointer had already been switched.
+  const afterSwitch = script.slice(script.indexOf('pointer switch failed'))
+  assert.doesNotMatch(afterSwitch, /\$Stage/u)
+  assert.match(script, /install-service\.ps1'\nif \(-not \(Test-Path \$installer\)\) \{ \$installer = Join-Path \$ReleaseDir/u)
+  assert.match(script, /rollback-local\.mjs/u)
   // The control panel is a per-member service: the activate step installs it
   // against the stable root and refuses to report success without 51821.
   assert.match(script, /install-control-service\.ps1[\s\S]*-Root \$LayoutRoot -NodePath \$stableNode -DshHome \$dshHome/u)

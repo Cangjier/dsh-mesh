@@ -279,3 +279,13 @@ test('an incomplete release is refused before anything is switched', () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('the Windows start shim frees stale stack ports before it hands over', () => {
+  // The shim is written only on win32, which this Linux CI cannot enter. The
+  // port sweep used to live in the package start.ps1; the pointer layout
+  // replaced that script with the shim, and without the sweep an upgrade
+  // starts a gate that cannot bind while the old release still answers health.
+  const source = readFileSync(LAYOUT, 'utf8')
+  assert.match(source, /\$OwnedPorts = @\(80, 8765, 31280\)/u)
+  assert.match(source, /taskkill \/PID \$Owner \/T \/F/u)
+})

@@ -803,10 +803,10 @@ async function createSevenZip(options) {
     "-bd",
     "-snl",
     options.destination,
-    path4.basename(options.packageDir)
+    "*"
   ];
   log(`7z ${args.slice(0, 5).join(" ")} ${path4.basename(options.destination)}`);
-  const result = await run(options.binary, args, { cwd: path4.dirname(options.packageDir), log });
+  const result = await run(options.binary, args, { cwd: options.packageDir, log });
   if (!result.ok) throw new Error(`7z could not create ${options.destination}: ${result.tail.join("\n")}`);
   const info = await stat(options.destination);
   if (!info.isFile() || info.size <= 0) throw new Error(`7z created no usable archive: ${options.destination}`);
@@ -2042,6 +2042,7 @@ async function assembleWebPackage(options) {
   await copyIfExists(path8.join(options.repositoryRoot, "code", "shared"), path8.join(packageDir, "plugins", "dsh-mesh", "code", "shared"));
   await copyIfExists(path8.join(options.repositoryRoot, "code", "deploy"), path8.join(packageDir, "plugins", "dsh-mesh", "code", "deploy"));
   await copyIfExists(path8.join(options.repositoryRoot, "code", "install"), path8.join(packageDir, "plugins", "dsh-mesh", "code", "install"));
+  await copyIfExists(path8.join(options.repositoryRoot, "code", "gate", "assets", "7z"), path8.join(packageDir, "plugins", "dsh-mesh", "code", "gate", "assets", "7z"));
   const extraPlugins = await copyExtraPlugins({
     packageDir,
     repositoryRoot: options.repositoryRoot,
@@ -8852,7 +8853,7 @@ var run2 = promisify(execFile);
 var CODE_SCRIPTS = ["install.sh", "install.ps1"];
 var ROOT_SCRIPTS = ["start-interop.sh", "install-interop-service.sh", "uninstall-interop-service.sh", "dsh-mesh.mjs"];
 var PLUGIN_FILES = ["index.js", "client.js", "cordis.patch.yml", "package.json"];
-var PLUGIN_DIRS = ["locale", "build", "code/build", "code/shared", "code/deploy", "code/install"];
+var PLUGIN_DIRS = ["locale", "build", "code/build", "code/shared", "code/deploy", "code/install", "code/gate/assets/7z"];
 var CODE_DIRS = ["windows-service", "interop-service", "wireguard", "dsh-service", "deploy", "install", "shared"];
 async function clear(target) {
   await rm13(target, { recursive: true, force: true });

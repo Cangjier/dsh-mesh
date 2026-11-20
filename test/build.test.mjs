@@ -27,6 +27,7 @@ import {
 } from '../code/build/engine.mjs'
 import { createJob, learnJob, readState, resumeJob, unverifiedBuildReason, writeState } from '../code/build/job.mjs'
 import { buildWebWorkerPackages } from '../code/build/engine.mjs'
+import { resolveSevenZipAssetPath } from '../code/shared/sevenzip.mjs'
 
 /**
  * Create a temporary directory.
@@ -222,6 +223,8 @@ test('assembleWebPackage copies the web payload, gate, and plugin', async () => 
     await write(path.join(dist, 'index.html'), '<!doctype html>')
     await write(path.join(dist, 'assets', 'index.js'), 'console.log(1)')
     await write(path.join(repo, 'code', 'gate', 'server.mjs'), '// gate')
+    await write(path.join(repo, 'code', 'gate', 'assets', '7z', '7za-windows-x64.exe'), 'MZ7z')
+    await write(path.join(repo, 'code', 'gate', 'assets', '7z', '7zz-linux-x64'), 'ELF7z')
     await write(path.join(repo, 'code', 'shared', 'wireguard.mjs'), '// shared')
     await write(path.join(repo, 'code', 'shared', 'chrome.mjs'), '// cdp')
     await write(path.join(repo, 'code', 'build', 'smoke.mjs'), '// smoke')
@@ -271,6 +274,21 @@ test('assembleWebPackage copies the web payload, gate, and plugin', async () => 
     assert.match(await readFile(path.join(result.packageDir, 'plugins', 'dsh-mesh', 'code', 'build', 'smoke-cli.mjs'), 'utf8'), /smoke cli/u)
     assert.match(await readFile(path.join(result.packageDir, 'plugins', 'dsh-mesh', 'code', 'shared', 'chrome.mjs'), 'utf8'), /cdp/u)
     assert.match(await readFile(path.join(result.packageDir, 'shared', 'chrome.mjs'), 'utf8'), /cdp/u)
+    // The plugin is installed by copying it into the DSH profile, which sits
+    // outside the release, so the deploy engine cannot reach the release's
+    // gate/assets from there. The 7-Zip binary must therefore travel inside the
+    // plugin too, or every .7z deploy fails on a fresh install with "bundled
+    // 7-Zip binary is missing".
+    const pluginRoot = path.join(result.packageDir, 'plugins', 'dsh-mesh')
+    assert.match(await readFile(path.join(pluginRoot, 'code', 'gate', 'assets', '7z', '7za-windows-x64.exe'), 'utf8'), /MZ7z/u)
+    assert.equal(
+      resolveSevenZipAssetPath(pluginRoot, 'windows'),
+      path.join(pluginRoot, 'code', 'gate', 'assets', '7z', '7za-windows-x64.exe'),
+    )
+    assert.equal(
+      resolveSevenZipAssetPath(pluginRoot, 'linux'),
+      path.join(pluginRoot, 'code', 'gate', 'assets', '7z', '7zz-linux-x64'),
+    )
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

@@ -909,6 +909,13 @@ export async function assembleWebPackage(options) {
   // its own panel starts `code/deploy/runner.mjs` from its plugin directory.
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'deploy'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'deploy'))
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'install'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'install'))
+  // A packaged plugin is installed by copying it into the DSH profile, which
+  // sits outside the release; `resolveSevenZipAssetPath` cannot reach the
+  // release's gate/assets from there. The deploy engine resolves the bundled
+  // 7-Zip relative to its own directory, so the binary has to travel inside the
+  // plugin as well — without it every .7z deploy fails on a fresh install with
+  // "bundled 7-Zip binary is missing".
+  await copyIfExists(path.join(options.repositoryRoot, 'code', 'gate', 'assets', '7z'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'gate', 'assets', '7z'))
   // Plugins that travel with dsh-mesh (currently xl): fetched from main at build
   // time, so a package built today carries today's plugin code.
   const extraPlugins = await copyExtraPlugins({

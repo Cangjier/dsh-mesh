@@ -32,6 +32,9 @@ test('repacking a directory keeps the app payload and replaces the owned files',
     assert.ok(existsSync(path.join(dir, 'gate', 'windows-browser.mjs')))
     assert.ok(existsSync(path.join(dir, 'shared', 'credentials-merge.mjs')))
     assert.ok(existsSync(path.join(dir, 'plugins', 'dsh-mesh', 'client.js')))
+    // The plugin is copied into the DSH profile, away from the release's
+    // gate/, so the 7-Zip binary has to ride along inside it.
+    assert.ok(existsSync(path.join(dir, 'plugins', 'dsh-mesh', 'code', 'gate', 'assets', '7z', '7zz-linux-x64')))
     const manifest = JSON.parse(readFileSync(path.join(dir, 'manifest.json'), 'utf8'))
     assert.equal(manifest.repackedFrom, 'code/build/repack.mjs')
     assert.ok(manifest.files > 10)

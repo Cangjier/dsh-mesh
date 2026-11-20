@@ -68,6 +68,8 @@ Linux 用静态 `7zzs`（`7zzs` 改名），不依赖 glibc/libstdc++ 版本；W
 - **部署计划**（`buildDeployPlan`）：包名以 `.7z` 结尾时，plan 里多一个 `sevenZip` 描述（目标平台的二进制在本机的路径 + 目标上的临时路径）。部署时网关先把二进制传到目标（Linux `/tmp/dsh-mesh-<sha12>-7z.bin`，Windows `C:\Windows\Temp\dsh-mesh-<sha12>-7z.exe`），再跑 prepare。
 - **Linux prepare**：`case "$PACKAGE" in *.7z)` → `l -ba` 数条目、`x -y -bd` 解压、把 7z 保留的顶层目录拍平、发 `DSH-MESH-EXTRACT-*` 进度标记。解压后显式 `chmod +x`：这是必须的——**Windows 生成的 7z 不携带 Unix mode**，不 chmod 的话 `install.sh`、`runtime/node/bin/node`、嵌套的 `*.sh` 和包内 7zz 都没有可执行位。旧的 `.tar.gz`/`.zip` 分支原样保留。
 - **Windows prepare**：`$Package -like '*.7z'` → 用上传的 `7za.exe` 解压；否则仍走 `Expand-Archive`。
+- **包内路径**：7z 归档的是包的**内容**（`7z a <out>.7z '*'`，工作目录是包目录），条目是 `app/...`、`runtime/...` 这种相对路径，解压出来直接就是包根，不需要再拍平顶层目录。旧包（带 `dsh-mesh-<ver>-<plat>/` 顶层目录）仍能装：prepare 和 runner 的拍平只在真的找到“含 manifest.json 的顶层目录”时才动手。
+- **本机升级的可执行位**：`code/deploy/runner.mjs` 解压后必须像 prepare 一样补 `chmod +x`（`install.sh`、`dsh-mesh.mjs`、`runtime/node/bin/node`、嵌套 `*.sh`、包内 7zz）。漏掉时 `dsh-web-gate` 会以 `spawn .../runtime/node/bin/node EACCES` 反复重启，健康检查随即回退。
 - **Windows 预解压**：`SshRunner.sevenZipEntries` / `extractSevenZip` 在 prepare 之前用 7z 解到 staging，进度按条目总数一次到位。
 - **本机原地升级**（`code/deploy/runner.mjs`）：`.7z` 用本机 release 里的 `code/gate/assets/7z/<host binary>` 解压并把顶层目录拍平；旧格式继续走 tar。
 - **符号链接**：7-Zip 拒绝还原任何目标里带 `..` 的链接（`ERROR: Dangerous link path was ignored`，退出码 2），并在原位置留一个 0 字节文件。node 运行时的 `runtime/node/bin/{npm,npx,corepack}` 正是这种链接。prepare 与 runner 都因此把退出码 2 当作“部分条目被跳过”继续执行，解压后按运行时布局把这三个 shim 重新 `ln -sfn` 回 `../lib/node_modules/...`（只在文件为 0 字节且目标存在时执行）。没有这一步，Linux 成员会在 prepare 阶段失败，或拿到一个没有 npm 的运行时。

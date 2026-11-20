@@ -246,7 +246,11 @@ test('archivePackage writes a 7z archive with the bundled binary', async (t) => 
     const out = path.join(root, 'out')
     await mkdir(out)
     execFileSync(sevenZipAssetPath(REPO_ROOT, 'linux', 'x64'), ['x', '-y', '-bd', `-o${out}`, archive])
-    assert.equal(await readFile(path.join(out, 'pkg', 'install.sh'), 'utf8'), '#!/bin/sh\n')
+    // The archive holds the directory's contents, so extraction lands at the
+    // root with no package directory to flatten away.
+    assert.equal(await readFile(path.join(out, 'install.sh'), 'utf8'), '#!/bin/sh\n')
+    assert.equal(existsSync(path.join(out, 'pkg')), false)
+    assert.equal(existsSync(path.join(out, 'bin', 'tool')), true)
     assert.equal(existsSync(`${pkg}.7z.tar`), false)
     const legacy = await archivePackage(pkg, 'linux-x64', { format: 'legacy', log: () => {}, threads: 2 })
     assert.equal(legacy, `${pkg}.tar.gz`)

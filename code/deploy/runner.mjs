@@ -219,6 +219,37 @@ async function acquireRelease(context) {
  * @returns {Promise<void>} completion.
  */
 /**
+ * Give the extracted tree the executable bits a 7z archive cannot carry.
+ *
+ * A package built on Windows stores no Unix mode, so `runtime/node/bin/node`
+ * and every shell script arrive as 0644. The gateway's own upgrade restarts
+ * the services from this tree, and a non-executable node makes the gate exit
+ * with EACCES until the health check rolls the whole upgrade back.
+ * @param {string} stage extraction root.
+ * @returns {Promise<void>} completion.
+ */
+async function restoreExecutableBits(stage) {
+  const fixed = [
+    path.join(stage, 'dsh-mesh.mjs'),
+    path.join(stage, 'runtime', 'node', 'bin', 'node'),
+  ]
+  const sevenDir = path.join(stage, 'code', 'gate', 'assets', '7z')
+  for (const name of await readdir(sevenDir).catch(() => [])) {
+    if (name.startsWith('7zz-')) fixed.push(path.join(sevenDir, name))
+  }
+  for (const target of fixed) await chmod(target, 0o755).catch(() => {})
+  const stack = [stage]
+  while (stack.length > 0) {
+    const dir = stack.pop()
+    for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) stack.push(full)
+      else if (entry.name.endsWith('.sh')) await chmod(full, 0o755).catch(() => {})
+    }
+  }
+}
+
+/**
  * Recreate the node runtime's bin shims after a 7-Zip extraction.
  *
  * A 7-Zip archive created on Windows packs `runtime/node/bin/npm` and its
@@ -307,6 +338,7 @@ async function runInplace(context) {
       await rm(path.join(stage, inner), { recursive: true, force: true })
     }
     await restoreRuntimeLinks(stage, note)
+    await restoreExecutableBits(stage)
     meter('解压安装包', { done: entries, total: entries, percent: 100 })
   } else {
     let extracted = 0

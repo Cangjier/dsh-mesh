@@ -365,6 +365,11 @@ export async function createSevenZip(options) {
   const level = Number.isSafeInteger(options.level) ? options.level : Number(process.env.DSH_MESH_7Z_LEVEL ?? 0) || 5
   const threads = Math.max(1, Number(options.threads) || 1)
   await rm(options.destination, { force: true })
+  // Archive the directory's *contents*, not the directory itself: the package
+  // tree is what has to land at the extraction root, and 7-Zip has no
+  // strip-components switch. Entries are therefore relative (`app/...`,
+  // `runtime/...`), so every extractor can write straight into the staging
+  // directory. `*` is expanded by 7-Zip itself and does include dot entries.
   const args = [
     'a',
     '-t7z',
@@ -373,10 +378,10 @@ export async function createSevenZip(options) {
     '-bd',
     '-snl',
     options.destination,
-    path.basename(options.packageDir),
+    '*',
   ]
   log(`7z ${args.slice(0, 5).join(' ')} ${path.basename(options.destination)}`)
-  const result = await run(options.binary, args, { cwd: path.dirname(options.packageDir), log })
+  const result = await run(options.binary, args, { cwd: options.packageDir, log })
   if (!result.ok) throw new Error(`7z could not create ${options.destination}: ${result.tail.join('\n')}`)
   const info = await stat(options.destination)
   if (!info.isFile() || info.size <= 0) throw new Error(`7z created no usable archive: ${options.destination}`)

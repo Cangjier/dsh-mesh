@@ -19,7 +19,7 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { chmod, cp, mkdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'

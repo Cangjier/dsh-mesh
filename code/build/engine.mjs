@@ -916,7 +916,7 @@ export async function assembleWebPackage(options) {
   // plugin as well — without it every .7z deploy fails on a fresh install with
   // "bundled 7-Zip binary is missing".
   await copyIfExists(path.join(options.repositoryRoot, 'code', 'gate', 'assets', '7z'), path.join(packageDir, 'plugins', 'dsh-mesh', 'code', 'gate', 'assets', '7z'))
-  // Plugins that travel with dsh-mesh (currently xl): fetched from main at build
+  // Plugins that travel with dsh-mesh (currently xl and dsh-vscode): fetched from main at build
   // time, so a package built today carries today's plugin code.
   const extraPlugins = await copyExtraPlugins({
     packageDir,

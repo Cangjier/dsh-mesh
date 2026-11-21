@@ -7,6 +7,12 @@
       "dir": "plugins/xl",
       "repo": "https://github.com/Cangjier/xl",
       "ref": "main"
+    },
+    {
+      "name": "dsh-vscode",
+      "dir": "plugins/dsh-vscode",
+      "repo": "https://github.com/Cangjier/dsh-vscode",
+      "ref": "main"
     }
   ]
 }

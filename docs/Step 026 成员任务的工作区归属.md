@@ -65,7 +65,8 @@
 
    - 已有记录直接复用，不重复 `create`，也不改它的标题；
    - `create` 的标题：有 workspace 名称时用该名称；默认目录用
-     `'default-workspace'`；显式 cwd 用 `path.basename(cwd)`；
+     `'default-workspace'`；显式 cwd 用 `path.basename(cwd)`（为空时回退
+     `'default-workspace'`，例如 cwd 就是根目录）；
    - `resolveByPath` / `create` / `attachSession` 任一步抛错都只记一条日志，
      **不会让会话创建失败**——分组只是 UI 归属，不能影响任务本身。
 
@@ -149,6 +150,7 @@ curl -s -H "authorization: Bearer <token>" http://<member>:8765/v1/conversations
   - 路径已有记录 → 复用、不重复 create、仍然 attach；
   - 没有 workspaceRegistry → 会话照常创建；
   - attach 抛错 → 会话仍 201；
+  - `resolveByPath` / `create` 抛错 → 会话仍 201、只记日志；
   - 显式 cwd → cwd 原样、workspace 为 `''`、标题取 basename；
   - 原有 `../escape` 仍被 400 拒绝。
 - `test/member-task.test.mjs`：
@@ -166,8 +168,9 @@ curl -s -H "authorization: Bearer <token>" http://<member>:8765/v1/conversations
   统一的「默认工作区」；代价是成员上真实目录名也是 `default-workspace`。
 - **显式 cwd 保留语义但仍归组**：cwd 的语义是“就在这个目录跑”，所以 cwd 本身
   不改写、`conversation.workspace` 保持 `''`；但会话仍按这个目录挂到已有/新建的
-  工作区记录（新记录的标题取 `path.basename(cwd)`），否则显式 cwd 的任务又会掉回
-  「未分组」。也就是说，“不带工作区名”指的是请求字段，不是不归组。
+  工作区记录（新记录标题取 `path.basename(cwd)`，为空时回退
+  `'default-workspace'`），否则显式 cwd 的任务又会掉回「未分组」。也就是说，
+  “不带工作区名”指的是请求字段，不是不归组。
 - **挂载失败只记日志**：注册表不可用（独立服务、旧宿主、持久化抖动）时任务
   必须照常跑；分组可以在 Web 里事后手工调整，任务失败却不能。
 - **不迁移历史会话**：这次只影响新建会话；之前已经在「未分组」的旧任务保持

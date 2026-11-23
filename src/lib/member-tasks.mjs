@@ -18,6 +18,16 @@ const DEFAULT_INTEROP_PORT = 8765
 const WAIT_TIMEOUT_MS = 60_000
 const MAX_ATTEMPTS = 30
 /**
+ * How long a finished task waits for a `wait_member` call to take its result.
+ *
+ * The model may stop calling `wait_member` after a `progress` reply. Once the
+ * conversation ends, a parked wait is woken immediately, and the model's next
+ * step may issue another one; this window is what lets either of them consume
+ * the terminal outcome before it is written back into the calling conversation,
+ * so the same answer is never delivered twice.
+ */
+const DELIVERY_GRACE_MS = 3_000
+/**
  * How long one pre-delivery compaction may take.
  *
  * Compaction is model-backed: a long conversation can spend a couple of
@@ -174,6 +184,8 @@ export class MemberTaskService {
     this.controllers = new Map()
     /** @type {Map<string, Set<() => void>>} `wait_member` calls parked on a task */
     this.waiters = new Map()
+    /** @type {Map<string, ReturnType<typeof setTimeout>>} pending post-completion deliveries */
+    this.deliveryTimers = new Map()
     /** Cached `{ id, name, ip }` of this machine, filled by the first member lookup. */
     this.identity = null
     this.loaded = false
@@ -182,6 +194,8 @@ export class MemberTaskService {
 
   async dispose() {
     this.disposed = true
+    for (const timer of this.deliveryTimers.values()) clearTimeout(timer)
+    this.deliveryTimers.clear()
     for (const controller of this.controllers.values()) {
       try { controller.abort(new Error('the plugin stopped')) } catch { }
     }
@@ -216,6 +230,7 @@ export class MemberTaskService {
         task.replies = Array.isArray(task.replies) ? task.replies : []
         task.replySeq = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0
         task.deliveredSeq = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0
+        task.terminalDelivered = task.terminalDelivered === true
         this.tasks.set(task.id, task)
       } catch { }
     }
@@ -460,6 +475,8 @@ export class MemberTaskService {
       replySeq: 0,
       /** Newest reply seq a `wait_member` call already returned to the model. */
       deliveredSeq: 0,
+      /** True once a `wait_member` call returned this task's terminal outcome. */
+      terminalDelivered: false,
       notify,
       notified: false,
       notifiedAt: null,
@@ -519,6 +536,9 @@ export class MemberTaskService {
       const terminal = task.status === 'completed' || task.status === 'failed' || task.status === 'interrupted'
       if (replies.length > 0) {
         task.deliveredSeq = replies[replies.length - 1].seq
+        // A terminal answer handed over together with its text also tells the
+        // model the task is over, so the post-completion delivery is skipped.
+        if (terminal) task.terminalDelivered = true
         await this.#save(task).catch(() => {})
         return {
           done: terminal,
@@ -529,6 +549,10 @@ export class MemberTaskService {
         }
       }
       if (terminal) {
+        // A terminal outcome with no new text (a failure, or an idle finish)
+        // still counts as consumed: the model knows the task ended.
+        task.terminalDelivered = true
+        await this.#save(task).catch(() => {})
         return { done: true, timedOut: false, task, replies: [], state: task.status === 'completed' ? 'done' : 'failed' }
       }
       const left = deadline - Date.now()
@@ -642,10 +666,18 @@ export class MemberTaskService {
     task.interrupted = false
     task.attempts = 0
     task.emptyWaits = 0
+    task.terminalDelivered = false
     task.notified = false
     task.notifiedAt = null
     task.notifyError = null
-    task.notify = false
+    task.notify = true
+    // A pending delivery from the previous completion belongs to that turn;
+    // this new message starts a new one.
+    const pendingDelivery = this.deliveryTimers.get(task.id)
+    if (pendingDelivery !== undefined) {
+      clearTimeout(pendingDelivery)
+      this.deliveryTimers.delete(task.id)
+    }
     if (!this.controllers.has(task.id)) this.controllers.set(task.id, new AbortController())
     await this.#save(task)
     await this.#log(task, `message queued: ${result?.receipt?.messageId ?? 'unknown'}`)
@@ -704,7 +736,9 @@ export class MemberTaskService {
         replySeq: 0,
         /** Newest reply seq a `wait_member` call already returned to the model. */
         deliveredSeq: 0,
-        notify: false,
+        /** True once a `wait_member` call returned this task's terminal outcome. */
+        terminalDelivered: false,
+        notify: true,
         notified: false,
         notifiedAt: null,
         notifyError: null,
@@ -910,13 +944,20 @@ export class MemberTaskService {
       task.error = 'the plugin stopped before the member conversation completed'
     }
     if (task.status === 'completed' || task.status === 'failed') {
+      task.settledAt = new Date().toISOString()
       await this.#save(task)
       await this.#log(task, `${task.status}: ${truncate(task.lastText || task.error || '', 500)}`)
-      if (task.notify) await this.#notify(task)
     }
     // A parked `wait_member` must hear about a terminal state (or an
-    // interruption) without waiting for its own timeout.
+    // interruption) without waiting for its own timeout. Waking it first lets
+    // it take the result before the delivery grace window starts.
     this.#notifyWaiters(task)
+    // The model may have stopped waiting after a `progress` reply. Unless a
+    // `wait_member` call takes the result within the grace window, write it
+    // back into the conversation that called `call_member`.
+    if (task.notify && (task.status === 'completed' || task.status === 'failed')) {
+      this.#scheduleDelivery(task)
+    }
     return task
   }
 
@@ -974,6 +1015,42 @@ export class MemberTaskService {
   #turnAdvanced(task, conversation) {
     if (!Number.isSafeInteger(conversation.turns)) return String(conversation.lastText ?? '') !== ''
     return conversation.turns > (Number.isSafeInteger(task.turns) ? task.turns : 0)
+  }
+
+  /**
+   * Hand a finished task's result to the calling conversation after a grace window.
+   *
+   * A parked `wait_member` is woken before this runs, and the model's next step
+   * may still issue one; the window is what lets either of them consume the
+   * terminal outcome first. The timer is unref'd so a pending delivery never
+   * holds the process open on its own.
+   * @param {object} task terminal task.
+   * @returns {void}
+   */
+  #scheduleDelivery(task) {
+    const previous = this.deliveryTimers.get(task.id)
+    if (previous !== undefined) clearTimeout(previous)
+    const timer = setTimeout(() => {
+      this.deliveryTimers.delete(task.id)
+      void this.#deliverIfUnconsumed(task).catch(() => {})
+    }, DELIVERY_GRACE_MS)
+    timer.unref?.()
+    this.deliveryTimers.set(task.id, timer)
+  }
+
+  /**
+   * Deliver a terminal result unless a `wait_member` call already returned it.
+   * @param {object} task terminal task.
+   * @returns {Promise<void>} resolution after the notification attempt.
+   */
+  async #deliverIfUnconsumed(task) {
+    if (this.disposed) return
+    if (task.status !== 'completed' && task.status !== 'failed') return
+    if (task.terminalDelivered === true) {
+      await this.#log(task, 'delivery skipped: a wait_member call already returned the result')
+      return
+    }
+    await this.#notify(task)
   }
 
   async #notify(task) {

@@ -13047,10 +13047,12 @@ import path26 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
+var DELIVERY_GRACE_MS = 3e3;
 var COMPACT_TIMEOUT_MS = 18e4;
 var LOST_CONVERSATION = /conversation not found|unknown SDK session|session "?[\w-]+"? already exists|SDK session is already open or opening|session agent was disposed/iu;
 var EMPTY_TURN = "\u76EE\u6807\u7684 DSH \u5728\u4EFB\u52A1\u6267\u884C\u671F\u95F4\u91CD\u542F\u4E86\uFF1A\u5BF9\u8BDD\u6CA1\u6709\u4EA7\u751F\u4EFB\u4F55\u8F93\u51FA\uFF0C\u8FD9\u4E00\u8F6E\u5DF2\u4E2D\u65AD";
 var EMPTY_WAIT_RETRIES = 3;
+var DEFAULT_WORKSPACE = "default-workspace";
 function envFile(file) {
   const values = {};
   if (!existsSync14(file)) return values;
@@ -13066,6 +13068,28 @@ function envFile(file) {
 function truncate(text, limit) {
   const value = String(text ?? "");
   return value.length > limit ? `${value.slice(0, limit)}\u2026` : value;
+}
+function workspaceNameFromTitle(value) {
+  const name = typeof value === "string" ? value.trim() : "";
+  if (name === "" || name === "." || name === ".." || name.length > 120) return "";
+  if (/[\\/"<>:|?*]/u.test(name) || /[\u0000-\u001f]/u.test(name)) return "";
+  return name;
+}
+async function callerWorkspaceName(ctx, agent) {
+  if (typeof ctx?.get !== "function") return DEFAULT_WORKSPACE;
+  const cwd = agent?.session?.header?.cwd ?? agent?.session?.meta?.cwd ?? agent?.session?.cwd;
+  if (typeof cwd !== "string" || cwd.trim() === "") return DEFAULT_WORKSPACE;
+  const registry = ctx.get("workspaceRegistry");
+  if (registry === void 0 || registry === null || typeof registry.resolveByPath !== "function") {
+    return DEFAULT_WORKSPACE;
+  }
+  try {
+    const found = await registry.resolveByPath(cwd);
+    const name = workspaceNameFromTitle(found?.title);
+    return name === "" ? DEFAULT_WORKSPACE : name;
+  } catch {
+    return DEFAULT_WORKSPACE;
+  }
 }
 function finiteOrNull(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
@@ -13098,12 +13122,15 @@ var MemberTaskService = class {
     this.monitors = /* @__PURE__ */ new Map();
     this.controllers = /* @__PURE__ */ new Map();
     this.waiters = /* @__PURE__ */ new Map();
+    this.deliveryTimers = /* @__PURE__ */ new Map();
     this.identity = null;
     this.loaded = false;
     this.disposed = false;
   }
   async dispose() {
     this.disposed = true;
+    for (const timer of this.deliveryTimers.values()) clearTimeout(timer);
+    this.deliveryTimers.clear();
     for (const controller of this.controllers.values()) {
       try {
         controller.abort(new Error("the plugin stopped"));
@@ -13142,6 +13169,7 @@ var MemberTaskService = class {
         task.replies = Array.isArray(task.replies) ? task.replies : [];
         task.replySeq = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0;
         task.deliveredSeq = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0;
+        task.terminalDelivered = task.terminalDelivered === true;
         this.tasks.set(task.id, task);
       } catch {
       }
@@ -13332,14 +13360,17 @@ var MemberTaskService = class {
     const target = await this.#resolveMember(member);
     const mesh = await this.#meshFor(target);
     const egressLine = mesh.link === true ? formatEgressLine(mesh) : "";
+    const explicitWorkspace = typeof workspace === "string" && workspace.trim() !== "";
+    const explicitCwd = typeof cwd === "string" && cwd !== "";
+    const targetWorkspace = explicitWorkspace ? workspace.trim() : explicitCwd ? "" : await callerWorkspaceName(this.ctx, agent);
     const payload = {
       prompt,
       // The member's panel lists these; without a title it would show a UUID.
       title: truncate(prompt, 80),
       initiator: { ...this.identity ?? { id: "local" }, source: "call_member" },
       mesh,
-      ...typeof workspace === "string" && workspace.trim() !== "" ? { workspace: workspace.trim() } : {},
-      ...typeof cwd === "string" && cwd !== "" ? { cwd } : {}
+      ...targetWorkspace !== "" ? { workspace: targetWorkspace } : {},
+      ...explicitCwd ? { cwd } : {}
     };
     const created = await this.#waitForRuntime(
       () => this.#request(target.baseUrl, "POST", "/v1/conversations", payload, 6e4, signal),
@@ -13369,6 +13400,8 @@ var MemberTaskService = class {
       replySeq: 0,
       /** Newest reply seq a `wait_member` call already returned to the model. */
       deliveredSeq: 0,
+      /** True once a `wait_member` call returned this task's terminal outcome. */
+      terminalDelivered: false,
       notify,
       notified: false,
       notifiedAt: null,
@@ -13428,6 +13461,7 @@ var MemberTaskService = class {
       const terminal = task.status === "completed" || task.status === "failed" || task.status === "interrupted";
       if (replies.length > 0) {
         task.deliveredSeq = replies[replies.length - 1].seq;
+        if (terminal) task.terminalDelivered = true;
         await this.#save(task).catch(() => {
         });
         return {
@@ -13439,6 +13473,9 @@ var MemberTaskService = class {
         };
       }
       if (terminal) {
+        task.terminalDelivered = true;
+        await this.#save(task).catch(() => {
+        });
         return { done: true, timedOut: false, task, replies: [], state: task.status === "completed" ? "done" : "failed" };
       }
       const left = deadline - Date.now();
@@ -13545,10 +13582,16 @@ var MemberTaskService = class {
     task.interrupted = false;
     task.attempts = 0;
     task.emptyWaits = 0;
+    task.terminalDelivered = false;
     task.notified = false;
     task.notifiedAt = null;
     task.notifyError = null;
-    task.notify = false;
+    task.notify = true;
+    const pendingDelivery = this.deliveryTimers.get(task.id);
+    if (pendingDelivery !== void 0) {
+      clearTimeout(pendingDelivery);
+      this.deliveryTimers.delete(task.id);
+    }
     if (!this.controllers.has(task.id)) this.controllers.set(task.id, new AbortController());
     await this.#save(task);
     await this.#log(task, `message queued: ${result?.receipt?.messageId ?? "unknown"}`);
@@ -13607,7 +13650,9 @@ var MemberTaskService = class {
         replySeq: 0,
         /** Newest reply seq a `wait_member` call already returned to the model. */
         deliveredSeq: 0,
-        notify: false,
+        /** True once a `wait_member` call returned this task's terminal outcome. */
+        terminalDelivered: false,
+        notify: true,
         notified: false,
         notifiedAt: null,
         notifyError: null,
@@ -13790,11 +13835,14 @@ var MemberTaskService = class {
       task.error = "the plugin stopped before the member conversation completed";
     }
     if (task.status === "completed" || task.status === "failed") {
+      task.settledAt = (/* @__PURE__ */ new Date()).toISOString();
       await this.#save(task);
       await this.#log(task, `${task.status}: ${truncate(task.lastText || task.error || "", 500)}`);
-      if (task.notify) await this.#notify(task);
     }
     this.#notifyWaiters(task);
+    if (task.notify && (task.status === "completed" || task.status === "failed")) {
+      this.#scheduleDelivery(task);
+    }
     return task;
   }
   /**
@@ -13846,6 +13894,41 @@ var MemberTaskService = class {
   #turnAdvanced(task, conversation) {
     if (!Number.isSafeInteger(conversation.turns)) return String(conversation.lastText ?? "") !== "";
     return conversation.turns > (Number.isSafeInteger(task.turns) ? task.turns : 0);
+  }
+  /**
+   * Hand a finished task's result to the calling conversation after a grace window.
+   *
+   * A parked `wait_member` is woken before this runs, and the model's next step
+   * may still issue one; the window is what lets either of them consume the
+   * terminal outcome first. The timer is unref'd so a pending delivery never
+   * holds the process open on its own.
+   * @param {object} task terminal task.
+   * @returns {void}
+   */
+  #scheduleDelivery(task) {
+    const previous = this.deliveryTimers.get(task.id);
+    if (previous !== void 0) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      this.deliveryTimers.delete(task.id);
+      void this.#deliverIfUnconsumed(task).catch(() => {
+      });
+    }, DELIVERY_GRACE_MS);
+    timer.unref?.();
+    this.deliveryTimers.set(task.id, timer);
+  }
+  /**
+   * Deliver a terminal result unless a `wait_member` call already returned it.
+   * @param {object} task terminal task.
+   * @returns {Promise<void>} resolution after the notification attempt.
+   */
+  async #deliverIfUnconsumed(task) {
+    if (this.disposed) return;
+    if (task.status !== "completed" && task.status !== "failed") return;
+    if (task.terminalDelivered === true) {
+      await this.#log(task, "delivery skipped: a wait_member call already returned the result");
+      return;
+    }
+    await this.#notify(task);
   }
   async #notify(task) {
     const agents = typeof this.ctx.get === "function" ? this.ctx.get("agents") : this.ctx.agents;
@@ -14076,12 +14159,14 @@ function registerTools(ctx, toolsCtx, service) {
       "\u628A\u4EFB\u52A1\u4EA4\u7ED9\u53E6\u4E00\u4E2A WireGuard \u6210\u5458\u4E0A\u7684 DSH \u5BF9\u8BDD\u3002",
       "",
       "\u6CA1\u6709 `conversationId`\uFF1A\u5728\u6210\u5458 B \u4E0A\u65B0\u5EFA\u5BF9\u8BDD\uFF0C\u7ACB\u5373\u8FD4\u56DE\u4F1A\u8BDDid\uFF1B\u4E0D\u4F1A\u540C\u6B65\u7B49\u5F85\u3002",
-      "\u6709 `conversationId`\uFF1A\u628A\u8FD9\u6761\u6D88\u606F\u7EE7\u7EED\u6295\u9012\u5230\u90A3\u4E2A\u5DF2\u6709\u5BF9\u8BDD\uFF0C\u7ACB\u5373\u8FD4\u56DE\uFF1B\u4E0D\u4F1A\u81EA\u52A8\u7B49\u5F85\u6216\u901A\u77E5\u3002",
+      "\u6709 `conversationId`\uFF1A\u628A\u8FD9\u6761\u6D88\u606F\u7EE7\u7EED\u6295\u9012\u5230\u90A3\u4E2A\u5DF2\u6709\u5BF9\u8BDD\uFF0C\u7ACB\u5373\u8FD4\u56DE\uFF1B\u4E0D\u4F1A\u540C\u6B65\u7B49\u5F85\u3002",
       "\u4F1A\u8BDDid\uFF08conversationId\uFF09\u662F\u8DE8\u8FDB\u7A0B\u7684\u7EE7\u7EED\u6295\u9012\u51ED\u636E\uFF1A\u91CD\u65B0\u542F\u52A8\u540E\u3001\u6216\u4E0D\u662F\u672C\u673A\u53D1\u8D77\u7684\u5BF9\u8BDD\uFF0C",
       "\u53EA\u8981\u77E5\u9053\u4F1A\u8BDDid\uFF0C\u914D\u4E0A member \u5C31\u80FD\u7EE7\u7EED\uFF1B\u672C\u673A\u5DF2\u8DDF\u8E2A\u8BE5\u5BF9\u8BDD\u65F6 member \u53EF\u4EE5\u7701\u7565\u3002",
       "`compress: true`\uFF1A\u7EE7\u7EED\u6295\u9012\u524D\u5148\u5728\u6210\u5458 B \u4E0A\u538B\u7F29\u8BE5\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\uFF08\u8981\u6C42\u5BF9\u8BDD\u5F53\u524D\u7A7A\u95F2\uFF09\uFF1B\u65B0\u5EFA\u5BF9\u8BDD\u4E0D\u9002\u7528\u3002",
       "\u7528 wait_member \u7B49\u7ED3\u679C\uFF1A\u6210\u5458\u6BCF\u7ED3\u675F\u4E00\u8F6E\u56DE\u7B54\u5C31\u8FD4\u56DE\u4E00\u6B21\uFF08state=progress \u8868\u793A\u8FD8\u4F1A\u7EE7\u7EED\uFF09\uFF0C",
       "\u53EA\u6709 state=done \u624D\u662F\u6574\u6BB5\u4EFB\u52A1\u7684\u6700\u7EC8\u7ED3\u679C\uFF1B\u8D85\u65F6\uFF08state=running\uFF09\u7528\u540C\u4E00\u4E2A conversationId \u63A5\u7740\u7B49\u3002",
+      "\u5982\u679C\u4E0D\u518D\u7EE7\u7EED wait\uFF1A\u5BF9\u8BDD\u5B8C\u6210\uFF08\u6216\u5931\u8D25/\u4E2D\u65AD\uFF09\u540E\uFF0C3 \u79D2\u5185\u6CA1\u6709 wait_member \u53D6\u8D70\u7ED3\u679C\uFF0C",
+      "\u63D2\u4EF6\u4F1A\u628A\u7ED3\u679C\u6295\u9012\u56DE\u8C03\u7528 call_member \u7684\u8FD9\u4E2A\u5BF9\u8BDD\uFF0C\u4E0D\u4F1A\u4E22\uFF1B\u5DF2\u7ECF\u53D6\u8D70\u7684\u7ED3\u679C\u4E0D\u4F1A\u91CD\u590D\u6295\u9012\u3002",
       "\u65B0\u5EFA\u5BF9\u8BDD\u524D\u4F1A\u6309\u7EC4\u7F51\u76F4\u8FDE\u914D\u7F6E\u627E\u5230\u76EE\u6807\u6210\u5458\u7684\u672C\u5730\u4EE3\u7406\u7AEF\u53E3\uFF0C\u7528 SSH \u5728\u76EE\u6807\u6210\u5458\u4E0A\u8DD1 mjs \u63A2\u9488\u5B9E\u6D4B\u5176\u5EF6\u8FDF\u548C\u4E0B\u884C\u5E26\u5BBD\uFF0C",
       "\u628A\u4E00\u884C\u7ED3\u679C\u3001\u4EE3\u7406\u7AEF\u53E3\u548C hub \u7684 git token \u6CE8\u5165\u76EE\u6807\u4F1A\u8BDD\uFF08\u6CA1\u6709\u76F4\u8FDE\u914D\u7F6E\u5C31\u4E0D\u62A5\u51FA\u7F51\uFF09\uFF1B\u5E76\u7981\u7528\u8BE5\u4F1A\u8BDD\u7684 ask_user_question\uFF1A",
       "\u6210\u5458\u9700\u8981\u4FE1\u606F\u65F6\u4F1A\u5728\u56DE\u590D\u91CC\u63D0\u95EE\u5E76\u505C\u4E0B\uFF0C\u7528 call_member \u5E26 conversationId \u56DE\u7B54\u3002",
@@ -14126,7 +14211,7 @@ function registerTools(ctx, toolsCtx, service) {
           cwd: args.cwd,
           workspace: args.workspace,
           agent: exec.agent,
-          notify: false,
+          notify: true,
           signal: exec.signal
         });
         const data2 = memberTaskData(task2, memberTasks);
@@ -14138,6 +14223,7 @@ function registerTools(ctx, toolsCtx, service) {
             `\u4F1A\u8BDDid\uFF1A${task2.conversationId}`,
             `\u7528 wait_member \u7B49\u5F85\u7ED3\u679C\uFF1AconversationId="${task2.conversationId}"\uFF0CtimeoutMs=30000\uFF08\u53EF\u6309\u9700\u8C03\u5927\uFF0C\u6700\u5927 300000\uFF09\u3002`,
             "\u6210\u5458\u6BCF\u7ED3\u675F\u4E00\u8F6E\u56DE\u7B54\u5C31\u8FD4\u56DE\u4E00\u6B21\uFF08state=progress\uFF09\uFF0C\u62FF\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002",
+            "\u4E0D\u518D\u7B49\u5F85\u4E5F\u6CA1\u5173\u7CFB\uFF1A\u5B8C\u6210\u540E 3 \u79D2\u5185\u6CA1\u6709 wait_member \u53D6\u8D70\u7ED3\u679C\uFF0C\u7ED3\u679C\u4F1A\u81EA\u52A8\u6295\u9012\u56DE\u672C\u5BF9\u8BDD\u3002",
             `\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\uFF1Acall_member { "member": ${JSON.stringify(String(task2.member))}, "conversationId": ${JSON.stringify(String(task2.conversationId))}, "prompt": "..." }\u3002`,
             task2.status === "failed" ? `\u5F53\u524D\u72B6\u6001\uFF1Afailed\uFF0C${task2.error ?? ""}` : "",
             `\u65E5\u5FD7\uFF1A${data2.logFile}`
@@ -14167,6 +14253,7 @@ function registerTools(ctx, toolsCtx, service) {
           compactionLine,
           formatContextLine(task.context),
           `\u7528 wait_member \u7B49\u5F85\u56DE\u590D\uFF1AconversationId="${task.conversationId}"\uFF0CtimeoutMs=30000\uFF1B\u540C\u6837\u6BCF\u8F6E\u8FD4\u56DE\u4E00\u6B21\uFF0Cstate=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
+          "\u4E0D\u518D\u7B49\u5F85\u4E5F\u6CA1\u5173\u7CFB\uFF1A\u5B8C\u6210\u540E 3 \u79D2\u5185\u6CA1\u6709 wait_member \u53D6\u8D70\u7ED3\u679C\uFF0C\u7ED3\u679C\u4F1A\u81EA\u52A8\u6295\u9012\u56DE\u672C\u5BF9\u8BDD\u3002",
           `\u65E5\u5FD7\uFF1A${data.logFile}`
         ].filter((line) => line !== "").join("\n"),
         data
@@ -14184,6 +14271,8 @@ function registerTools(ctx, toolsCtx, service) {
       "done\uFF1A\u6574\u6BB5\u4EFB\u52A1\u5B8C\u6210\uFF0C\u8FD4\u56DE\u6700\u7EC8\u6587\u672C\u3001\u4F1A\u8BDDid\u548C\u5F53\u524D\u4E0A\u4E0B\u6587\u5360\u7528\u3002",
       "\u8D85\u65F6\uFF1Adone=false\u3001state=running\uFF0C\u7528\u540C\u4E00\u4E2A conversationId \u7EE7\u7EED\u7B49\u5373\u53EF\uFF0C\u671F\u95F4\u4EA7\u751F\u7684\u56DE\u590D\u4E0D\u4F1A\u4E22\u3002",
       "\u5931\u8D25/\u4E2D\u65AD\uFF1A\u8FD4\u56DE\u9519\u8BEF\uFF1B\u76EE\u6807 DSH \u91CD\u542F\u65F6\u53EF\u4EE5\u7528 call_member \u5E26 conversationId \u7EE7\u7EED\u8BE5\u5BF9\u8BDD\u3002",
+      "\u5982\u679C\u51B3\u5B9A\u4E0D\u518D\u7EE7\u7EED\u7B49\uFF1A\u5BF9\u8BDD\u5B8C\u6210\uFF08\u6216\u5931\u8D25/\u4E2D\u65AD\uFF09\u540E\uFF0C3 \u79D2\u5185\u6CA1\u6709 wait_member \u53D6\u8D70\u7ED3\u679C\uFF0C",
+      "\u63D2\u4EF6\u4F1A\u628A\u7ED3\u679C\u6216\u5931\u8D25\u539F\u56E0\u81EA\u52A8\u6295\u9012\u56DE\u53D1\u8D77\u5BF9\u8BDD\uFF1B\u5DF2\u7ECF\u53D6\u8D70\u7684\u7ED3\u679C\u4E0D\u4F1A\u91CD\u590D\u6295\u9012\u3002",
       "state=done \u65F6\u53EF\u4EE5\u7528\u8FD4\u56DE\u7684\u4F1A\u8BDDid\u7EE7\u7EED\u6295\u9012\uFF1Acall_member { conversationId, prompt }\uFF1B",
       '\u4E0A\u4E0B\u6587\u5360\u7528\u8D85\u8FC7 20% \u65F6\u4F1A\u5EFA\u8BAE\u4E0B\u6B21\u6295\u9012\u52A0 "compress": true\uFF0C\u5148\u538B\u7F29\u518D\u6295\u9012\u3002',
       "\u6BCF\u6B21\u8C03\u7528\u6709\u4E0A\u9650\uFF08\u9ED8\u8BA4 30000\uFF0C\u6700\u5927 300000 \u6BEB\u79D2\uFF09\uFF0C\u4E0D\u4F1A\u65E0\u9650\u963B\u585E\uFF1B\u7528\u6237\u505C\u6B62\u5F53\u524D\u5BF9\u8BDD\u4F1A\u4E2D\u6B62\u672C\u6B21\u7B49\u5F85\u3002"
@@ -14459,7 +14548,7 @@ function formatBytes3(value) {
 // src/lib/interop-service.mjs
 import { execFile as execFile4 } from "node:child_process";
 import { createHash as createHash9, randomBytes as randomBytes3, randomUUID as randomUUID2, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
-import { existsSync as existsSync15, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, writeFileSync } from "node:fs";
+import { existsSync as existsSync15, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, statSync, writeFileSync } from "node:fs";
 import http3 from "node:http";
 import { homedir as homedir3 } from "node:os";
 import path27 from "node:path";
@@ -14629,6 +14718,7 @@ var MEMBER_INTERACTION_RULE = [
 var INTERACTION_CONTEXT_ORDER = 125;
 var ENVIRONMENT_CONTEXT_ORDER = 130;
 var MAX_EVENTS = 5e3;
+var DEFAULT_WORKSPACE2 = "default-workspace";
 var EMBEDDED_INTEROP_MARKER = "dsh-mesh-embedded-interop-v1";
 var MAX_BODY = 1024 * 1024;
 var SETTLE_MS = 300;
@@ -15225,13 +15315,47 @@ data: ${JSON.stringify(payload)}
       }
     }
   }
+  async function attachWorkspaceSession(registry, cwd, title, sessionId) {
+    if (registry === void 0 || registry === null) return;
+    try {
+      const existing = typeof registry.resolveByPath === "function" ? await registry.resolveByPath(cwd) : void 0;
+      const workspace = existing !== void 0 && existing !== null ? existing : typeof registry.create === "function" ? await registry.create(cwd, title) : void 0;
+      if (workspace !== void 0 && workspace !== null && typeof workspace.attachSession === "function") {
+        await workspace.attachSession(sessionId);
+      }
+    } catch (error) {
+      log(`could not attach ${sessionId} to workspace ${cwd}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  function defaultWorkspaceDirectory(registry, settings2) {
+    if (registry !== void 0 && registry !== null && typeof registry.list === "function") {
+      try {
+        const listed = registry.list();
+        const existing = Array.isArray(listed) ? listed.find((workspace) => {
+          if (workspace?.title !== DEFAULT_WORKSPACE2) return false;
+          if (typeof workspace.path !== "string" || workspace.path === "") return false;
+          try {
+            return statSync(workspace.path).isDirectory();
+          } catch {
+            return false;
+          }
+        }) : void 0;
+        if (existing !== void 0) return existing.path;
+      } catch {
+      }
+    }
+    return workspacePath(settings2, DEFAULT_WORKSPACE2);
+  }
   async function createConversation(request) {
     if (typeof ctx.agents?.create !== "function") {
       throw httpError(503, "sdk_unavailable", "DSH agent runtime is not available");
     }
     const id = randomUUID2();
-    const workspace = normalizeWorkspaceName(request.workspace);
-    const cwd = workspace !== "" ? workspacePath(settings, workspace) : typeof request.cwd === "string" && request.cwd !== "" ? path27.resolve(request.cwd) : settings.workdir;
+    const registry = typeof ctx.get === "function" ? ctx.get("workspaceRegistry") : ctx.workspaceRegistry;
+    const requested = normalizeWorkspaceName(request.workspace);
+    const explicitCwd = typeof request.cwd === "string" && request.cwd !== "" ? path27.resolve(request.cwd) : "";
+    const workspace = requested !== "" ? requested : explicitCwd === "" ? DEFAULT_WORKSPACE2 : "";
+    const cwd = requested !== "" ? requested === DEFAULT_WORKSPACE2 ? defaultWorkspaceDirectory(registry, settings) : workspacePath(settings, requested) : explicitCwd !== "" ? explicitCwd : defaultWorkspaceDirectory(registry, settings);
     const prompt = request.prompt;
     try {
       mkdirSync2(cwd, { recursive: true });
@@ -15301,6 +15425,7 @@ data: ${JSON.stringify(payload)}
         conversation.status = "running";
         conversation.idle = false;
       }
+      await attachWorkspaceSession(registry, cwd, workspace !== "" ? workspace : path27.basename(cwd) || DEFAULT_WORKSPACE2, id);
       scheduleSave();
       return conversation;
     } catch (error) {

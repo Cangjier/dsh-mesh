@@ -226,6 +226,79 @@ test('a completed member conversation notifies the originating agent', async () 
   }
 })
 
+test('a finished task nobody waits for is delivered to the calling conversation', async () => {
+  const { server, port } = await fakeMember()
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-task-'))
+  const messages = []
+  const agent = {
+    id: 'session-A',
+    session: { id: 'session-A' },
+    followup: message => { messages.push(message) },
+  }
+  const service = {
+    config: { interopPort: port, interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
+  }
+  const ctx = { get: name => name === 'agents' ? { get: id => id === 'session-A' ? agent : undefined } : undefined }
+  const tasks = new MemberTaskService({ ctx, service, dataDir, log: () => {} })
+  const started = Date.now()
+  try {
+    await tasks.start({ member: '127.0.0.1', prompt: 'do the member job', agent, notify: true })
+    // The model may still issue one more wait_member: the result must not be
+    // delivered while that call could take it.
+    await new Promise(resolve => setTimeout(resolve, 1_500))
+    assert.equal(messages.length, 0, 'delivery must wait out the grace window')
+    const deadline = Date.now() + 10_000
+    while (messages.length === 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    assert.equal(messages.length, 1)
+    assert.match(messages[0].content[0].text, /成员任务完成/u)
+    assert.match(messages[0].content[0].text, /MEMBER DONE/u)
+    assert.ok(Date.now() - started >= 2_900, 'the 3 second grace window must elapse first')
+  } finally {
+    await tasks.dispose()
+    await new Promise(resolve => server.close(resolve))
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a wait_member that takes the result suppresses the delayed delivery', async () => {
+  const { server, port } = await fakeMember()
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-task-'))
+  const messages = []
+  const agent = {
+    id: 'session-A',
+    session: { id: 'session-A' },
+    followup: message => { messages.push(message) },
+  }
+  const service = {
+    config: { interopPort: port, interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
+  }
+  const ctx = { get: name => name === 'agents' ? { get: id => id === 'session-A' ? agent : undefined } : undefined }
+  const tasks = new MemberTaskService({ ctx, service, dataDir, log: () => {} })
+  try {
+    const task = await tasks.start({ member: '127.0.0.1', prompt: 'do the member job', agent, notify: true })
+    const waited = await tasks.wait(task.conversationId, { timeoutMs: 10_000 })
+    assert.equal(waited.done, true)
+    // Give the post-completion delivery timer every chance to fire.
+    await new Promise(resolve => setTimeout(resolve, 3_500))
+    const final = await tasks.status(task.id)
+    assert.equal(final.terminalDelivered, true)
+    assert.equal(final.notified, false)
+    assert.equal(messages.length, 0, 'a consumed result must not be delivered twice')
+  } finally {
+    await tasks.dispose()
+    await new Promise(resolve => server.close(resolve))
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
 test('member system inventory is fetched through the interop service', async () => {
   const { server, port } = await fakeMember()
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-task-'))

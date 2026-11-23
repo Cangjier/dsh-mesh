@@ -368,7 +368,7 @@ call_member { "member": "10.66.66.3", "prompt": "检查磁盘" }
   → POST http://10.66.66.3:8765/v1/conversations
   → 立即返回会话id + logFile
   → 后台循环 POST /wait，按轮记录回复
-  → 由 wait_member 取回（call_member 不把结果写回 A 的原对话）
+  → 由 wait_member 取回；不再等待时，终态后 3 秒内无人取走则自动投递回发起对话
 ```
 
 返回里的 `data.logFile`：
@@ -449,6 +449,13 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 `data` 里带 `replies`（本轮及之前未返回的回复，按 `seq` 去重）、`text`、`seq`、`turn`；
 内部 task id 不出现在参数和 data 里。
 
+**没人继续等待时的兜底投递**：模型拿到 `progress` 后可能就不再 `wait_member`。对话进入终态
+（`completed` / `failed`，含被目标重启打断）时，插件先唤醒正在等待的 `wait_member`，再等
+**3 秒**，让紧接着发起的 `wait_member` 取走结果；3 秒内没有 `wait_member` 返回该终态结果，
+才把结果（失败时是原因和会话id）按下面的 `[成员任务完成]` / `[成员任务失败]` 文本作为一条
+用户消息投递回发起 `call_member` 的对话。`wait_member` 已经返回过的结果——包括没有新文本的
+`done` 和失败——不会重复投递。新建对话和带 `conversationId` 的继续投递都适用。
+
 `state=done` 的 text 还会带：
 
 ```text
@@ -500,7 +507,7 @@ interrupted    插件停止或重启时，未完成任务被标记
 - 目标正在启动（503）时新建/继续都会等最多 90 秒；
 - 对话已消失（404 / 未知 SDK 会话 / 会话已存在）立即失败，不进入退避重试；
 - `compress` 要求目标对话空闲，压缩请求最多等 180 秒；成员没有 `ctx.compaction` 时返回 501；
-- 需要看最终结果用 `wait_member`（state=done）或读取 `logFile`；
+- 需要看最终结果用 `wait_member`（state=done）或读取 `logFile`；不继续等待也没关系：终态后 3 秒内没人取走结果会自动投递回发起对话；
 - 插件重启后不会自动恢复等待。
 
 ---

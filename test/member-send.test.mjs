@@ -134,9 +134,10 @@ async function fakeMember(options = {}) {
 /**
  * One MemberTaskService pointed at a fake member.
  * @param {number} port interop port.
+ * @param {{ctx?: object}} [options] host-context override.
  * @returns {Promise<{tasks: MemberTaskService, service: object, dataDir: string}>} service.
  */
-async function buildService(port) {
+async function buildService(port, options = {}) {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'mesh-send-'))
   const service = {
     dataDir,
@@ -144,7 +145,7 @@ async function buildService(port) {
     config: { interopPort: port, interopToken: 'test-token', interopUseGatePassword: false },
     async members() { return { local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] } },
   }
-  const tasks = new MemberTaskService({ ctx: { get: () => undefined }, service, dataDir })
+  const tasks = new MemberTaskService({ ctx: options.ctx ?? { get: () => undefined }, service, dataDir })
   return { tasks, service, dataDir }
 }
 
@@ -223,6 +224,37 @@ test('a continued conversation is addressable by its conversation id', async () 
     assert.equal(second.id, first.id)
     assert.deepEqual(member.order, ['message', 'message'])
     assert.deepEqual(member.messages, ['第一轮', '第二轮'])
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a continued conversation is delivered back when nobody waits for it', async () => {
+  const member = await fakeMember()
+  const messages = []
+  const agent = {
+    id: 'session-a',
+    session: { id: 'session-a' },
+    followup: message => { messages.push(message) },
+  }
+  const ctx = { get: name => name === 'agents' ? { get: id => id === 'session-a' ? agent : undefined } : undefined }
+  const { tasks, dataDir } = await buildService(member.port, { ctx })
+  const started = Date.now()
+  try {
+    const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续', agent })
+    assert.equal(task.notify, true, 'a continued conversation is deliverable too')
+    await new Promise(resolve => setTimeout(resolve, 1_500))
+    assert.equal(messages.length, 0, 'delivery must wait out the grace window')
+    const deadline = Date.now() + 10_000
+    while (messages.length === 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    assert.equal(messages.length, 1)
+    assert.match(messages[0].content[0].text, /成员任务完成/u)
+    assert.match(messages[0].content[0].text, /new-answer/u)
+    assert.ok(Date.now() - started >= 2_900, 'the 3 second grace window must elapse first')
   } finally {
     await tasks.dispose()
     await member.close()

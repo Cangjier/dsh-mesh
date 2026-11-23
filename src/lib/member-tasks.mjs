@@ -66,6 +66,11 @@ function truncate(text, limit) {
  *
  * The member rejects a name longer than 120 characters or one containing a
  * path separator or a quote with a 400, and that would fail the whole task.
+ * A name derived automatically from a workspace title is also held to the
+ * portable subset: `: * ? < > |` are legal in a Linux title but make an
+ * unusable directory on a Windows member, so such a title falls back to the
+ * default workspace instead of sending a name the member cannot create. An
+ * explicitly passed `workspace` keeps the interop's own rule set.
  * Such a title is not rewritten into a near-duplicate name either: the caller
  * falls back to the default workspace instead. A title that only needs
  * trimming is accepted.
@@ -75,7 +80,7 @@ function truncate(text, limit) {
 function workspaceNameFromTitle(value) {
   const name = typeof value === 'string' ? value.trim() : ''
   if (name === '' || name === '.' || name === '..' || name.length > 120) return ''
-  if (/[\\/"]/u.test(name) || /[\u0000-\u001f]/u.test(name)) return ''
+  if (/[\\/"<>:|?*]/u.test(name) || /[\u0000-\u001f]/u.test(name)) return ''
   return name
 }
 

@@ -30,7 +30,7 @@
 1. **取注册表**（惰性，允许没有）：
 
    ```js
-   const registry = typeof ctx.get === 'function' ? ctx.get('workspaceRegistry') : undefined
+   const registry = typeof ctx.get === 'function' ? ctx.get('workspaceRegistry') : ctx.workspaceRegistry
    ```
 
    独立 interop 服务（`code/interop-service/server.mjs`）和单测环境没有宿主
@@ -42,7 +42,7 @@
    | --- | --- | --- |
    | `workspace: '<name>'` | `<workspaceRoot>/<name>` | `<name>` |
    | `cwd: '<dir>'` | `<dir>`（`path.resolve`） | `''` |
-   | 两者都没有 | `<workspaceRoot>/default-workspace` | `'default-workspace'` |
+   | 两者都没有 | 先复用注册表里标题为 `default-workspace` 的记录，否则 `<workspaceRoot>/default-workspace` | `'default-workspace'` |
 
    `workspaceRoot` 仍是 `DSH_WORKSPACES_DIR`，默认 `~/.dsh/workspaces`；以前的
    默认值 `settings.workdir` 不再用于新建会话（它仍用于恢复旧记录的兜底）。
@@ -50,6 +50,11 @@
    `..` 和控制字符，所以 `../escape` 还是 400。
    显式 cwd 的会话照样进入第 3 步挂载：按该目录复用/新建工作区，新记录标题取
    `path.basename(cwd)`；只是请求和记录里的 `workspace` 字段为空。
+   两者都没有时先看 `registry.list()`：如果已有标题恰为 `default-workspace` 且
+   目录存在的记录（DSH 首次使用的默认工作区在
+   `<Documents>/deepseek-harness/default-workspace`），就用它的 `path` 当 cwd 并
+   attach；没有才用 `<workspaceRoot>/default-workspace` 并 `create`。这样侧栏
+   不会出现两行都叫「默认工作区」。
 
 3. **挂载时机**：`ctx.agents.create` 成功之后。注册表的 `attachSession` 会用
    **已持久化**的 session header cwd 校验归属，而 `agents.create` 在返回前已经
@@ -75,7 +80,7 @@
 
 6. **默认标题固定为 `default-workspace`**：DSH 客户端把标题恰好等于这个字符串
    的工作区显示成本地化的「默认工作区」。用中文或 `default` 都会在界面上露出
-   不一致的原始名字。
+   不一致的原始名字。默认分支复用同名记录，正是为了不出现两个这样的分组。
 
 ### 调用方：`src/lib/member-tasks.mjs`（`MemberTaskService.start`）
 
@@ -89,7 +94,9 @@ payload 的 `workspace` 现在按优先级决定：
    - `ctx.get('workspaceRegistry').resolveByPath(cwd)` 找到记录后取
      `workspace.title`（真机 API 是 `async`，这里 `await`）；
    - 标题按 interop 的规则消毒：`trim()`，非空、不是 `.`/`..`、不超过 120
-     字符、不含 `/`、`\`、`"` 或控制字符；
+     字符、不含 `/`、`\`、`"` 或控制字符；自动派生的名字还拒绝 `: * ? < > |`
+     （Linux 标题合法，但在 Windows 成员上建不出目录）；显式传入的 `workspace`
+     仍走 interop 原有规则，不额外收紧；
    - 找不到记录或标题不合法 → `'default-workspace'`；注册表不存在、没有 cwd、
      `resolveByPath` 抛错 → 同样回退，不失败。
 
@@ -104,7 +111,7 @@ payload 的 `workspace` 现在按优先级决定：
 | --- | --- | --- |
 | `workspace` | `string?` | 工作区名，一层目录，在成员 `~/.dsh/workspaces` 下解析 |
 | `cwd` | `string?` | 显式目录；`workspace` 优先；单独给时保持原语义、不产生 workspace 名 |
-| 两者都缺省 | — | cwd = `~/.dsh/workspaces/default-workspace`，workspace = `default-workspace` |
+| 两者都缺省 | — | 复用标题为 `default-workspace` 的已有记录（目录须存在），否则 cwd = `~/.dsh/workspaces/default-workspace`；workspace = `default-workspace` |
 
 响应和持久化记录里的 `conversation` 新增/明确的字段：
 
@@ -117,6 +124,7 @@ payload 的 `workspace` 现在按优先级决定：
 
 | 调用 | 用途 |
 | --- | --- |
+| `list()` | 默认分支里按标题找 DSH 自带的默认工作区，避免重复分组 |
 | `resolveByPath(cwd)` | 按真实路径找已有工作区（不存在返回 `undefined`，路径不存在会 reject） |
 | `create(cwd, title)` | 建记录；目录必须已存在（这里先 `mkdir -p`）；同一路径重复调用返回原记录 |
 | `workspace.attachSession(sessionId)` | 把会话挂进工作区；用持久化的 header cwd 校验 |
@@ -143,15 +151,18 @@ curl -s -H "authorization: Bearer <token>" http://<member>:8765/v1/conversations
 ## 测试
 
 - `test/interop-service.test.mjs`（fakeHost 新增内存版 `workspaceRegistry`）：
-  - 无 workspace/cwd → cwd 为 `<workspaceRoot>/default-workspace`、标题
-    `default-workspace`、`attachSession` 收到会话 id、
+  - 无 workspace/cwd 且注册表为空 → cwd 为 `<workspaceRoot>/default-workspace`、
+    标题 `default-workspace`、`attachSession` 收到会话 id、
     `conversation.workspace === 'default-workspace'`；
+  - 已有标题为 `default-workspace` 的记录 → 用它的 path 当 cwd、不重复 create、
+    仍然 attach；
   - 指定 workspace → 目录在 workspaceRoot 下、标题为名称、attach；
   - 路径已有记录 → 复用、不重复 create、仍然 attach；
   - 没有 workspaceRegistry → 会话照常创建；
   - attach 抛错 → 会话仍 201；
   - `resolveByPath` / `create` 抛错 → 会话仍 201、只记日志；
   - 显式 cwd → cwd 原样、workspace 为 `''`、标题取 basename；
+  - 显式 `cwd='/'` → basename 为空时标题回退 `default-workspace`；
   - 原有 `../escape` 仍被 400 拒绝。
 - `test/member-task.test.mjs`：
   - 调用方 `session.header.cwd` 命中注册表 → `payload.workspace` 等于该工作区
@@ -159,6 +170,8 @@ curl -s -H "authorization: Bearer <token>" http://<member>:8765/v1/conversations
   - 没有 workspace/cwd 且没有注册表 → `payload.workspace === 'default-workspace'`；
   - 显式 workspace 原样穿过、显式 cwd 不带 workspace；
   - 非法标题（含 `/`）→ 回退 `'default-workspace'`；
+  - 自动派生标题含 Windows 非法字符（如 `:`）→ 回退 `'default-workspace'`，
+    而显式 workspace 参数仍原样穿过；
   - `meta.cwd` 兜底路径。
 - `test/conversation-meta.test.mjs`：`workspace` 的持久化与恢复不变。
 
@@ -178,12 +191,11 @@ curl -s -H "authorization: Bearer <token>" http://<member>:8765/v1/conversations
 - **超长/非法标题回退而不是截断**：截断后的名字和调用方工作区不同名，会在成员
   上悄悄造出一个“看起来像”的第二个工作区；回退到默认工作区至少是诚实的。
 - **注册表按路径复用，不按标题复用**：同名标题允许指向不同目录（DSH 本身允许），
-  按路径复用才和 Web 的“一个目录一个工作区”一致。
-- **工作区名沿用 interop 的名字规则**：只拒绝 `/`、`\`、`"`、`.`/`..` 和控制字符；
-  `:`、`*`、`?`、`<`、`>`、`|` 在 Windows 上仍非法，但那是 interop 既有的名字
-  契约（面板手填同样受此限制），这次不另加一套平台相关规则。极端标题在 Windows
-  成员上仍可能建目录失败；届时到成员侧改一个可用的工作区名即可。
-- **默认工作区可能与 DSH 自己的默认工作区同名**：DSH 首次使用的默认工作区在
-  `<Documents>/deepseek-harness/default-workspace`，这里是
-  `<workspaceRoot>/default-workspace`；两者标题相同，侧栏会出现两个「默认工作区」
-  分组。这是“固定标题”换来的代价，按目录区分即可。
+  按路径复用才和 Web 的“一个目录一个工作区”一致。默认分支是唯一的按标题例外：
+  它挑的正是 DSH 自带的 `default-workspace`，再用它的路径 attach，避免两个同名分组。
+- **自动派生的名字比 interop 更严**：调用方从工作区标题派生名字时额外拒绝
+  `:`、`*`、`?`、`<`、`>`、`|`，因为这类标题在 Linux 上合法、在 Windows 成员上
+  却建不出目录，而调用方无法在发起时知道成员的操作系统；代价是个别 Linux 标题
+  会落到默认工作区。显式传入的 `workspace` 仍沿用 interop 的宽松规则，保持不变。
+- **默认分支按标题认领已有记录，但不按标题认领其他名字**：只有固定标题的默认
+  工作区这样做；普通工作区仍按路径识别，不会因为同名就误挂到别的目录。

@@ -148,6 +148,21 @@ test('an unusable workspace title falls back to the default one', async () => {
   assert.equal(created[0].workspace, 'default-workspace')
 })
 
+test('an auto-derived title with a Windows-invalid name falls back to the default one', async () => {
+  const cwd = '/work/portable-name'
+  // ':' is legal in a Linux workspace title but unusable as a directory name
+  // on a Windows member, so the derived name is refused before it is sent.
+  const derived = await delegationPayload({
+    session: { id: 'session-A', header: { cwd } },
+    registry: { async resolveByPath() { return { title: 'parts: one' } } },
+  })
+  assert.equal(derived.created[0].workspace, 'default-workspace')
+
+  // An explicit workspace argument keeps the interop's own rule set.
+  const explicit = await delegationPayload({ start: { workspace: 'parts: one' } })
+  assert.equal(explicit.created[0].workspace, 'parts: one')
+})
+
 test('an explicit cwd keeps its own meaning and carries no workspace', async () => {
   const { created } = await delegationPayload({
     session: { id: 'session-A', header: { cwd: '/work/dsh-mesh' } },

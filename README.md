@@ -146,7 +146,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.7z \
 
 - 新工具 `call_member`：没有 `action`；没有 `conversationId` 就新建对话，有就继续那个对话，只发起并立即返回会话id。`wait_member` 按 `conversationId` 有界等待，**成员每结束一轮回答就返回**，`state` 区分进行中（还会继续/有子代理在跑）与完成。
 - 新建对话前，`call_member` 先从组网直连配置找到目标成员的本地代理端口，用 SSH 在目标成员上跑 mjs 探针实测该端口的出网延迟和下行带宽，把**一行结果 + 代理端口 + hub 的 git token 原值**注入会话；组网里没有该成员的直连配置就不报出网信息。并**禁用该会话的 `ask_user_question`**——成员任务没有可应答的用户，需要信息时会在回复里提问并停下，用 `call_member` 带同一个 `conversationId` 回答。详见 [Step 025](docs/Step%20025%20成员任务的出网实测与token注入.md)。
-- **工作区归属**：显式 `workspace` 优先；显式 `cwd` 保持原语义（不带工作区名，但会话仍按该目录归组，标题取目录名）；两者都没有时用调用方会话当前所属工作区的标题。目标成员创建会话后把它挂到 `ctx.workspaceRegistry`，所以成员的 Web 会话列表里这类任务落在对应工作区或 `default-workspace`（显示为「默认工作区」），不再留在「未分组」。详见 [Step 026](docs/Step%20026%20成员任务的工作区归属.md)。
+- **工作区归属**：显式 `workspace` 优先；显式 `cwd` 保持原语义（不带工作区名，但会话仍按该目录归组，标题取目录名）；两者都没有时用调用方会话当前所属工作区的标题（自动派生的名称会额外拒绝 `: * ? < > |`，避免 Windows 成员建不出目录）。目标成员创建会话后把它挂到 `ctx.workspaceRegistry`；默认分支优先复用已有的 `default-workspace` 记录，所以侧栏不会出现两个「默认工作区」，也不会再留在「未分组」。详见 [Step 026](docs/Step%20026%20成员任务的工作区归属.md)。
 - `conversationId` 是唯一对外的继续投递凭据（内部 task id 不再出现在工具参数里）；`compress: true` 会让成员先压缩上下文再投递。`wait_member` 在 `state=done` 时返回会话id和上下文占用，超过 20% 时建议下次投递先压缩。
 - A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话；后台轮询 B 的 `/wait`，`wait_member` 按轮取回，不会把结果自动写回 A 的对话。
 - 不需要 B 主动访问 A；A 长轮询（阻塞式等待）B 的 `/wait`，避免回调端口/NAT 问题。

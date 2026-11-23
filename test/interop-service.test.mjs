@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -176,31 +176,39 @@ function memoryWorkspaceRegistry(options = {}) {
   const records = new Map()
   const creates = []
   const attaches = []
+  /** Register one record without going through `create`, for pre-seeded state. */
+  const seed = (dir, title) => {
+    const workspace = {
+      path: dir,
+      title,
+      sessionIds: [],
+      async attachSession(id) {
+        if (options.attachThrows === true) throw new Error('attach failed')
+        this.sessionIds.push(id)
+        attaches.push([dir, id])
+      },
+    }
+    records.set(dir, workspace)
+    return workspace
+  }
   const registry = {
     async resolveByPath(dir) {
       if (options.resolveThrows === true) throw new Error('resolve failed')
       return records.get(dir)
+    },
+    list() {
+      if (options.listThrows === true) throw new Error('list failed')
+      return [...records.values()]
     },
     async create(dir, title) {
       creates.push([dir, title])
       if (options.createThrows === true) throw new Error('create failed')
       const existing = records.get(dir)
       if (existing !== undefined) return existing
-      const workspace = {
-        path: dir,
-        title,
-        sessionIds: [],
-        async attachSession(id) {
-          if (options.attachThrows === true) throw new Error('attach failed')
-          this.sessionIds.push(id)
-          attaches.push([dir, id])
-        },
-      }
-      records.set(dir, workspace)
-      return workspace
+      return seed(dir, title)
     },
   }
-  return { registry, records, creates, attaches }
+  return { registry, records, creates, attaches, seed }
 }
 
 test('a conversation without workspace or cwd joins the default workspace', async () => {
@@ -217,6 +225,48 @@ test('a conversation without workspace or cwd joins the default workspace', asyn
     assert.deepEqual(memory.creates, [[expected, 'default-workspace']])
     assert.deepEqual(memory.attaches, [[expected, conversation.id]])
     assert.equal(memory.records.get(expected).title, 'default-workspace')
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an existing default workspace is reused instead of creating a second one', async () => {
+  const memory = memoryWorkspaceRegistry()
+  const { service, call, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+  try {
+    // DSH's own first-use default workspace lives outside the mesh root.
+    const documents = path.join(dir, 'Documents', 'deepseek-harness', 'default-workspace')
+    mkdirSync(documents, { recursive: true })
+    const existing = memory.seed(documents, 'default-workspace')
+
+    const created = await call('POST', '/v1/conversations', { prompt: '复用默认' })
+    assert.equal(created.status, 201)
+    const conversation = created.body.conversation
+    assert.equal(conversation.cwd, documents)
+    assert.equal(conversation.workspace, 'default-workspace')
+    assert.deepEqual(memory.creates, [])
+    assert.deepEqual(memory.attaches, [[documents, conversation.id]])
+    assert.deepEqual(existing.sessionIds, [conversation.id])
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a root cwd still gets a non-empty workspace title', async () => {
+  const memory = memoryWorkspaceRegistry()
+  const { service, call, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+  try {
+    const root = path.resolve('/')
+    const created = await call('POST', '/v1/conversations', { prompt: '根目录', cwd: root })
+    assert.equal(created.status, 201)
+    const conversation = created.body.conversation
+    assert.equal(conversation.cwd, root)
+    assert.equal(conversation.workspace, '')
+    // path.basename('/') is '', which would register an untitled workspace.
+    assert.deepEqual(memory.creates, [[root, 'default-workspace']])
+    assert.deepEqual(memory.attaches, [[root, conversation.id]])
   } finally {
     await service.dispose()
     await rm(dir, { recursive: true, force: true })

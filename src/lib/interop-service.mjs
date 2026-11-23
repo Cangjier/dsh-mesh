@@ -15,7 +15,7 @@
 
 import { execFile } from 'node:child_process'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -978,11 +978,44 @@ export function createInteropService(options) {
     }
   }
 
+  /**
+   * Pick the directory for a conversation that names neither workspace nor cwd.
+   *
+   * DSH itself creates a first-use default workspace under
+   * `<Documents>/deepseek-harness/default-workspace`, and the Web renders every
+   * record titled `default-workspace` as 「默认工作区」. Registering a second
+   * such record below the mesh workspace root would put two identical groups in
+   * the sidebar, so an existing record with that exact title and a live
+   * directory wins. A missing `list()`, an empty list, a broken path, or any
+   * registry error falls back to the mesh-owned default directory.
+   * @param {any} registry `workspaceRegistry` service, or undefined.
+   * @param {Record<string, any>} settings interop settings.
+   * @returns {string} absolute directory.
+   */
+  function defaultWorkspaceDirectory(registry, settings) {
+    if (registry !== undefined && registry !== null && typeof registry.list === 'function') {
+      try {
+        const listed = registry.list()
+        const existing = Array.isArray(listed)
+          ? listed.find(workspace => workspace?.title === DEFAULT_WORKSPACE
+            && typeof workspace.path === 'string' && workspace.path !== '')
+          : undefined
+        if (existing !== undefined) {
+          try {
+            if (statSync(existing.path).isDirectory()) return existing.path
+          } catch { }
+        }
+      } catch { }
+    }
+    return workspacePath(settings, DEFAULT_WORKSPACE)
+  }
+
   async function createConversation(request) {
     if (typeof ctx.agents?.create !== 'function') {
       throw httpError(503, 'sdk_unavailable', 'DSH agent runtime is not available')
     }
     const id = randomUUID()
+    const registry = typeof ctx.get === 'function' ? ctx.get('workspaceRegistry') : ctx.workspaceRegistry
     const requested = normalizeWorkspaceName(request.workspace)
     const explicitCwd = typeof request.cwd === 'string' && request.cwd !== '' ? path.resolve(request.cwd) : ''
     // An explicit cwd keeps its own semantics — the member runs there and the
@@ -991,7 +1024,7 @@ export function createInteropService(options) {
     const workspace = requested !== '' ? requested : explicitCwd === '' ? DEFAULT_WORKSPACE : ''
     const cwd = requested !== ''
       ? workspacePath(settings, requested)
-      : explicitCwd !== '' ? explicitCwd : workspacePath(settings, DEFAULT_WORKSPACE)
+      : explicitCwd !== '' ? explicitCwd : defaultWorkspaceDirectory(registry, settings)
     const prompt = request.prompt
     try {
       mkdirSync(cwd, { recursive: true })
@@ -1062,7 +1095,6 @@ export function createInteropService(options) {
       }
       // Attach after the session exists: the registry validates the attach
       // against the persisted header cwd, which `agents.create` just wrote.
-      const registry = typeof ctx.get === 'function' ? ctx.get('workspaceRegistry') : ctx.workspaceRegistry
       await attachWorkspaceSession(registry, cwd, workspace !== '' ? workspace : path.basename(cwd) || DEFAULT_WORKSPACE, id)
       scheduleSave()
       return conversation

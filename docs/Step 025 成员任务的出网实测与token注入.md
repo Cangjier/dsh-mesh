@@ -59,7 +59,7 @@ agentCtx.systemPrompt.context({ name: 'mesh:interaction', order: 125, interpolat
 ## 边界
 
 - 发起方不是 hub 时读不到 `links.json`，因此不注入出网信息；token 也读不到，就不注入。
-- 旧版本发起方不带 `mesh` 字段时，目标会话只得到禁问规则。
+- 旧版本发起方不带 `mesh` 字段时，目标会话只注入禁问规则；工作区归属与 `mesh` 无关，仍按调用方工作区或 `default-workspace` 解析（见 [Step 026](Step%20026%20成员任务的工作区归属.md)）。
 - `mesh` 上下文不做持久化：DSH 重启后恢复会话只重放禁问规则；需要出网信息就重新发起。
 - 探针经 SSH 在目标成员上执行，所以测的是目标成员的本地代理，不是发起方的网络。
 

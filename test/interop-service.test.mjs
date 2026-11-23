@@ -163,6 +163,152 @@ async function serviceOf(overrides = {}, hostOptions = {}) {
   return { service, fake, settings, port, call, dir }
 }
 
+/**
+ * An in-memory stand-in for the host `workspaceRegistry` service.
+ *
+ * It mirrors the parts the interop service touches: `resolveByPath` only looks
+ * a directory up, `create` reuses an existing record for the same path without
+ * changing its title, and an entity records every `attachSession` call.
+ * @param {object} [options] failure knobs.
+ * @returns {object} registry plus inspection helpers.
+ */
+function memoryWorkspaceRegistry(options = {}) {
+  const records = new Map()
+  const creates = []
+  const attaches = []
+  const registry = {
+    async resolveByPath(dir) {
+      if (options.resolveThrows === true) throw new Error('resolve failed')
+      return records.get(dir)
+    },
+    async create(dir, title) {
+      creates.push([dir, title])
+      if (options.createThrows === true) throw new Error('create failed')
+      const existing = records.get(dir)
+      if (existing !== undefined) return existing
+      const workspace = {
+        path: dir,
+        title,
+        sessionIds: [],
+        async attachSession(id) {
+          if (options.attachThrows === true) throw new Error('attach failed')
+          this.sessionIds.push(id)
+          attaches.push([dir, id])
+        },
+      }
+      records.set(dir, workspace)
+      return workspace
+    },
+  }
+  return { registry, records, creates, attaches }
+}
+
+test('a conversation without workspace or cwd joins the default workspace', async () => {
+  const memory = memoryWorkspaceRegistry()
+  const { service, call, settings, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+  try {
+    const created = await call('POST', '/v1/conversations', { prompt: '默认归属' })
+    assert.equal(created.status, 201)
+    const conversation = created.body.conversation
+    const expected = path.join(settings.workspaceRoot, 'default-workspace')
+    assert.equal(conversation.cwd, expected)
+    assert.equal(conversation.workspace, 'default-workspace')
+    assert.equal(existsSync(expected), true)
+    assert.deepEqual(memory.creates, [[expected, 'default-workspace']])
+    assert.deepEqual(memory.attaches, [[expected, conversation.id]])
+    assert.equal(memory.records.get(expected).title, 'default-workspace')
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a named workspace is created below the root and its session attached', async () => {
+  const memory = memoryWorkspaceRegistry()
+  const { service, call, settings, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+  try {
+    const created = await call('POST', '/v1/conversations', { prompt: '同名工作区', workspace: 'dsh-mesh' })
+    assert.equal(created.status, 201)
+    const conversation = created.body.conversation
+    const expected = path.join(settings.workspaceRoot, 'dsh-mesh')
+    assert.equal(conversation.cwd, expected)
+    assert.equal(conversation.workspace, 'dsh-mesh')
+    assert.deepEqual(memory.creates, [[expected, 'dsh-mesh']])
+    assert.deepEqual(memory.attaches, [[expected, conversation.id]])
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an existing workspace record is reused instead of created twice', async () => {
+  const memory = memoryWorkspaceRegistry()
+  const { service, call, settings, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+  try {
+    const expected = path.join(settings.workspaceRoot, 'reused')
+    const existing = {
+      path: expected,
+      title: '已有名字',
+      sessionIds: [],
+      async attachSession(id) { this.sessionIds.push(id); memory.attaches.push([expected, id]) },
+    }
+    memory.records.set(expected, existing)
+
+    const created = await call('POST', '/v1/conversations', { prompt: '复用', workspace: 'reused' })
+    assert.equal(created.status, 201)
+    assert.deepEqual(memory.creates, [])
+    assert.deepEqual(memory.attaches, [[expected, created.body.conversation.id]])
+    assert.deepEqual(existing.sessionIds, [created.body.conversation.id])
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a host without a workspace registry still creates the conversation', async () => {
+  const { service, call, fake, dir } = await serviceOf()
+  try {
+    const created = await call('POST', '/v1/conversations', { prompt: '没有注册表' })
+    assert.equal(created.status, 201)
+    assert.ok(fake.agents.get(created.body.conversation.id))
+    assert.equal(created.body.conversation.workspace, 'default-workspace')
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a failing attach never fails the conversation', async () => {
+  const memory = memoryWorkspaceRegistry({ attachThrows: true })
+  const { service, call, fake, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+  try {
+    const created = await call('POST', '/v1/conversations', { prompt: '挂载失败' })
+    assert.equal(created.status, 201)
+    assert.ok(fake.agents.get(created.body.conversation.id))
+    assert.equal(created.body.conversation.workspace, 'default-workspace')
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an explicit cwd keeps its own meaning and carries no workspace name', async () => {
+  const memory = memoryWorkspaceRegistry()
+  const { service, call, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+  try {
+    const explicit = path.join(dir, 'somewhere')
+    const created = await call('POST', '/v1/conversations', { prompt: '显式目录', cwd: explicit })
+    assert.equal(created.status, 201)
+    assert.equal(created.body.conversation.cwd, explicit)
+    assert.equal(created.body.conversation.workspace, '')
+    assert.deepEqual(memory.creates, [[explicit, 'somewhere']])
+    assert.deepEqual(memory.attaches, [[explicit, created.body.conversation.id]])
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a launch creates a host agent, titles it and prompts it', async () => {
   const { service, fake, call, dir } = await serviceOf()
   try {

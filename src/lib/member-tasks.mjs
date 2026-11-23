@@ -35,6 +35,13 @@ const LOST_CONVERSATION = /conversation not found|unknown SDK session|session "?
 const EMPTY_TURN = '目标的 DSH 在任务执行期间重启了：对话没有产生任何输出，这一轮已中断'
 /** How many empty idle answers are tolerated before a task counts as cut short. */
 const EMPTY_WAIT_RETRIES = 3
+/**
+ * The workspace a call joins when the caller names neither one nor a cwd.
+ *
+ * The member's interop gives the same fixed title to its default workspace and
+ * the Web client localizes exactly this title, so it must not be translated.
+ */
+const DEFAULT_WORKSPACE = 'default-workspace'
 
 function envFile(file) {
   const values = {}
@@ -52,6 +59,53 @@ function envFile(file) {
 function truncate(text, limit) {
   const value = String(text ?? '')
   return value.length > limit ? `${value.slice(0, limit)}…` : value
+}
+
+/**
+ * Clean one workspace title into a name the member's interop accepts.
+ *
+ * The member rejects a name longer than 120 characters or one containing a
+ * path separator or a quote with a 400, and that would fail the whole task.
+ * Such a title is not rewritten into a near-duplicate name either: the caller
+ * falls back to the default workspace instead. A title that only needs
+ * trimming is accepted.
+ * @param {unknown} value workspace title.
+ * @returns {string} the usable name, or '' when there is none.
+ */
+function workspaceNameFromTitle(value) {
+  const name = typeof value === 'string' ? value.trim() : ''
+  if (name === '' || name === '.' || name === '..' || name.length > 120) return ''
+  if (/[\\/"]/u.test(name) || /[\u0000-\u001f]/u.test(name)) return ''
+  return name
+}
+
+/**
+ * The workspace title of the conversation that is delegating.
+ *
+ * The caller's own directory is read from its session header and matched
+ * against the local workspace registry, so a task started from a "dsh-mesh"
+ * conversation lands in the same-named workspace on the member. Anything short
+ * of a confident match — no session, no cwd, no registry, no record, an
+ * unusable title — resolves to the default workspace rather than failing.
+ * @param {any} ctx host context carrying `get`.
+ * @param {any} agent the calling agent.
+ * @returns {Promise<string>} workspace name for the create request.
+ */
+async function callerWorkspaceName(ctx, agent) {
+  if (typeof ctx?.get !== 'function') return DEFAULT_WORKSPACE
+  const cwd = agent?.session?.header?.cwd ?? agent?.session?.meta?.cwd ?? agent?.session?.cwd
+  if (typeof cwd !== 'string' || cwd.trim() === '') return DEFAULT_WORKSPACE
+  const registry = ctx.get('workspaceRegistry')
+  if (registry === undefined || registry === null || typeof registry.resolveByPath !== 'function') {
+    return DEFAULT_WORKSPACE
+  }
+  try {
+    const found = await registry.resolveByPath(cwd)
+    const name = workspaceNameFromTitle(found?.title)
+    return name === '' ? DEFAULT_WORKSPACE : name
+  } catch {
+    return DEFAULT_WORKSPACE
+  }
 }
 
 /**
@@ -356,14 +410,22 @@ export class MemberTaskService {
     // starts with what was actually measured, not a guess.
     const mesh = await this.#meshFor(target)
     const egressLine = mesh.link === true ? formatEgressLine(mesh) : ''
+    const explicitWorkspace = typeof workspace === 'string' && workspace.trim() !== ''
+    const explicitCwd = typeof cwd === 'string' && cwd !== ''
+    // Precedence: an explicitly named workspace, then an explicit cwd (which
+    // keeps its own meaning and carries no workspace), then the workspace the
+    // calling conversation is itself in.
+    const targetWorkspace = explicitWorkspace
+      ? workspace.trim()
+      : explicitCwd ? '' : await callerWorkspaceName(this.ctx, agent)
     const payload = {
       prompt,
       // The member's panel lists these; without a title it would show a UUID.
       title: truncate(prompt, 80),
       initiator: { ...(this.identity ?? { id: 'local' }), source: 'call_member' },
       mesh,
-      ...(typeof workspace === 'string' && workspace.trim() !== '' ? { workspace: workspace.trim() } : {}),
-      ...(typeof cwd === 'string' && cwd !== '' ? { cwd } : {}),
+      ...(targetWorkspace !== '' ? { workspace: targetWorkspace } : {}),
+      ...(explicitCwd ? { cwd } : {}),
     }
     const created = await this.#waitForRuntime(
       () => this.#request(target.baseUrl, 'POST', '/v1/conversations', payload, 60_000, signal),

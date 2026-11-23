@@ -48,8 +48,8 @@
 
 - 实际目录固定为 `~/.dsh/workspaces/<name>`（`DSH_WORKSPACES_DIR` 可覆盖根目录，测试用）。
 - interop 新增 `GET /v1/workspaces`：返回 `{ dir, workspaces: [{ name, path }] }`，只列直接子目录。
-- 创建会话时 `workspace` 优先于 `cwd`：目标成员自己解析路径并 `mkdir -p`，网关不需要知道对方的 home。名称只允许一层目录，拒绝 `/`、`\`、`.`、`..` 和控制字符。
-- `call_member` 增加可选的 `workspace` 参数，`MemberTaskService` 原样放进创建请求；协调对话的 prompt 会显式带上 `workspace="<name>"`。
+- 创建会话时 `workspace` 优先于 `cwd`：目标成员自己解析路径并 `mkdir -p`，网关不需要知道对方的 home。名称只允许一层目录，拒绝 `/`、`\`、`.`、`..` 和控制字符。两者都缺省时成员建/复用 `~/.dsh/workspaces/default-workspace` 并挂到工作区注册表，不再显示在「未分组」（见 [Step 026](Step%20026%20成员任务的工作区归属.md)）。
+- `call_member` 增加可选的 `workspace` 参数，`MemberTaskService` 原样放进创建请求；不传时先取调用方会话当前所属工作区的标题，调用方也没有工作区才用 `default-workspace`；协调对话的 prompt 仍会显式带上 `workspace="<name>"`。
 - 工作区列表走 `GET /api/dsh-wireguard/tasks/workspaces?member=<id>`，由网关向目标成员的 interop 查询；成员的 control-service 继续用 peer token 转发给网关。
 
 ## 消息详情
@@ -95,7 +95,7 @@ curl -s -X POST -H 'content-type: application/json' -H 'x-dsh-wireguard: 1' \
 ## 测试
 
 - `test/wireguard/task-service.test.ts`：本机协调对话、执行成员与 workspace payload、本机目标拒绝、工作区列表、清空保留运行中、成员转发。
-- `test/interop-service.test.mjs`：workspace 会话落在根目录下、`GET /v1/workspaces`、prompt 原文、路径穿越拒绝。
+- `test/interop-service.test.mjs`：workspace 会话落在根目录下、`GET /v1/workspaces`、prompt 原文、路径穿越拒绝、默认工作区与 `attachSession` 降级。
 - `test/conversation-meta.test.mjs`：prompt / workspace 持久化与恢复。
 - `test/member-task.test.mjs`：`workspace` 穿过 `call_member` 到成员请求体。
 

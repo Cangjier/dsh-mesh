@@ -61,6 +61,14 @@ const ENVIRONMENT_CONTEXT_ORDER = 130
 
 /** How many events one conversation keeps for late `/events` readers. */
 const MAX_EVENTS = 5000
+/**
+ * The directory and title a conversation gets when the request names neither a
+ * workspace nor a cwd.
+ *
+ * The Web client localizes this exact title as "默认工作区", so it is a fixed
+ * English identifier, never a translated label.
+ */
+const DEFAULT_WORKSPACE = 'default-workspace'
 /** Stable marker a rollback can find in a built plugin bundle. */
 export const EMBEDDED_INTEROP_MARKER = 'dsh-mesh-embedded-interop-v1'
 /** Largest accepted JSON body. */
@@ -938,15 +946,52 @@ export function createInteropService(options) {
     }
   }
 
+  /**
+   * Put a freshly created session into the workspace that owns its directory.
+   *
+   * The Web groups its session list by `workspaceRegistry`, not by cwd, so a
+   * session created only through `ctx.agents.create` stays under "Ungrouped"
+   * until it is attached. The registry is looked up lazily because the
+   * standalone interop service (and its unit tests) has no host context at all;
+   * there, grouping simply does not apply. Every failure is logged and
+   * swallowed: grouping is a UI attribution and must never fail the task.
+   * @param {any} registry `workspaceRegistry` service, or undefined.
+   * @param {string} cwd the session's absolute directory.
+   * @param {string} title display title, used only when a record is created.
+   * @param {string} sessionId the session to attach.
+   * @returns {Promise<void>} resolves after the best-effort attach.
+   */
+  async function attachWorkspaceSession(registry, cwd, title, sessionId) {
+    if (registry === undefined || registry === null) return
+    try {
+      const existing = typeof registry.resolveByPath === 'function'
+        ? await registry.resolveByPath(cwd)
+        : undefined
+      const workspace = existing !== undefined && existing !== null
+        ? existing
+        : typeof registry.create === 'function' ? await registry.create(cwd, title) : undefined
+      if (workspace !== undefined && workspace !== null && typeof workspace.attachSession === 'function') {
+        await workspace.attachSession(sessionId)
+      }
+    } catch (error) {
+      log(`could not attach ${sessionId} to workspace ${cwd}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   async function createConversation(request) {
     if (typeof ctx.agents?.create !== 'function') {
       throw httpError(503, 'sdk_unavailable', 'DSH agent runtime is not available')
     }
     const id = randomUUID()
-    const workspace = normalizeWorkspaceName(request.workspace)
-    const cwd = workspace !== ''
-      ? workspacePath(settings, workspace)
-      : typeof request.cwd === 'string' && request.cwd !== '' ? path.resolve(request.cwd) : settings.workdir
+    const requested = normalizeWorkspaceName(request.workspace)
+    const explicitCwd = typeof request.cwd === 'string' && request.cwd !== '' ? path.resolve(request.cwd) : ''
+    // An explicit cwd keeps its own semantics — the member runs there and the
+    // workspace field stays empty. Only a request with neither field is routed
+    // into the default workspace, so it never lands under "Ungrouped".
+    const workspace = requested !== '' ? requested : explicitCwd === '' ? DEFAULT_WORKSPACE : ''
+    const cwd = requested !== ''
+      ? workspacePath(settings, requested)
+      : explicitCwd !== '' ? explicitCwd : workspacePath(settings, DEFAULT_WORKSPACE)
     const prompt = request.prompt
     try {
       mkdirSync(cwd, { recursive: true })
@@ -1015,6 +1060,10 @@ export function createInteropService(options) {
         conversation.status = 'running'
         conversation.idle = false
       }
+      // Attach after the session exists: the registry validates the attach
+      // against the persisted header cwd, which `agents.create` just wrote.
+      const registry = typeof ctx.get === 'function' ? ctx.get('workspaceRegistry') : ctx.workspaceRegistry
+      await attachWorkspaceSession(registry, cwd, workspace !== '' ? workspace : path.basename(cwd), id)
       scheduleSave()
       return conversation
     } catch (error) {

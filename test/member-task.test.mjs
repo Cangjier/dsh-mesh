@@ -66,6 +66,98 @@ async function fakeMember() {
   return { server, port: address.port, created }
 }
 
+/**
+ * Run one delegation far enough to capture what it POSTs to the member.
+ * @param {object} [options] knobs: session, registry, start overrides.
+ * @returns {Promise<{created: object[]}>} the captured create bodies.
+ */
+async function delegationPayload(options = {}) {
+  const { server, port, created } = await fakeMember()
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-task-workspace-'))
+  const agent = {
+    id: 'session-A',
+    session: options.session ?? { id: 'session-A' },
+    followup: () => {},
+  }
+  const ctx = {
+    get: (name) => {
+      if (name === 'agents') return { get: () => undefined }
+      if (name === 'workspaceRegistry') return options.registry
+      return undefined
+    },
+  }
+  const service = {
+    config: { interopPort: port, interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
+  }
+  const tasks = new MemberTaskService({ ctx, service, dataDir, log: () => {} })
+  try {
+    await tasks.start({
+      member: '127.0.0.1',
+      prompt: 'do the member job',
+      agent,
+      notify: false,
+      ...options.start,
+    })
+  } finally {
+    await tasks.dispose()
+    await new Promise(resolve => server.close(resolve))
+    await rm(dataDir, { recursive: true, force: true })
+  }
+  return { created }
+}
+
+test('a delegation from a workspace session carries that workspace title', async () => {
+  const cwd = path.join(os.tmpdir(), 'caller-dsh-mesh')
+  const { created } = await delegationPayload({
+    session: { id: 'session-A', header: { cwd } },
+    registry: {
+      async resolveByPath(dir) {
+        return dir === cwd ? { title: 'dsh-mesh' } : undefined
+      },
+    },
+  })
+  // The title of the caller's workspace becomes the create request's
+  // workspace; the member resolves it below its own workspace root.
+  assert.equal(created[0].workspace, 'dsh-mesh')
+  assert.equal('cwd' in created[0], false)
+})
+
+test('a delegation without a resolvable workspace falls back to the default one', async () => {
+  // No workspace/cwd and no registry at all.
+  const absent = await delegationPayload({ session: { id: 'session-A', header: { cwd: '/work/unknown' } } })
+  assert.equal(absent.created[0].workspace, 'default-workspace')
+
+  // A registry that knows the directory under another spelling still misses;
+  // `meta.cwd` is accepted as the header fallback.
+  const missed = await delegationPayload({
+    session: { id: 'session-A', meta: { cwd: '/work/other' } },
+    registry: { async resolveByPath() { return undefined } },
+  })
+  assert.equal(missed.created[0].workspace, 'default-workspace')
+})
+
+test('an unusable workspace title falls back to the default one', async () => {
+  const cwd = '/work/bad-title'
+  const { created } = await delegationPayload({
+    session: { id: 'session-A', header: { cwd } },
+    registry: { async resolveByPath() { return { title: 'bad/name' } } },
+  })
+  assert.equal(created[0].workspace, 'default-workspace')
+})
+
+test('an explicit cwd keeps its own meaning and carries no workspace', async () => {
+  const { created } = await delegationPayload({
+    session: { id: 'session-A', header: { cwd: '/work/dsh-mesh' } },
+    registry: { async resolveByPath() { return { title: 'dsh-mesh' } } },
+    start: { cwd: '/srv/task-dir' },
+  })
+  assert.equal(created[0].cwd, '/srv/task-dir')
+  assert.equal('workspace' in created[0], false)
+})
+
 test('a completed member conversation notifies the originating agent', async () => {
   const { server, port, created } = await fakeMember()
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-task-'))
@@ -99,6 +191,7 @@ test('a completed member conversation notifies the originating agent', async () 
     // The workspace name crosses the interop boundary as-is; the member
     // resolves it below its own ~/.dsh/workspaces.
     assert.equal(created[0].workspace, 'demo')
+    assert.equal('cwd' in created[0], false)
     const deadline = Date.now() + 10_000
     while (messages.length === 0 && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 50))

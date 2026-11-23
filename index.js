@@ -5,11 +5,12 @@ import path28 from "node:path";
 // src/lib/service.mjs
 import { mkdir as mkdir12, readFile as readFile15, readdir as readdir8, rm as rm14, stat as stat13, writeFile as writeFile12 } from "node:fs/promises";
 import { existsSync as existsSync13, readFileSync as readFileSync4, realpathSync } from "node:fs";
-import { spawn as spawn7 } from "node:child_process";
+import { execFile as execFile3, spawn as spawn7 } from "node:child_process";
 import { createHash as createHash8 } from "node:crypto";
 import os10 from "node:os";
 import path22 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { promisify as promisify3 } from "node:util";
 
 // code/shared/wireguard.mjs
 import { readFile as readFile2 } from "node:fs/promises";
@@ -9588,6 +9589,111 @@ function resolveDeployLinkProxy(options) {
   return null;
 }
 
+// src/lib/egress-probe.mjs
+var EGRESS_PROBE_SOURCE = String.raw`
+import http from 'node:http'
+import tls from 'node:tls'
+
+const port = Number(process.argv[2])
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  console.log(JSON.stringify({ ok: false, error: 'no proxy port' }))
+  process.exit(1)
+}
+
+const targets = [
+  { host: 'speed.cloudflare.com', path: '/__down?bytes=2000000', bandwidth: true },
+  { host: 'api.github.com', path: '/', bandwidth: false },
+]
+
+function httpConnect(host) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({ host: '127.0.0.1', port: port, method: 'CONNECT', path: host + ':443' })
+    request.once('connect', (response, socket) => {
+      if (response.statusCode === 200) resolve(socket)
+      else { socket.destroy(); reject(new Error('CONNECT ' + response.statusCode)) }
+    })
+    request.once('error', reject)
+    request.end()
+  })
+}
+
+function measure(socket, host, path) {
+  return new Promise((resolve, reject) => {
+    const secure = tls.connect({ socket: socket, servername: host })
+    let started = 0
+    let first = 0
+    let bytes = 0
+    let head = Buffer.alloc(0)
+    let done = false
+    const finish = (error) => {
+      if (done) return
+      done = true
+      try { secure.destroy() } catch {}
+      if (error) reject(error)
+      else resolve({ latencyMs: Math.max(0, first - started), bytes: bytes, ms: Math.max(1, Date.now() - started), head: head.toString('latin1') })
+    }
+    const timer = setTimeout(() => finish(new Error('timeout')), 12000)
+    timer.unref()
+    secure.once('error', finish)
+    secure.once('secureConnect', () => {
+      started = Date.now()
+      secure.write('GET ' + path + ' HTTP/1.1\r\nHost: ' + host + '\r\nUser-Agent: dsh-mesh-egress-probe\r\nAccept: */*\r\nConnection: close\r\n\r\n')
+    })
+    secure.on('data', (chunk) => {
+      if (first === 0) first = Date.now()
+      bytes += chunk.length
+      if (head.length < 256) head = Buffer.concat([head, chunk.subarray(0, 256 - head.length)])
+    })
+    secure.once('end', () => finish())
+  })
+}
+
+let lastError = 'proxy unavailable'
+for (const target of targets) {
+  let socket = null
+  try {
+    socket = await httpConnect(target.host)
+    const result = await measure(socket, target.host, target.path)
+    const status = /^HTTP\/1\.[01] (\d{3})/.exec(result.head)
+    if (!status || Number(status[1]) >= 400) {
+      lastError = 'HTTP ' + (status ? status[1] : '?')
+      continue
+    }
+    const mbps = target.bandwidth ? Math.round((result.bytes * 8 / (result.ms / 1000) / 1e6) * 10) / 10 : null
+    console.log(JSON.stringify({ ok: true, port: port, host: target.host, latencyMs: result.latencyMs, downMbps: mbps }))
+    process.exit(0)
+  } catch (error) {
+    lastError = error && error.message ? error.message : String(error)
+  } finally {
+    try { if (socket) socket.destroy() } catch {}
+  }
+}
+console.log(JSON.stringify({ ok: false, error: String(lastError).slice(0, 160) }))
+process.exit(1)
+`;
+function formatEgressLine(mesh) {
+  const port = Number.isInteger(mesh?.proxyPort) ? mesh.proxyPort : null;
+  const egress = mesh?.egress !== null && typeof mesh?.egress === "object" ? mesh.egress : {};
+  const where = port === null ? "\u672C\u673A\u6CA1\u6709\u68C0\u6D4B\u5230\u4EE3\u7406\u7AEF\u53E3" : `\u672C\u673A\u4EE3\u7406\u7AEF\u53E3 ${port}`;
+  if (egress.ok === true) {
+    const latency = Number.isFinite(egress.latencyMs) ? Math.max(0, Math.round(egress.latencyMs)) : null;
+    const down = Number.isFinite(egress.downMbps) ? egress.downMbps : null;
+    const perf = latency === null ? "\u51FA\u7F51\u5B9E\u6D4B\u901A\u8FC7" : down === null ? `\u5EF6\u8FDF ${latency} ms\uFF08\u5E26\u5BBD\u672A\u6D4B\uFF09` : `\u5EF6\u8FDF ${latency} ms\uFF0C\u4E0B\u884C ${down} Mbps`;
+    return `${where}\uFF1B\u7ECF\u4EE3\u7406\u51FA\u7F51\u5B9E\u6D4B\uFF1A${perf}\u3002`;
+  }
+  const reason = String(egress.error ?? "").trim();
+  return `${where}\uFF1B\u7ECF\u4EE3\u7406\u51FA\u7F51\u5B9E\u6D4B\u5931\u8D25${reason === "" ? "" : `\uFF1A${reason}`}\u3002`;
+}
+function formatMemberMesh(mesh) {
+  if (mesh === null || typeof mesh !== "object") return "";
+  const lines = [];
+  if (mesh.link === true && Number.isInteger(mesh.proxyPort)) lines.push(formatEgressLine(mesh));
+  const tokens = mesh.tokens !== null && typeof mesh.tokens === "object" ? mesh.tokens : {};
+  if (typeof tokens.github === "string" && tokens.github.trim() !== "") lines.push(`GitHub token: ${tokens.github.trim()}`);
+  if (typeof tokens.gitee === "string" && tokens.gitee.trim() !== "") lines.push(`Gitee token: ${tokens.gitee.trim()}`);
+  return lines.join("\n");
+}
+
 // src/lib/package-sources.mjs
 import path21 from "node:path";
 var PACKAGE_ARCHIVE_RE = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u;
@@ -9746,6 +9852,7 @@ function powershellQuote(value) {
 
 // src/lib/service.mjs
 var HERE2 = path22.dirname(fileURLToPath2(import.meta.url));
+var execFileAsync2 = promisify3(execFile3);
 var PROBE_GRACE_MS = 10 * 6e4;
 var PROBE_TIMEOUT_MS = 4500;
 var PROBE_RETRY_MS = 4500;
@@ -9763,6 +9870,45 @@ function findRepositoryRoot(start) {
   return path22.resolve(start, "..", "..");
 }
 var REPOSITORY_ROOT = findRepositoryRoot(HERE2);
+function runSshProbe(args, source, timeoutMs = 3e4) {
+  return new Promise((resolve) => {
+    const child = spawn7("ssh", args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.kill("SIGKILL");
+      } catch {
+      }
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish({ ok: false, error: "probe timed out" }), timeoutMs);
+    timer.unref?.();
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.once("error", (error) => finish({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    child.once("close", () => {
+      const line = String(stdout).trim().split(/\r?\n/u).filter(Boolean).pop() ?? "";
+      try {
+        const parsed = JSON.parse(line);
+        finish(parsed !== null && typeof parsed === "object" ? parsed : { ok: false, error: "probe returned no object" });
+      } catch {
+        finish({ ok: false, error: (String(stderr).trim() || "no probe output").slice(0, 160) });
+      }
+    });
+    child.stdin.on("error", () => {
+    });
+    child.stdin.end(source);
+  });
+}
 function packageVersion() {
   try {
     const parsed = JSON.parse(readFileSync4(path22.join(REPOSITORY_ROOT, "package.json"), "utf8"));
@@ -10066,6 +10212,78 @@ var MeshService = class {
       }
     }
     return { ...snapshot, self, members, local: self };
+  }
+  /**
+   * The direct link the mesh networking config gives one member, if any.
+   *
+   * Only the link's client has a local proxy: the server side supplies the
+   * egress. A member without a client link gets no proxy information at all —
+   * there is nothing configured to report, and nothing to set up.
+   * @param {string} ip member VPN address.
+   * @returns {Promise<{proxy: string, port: number}|null>} proxy facts, or null.
+   */
+  async directLinkFor(ip) {
+    const address = String(ip ?? "").trim();
+    if (address === "") return null;
+    const links = await this.#directLinks();
+    const link3 = links.find((item) => item !== null && typeof item === "object" && item?.client?.ip === address);
+    if (link3 === void 0) return null;
+    const proxy2 = typeof link3.httpProxy === "string" ? link3.httpProxy.trim() : "";
+    if (proxy2 === "") return null;
+    try {
+      const url = new URL(proxy2);
+      const port = Number(url.port) || (url.protocol === "https:" ? 443 : 80);
+      return Number.isInteger(port) && port > 0 && port < 65536 ? { proxy: proxy2, port } : null;
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * SSH into one member and measure its local proxy egress.
+   *
+   * The probe is the shipped ES module (`egress-probe.mjs`), piped into the
+   * target's own Node over the mesh SSH key: the measurement runs on the
+   * machine that will use the proxy, through the same loopback listeners the
+   * agent would use. The result is a one-line report for `call_member`.
+   * @param {string} ip member VPN address.
+   * @param {number} port HTTP proxy port the mesh networking config advertises.
+   * @returns {Promise<{ok: boolean, port?: number, latencyMs?: number, downMbps?: number|null, error?: string}>} probe result.
+   */
+  async probeMemberEgress(ip, port) {
+    const address = String(ip ?? "").trim();
+    if (address === "") return { ok: false, error: "member address is empty" };
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, error: "proxy port is invalid" };
+    const { state } = await readWireGuardState({ file: path22.join(this.home, "wireguard", "state.json") });
+    const peer = state?.server?.peers?.find((candidate) => candidate?.ip === address);
+    if (peer === void 0 || peer === null) return { ok: false, error: "member is not in the WireGuard state" };
+    const digest = createHash8("sha256").update(String(peer.publicKey ?? "")).digest("hex");
+    const key = path22.join(this.home, "wireguard", "ssh", `${digest}.key`);
+    if (!existsSync13(key)) return { ok: false, error: "no SSH key for this member" };
+    const windows = String(peer.platform ?? "").toLowerCase().startsWith("win");
+    const remote = windows ? `"%USERPROFILE%\\.dsh\\runtime\\node\\node.exe" --input-type=module - ${String(port)}` : `~/.dsh/runtime/node/bin/node --input-type=module - ${String(port)}`;
+    const user = typeof peer.sshUser === "string" && peer.sshUser !== "" ? peer.sshUser : "root";
+    return await runSshProbe([
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=8",
+      "-o",
+      "StrictHostKeyChecking=accept-new",
+      "-i",
+      key,
+      `${user}@${address}`,
+      remote
+    ], EGRESS_PROBE_SOURCE);
+  }
+  /**
+   * The git tokens the mesh's package management holds, for the injected
+   * context of a member conversation.
+   * @returns {Promise<{github: string|null, gitee: string|null}>} token values.
+   */
+  async releaseTokens() {
+    const release = await loadReleaseConfig({ file: this.releaseConfigFile });
+    const read = (value) => typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+    return { github: read(release.github?.token), gitee: read(release.gitee?.token) };
   }
   /**
    * User labels for members, keyed by member id.
@@ -12829,6 +13047,7 @@ import path26 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
+var COMPACT_TIMEOUT_MS = 18e4;
 var LOST_CONVERSATION = /conversation not found|unknown SDK session|session "?[\w-]+"? already exists|SDK session is already open or opening|session agent was disposed/iu;
 var EMPTY_TURN = "\u76EE\u6807\u7684 DSH \u5728\u4EFB\u52A1\u6267\u884C\u671F\u95F4\u91CD\u542F\u4E86\uFF1A\u5BF9\u8BDD\u6CA1\u6709\u4EA7\u751F\u4EFB\u4F55\u8F93\u51FA\uFF0C\u8FD9\u4E00\u8F6E\u5DF2\u4E2D\u65AD";
 var EMPTY_WAIT_RETRIES = 3;
@@ -12847,6 +13066,22 @@ function envFile(file) {
 function truncate(text, limit) {
   const value = String(text ?? "");
   return value.length > limit ? `${value.slice(0, limit)}\u2026` : value;
+}
+function finiteOrNull(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+function normalizeContext(value) {
+  if (value === null || typeof value !== "object") return null;
+  const usedTokens = finiteOrNull(value.usedTokens ?? value.used ?? value.pressureTokens);
+  const maxTokens = finiteOrNull(value.maxTokens ?? value.max ?? value.contextWindow);
+  if (usedTokens === null && maxTokens === null) return null;
+  const percent = usedTokens !== null && maxTokens !== null && maxTokens > 0 ? Math.round(usedTokens / maxTokens * 1e3) / 10 : finiteOrNull(value.percent);
+  return { usedTokens, maxTokens, percent };
+}
+function summaryText(value) {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value.filter((block) => block !== null && typeof block === "object" && block.type === "text" && typeof block.text === "string").map((block) => block.text).join("\n").trim();
 }
 var MemberTaskService = class {
   /**
@@ -13030,6 +13265,30 @@ var MemberTaskService = class {
     return parsed;
   }
   /**
+   * Facts the target conversation starts with: the measured egress line and
+   * the mesh's git tokens.
+   *
+   * The proxy is the mesh networking config's direct link for this member:
+   * only its client has a local proxy, and a member without a client link is
+   * told nothing about egress. The probe measures the link's advertised HTTP
+   * proxy port before delivery; a failure is reported, never thrown.
+   * @param {{name: string, ip: string}} target resolved member.
+   * @returns {Promise<object>} create-request `mesh` field.
+   */
+  async #meshFor(target) {
+    const tokens = typeof this.service.releaseTokens === "function" ? await this.service.releaseTokens().catch(() => ({})) : {};
+    const tokenPair = { github: tokens.github ?? null, gitee: tokens.gitee ?? null };
+    const link3 = typeof this.service.directLinkFor === "function" ? await this.service.directLinkFor(target.ip).catch(() => null) : null;
+    if (link3 === null) return { link: false, proxyPort: null, egress: null, tokens: tokenPair };
+    const probe = typeof this.service.probeMemberEgress === "function" ? await this.service.probeMemberEgress(target.ip, link3.port).catch(() => ({ ok: false, error: "probe failed" })) : { ok: false, error: "probe unavailable" };
+    return {
+      link: true,
+      proxyPort: link3.port,
+      egress: probe?.ok === true ? { ok: true, latencyMs: probe.latencyMs ?? null, downMbps: probe.downMbps ?? null } : { ok: false, error: typeof probe?.error === "string" ? probe.error : null },
+      tokens: tokenPair
+    };
+  }
+  /**
    * Wait out a member runtime that is still booting.
    *
    * A member's interop answers 503 while its SDK child starts, which is exactly
@@ -13071,11 +13330,14 @@ var MemberTaskService = class {
     if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("prompt is required");
     if (agent === void 0 || agent === null) throw new Error("delegation must be called from a DSH conversation");
     const target = await this.#resolveMember(member);
+    const mesh = await this.#meshFor(target);
+    const egressLine = mesh.link === true ? formatEgressLine(mesh) : "";
     const payload = {
       prompt,
       // The member's panel lists these; without a title it would show a UUID.
       title: truncate(prompt, 80),
       initiator: { ...this.identity ?? { id: "local" }, source: "call_member" },
+      mesh,
       ...typeof workspace === "string" && workspace.trim() !== "" ? { workspace: workspace.trim() } : {},
       ...typeof cwd === "string" && cwd !== "" ? { cwd } : {}
     };
@@ -13112,7 +13374,15 @@ var MemberTaskService = class {
       notifiedAt: null,
       notifyError: null,
       originAgentId: String(agent.id ?? ""),
-      originSessionId: String(agent.session?.id ?? "")
+      originSessionId: String(agent.session?.id ?? ""),
+      /** One-line egress report the target received, or ''. */
+      egressLine,
+      /** Context occupancy last reported by the member, or null. */
+      context: null,
+      /** Last pre-delivery compaction, when the caller asked for one. */
+      lastCompaction: null,
+      /** True for a task attached to a conversation this initiator did not start. */
+      adopted: false
     };
     this.controllers.set(task.id, new AbortController());
     this.tasks.set(task.id, task);
@@ -13129,28 +13399,31 @@ var MemberTaskService = class {
    *
    * "News" is either a finished-turn reply the model has not seen yet, or the
    * task reaching a terminal state. The monitor keeps running in the background,
-   * so a timeout only ends this caller's wait; the same taskId can be waited
-   * again, and replies that arrived meanwhile are not lost.
+   * so a timeout only ends this caller's wait; the same conversationId can be
+   * waited again, and replies that arrived meanwhile are not lost.
+   *
+   * The conversation id is the only handle the caller needs; the task record
+   * it resolves to stays an implementation detail of this service.
    *
    * `signal` is the tool call's own cancellation. It ends the park at once
    * rather than at the next wake, so stopping the conversation does not leave
    * the call hanging until its deadline; the thrown reason is the signal's own
    * reason, which is what makes DSH report the call as cancelled.
-   * @param {string} taskId task id returned by call_member.
+   * @param {string} conversationId conversation id returned by call_member.
    * @param {{timeoutMs?: number, signal?: AbortSignal}} [options] wait options.
    * @returns {Promise<{done: boolean, timedOut: boolean, task: object, replies: object[], state: string}>} outcome.
    */
-  async wait(taskId, options = {}) {
+  async wait(conversationId, options = {}) {
     await this.#ensureLoaded();
-    const id = String(taskId ?? "");
-    if (id === "") throw new Error("taskId is required");
+    const key = String(conversationId ?? "");
+    if (key === "") throw new Error("conversationId is required");
+    const task = this.#taskOfConversation(key);
+    if (task === void 0) throw new Error(`member conversation is not tracked: ${key}`);
     const timeoutMs = Math.max(1e3, Math.min(Number.isSafeInteger(options.timeoutMs) ? options.timeoutMs : 3e4, 3e5));
     const signal = options.signal;
     const deadline = Date.now() + timeoutMs;
     for (; ; ) {
       signal?.throwIfAborted();
-      const task = this.tasks.get(id);
-      if (task === void 0) throw new Error(`member task not found: ${id}`);
       const replies = this.#pendingReplies(task);
       const terminal = task.status === "completed" || task.status === "failed" || task.status === "interrupted";
       if (replies.length > 0) {
@@ -13172,6 +13445,14 @@ var MemberTaskService = class {
       if (left <= 0) return { done: false, timedOut: true, task, replies: [], state: "running" };
       await this.#waitForWake(task, left, signal);
     }
+  }
+  /**
+   * The newest task tracked for one member conversation.
+   * @param {string} conversationId member conversation id.
+   * @returns {object|undefined} task record.
+   */
+  #taskOfConversation(conversationId) {
+    return [...this.tasks.values()].filter((task) => task.conversationId === conversationId).sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))[0];
   }
   /** Replies this task received but no `wait` call has returned yet. */
   #pendingReplies(task) {
@@ -13226,16 +13507,39 @@ var MemberTaskService = class {
       }
     }
   }
-  async send(taskId, content, signal) {
+  /**
+   * Send one message into an existing member conversation.
+   *
+   * The conversation is named by the member's conversation id. That id is the
+   * portable key: it is what `call_member` / `wait_member` return, it survives a
+   * new process on this side, and it lets a model continue a conversation it
+   * did not start.
+   *
+   * `compress` runs the member's own compaction before the message is queued,
+   * so the next turn starts from a shortened context. It requires that
+   * conversation to be idle.
+   *
+   * @param {{conversationId: string, member?: string, prompt: string, compress?: boolean, agent?: any, signal?: AbortSignal}} request send request.
+   * @returns {Promise<object>} the tracked task.
+   */
+  async send(request) {
     await this.#ensureLoaded();
-    const task = this.tasks.get(String(taskId));
-    if (task === void 0) throw new Error("member task not found");
-    if (typeof content !== "string" || content.trim() === "") throw new Error("content is required");
+    const prompt = request.prompt;
+    if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("prompt is required");
+    const signal = request.signal;
+    const { task, fresh } = await this.#sendTarget(request);
+    if (request.compress === true) await this.#compact(task, signal);
     const result = await this.#waitForRuntime(
-      () => this.#request(task.baseUrl, "POST", `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content }, 3e4, signal),
+      () => this.#request(task.baseUrl, "POST", `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content: prompt }, 3e4, signal),
       9e4,
       signal
     );
+    if (fresh) {
+      this.#adoptPosition(task, result?.conversation);
+      task.prompt = truncate(prompt, 2e3);
+      this.tasks.set(task.id, task);
+    }
+    this.#rememberContext(task, result?.context ?? result?.conversation?.context);
     task.status = "running";
     task.error = null;
     task.interrupted = false;
@@ -13245,6 +13549,7 @@ var MemberTaskService = class {
     task.notifiedAt = null;
     task.notifyError = null;
     task.notify = false;
+    if (!this.controllers.has(task.id)) this.controllers.set(task.id, new AbortController());
     await this.#save(task);
     await this.#log(task, `message queued: ${result?.receipt?.messageId ?? "unknown"}`);
     if (!this.monitors.has(task.id)) {
@@ -13254,6 +13559,142 @@ var MemberTaskService = class {
       });
     }
     return task;
+  }
+  /**
+   * Resolve who a send targets: an existing tracked task, or a conversation on
+   * a named member that this initiator will adopt.
+   * @param {{conversationId: string, member?: string, prompt: string, agent?: any}} request send request.
+   * @returns {Promise<{task: object, fresh: boolean}>} target task.
+   */
+  async #sendTarget(request) {
+    const conversationId = typeof request.conversationId === "string" ? request.conversationId.trim() : "";
+    if (conversationId === "") throw new Error("conversationId is required to continue a conversation");
+    const tracked = this.#taskOfConversation(conversationId);
+    if (tracked !== void 0) {
+      const named2 = typeof request.member === "string" ? request.member.trim() : "";
+      if (named2 !== "") {
+        const target2 = await this.#resolveMember(named2);
+        if (target2.baseUrl !== tracked.baseUrl) {
+          throw new Error(`conversation ${conversationId} belongs to ${tracked.member} (${tracked.baseUrl}), not ${target2.baseUrl}`);
+        }
+      }
+      return { task: tracked, fresh: false };
+    }
+    const named = typeof request.member === "string" ? request.member.trim() : "";
+    if (named === "") {
+      throw new Error("send by conversationId needs member: no local task tracks this conversation");
+    }
+    const target = await this.#resolveMember(named);
+    return {
+      task: {
+        id: `member-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+        member: target.name,
+        memberIp: target.ip,
+        baseUrl: target.baseUrl,
+        conversationId,
+        prompt: truncate(request.prompt, 2e3),
+        status: "running",
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        lastText: "",
+        error: null,
+        interrupted: false,
+        attempts: 0,
+        turns: 0,
+        /** Replies already accepted from the member, oldest first. */
+        replies: [],
+        /** Newest reply sequence number seen on the member. */
+        replySeq: 0,
+        /** Newest reply seq a `wait_member` call already returned to the model. */
+        deliveredSeq: 0,
+        notify: false,
+        notified: false,
+        notifiedAt: null,
+        notifyError: null,
+        originAgentId: String(request.agent?.id ?? ""),
+        originSessionId: String(request.agent?.session?.id ?? ""),
+        context: null,
+        lastCompaction: null,
+        adopted: true
+      },
+      fresh: true
+    };
+  }
+  /**
+   * Move an adopted task's cursors to the member's current position.
+   * @param {object} task adopted task.
+   * @param {unknown} conversation the member's conversation projection.
+   * @returns {void}
+   */
+  #adoptPosition(task, conversation) {
+    if (conversation === null || typeof conversation !== "object") return;
+    const seq = Number.isSafeInteger(conversation.replySeq) ? conversation.replySeq : 0;
+    task.replySeq = Math.max(Number.isSafeInteger(task.replySeq) ? task.replySeq : 0, seq);
+    task.deliveredSeq = Math.max(Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0, task.replySeq);
+    if (Number.isSafeInteger(conversation.turns)) task.turns = conversation.turns;
+  }
+  /**
+   * Record the context occupancy a member reported.
+   * @param {object} task member task.
+   * @param {unknown} value raw occupancy.
+   * @returns {void}
+   */
+  #rememberContext(task, value) {
+    const context = normalizeContext(value);
+    if (context !== null) task.context = context;
+  }
+  /**
+   * Compact a member conversation before delivering into it.
+   *
+   * The member owns the session, so only it can compact. An older member has
+   * no `/compact` endpoint; that is reported as "upgrade the member", not
+   * retried as a transient failure.
+   * @param {object} task member task.
+   * @param {AbortSignal} [signal] cancellation of the sending tool call.
+   * @returns {Promise<object>} the recorded compaction.
+   */
+  async #compact(task, signal) {
+    await this.#log(task, "compacting context before delivery");
+    let result;
+    try {
+      result = await this.#waitForRuntime(
+        () => this.#request(
+          task.baseUrl,
+          "POST",
+          `/v1/conversations/${encodeURIComponent(task.conversationId)}/compact`,
+          {},
+          COMPACT_TIMEOUT_MS,
+          signal
+        ),
+        9e4,
+        signal
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/conversation not found|conversation_not_found/iu.test(message)) {
+        throw new Error(`\u6210\u5458 ${task.member} \u4E0A\u5DF2\u7ECF\u6CA1\u6709\u5BF9\u8BDD ${task.conversationId}\uFF1A${message}`);
+      }
+      if (/unknown endpoint|not_found|unsupported|compaction_unavailable/iu.test(message)) {
+        throw new Error(`\u6210\u5458 ${task.member} \u7684 interop \u670D\u52A1\u4E0D\u652F\u6301\u4E0A\u4E0B\u6587\u538B\u7F29\uFF08\u7248\u672C\u8FC7\u65E7\uFF09\uFF1A${message}\u3002\u53BB\u6389 compress \u76F4\u63A5\u6295\u9012\uFF0C\u6216\u5148\u5347\u7EA7\u8BE5\u6210\u5458\u3002`);
+      }
+      if (/busy|already has active work|conversation_busy|409/iu.test(message)) {
+        throw new Error(`\u5BF9\u8BDD ${task.conversationId} \u8FD8\u5728\u8FD0\u884C\uFF0C\u4E0D\u80FD\u538B\u7F29\uFF1A${message}\u3002\u7B49 wait_member \u8FD4\u56DE state=done \u540E\u518D\u6295\u9012\uFF0C\u6216\u53BB\u6389 compress\u3002`);
+      }
+      throw error;
+    }
+    task.lastCompaction = {
+      at: (/* @__PURE__ */ new Date()).toISOString(),
+      compacted: result?.compacted === true,
+      summary: summaryText(result?.summary),
+      shadowedCount: Number.isSafeInteger(result?.shadowedCount) ? result.shadowedCount : 0,
+      shadowedTokenCount: Number.isSafeInteger(result?.shadowedTokenCount) ? result.shadowedTokenCount : null
+    };
+    this.#rememberContext(task, result?.context);
+    await this.#log(
+      task,
+      task.lastCompaction.compacted ? `compacted ${String(task.lastCompaction.shadowedCount)} item(s), ~${String(task.lastCompaction.shadowedTokenCount ?? 0)} tokens` : "no compactable history"
+    );
+    return task.lastCompaction;
   }
   async #monitor(task) {
     const signal = this.controllers.get(task.id)?.signal;
@@ -13270,6 +13711,7 @@ var MemberTaskService = class {
           signal
         );
         task.attempts = 0;
+        this.#rememberContext(task, result.context ?? result.conversation?.context);
         if (result.timedOut === true) {
           task.status = "running";
           await this.#save(task);
@@ -13420,14 +13862,14 @@ var MemberTaskService = class {
       "\u7ED3\u679C\uFF1A",
       truncate(task.lastText || "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)", 8e3),
       "",
-      `taskId: ${task.id}`
+      `\u4F1A\u8BDDid: ${task.conversationId}`
     ].join("\n") : [
       `[\u6210\u5458\u4EFB\u52A1\u5931\u8D25] ${task.member} (${task.memberIp}) \u7684\u5BF9\u8BDD ${task.conversationId} \u5931\u8D25\u3002`,
       `\u4EFB\u52A1\uFF1A${truncate(task.prompt, 300)}`,
       `\u9519\u8BEF\uFF1A${task.error ?? "unknown"}`,
-      ...task.interrupted === true ? ["", "\u76EE\u6807\u7684 DSH \u91CD\u542F\uFF08\u6216\u8FD0\u884C\u65F6\u9000\u51FA\uFF09\u6253\u65AD\u4E86\u8FD9\u4E00\u8F6E\u3002\u5BF9\u8BDD\u548C\u4E0A\u4E0B\u6587\u8FD8\u5728\uFF1A\u7528 call_member send \u540C\u4E00\u4E2A taskId \u7EE7\u7EED\uFF0C\u6216\u91CD\u65B0 delegate \u4E00\u4E2A\u65B0\u4EFB\u52A1\u3002"] : [],
+      ...task.interrupted === true ? ["", `\u76EE\u6807\u7684 DSH \u91CD\u542F\uFF08\u6216\u8FD0\u884C\u65F6\u9000\u51FA\uFF09\u6253\u65AD\u4E86\u8FD9\u4E00\u8F6E\u3002\u5BF9\u8BDD\u548C\u4E0A\u4E0B\u6587\u8FD8\u5728\uFF1A\u7528 call_member \u5E26 conversationId ${task.conversationId} \u7EE7\u7EED\uFF0C\u6216\u65B0\u5F00\u4E00\u4E2A\u4EFB\u52A1\u3002`] : [],
       "",
-      `taskId: ${task.id}`
+      `\u4F1A\u8BDDid: ${task.conversationId}`
     ].join("\n");
     try {
       agent.followup({
@@ -13633,30 +14075,31 @@ function registerTools(ctx, toolsCtx, service) {
     description: [
       "\u628A\u4EFB\u52A1\u4EA4\u7ED9\u53E6\u4E00\u4E2A WireGuard \u6210\u5458\u4E0A\u7684 DSH \u5BF9\u8BDD\u3002",
       "",
-      "`delegate`\uFF1A\u5728\u6210\u5458 B \u4E0A\u521B\u5EFA\u5BF9\u8BDD\u5E76\u7ACB\u5373\u8FD4\u56DE taskId\uFF1B\u4E0D\u4F1A\u540C\u6B65\u7B49\u5F85\u3002",
-      "`send`\uFF1A\u5411\u5DF2\u7ECF\u521B\u5EFA\u7684\u6210\u5458\u4EFB\u52A1\u5BF9\u8BDD\u7EE7\u7EED\u53D1\u6D88\u606F\uFF0C\u7ACB\u5373\u8FD4\u56DE\uFF1B\u4E0D\u4F1A\u81EA\u52A8\u7B49\u5F85\u6216\u901A\u77E5\u3002",
+      "\u6CA1\u6709 `conversationId`\uFF1A\u5728\u6210\u5458 B \u4E0A\u65B0\u5EFA\u5BF9\u8BDD\uFF0C\u7ACB\u5373\u8FD4\u56DE\u4F1A\u8BDDid\uFF1B\u4E0D\u4F1A\u540C\u6B65\u7B49\u5F85\u3002",
+      "\u6709 `conversationId`\uFF1A\u628A\u8FD9\u6761\u6D88\u606F\u7EE7\u7EED\u6295\u9012\u5230\u90A3\u4E2A\u5DF2\u6709\u5BF9\u8BDD\uFF0C\u7ACB\u5373\u8FD4\u56DE\uFF1B\u4E0D\u4F1A\u81EA\u52A8\u7B49\u5F85\u6216\u901A\u77E5\u3002",
+      "\u4F1A\u8BDDid\uFF08conversationId\uFF09\u662F\u8DE8\u8FDB\u7A0B\u7684\u7EE7\u7EED\u6295\u9012\u51ED\u636E\uFF1A\u91CD\u65B0\u542F\u52A8\u540E\u3001\u6216\u4E0D\u662F\u672C\u673A\u53D1\u8D77\u7684\u5BF9\u8BDD\uFF0C",
+      "\u53EA\u8981\u77E5\u9053\u4F1A\u8BDDid\uFF0C\u914D\u4E0A member \u5C31\u80FD\u7EE7\u7EED\uFF1B\u672C\u673A\u5DF2\u8DDF\u8E2A\u8BE5\u5BF9\u8BDD\u65F6 member \u53EF\u4EE5\u7701\u7565\u3002",
+      "`compress: true`\uFF1A\u7EE7\u7EED\u6295\u9012\u524D\u5148\u5728\u6210\u5458 B \u4E0A\u538B\u7F29\u8BE5\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\uFF08\u8981\u6C42\u5BF9\u8BDD\u5F53\u524D\u7A7A\u95F2\uFF09\uFF1B\u65B0\u5EFA\u5BF9\u8BDD\u4E0D\u9002\u7528\u3002",
       "\u7528 wait_member \u7B49\u7ED3\u679C\uFF1A\u6210\u5458\u6BCF\u7ED3\u675F\u4E00\u8F6E\u56DE\u7B54\u5C31\u8FD4\u56DE\u4E00\u6B21\uFF08state=progress \u8868\u793A\u8FD8\u4F1A\u7EE7\u7EED\uFF09\uFF0C",
-      "\u53EA\u6709 state=done \u624D\u662F\u6574\u6BB5\u4EFB\u52A1\u7684\u6700\u7EC8\u7ED3\u679C\uFF1B\u8D85\u65F6\uFF08state=running\uFF09\u7528\u540C\u4E00\u4E2A taskId \u63A5\u7740\u7B49\u3002",
-      "\u8FD4\u56DE\u503C\u5E26 data.logFile\uFF0C\u6307\u5411\u8BE5\u4EFB\u52A1\u7684\u65E5\u5FD7\u6587\u4EF6\u3002",
+      "\u53EA\u6709 state=done \u624D\u662F\u6574\u6BB5\u4EFB\u52A1\u7684\u6700\u7EC8\u7ED3\u679C\uFF1B\u8D85\u65F6\uFF08state=running\uFF09\u7528\u540C\u4E00\u4E2A conversationId \u63A5\u7740\u7B49\u3002",
+      "\u65B0\u5EFA\u5BF9\u8BDD\u524D\u4F1A\u6309\u7EC4\u7F51\u76F4\u8FDE\u914D\u7F6E\u627E\u5230\u76EE\u6807\u6210\u5458\u7684\u672C\u5730\u4EE3\u7406\u7AEF\u53E3\uFF0C\u7528 SSH \u5728\u76EE\u6807\u6210\u5458\u4E0A\u8DD1 mjs \u63A2\u9488\u5B9E\u6D4B\u5176\u5EF6\u8FDF\u548C\u4E0B\u884C\u5E26\u5BBD\uFF0C",
+      "\u628A\u4E00\u884C\u7ED3\u679C\u3001\u4EE3\u7406\u7AEF\u53E3\u548C hub \u7684 git token \u6CE8\u5165\u76EE\u6807\u4F1A\u8BDD\uFF08\u6CA1\u6709\u76F4\u8FDE\u914D\u7F6E\u5C31\u4E0D\u62A5\u51FA\u7F51\uFF09\uFF1B\u5E76\u7981\u7528\u8BE5\u4F1A\u8BDD\u7684 ask_user_question\uFF1A",
+      "\u6210\u5458\u9700\u8981\u4FE1\u606F\u65F6\u4F1A\u5728\u56DE\u590D\u91CC\u63D0\u95EE\u5E76\u505C\u4E0B\uFF0C\u7528 call_member \u5E26 conversationId \u56DE\u7B54\u3002",
+      "\u8FD4\u56DE\u503C\u5E26 data.logFile\uFF0C\u6307\u5411\u8BE5\u4EFB\u52A1\u7684\u65E5\u5FD7\u6587\u4EF6\uFF1B\u4F1A\u8BDDid\u5728 text \u548C data.conversationId \u4E2D\u3002",
       "",
       "\u6210\u5458\u901A\u8FC7 WireGuard \u6210\u5458\u53D1\u73B0\u89E3\u6790\uFF08id/name/IP \u5747\u53EF\uFF09\uFF1B\u76EE\u6807 B \u7684 8765 interop \u670D\u52A1\u5FC5\u987B\u53EF\u8FBE\uFF0Ctoken \u9ED8\u8BA4\u590D\u7528\u7F51\u5173\u5BC6\u7801\u3002"
     ].join("\n"),
     parameters: {
       type: "object",
       properties: {
-        action: {
-          type: "string",
-          enum: ["delegate", "send"],
-          description: "\u8981\u6267\u884C\u7684\u52A8\u4F5C\u3002"
-        },
-        member: { type: "string", description: "\u6210\u5458 id\u3001\u540D\u79F0\u3001VPN IP \u6216 http(s) URL\u3002" },
-        prompt: { type: "string", description: "delegate\uFF1A\u4EA4\u7ED9\u6210\u5458 B \u7684\u4EFB\u52A1\u3002" },
-        content: { type: "string", description: "send\uFF1A\u7EE7\u7EED\u53D1\u7ED9\u6210\u5458 B \u5BF9\u8BDD\u7684\u6D88\u606F\u3002" },
-        taskId: { type: "string", description: "send \u7684\u4EFB\u52A1 id\u3002" },
-        cwd: { type: "string", description: "delegate\uFF1A\u6210\u5458 B \u4E0A\u7684\u5DE5\u4F5C\u76EE\u5F55\uFF08\u7EDD\u5BF9\u8DEF\u5F84\uFF0C\u53EF\u7A7A\uFF09\u3002" },
-        workspace: { type: "string", description: "delegate\uFF1A\u6210\u5458 B \u4E0A\u7684\u4EFB\u52A1\u5DE5\u4F5C\u533A\u540D\u79F0\uFF1B\u5B9E\u9645\u76EE\u5F55\u56FA\u5B9A\u4E3A\u6210\u5458\u672C\u673A\u7684 ~/.dsh/workspaces/<name>\u3002\u548C cwd \u4E8C\u9009\u4E00\u3002" }
+        prompt: { type: "string", description: "\u53D1\u7ED9\u6210\u5458\u7684\u6D88\u606F\uFF1A\u65B0\u5EFA\u5BF9\u8BDD\u65F6\u662F\u521D\u59CB\u4EFB\u52A1\uFF0C\u7EE7\u7EED\u6295\u9012\u65F6\u662F\u8FD9\u4E00\u8F6E\u7684\u5185\u5BB9\u3002" },
+        member: { type: "string", description: "\u6210\u5458 id\u3001\u540D\u79F0\u3001VPN IP \u6216 http(s) URL\u3002\u65B0\u5EFA\u5BF9\u8BDD\u65F6\u5FC5\u586B\uFF1B\u7EE7\u7EED\u6295\u9012\u4E14\u672C\u673A\u5DF2\u8DDF\u8E2A\u8BE5\u5BF9\u8BDD\u65F6\u53EF\u7701\u7565\u3002" },
+        conversationId: { type: "string", description: "\u8981\u7EE7\u7EED\u7684\u4F1A\u8BDDid\uFF08call_member / wait_member \u8FD4\u56DE\uFF09\u3002\u7701\u7565\u5C31\u65B0\u5EFA\u5BF9\u8BDD\u3002" },
+        compress: { type: "boolean", description: "\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u65F6\uFF0C\u6295\u9012\u524D\u5148\u8BA9\u6210\u5458\u538B\u7F29\u8BE5\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\uFF1B\u8981\u6C42\u5BF9\u8BDD\u7A7A\u95F2\u3002" },
+        cwd: { type: "string", description: "\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u6210\u5458 B \u4E0A\u7684\u5DE5\u4F5C\u76EE\u5F55\uFF08\u7EDD\u5BF9\u8DEF\u5F84\uFF0C\u53EF\u7A7A\uFF09\u3002" },
+        workspace: { type: "string", description: "\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u6210\u5458 B \u4E0A\u7684\u4EFB\u52A1\u5DE5\u4F5C\u533A\u540D\u79F0\uFF1B\u5B9E\u9645\u76EE\u5F55\u56FA\u5B9A\u4E3A\u6210\u5458\u672C\u673A\u7684 ~/.dsh/workspaces/<name>\u3002\u548C cwd \u4E8C\u9009\u4E00\u3002" }
       },
-      required: ["action"],
+      required: ["prompt"],
       additionalProperties: false
     },
     output: {
@@ -13668,10 +14111,16 @@ function registerTools(ctx, toolsCtx, service) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      const action = String(args.action);
-      if (action === "delegate") {
-        if (typeof args.prompt !== "string" || args.prompt.trim() === "") throw new Error("this action needs prompt");
-        const task = await memberTasks.start({
+      if (typeof args.prompt !== "string" || args.prompt.trim() === "") throw new Error("prompt is required");
+      const conversationId = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
+      if (conversationId === "") {
+        if (args.compress === true) {
+          throw new Error("compress only applies when continuing an existing conversation: a new conversation has no context to compress");
+        }
+        if (typeof args.member !== "string" || args.member.trim() === "") {
+          throw new Error("member is required to start a new conversation");
+        }
+        const task2 = await memberTasks.start({
           member: args.member,
           prompt: args.prompt,
           cwd: args.cwd,
@@ -13680,56 +14129,72 @@ function registerTools(ctx, toolsCtx, service) {
           notify: false,
           signal: exec.signal
         });
-        const data = { ...task, logFile: memberTasks.logPath(task.id) };
+        const data2 = memberTaskData(task2, memberTasks);
         return {
-          ok: task.status !== "failed",
+          ok: task2.status !== "failed",
           text: [
-            `\u5DF2\u53D1\u8D77\u6210\u5458\u4EFB\u52A1 ${task.id}\uFF1A${task.member}\uFF08${task.memberIp}\uFF09\uFF0C\u5BF9\u8BDD ${task.conversationId}\u3002`,
-            `\u7528 wait_member \u7B49\u5F85\u7ED3\u679C\uFF1AtaskId="${task.id}"\uFF0CtimeoutMs=30000\uFF08\u53EF\u6309\u9700\u8C03\u5927\uFF0C\u6700\u5927 300000\uFF09\u3002`,
+            `\u5DF2\u53D1\u8D77\u6210\u5458\u4EFB\u52A1\uFF1A${task2.member}\uFF08${task2.memberIp}\uFF09\uFF0C\u4F1A\u8BDD ${task2.conversationId}\u3002`,
+            typeof task2.egressLine === "string" && task2.egressLine !== "" ? `\u51FA\u7F51\u5B9E\u6D4B\uFF1A${task2.egressLine}` : "",
+            `\u4F1A\u8BDDid\uFF1A${task2.conversationId}`,
+            `\u7528 wait_member \u7B49\u5F85\u7ED3\u679C\uFF1AconversationId="${task2.conversationId}"\uFF0CtimeoutMs=30000\uFF08\u53EF\u6309\u9700\u8C03\u5927\uFF0C\u6700\u5927 300000\uFF09\u3002`,
             "\u6210\u5458\u6BCF\u7ED3\u675F\u4E00\u8F6E\u56DE\u7B54\u5C31\u8FD4\u56DE\u4E00\u6B21\uFF08state=progress\uFF09\uFF0C\u62FF\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002",
-            task.status === "failed" ? `\u5F53\u524D\u72B6\u6001\uFF1Afailed\uFF0C${task.error ?? ""}` : "",
-            `\u65E5\u5FD7\uFF1A${data.logFile}`
+            `\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\uFF1Acall_member { "member": ${JSON.stringify(String(task2.member))}, "conversationId": ${JSON.stringify(String(task2.conversationId))}, "prompt": "..." }\u3002`,
+            task2.status === "failed" ? `\u5F53\u524D\u72B6\u6001\uFF1Afailed\uFF0C${task2.error ?? ""}` : "",
+            `\u65E5\u5FD7\uFF1A${data2.logFile}`
           ].filter((line) => line !== "").join("\n"),
-          data
+          data: data2
         };
       }
-      if (action === "send") {
-        if (typeof args.taskId !== "string" || args.taskId === "") throw new Error("send needs taskId");
-        if (typeof args.content !== "string" || args.content.trim() === "") throw new Error("send needs content");
-        const task = await memberTasks.send(args.taskId, args.content, exec.signal);
-        const data = { ...task, logFile: memberTasks.logPath(task.id) };
-        return {
-          ok: true,
-          text: [
-            `\u5DF2\u53D1\u9001\u5230 ${task.member} \u7684\u5BF9\u8BDD ${task.conversationId}\u3002`,
-            `\u7528 wait_member \u7B49\u5F85\u56DE\u590D\uFF1AtaskId="${task.id}"\uFF0CtimeoutMs=30000\uFF1B\u540C\u6837\u6BCF\u8F6E\u8FD4\u56DE\u4E00\u6B21\uFF0Cstate=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
-            `\u65E5\u5FD7\uFF1A${data.logFile}`
-          ].join("\n"),
-          data
-        };
-      }
-      throw new Error(`unknown action: ${action}`);
+      const hasCwd = typeof args.cwd === "string" && args.cwd.trim() !== "";
+      const hasWorkspace = typeof args.workspace === "string" && args.workspace.trim() !== "";
+      if (hasCwd || hasWorkspace) throw new Error("cwd/workspace only apply to a new conversation");
+      const task = await memberTasks.send({
+        conversationId,
+        member: args.member,
+        prompt: args.prompt,
+        compress: args.compress === true,
+        agent: exec.agent,
+        signal: exec.signal
+      });
+      const data = memberTaskData(task, memberTasks);
+      const compaction = task.lastCompaction;
+      const compactionLine = args.compress === true ? compaction?.compacted === true ? `\u4E0A\u4E0B\u6587\u538B\u7F29\uFF1A\u5DF2\u538B\u7F29\uFF0C\u66FF\u6362 ${String(compaction.shadowedCount)} \u9879\u5386\u53F2\uFF08\u7EA6 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens\uFF09\u3002` : "\u4E0A\u4E0B\u6587\u538B\u7F29\uFF1A\u6CA1\u6709\u53EF\u538B\u7F29\u7684\u5386\u53F2\u3002" : "";
+      return {
+        ok: true,
+        text: [
+          `\u5DF2\u53D1\u9001\u5230 ${task.member}\uFF08${task.memberIp}\uFF09\u7684\u5BF9\u8BDD ${task.conversationId}\u3002`,
+          `\u4F1A\u8BDDid\uFF1A${task.conversationId}`,
+          compactionLine,
+          formatContextLine(task.context),
+          `\u7528 wait_member \u7B49\u5F85\u56DE\u590D\uFF1AconversationId="${task.conversationId}"\uFF0CtimeoutMs=30000\uFF1B\u540C\u6837\u6BCF\u8F6E\u8FD4\u56DE\u4E00\u6B21\uFF0Cstate=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
+          `\u65E5\u5FD7\uFF1A${data.logFile}`
+        ].filter((line) => line !== "").join("\n"),
+        data
+      };
     }
   };
   const waitMemberDefinition = {
     name: "wait_member",
     description: [
-      "\u7B49\u5F85\u4E00\u4E2A\u7531 call_member \u53D1\u8D77\u7684\u6210\u5458\u4EFB\u52A1\uFF0C\u6700\u591A timeoutMs \u6BEB\u79D2\u3002",
+      "\u7B49\u5F85\u4E00\u4E2A\u7531 call_member \u53D1\u8D77\u7684\u6210\u5458\u4F1A\u8BDD\uFF0C\u6700\u591A timeoutMs \u6BEB\u79D2\u3002",
       "",
+      "conversationId \u5C31\u662F call_member \u8FD4\u56DE\u7684\u4F1A\u8BDDid\uFF1B\u63D2\u4EF6\u5185\u90E8\u7684 task id \u4E0D\u5BF9\u5916\u66B4\u9732\u3002",
       "\u6210\u5458\u5BF9\u8BDD\u4E00\u6709\u65B0\u56DE\u590D\uFF08\u4E00\u8F6E\u7ED3\u675F\uFF09\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF0C\u4E0D\u7B49\u5230\u6574\u6BB5\u4EFB\u52A1\u7ED3\u675F\uFF1B\u8FD4\u56DE\u503C\u5E26 state\uFF1A",
-      "progress\uFF1A\u672C\u8F6E\u56DE\u590D\u5DF2\u8FD4\u56DE\uFF0C\u4F46\u6210\u5458\u8FD8\u4F1A\u7EE7\u7EED\uFF08\u53EF\u80FD\u8FD8\u6709\u672A\u5B8C\u6210\u7684\u5B50\u4EE3\u7406\uFF09\uFF1B\u7528\u540C\u4E00\u4E2A taskId \u518D\u7B49\u4E0B\u4E00\u8F6E\u3002",
-      "done\uFF1A\u6574\u6BB5\u4EFB\u52A1\u5B8C\u6210\uFF0C\u8FD4\u56DE\u6700\u7EC8\u6587\u672C\u3002",
-      "\u8D85\u65F6\uFF1Adone=false\u3001state=running\uFF0C\u7528\u540C\u4E00\u4E2A taskId \u7EE7\u7EED\u7B49\u5373\u53EF\uFF0C\u671F\u95F4\u4EA7\u751F\u7684\u56DE\u590D\u4E0D\u4F1A\u4E22\u3002",
-      "\u5931\u8D25/\u4E2D\u65AD\uFF1A\u8FD4\u56DE\u9519\u8BEF\uFF1B\u76EE\u6807 DSH \u91CD\u542F\u65F6\u53EF\u4EE5\u7528 call_member send \u7EE7\u7EED\u8BE5\u5BF9\u8BDD\u3002",
+      "progress\uFF1A\u672C\u8F6E\u56DE\u590D\u5DF2\u8FD4\u56DE\uFF0C\u4F46\u6210\u5458\u8FD8\u4F1A\u7EE7\u7EED\uFF08\u53EF\u80FD\u8FD8\u6709\u672A\u5B8C\u6210\u7684\u5B50\u4EE3\u7406\uFF09\uFF1B\u7528\u540C\u4E00\u4E2A conversationId \u518D\u7B49\u4E0B\u4E00\u8F6E\u3002",
+      "done\uFF1A\u6574\u6BB5\u4EFB\u52A1\u5B8C\u6210\uFF0C\u8FD4\u56DE\u6700\u7EC8\u6587\u672C\u3001\u4F1A\u8BDDid\u548C\u5F53\u524D\u4E0A\u4E0B\u6587\u5360\u7528\u3002",
+      "\u8D85\u65F6\uFF1Adone=false\u3001state=running\uFF0C\u7528\u540C\u4E00\u4E2A conversationId \u7EE7\u7EED\u7B49\u5373\u53EF\uFF0C\u671F\u95F4\u4EA7\u751F\u7684\u56DE\u590D\u4E0D\u4F1A\u4E22\u3002",
+      "\u5931\u8D25/\u4E2D\u65AD\uFF1A\u8FD4\u56DE\u9519\u8BEF\uFF1B\u76EE\u6807 DSH \u91CD\u542F\u65F6\u53EF\u4EE5\u7528 call_member \u5E26 conversationId \u7EE7\u7EED\u8BE5\u5BF9\u8BDD\u3002",
+      "state=done \u65F6\u53EF\u4EE5\u7528\u8FD4\u56DE\u7684\u4F1A\u8BDDid\u7EE7\u7EED\u6295\u9012\uFF1Acall_member { conversationId, prompt }\uFF1B",
+      '\u4E0A\u4E0B\u6587\u5360\u7528\u8D85\u8FC7 20% \u65F6\u4F1A\u5EFA\u8BAE\u4E0B\u6B21\u6295\u9012\u52A0 "compress": true\uFF0C\u5148\u538B\u7F29\u518D\u6295\u9012\u3002',
       "\u6BCF\u6B21\u8C03\u7528\u6709\u4E0A\u9650\uFF08\u9ED8\u8BA4 30000\uFF0C\u6700\u5927 300000 \u6BEB\u79D2\uFF09\uFF0C\u4E0D\u4F1A\u65E0\u9650\u963B\u585E\uFF1B\u7528\u6237\u505C\u6B62\u5F53\u524D\u5BF9\u8BDD\u4F1A\u4E2D\u6B62\u672C\u6B21\u7B49\u5F85\u3002"
     ].join("\n"),
     parameters: {
       type: "object",
       properties: {
-        taskId: { type: "string", description: "call_member \u8FD4\u56DE\u7684 taskId\u3002" },
+        conversationId: { type: "string", description: "\u8981\u7B49\u5F85\u7684\u4F1A\u8BDDid\uFF08call_member \u8FD4\u56DE\uFF09\u3002" },
         timeoutMs: { type: "integer", minimum: 1e3, maximum: 3e5, description: "\u672C\u6B21\u7B49\u5F85\u4E0A\u9650\uFF0C\u9ED8\u8BA4 30000 \u6BEB\u79D2\u3002" }
       },
-      required: ["taskId"],
+      required: ["conversationId"],
       additionalProperties: false
     },
     output: {
@@ -13742,30 +14207,32 @@ function registerTools(ctx, toolsCtx, service) {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const timeoutMs = Number.isSafeInteger(args.timeoutMs) ? args.timeoutMs : 3e4;
-      const result = await memberTasks.wait(args.taskId, { timeoutMs, signal: exec.signal });
+      const result = await memberTasks.wait(args.conversationId, { timeoutMs, signal: exec.signal });
       const task = result.task;
       const replies = Array.isArray(result.replies) ? result.replies : [];
       const replyText = replies.map((reply) => reply.text).join("\n\n").trim();
       const data = {
-        ...task,
+        ...memberTaskData(task, memberTasks),
         done: result.done,
         timedOut: result.timedOut,
         state: result.state,
         text: replyText,
-        replies,
-        logFile: memberTasks.logPath(task.id)
+        replies
       };
       const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `\u7B2C ${String(task.turns)} \u8F6E` : "";
-      const where = `${task.member}\uFF08${task.memberIp}\uFF09\uFF0C\u5BF9\u8BDD ${task.conversationId}`;
+      const where = `${task.member}\uFF08${task.memberIp}\uFF09`;
+      const contextLine = formatContextLine(task.context);
+      const advice = formatCompactionAdvice(task.context);
       if (!result.done && result.state === "progress") {
         return {
           ok: true,
           text: [
-            `\u6210\u5458\u4EFB\u52A1 ${task.id} \u8FDB\u884C\u4E2D${turn === "" ? "" : `\uFF08${turn}\uFF0C\u5C1A\u672A\u7ED3\u675F\uFF09`}\uFF1A${where}\u3002`,
+            `\u6210\u5458\u4F1A\u8BDD ${task.conversationId} \u8FDB\u884C\u4E2D${turn === "" ? "" : `\uFF08${turn}\uFF0C\u5C1A\u672A\u7ED3\u675F\uFF09`}\uFF1A${where}\u3002`,
             replyText !== "" ? `\u672C\u8F6E\u56DE\u590D\uFF1A
 ${replyText}` : "",
             "\u6210\u5458\u8FD8\u4F1A\u7EE7\u7EED\uFF08\u53EF\u80FD\u8FD8\u6709\u5B50\u4EE3\u7406\u5728\u8DD1\uFF09\uFF0C\u8FD9\u4E0D\u662F\u6700\u7EC8\u7ED3\u679C\u3002",
-            `\u8BF7\u7EE7\u7EED\u8C03\u7528 wait_member \u7B49\u4E0B\u4E00\u8F6E\uFF1AtaskId="${task.id}"\uFF0CtimeoutMs=30000\uFF1B\u6536\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
+            contextLine,
+            `\u8BF7\u7EE7\u7EED\u8C03\u7528 wait_member \u7B49\u4E0B\u4E00\u8F6E\uFF1AconversationId="${task.conversationId}"\uFF0CtimeoutMs=30000\uFF1B\u6536\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
             `\u65E5\u5FD7\uFF1A${data.logFile}`
           ].filter((line) => line !== "").join("\n"),
           data
@@ -13776,12 +14243,16 @@ ${replyText}` : "",
         return {
           ok: true,
           text: [
-            `\u6210\u5458\u4EFB\u52A1 ${task.id} \u5DF2\u5B8C\u6210\uFF1A${where}\u3002`,
-            "\uFF08\u4EFB\u52A1\u5DF2\u7ED3\u675F\uFF0C\u4E0D\u9700\u8981\u518D\u8C03\u7528 wait_member\uFF1B\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\u7528 call_member send\u3002\uFF09",
+            `\u6210\u5458\u4F1A\u8BDD ${task.conversationId} \u5DF2\u5B8C\u6210\uFF1A${where}\u3002`,
+            "\uFF08\u4EFB\u52A1\u5DF2\u7ED3\u675F\uFF0C\u4E0D\u9700\u8981\u518D\u8C03\u7528 wait_member\uFF1B\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\u7528 call_member \u5E26 conversationId\u3002\uFF09",
+            `\u4F1A\u8BDDid\uFF1A${task.conversationId}`,
+            `\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\uFF1Acall_member { "member": ${JSON.stringify(String(task.member))}, "conversationId": ${JSON.stringify(String(task.conversationId))}, "prompt": "..." }`,
+            contextLine,
+            advice,
             "\u7ED3\u679C\uFF1A",
             finalText !== "" ? finalText : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
             `\u65E5\u5FD7\uFF1A${data.logFile}`
-          ].join("\n"),
+          ].filter((line) => line !== "").join("\n"),
           data
         };
       }
@@ -13790,9 +14261,10 @@ ${replyText}` : "",
         return {
           ok: true,
           text: [
-            `\u6210\u5458\u4EFB\u52A1 ${task.id} \u4ECD\u5728\u8FD0\u884C${turn === "" ? "" : `\uFF08${turn}\uFF0C\u5C1A\u672A\u7ED3\u675F\uFF09`}\uFF1A${where}\u3002`,
+            `\u6210\u5458\u4F1A\u8BDD ${task.conversationId} \u4ECD\u5728\u8FD0\u884C${turn === "" ? "" : `\uFF08${turn}\uFF0C\u5C1A\u672A\u7ED3\u675F\uFF09`}\uFF1A${where}\u3002`,
             "\u8FD9\u6BB5\u65F6\u95F4\u6CA1\u6709\u65B0\u56DE\u590D\uFF0C\u4F46\u4EFB\u52A1\u6CA1\u6709\u7ED3\u675F\u3001\u671F\u95F4\u7684\u56DE\u590D\u4E5F\u4E0D\u4F1A\u4E22\u3002",
-            `\u8BF7\u7EE7\u7EED\u8C03\u7528 wait_member\uFF1AtaskId="${task.id}"\uFF0CtimeoutMs=${String(effective)}\uFF1B\u6536\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
+            contextLine,
+            `\u8BF7\u7EE7\u7EED\u8C03\u7528 wait_member\uFF1AconversationId="${task.conversationId}"\uFF0CtimeoutMs=${String(effective)}\uFF1B\u6536\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
             typeof task.lastText === "string" && task.lastText !== "" ? `\u6700\u8FD1\u8F93\u51FA\uFF1A${task.lastText.slice(0, 500)}` : "",
             `\u65E5\u5FD7\uFF1A${data.logFile}`
           ].filter((line) => line !== "").join("\n"),
@@ -13802,11 +14274,13 @@ ${replyText}` : "",
       return {
         ok: false,
         text: [
-          `\u6210\u5458\u4EFB\u52A1 ${task.id} ${task.status}\uFF08\u5DF2\u7ED3\u675F\uFF09\uFF1A${where}\u3002`,
+          `\u6210\u5458\u4F1A\u8BDD ${task.conversationId} ${task.status}\uFF08\u5DF2\u7ED3\u675F\uFF09\uFF1A${where}\u3002`,
+          `\u4F1A\u8BDDid\uFF1A${task.conversationId}`,
           `\u539F\u56E0\uFF1A${task.error ?? "unknown"}`,
           replyText !== "" ? `\u4E2D\u65AD\u524D\u7684\u56DE\u590D\uFF1A
 ${replyText}` : "",
-          task.interrupted === true ? "\u76EE\u6807\u6210\u5458\u7684 DSH \u91CD\u542F\u6216\u8FD0\u884C\u65F6\u9000\u51FA\u6253\u65AD\u4E86\u8FD9\u4E00\u8F6E\uFF1B\u53EF\u4EE5\u7528 call_member send \u540C\u4E00\u4E2A taskId \u7EE7\u7EED\u3002" : "",
+          task.interrupted === true ? "\u76EE\u6807\u6210\u5458\u7684 DSH \u91CD\u542F\u6216\u8FD0\u884C\u65F6\u9000\u51FA\u6253\u65AD\u4E86\u8FD9\u4E00\u8F6E\uFF1B\u53EF\u4EE5\u7528 call_member \u5E26\u540C\u4E00\u4E2A conversationId \u7EE7\u7EED\u3002" : "",
+          contextLine,
           `\u65E5\u5FD7\uFF1A${data.logFile}`
         ].filter((line) => line !== "").join("\n"),
         data
@@ -13887,6 +14361,38 @@ sha256 ${data.sha256}
     }
   }
 }
+function memberTaskData(task, memberTasks) {
+  const { id: taskId, ...fields } = task;
+  return { ...fields, logFile: memberTasks.logPath(taskId) };
+}
+var CONTEXT_COMPACT_THRESHOLD = 20;
+function formatTokens(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0) return "?";
+  if (amount < 1e3) return String(Math.round(amount));
+  if (amount < 1e6) return `${formatOneDecimal(amount / 1e3)}k`;
+  return `${formatOneDecimal(amount / 1e6)}M`;
+}
+function formatOneDecimal(value) {
+  return value >= 100 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/u, "");
+}
+function formatContextLine(context) {
+  if (context === null || typeof context !== "object") return "";
+  const used = Number.isFinite(context.usedTokens) ? context.usedTokens : null;
+  const max = Number.isFinite(context.maxTokens) ? context.maxTokens : null;
+  const percent = Number.isFinite(context.percent) ? context.percent : null;
+  if (used === null && max === null) return "";
+  const percentText = percent === null ? "" : `\uFF08${formatOneDecimal(percent)}%\uFF09`;
+  if (max === null) return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\uFF1A\u5DF2\u7528 ${formatTokens(used)} tokens${percentText}\uFF08\u6210\u5458\u672A\u62A5\u544A\u4E0A\u9650\uFF09`;
+  if (used === null) return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\uFF1A\u4E0A\u9650 ${formatTokens(max)} tokens\uFF08\u6210\u5458\u672A\u62A5\u544A\u5DF2\u7528\uFF09`;
+  return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\uFF1A${formatTokens(used)} / ${formatTokens(max)} tokens${percentText}`;
+}
+function formatCompactionAdvice(context) {
+  if (context === null || typeof context !== "object") return "";
+  const percent = Number.isFinite(context.percent) ? context.percent : null;
+  if (percent === null || percent <= CONTEXT_COMPACT_THRESHOLD) return "";
+  return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\u5DF2\u7528 ${formatOneDecimal(percent)}%\uFF0C\u8D85\u8FC7 ${String(CONTEXT_COMPACT_THRESHOLD)}%\uFF1A\u4E0B\u6B21\u6295\u9012\u65F6\u5EFA\u8BAE\u52A0 "compress": true\uFF0C\u5148\u538B\u7F29\u4E0A\u4E0B\u6587\u518D\u6295\u9012\u3002`;
+}
 function formatBuild(job) {
   const lines = [
     `${job.id}  ${job.status}  ${job.phase}`,
@@ -13951,13 +14457,13 @@ function formatBytes3(value) {
 }
 
 // src/lib/interop-service.mjs
-import { execFile as execFile3 } from "node:child_process";
+import { execFile as execFile4 } from "node:child_process";
 import { createHash as createHash9, randomBytes as randomBytes3, randomUUID as randomUUID2, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 import { existsSync as existsSync15, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, writeFileSync } from "node:fs";
 import http3 from "node:http";
 import { homedir as homedir3 } from "node:os";
 import path27 from "node:path";
-import { promisify as promisify3 } from "node:util";
+import { promisify as promisify4 } from "node:util";
 
 // code/shared/conversation-meta.mjs
 var TITLE_LIMIT = 80;
@@ -14114,7 +14620,14 @@ function summarizeReplies(replies) {
 }
 
 // src/lib/interop-service.mjs
-var execFileAsync2 = promisify3(execFile3);
+var execFileAsync3 = promisify4(execFile4);
+var QUESTION_TOOL = "ask_user_question";
+var MEMBER_INTERACTION_RULE = [
+  "\u672C\u4F1A\u8BDD\u7981\u7528\u4E86 ask_user_question\uFF1A\u6CA1\u6709\u53EF\u4EE5\u5E94\u7B54\u7684\u7528\u6237\uFF0C\u63D0\u95EE\u4E0D\u4F1A\u5F97\u5230\u56DE\u7B54\u3002",
+  "\u9700\u8981\u989D\u5916\u4FE1\u606F\u6216\u51B3\u7B56\u65F6\uFF0C\u5728\u56DE\u590D\u91CC\u628A\u95EE\u9898\u5199\u6E05\u695A\u5E76\u7ED3\u675F\u8FD9\u4E00\u8F6E\uFF1B\u59D4\u6D3E\u65B9\u4F1A\u7528\u540C\u4E00\u4F1A\u8BDD\u7EE7\u7EED\u56DE\u7B54\u3002"
+].join("\n");
+var INTERACTION_CONTEXT_ORDER = 125;
+var ENVIRONMENT_CONTEXT_ORDER = 130;
 var MAX_EVENTS = 5e3;
 var EMBEDDED_INTEROP_MARKER = "dsh-mesh-embedded-interop-v1";
 var MAX_BODY = 1024 * 1024;
@@ -14348,6 +14861,13 @@ function contentBlocks(value) {
 function userMessage(blocks) {
   return { id: randomUUID2(), role: "user", content: blocks, source: { kind: "user" } };
 }
+function nonNegativeOrNull(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+function summaryText2(value) {
+  if (!Array.isArray(value)) return "";
+  return value.filter((block) => block !== null && typeof block === "object" && block.type === "text" && typeof block.text === "string").map((block) => block.text).join("\n").trim();
+}
 function createInteropService(options) {
   const ctx = options.ctx;
   const config = options.config ?? {};
@@ -14405,6 +14925,36 @@ function createInteropService(options) {
       initiator: conversation.initiator ?? null,
       turns: Number.isSafeInteger(conversation.turns) ? conversation.turns : 0,
       replySeq: Number.isSafeInteger(conversation.replySeq) ? conversation.replySeq : 0
+    };
+  }
+  function contextOf(conversation) {
+    const session = conversation?.agent?.session;
+    if (session === void 0 || session === null) return null;
+    let pressure;
+    const projections = typeof ctx.get === "function" ? ctx.get("sessionProjections") : void 0;
+    if (typeof projections?.snapshot === "function") {
+      try {
+        pressure = projections.snapshot(session, ["contextPressure"]).values.contextPressure;
+      } catch {
+      }
+    }
+    if (pressure === void 0) {
+      const meter = typeof ctx.get === "function" ? ctx.get("tokenMeter") : void 0;
+      if (typeof meter?.contextPressure === "function") {
+        try {
+          pressure = meter.contextPressure(session);
+        } catch {
+        }
+      }
+    }
+    if (pressure === null || typeof pressure !== "object") return null;
+    const usedTokens = nonNegativeOrNull(pressure.projectedTokens) ?? nonNegativeOrNull(pressure.pressureTokens);
+    const maxTokens = nonNegativeOrNull(pressure.contextWindow);
+    if (usedTokens === null && maxTokens === null) return null;
+    return {
+      usedTokens,
+      maxTokens,
+      percent: usedTokens !== null && maxTokens !== null && maxTokens > 0 ? Math.round(usedTokens / maxTokens * 1e3) / 10 : null
     };
   }
   function updateConversation(conversation, patch) {
@@ -14587,12 +15137,16 @@ data: ${JSON.stringify(payload)}
     }
     try {
       const composition = await resolveAgentPreset();
+      const environment = typeof conversation.meshContext === "string" ? conversation.meshContext : "";
       const handle2 = await ctx.agents.resume({
         resumeSessionId: conversation.sessionId,
-        ...composition.presets === void 0 || composition.id === "" ? {} : {
-          setup: async (agentCtx) => {
+        // Resume re-runs setup on the restored session, so the denied question
+        // tool and the environment note come back with it.
+        setup: async (agentCtx) => {
+          if (composition.presets !== void 0 && composition.id !== "") {
             await composition.presets.mount(agentCtx, composition.id);
           }
+          applyMemberEnvironment(agentCtx, environment);
         }
       });
       handles.set(conversation.id, handle2);
@@ -14637,6 +15191,38 @@ data: ${JSON.stringify(payload)}
       }]]);
     } catch (error) {
       log(`could not title ${conversation.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  function applyMemberEnvironment(agentCtx, text) {
+    if (agentCtx === null || typeof agentCtx !== "object") return;
+    const tools = agentCtx.tools;
+    if (tools !== void 0 && tools !== null && typeof tools.restrict === "function") {
+      try {
+        tools.restrict({ deny: [QUESTION_TOOL] });
+      } catch (error) {
+        log(`could not disable ${QUESTION_TOOL}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const systemPrompt = agentCtx.systemPrompt;
+    if (systemPrompt !== void 0 && systemPrompt !== null && typeof systemPrompt.context === "function") {
+      try {
+        systemPrompt.context({
+          name: "mesh:interaction",
+          order: INTERACTION_CONTEXT_ORDER,
+          interpolate: false,
+          text: MEMBER_INTERACTION_RULE
+        });
+        if (text !== "") {
+          systemPrompt.context({
+            name: "mesh:environment",
+            order: ENVIRONMENT_CONTEXT_ORDER,
+            interpolate: false,
+            text
+          });
+        }
+      } catch (error) {
+        log(`could not inject the member environment: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
   async function createConversation(request) {
@@ -14684,6 +15270,8 @@ data: ${JSON.stringify(payload)}
     conversations.set(id, conversation);
     bySession.set(id, conversation);
     const composition = await resolveAgentPreset();
+    const environment = formatMemberMesh(request.mesh);
+    conversation.meshContext = environment;
     let handle2 = null;
     try {
       handle2 = await ctx.agents.create({
@@ -14701,6 +15289,7 @@ data: ${JSON.stringify(payload)}
             await composition.presets.mount(agentCtx, composition.id);
           }
           applyPreset(agent);
+          applyMemberEnvironment(agentCtx, environment);
         }
       });
       handles.set(id, handle2);
@@ -14741,6 +15330,33 @@ data: ${JSON.stringify(payload)}
     broadcast(conversation, { type: "message.accepted", sessionId: conversation.sessionId, ok: true });
     scheduleSave();
     return { accepted: true };
+  }
+  async function compactConversation(conversation) {
+    const agent = await ensureAgent(conversation);
+    const presets = typeof ctx.get === "function" ? ctx.get("agentPresets") : void 0;
+    const scoped = typeof presets?.serviceFor === "function" ? presets.serviceFor(agent, "compaction") : void 0;
+    const compaction = scoped ?? (typeof ctx.get === "function" ? ctx.get("compaction") : void 0);
+    if (compaction === void 0 || typeof compaction.compactNow !== "function") {
+      throw httpError(501, "compaction_unavailable", "this member has no compaction service");
+    }
+    if (agent.status !== "idle") {
+      throw httpError(409, "conversation_busy", "the conversation is running; wait until it is idle before compacting");
+    }
+    const timeoutMs = Number.isSafeInteger(settings.requestTimeoutMs) && settings.requestTimeoutMs > 0 ? settings.requestTimeoutMs : 18e4;
+    try {
+      return await compaction.compactNow(agent, AbortSignal.timeout(timeoutMs));
+    } catch (error) {
+      const code = typeof error?.code === "string" ? error.code : "";
+      if (code === "busy") {
+        throw httpError(409, "conversation_busy", "the conversation is not idle or another compaction is running");
+      }
+      if (code === "cancelled") {
+        throw httpError(408, "compaction_cancelled", "compaction was cancelled");
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      log(`compaction failed for ${conversation.id}: ${message}`);
+      throw httpError(502, "compaction_failed", `compaction failed${code === "" ? "" : ` (${code})`}: ${message}`);
+    }
   }
   function nextSignal(conversation, ms) {
     if (!(conversation.waiters instanceof Set)) conversation.waiters = /* @__PURE__ */ new Set();
@@ -14929,7 +15545,7 @@ data: ${JSON.stringify(payload)}
         json(response, 201, { ok: true, conversation: publicConversation(conversation2) });
         return;
       }
-      const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result))?$/u.exec(url.pathname);
+      const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact))?$/u.exec(url.pathname);
       if (match === null) {
         fail(response, 404, "not_found", "Unknown endpoint.");
         return;
@@ -14987,7 +15603,29 @@ data: ${JSON.stringify(event)}
       if (request.method === "POST" && (suffix === "messages" || suffix === "notify")) {
         const body = await readJson3(request);
         const receipt = await sendMessage(conversation, body);
-        json(response, 202, { ok: true, conversation: publicConversation(conversation), receipt });
+        json(response, 202, {
+          ok: true,
+          conversation: publicConversation(conversation),
+          context: contextOf(conversation),
+          receipt
+        });
+        return;
+      }
+      if (request.method === "POST" && suffix === "compact") {
+        const result = await compactConversation(conversation);
+        json(response, 200, {
+          ok: true,
+          compacted: result !== null,
+          ...result === null ? {} : {
+            summary: summaryText2(result.summary),
+            shadowedCount: Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs.length : 0,
+            shadowedTokenCount: Number.isSafeInteger(result.shadowedTokenCount) ? result.shadowedTokenCount : null,
+            startSeq: result.startSeq,
+            summarySeq: result.summarySeq,
+            endSeq: result.endSeq
+          },
+          context: contextOf(conversation)
+        });
         return;
       }
       if (request.method === "POST" && suffix === "wait") {
@@ -15004,7 +15642,8 @@ data: ${JSON.stringify(event)}
           turn: Number.isSafeInteger(result.turn) ? result.turn : turnsOf(conversation),
           seq: Number.isSafeInteger(result.seq) ? result.seq : seqOf(conversation),
           replies: Array.isArray(result.replies) ? result.replies : [],
-          conversation: publicConversation(conversation)
+          conversation: publicConversation(conversation),
+          context: contextOf(conversation)
         });
         return;
       }

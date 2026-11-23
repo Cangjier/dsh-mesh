@@ -1,9 +1,10 @@
 /**
  * Model-visible tools for the mesh plugin.
  *
- * Six tools, one behaviour each:
+ * Six tools:
  *   build        deterministic source build, waits for the final state
  *   deploy       SSH blue-green deployment, waits for the final state
+ *   repack       refresh an existing offline package from this checkout
  *   members      read-only WireGuard member discovery
  *   call_member  start / continue a conversation on another member
  *   wait_member  bounded wait for one member task
@@ -165,30 +166,31 @@ export function registerTools(ctx, toolsCtx, service) {
     description: [
       '把任务交给另一个 WireGuard 成员上的 DSH 对话。',
       '',
-      '`delegate`：在成员 B 上创建对话并立即返回 taskId；不会同步等待。',
-      '`send`：向已经创建的成员任务对话继续发消息，立即返回；不会自动等待或通知。',
+      '没有 `conversationId`：在成员 B 上新建对话，立即返回会话id；不会同步等待。',
+      '有 `conversationId`：把这条消息继续投递到那个已有对话，立即返回；不会自动等待或通知。',
+      '会话id（conversationId）是跨进程的继续投递凭据：重新启动后、或不是本机发起的对话，',
+      '只要知道会话id，配上 member 就能继续；本机已跟踪该对话时 member 可以省略。',
+      '`compress: true`：继续投递前先在成员 B 上压缩该对话的上下文（要求对话当前空闲）；新建对话不适用。',
       '用 wait_member 等结果：成员每结束一轮回答就返回一次（state=progress 表示还会继续），',
-      '只有 state=done 才是整段任务的最终结果；超时（state=running）用同一个 taskId 接着等。',
-      '返回值带 data.logFile，指向该任务的日志文件。',
+      '只有 state=done 才是整段任务的最终结果；超时（state=running）用同一个 conversationId 接着等。',
+      '新建对话前会按组网直连配置找到目标成员的本地代理端口，用 SSH 在目标成员上跑 mjs 探针实测其延迟和下行带宽，',
+      '把一行结果、代理端口和 hub 的 git token 注入目标会话（没有直连配置就不报出网）；并禁用该会话的 ask_user_question：',
+      '成员需要信息时会在回复里提问并停下，用 call_member 带 conversationId 回答。',
+      '返回值带 data.logFile，指向该任务的日志文件；会话id在 text 和 data.conversationId 中。',
       '',
       '成员通过 WireGuard 成员发现解析（id/name/IP 均可）；目标 B 的 8765 interop 服务必须可达，token 默认复用网关密码。',
     ].join('\n'),
     parameters: {
       type: 'object',
       properties: {
-        action: {
-          type: 'string',
-          enum: ['delegate', 'send'],
-          description: '要执行的动作。',
-        },
-        member: { type: 'string', description: '成员 id、名称、VPN IP 或 http(s) URL。' },
-        prompt: { type: 'string', description: 'delegate：交给成员 B 的任务。' },
-        content: { type: 'string', description: 'send：继续发给成员 B 对话的消息。' },
-        taskId: { type: 'string', description: 'send 的任务 id。' },
-        cwd: { type: 'string', description: 'delegate：成员 B 上的工作目录（绝对路径，可空）。' },
-        workspace: { type: 'string', description: 'delegate：成员 B 上的任务工作区名称；实际目录固定为成员本机的 ~/.dsh/workspaces/<name>。和 cwd 二选一。' },
+        prompt: { type: 'string', description: '发给成员的消息：新建对话时是初始任务，继续投递时是这一轮的内容。' },
+        member: { type: 'string', description: '成员 id、名称、VPN IP 或 http(s) URL。新建对话时必填；继续投递且本机已跟踪该对话时可省略。' },
+        conversationId: { type: 'string', description: '要继续的会话id（call_member / wait_member 返回）。省略就新建对话。' },
+        compress: { type: 'boolean', description: '继续已有对话时，投递前先让成员压缩该对话的上下文；要求对话空闲。' },
+        cwd: { type: 'string', description: '新建对话：成员 B 上的工作目录（绝对路径，可空）。' },
+        workspace: { type: 'string', description: '新建对话：成员 B 上的任务工作区名称；实际目录固定为成员本机的 ~/.dsh/workspaces/<name>。和 cwd 二选一。' },
       },
-      required: ['action'],
+      required: ['prompt'],
       additionalProperties: false,
     },
     output: {
@@ -200,9 +202,15 @@ export function registerTools(ctx, toolsCtx, service) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      const action = String(args.action)
-      if (action === 'delegate') {
-        if (typeof args.prompt !== 'string' || args.prompt.trim() === '') throw new Error('this action needs prompt')
+      if (typeof args.prompt !== 'string' || args.prompt.trim() === '') throw new Error('prompt is required')
+      const conversationId = typeof args.conversationId === 'string' ? args.conversationId.trim() : ''
+      if (conversationId === '') {
+        if (args.compress === true) {
+          throw new Error('compress only applies when continuing an existing conversation: a new conversation has no context to compress')
+        }
+        if (typeof args.member !== 'string' || args.member.trim() === '') {
+          throw new Error('member is required to start a new conversation')
+        }
         const task = await memberTasks.start({
           member: args.member,
           prompt: args.prompt,
@@ -212,57 +220,77 @@ export function registerTools(ctx, toolsCtx, service) {
           notify: false,
           signal: exec.signal,
         })
-        const data = { ...task, logFile: memberTasks.logPath(task.id) }
+        const data = memberTaskData(task, memberTasks)
         return {
           ok: task.status !== 'failed',
           text: [
-            `已发起成员任务 ${task.id}：${task.member}（${task.memberIp}），对话 ${task.conversationId}。`,
-            `用 wait_member 等待结果：taskId="${task.id}"，timeoutMs=30000（可按需调大，最大 300000）。`,
+            `已发起成员任务：${task.member}（${task.memberIp}），会话 ${task.conversationId}。`,
+            typeof task.egressLine === 'string' && task.egressLine !== '' ? `出网实测：${task.egressLine}` : '',
+            `会话id：${task.conversationId}`,
+            `用 wait_member 等待结果：conversationId="${task.conversationId}"，timeoutMs=30000（可按需调大，最大 300000）。`,
             '成员每结束一轮回答就返回一次（state=progress），拿到 state=done 才是最终结果。',
+            `要继续这个对话：call_member { "member": ${JSON.stringify(String(task.member))}, "conversationId": ${JSON.stringify(String(task.conversationId))}, "prompt": "..." }。`,
             task.status === 'failed' ? `当前状态：failed，${task.error ?? ''}` : '',
             `日志：${data.logFile}`,
           ].filter(line => line !== '').join('\n'),
           data,
         }
       }
-      if (action === 'send') {
-        if (typeof args.taskId !== 'string' || args.taskId === '') throw new Error('send needs taskId')
-        if (typeof args.content !== 'string' || args.content.trim() === '') throw new Error('send needs content')
-        const task = await memberTasks.send(args.taskId, args.content, exec.signal)
-        const data = { ...task, logFile: memberTasks.logPath(task.id) }
-        return {
-          ok: true,
-          text: [
-            `已发送到 ${task.member} 的对话 ${task.conversationId}。`,
-            `用 wait_member 等待回复：taskId="${task.id}"，timeoutMs=30000；同样每轮返回一次，state=done 才是最终结果。`,
-            `日志：${data.logFile}`,
-          ].join('\n'),
-          data,
-        }
+      const hasCwd = typeof args.cwd === 'string' && args.cwd.trim() !== ''
+      const hasWorkspace = typeof args.workspace === 'string' && args.workspace.trim() !== ''
+      if (hasCwd || hasWorkspace) throw new Error('cwd/workspace only apply to a new conversation')
+      const task = await memberTasks.send({
+        conversationId,
+        member: args.member,
+        prompt: args.prompt,
+        compress: args.compress === true,
+        agent: exec.agent,
+        signal: exec.signal,
+      })
+      const data = memberTaskData(task, memberTasks)
+      const compaction = task.lastCompaction
+      const compactionLine = args.compress === true
+        ? compaction?.compacted === true
+          ? `上下文压缩：已压缩，替换 ${String(compaction.shadowedCount)} 项历史（约 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens）。`
+          : '上下文压缩：没有可压缩的历史。'
+        : ''
+      return {
+        ok: true,
+        text: [
+          `已发送到 ${task.member}（${task.memberIp}）的对话 ${task.conversationId}。`,
+          `会话id：${task.conversationId}`,
+          compactionLine,
+          formatContextLine(task.context),
+          `用 wait_member 等待回复：conversationId="${task.conversationId}"，timeoutMs=30000；同样每轮返回一次，state=done 才是最终结果。`,
+          `日志：${data.logFile}`,
+        ].filter(line => line !== '').join('\n'),
+        data,
       }
-      throw new Error(`unknown action: ${action}`)
     },
   }
 
   const waitMemberDefinition = {
     name: 'wait_member',
     description: [
-      '等待一个由 call_member 发起的成员任务，最多 timeoutMs 毫秒。',
+      '等待一个由 call_member 发起的成员会话，最多 timeoutMs 毫秒。',
       '',
+      'conversationId 就是 call_member 返回的会话id；插件内部的 task id 不对外暴露。',
       '成员对话一有新回复（一轮结束）就立刻返回，不等到整段任务结束；返回值带 state：',
-      'progress：本轮回复已返回，但成员还会继续（可能还有未完成的子代理）；用同一个 taskId 再等下一轮。',
-      'done：整段任务完成，返回最终文本。',
-      '超时：done=false、state=running，用同一个 taskId 继续等即可，期间产生的回复不会丢。',
-      '失败/中断：返回错误；目标 DSH 重启时可以用 call_member send 继续该对话。',
+      'progress：本轮回复已返回，但成员还会继续（可能还有未完成的子代理）；用同一个 conversationId 再等下一轮。',
+      'done：整段任务完成，返回最终文本、会话id和当前上下文占用。',
+      '超时：done=false、state=running，用同一个 conversationId 继续等即可，期间产生的回复不会丢。',
+      '失败/中断：返回错误；目标 DSH 重启时可以用 call_member 带 conversationId 继续该对话。',
+      'state=done 时可以用返回的会话id继续投递：call_member { conversationId, prompt }；',
+      '上下文占用超过 20% 时会建议下次投递加 "compress": true，先压缩再投递。',
       '每次调用有上限（默认 30000，最大 300000 毫秒），不会无限阻塞；用户停止当前对话会中止本次等待。',
     ].join('\n'),
     parameters: {
       type: 'object',
       properties: {
-        taskId: { type: 'string', description: 'call_member 返回的 taskId。' },
+        conversationId: { type: 'string', description: '要等待的会话id（call_member 返回）。' },
         timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, description: '本次等待上限，默认 30000 毫秒。' },
       },
-      required: ['taskId'],
+      required: ['conversationId'],
       additionalProperties: false,
     },
     output: {
@@ -275,29 +303,31 @@ export function registerTools(ctx, toolsCtx, service) {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const timeoutMs = Number.isSafeInteger(args.timeoutMs) ? args.timeoutMs : 30_000
-      const result = await memberTasks.wait(args.taskId, { timeoutMs, signal: exec.signal })
+      const result = await memberTasks.wait(args.conversationId, { timeoutMs, signal: exec.signal })
       const task = result.task
       const replies = Array.isArray(result.replies) ? result.replies : []
       const replyText = replies.map(reply => reply.text).join('\n\n').trim()
       const data = {
-        ...task,
+        ...memberTaskData(task, memberTasks),
         done: result.done,
         timedOut: result.timedOut,
         state: result.state,
         text: replyText,
         replies,
-        logFile: memberTasks.logPath(task.id),
       }
       const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `第 ${String(task.turns)} 轮` : ''
-      const where = `${task.member}（${task.memberIp}），对话 ${task.conversationId}`
+      const where = `${task.member}（${task.memberIp}）`
+      const contextLine = formatContextLine(task.context)
+      const advice = formatCompactionAdvice(task.context)
       if (!result.done && result.state === 'progress') {
         return {
           ok: true,
           text: [
-            `成员任务 ${task.id} 进行中${turn === '' ? '' : `（${turn}，尚未结束）`}：${where}。`,
+            `成员会话 ${task.conversationId} 进行中${turn === '' ? '' : `（${turn}，尚未结束）`}：${where}。`,
             replyText !== '' ? `本轮回复：\n${replyText}` : '',
             '成员还会继续（可能还有子代理在跑），这不是最终结果。',
-            `请继续调用 wait_member 等下一轮：taskId="${task.id}"，timeoutMs=30000；收到 state=done 才是最终结果。`,
+            contextLine,
+            `请继续调用 wait_member 等下一轮：conversationId="${task.conversationId}"，timeoutMs=30000；收到 state=done 才是最终结果。`,
             `日志：${data.logFile}`,
           ].filter(line => line !== '').join('\n'),
           data,
@@ -308,12 +338,16 @@ export function registerTools(ctx, toolsCtx, service) {
         return {
           ok: true,
           text: [
-            `成员任务 ${task.id} 已完成：${where}。`,
-            '（任务已结束，不需要再调用 wait_member；要继续这个对话用 call_member send。）',
+            `成员会话 ${task.conversationId} 已完成：${where}。`,
+            '（任务已结束，不需要再调用 wait_member；要继续这个对话用 call_member 带 conversationId。）',
+            `会话id：${task.conversationId}`,
+            `继续这个对话：call_member { "member": ${JSON.stringify(String(task.member))}, "conversationId": ${JSON.stringify(String(task.conversationId))}, "prompt": "..." }`,
+            contextLine,
+            advice,
             '结果：',
             finalText !== '' ? finalText : '(成员没有返回文本结果)',
             `日志：${data.logFile}`,
-          ].join('\n'),
+          ].filter(line => line !== '').join('\n'),
           data,
         }
       }
@@ -322,9 +356,10 @@ export function registerTools(ctx, toolsCtx, service) {
         return {
           ok: true,
           text: [
-            `成员任务 ${task.id} 仍在运行${turn === '' ? '' : `（${turn}，尚未结束）`}：${where}。`,
+            `成员会话 ${task.conversationId} 仍在运行${turn === '' ? '' : `（${turn}，尚未结束）`}：${where}。`,
             '这段时间没有新回复，但任务没有结束、期间的回复也不会丢。',
-            `请继续调用 wait_member：taskId="${task.id}"，timeoutMs=${String(effective)}；收到 state=done 才是最终结果。`,
+            contextLine,
+            `请继续调用 wait_member：conversationId="${task.conversationId}"，timeoutMs=${String(effective)}；收到 state=done 才是最终结果。`,
             typeof task.lastText === 'string' && task.lastText !== '' ? `最近输出：${task.lastText.slice(0, 500)}` : '',
             `日志：${data.logFile}`,
           ].filter(line => line !== '').join('\n'),
@@ -334,10 +369,12 @@ export function registerTools(ctx, toolsCtx, service) {
       return {
         ok: false,
         text: [
-          `成员任务 ${task.id} ${task.status}（已结束）：${where}。`,
+          `成员会话 ${task.conversationId} ${task.status}（已结束）：${where}。`,
+          `会话id：${task.conversationId}`,
           `原因：${task.error ?? 'unknown'}`,
           replyText !== '' ? `中断前的回复：\n${replyText}` : '',
-          task.interrupted === true ? '目标成员的 DSH 重启或运行时退出打断了这一轮；可以用 call_member send 同一个 taskId 继续。' : '',
+          task.interrupted === true ? '目标成员的 DSH 重启或运行时退出打断了这一轮；可以用 call_member 带同一个 conversationId 继续。' : '',
+          contextLine,
           `日志：${data.logFile}`,
         ].filter(line => line !== '').join('\n'),
         data,
@@ -420,6 +457,80 @@ export function registerTools(ctx, toolsCtx, service) {
 }
 
 /**
+ * Model-facing task fields.
+ *
+ * The internal task id only names the log and the in-memory record; every
+ * caller-visible handle is the member conversation id.
+ * @param {object} task task record.
+ * @param {{logPath: (taskId: string) => string}} memberTasks task service.
+ * @returns {object} data fields without the internal id.
+ */
+function memberTaskData(task, memberTasks) {
+  const { id: taskId, ...fields } = task
+  return { ...fields, logFile: memberTasks.logPath(taskId) }
+}
+
+/**
+ * Context occupancy above which the next delivery should compact first.
+ *
+ * The model sees the figure after every finished member turn. Twenty percent
+ * is early enough that the next turn still fits comfortably and late enough
+ * that a small exchange is not summarized for nothing.
+ */
+const CONTEXT_COMPACT_THRESHOLD = 20
+
+/**
+ * Format a token count for a one-line status.
+ * @param {number} value token count.
+ * @returns {string} text.
+ */
+function formatTokens(value) {
+  const amount = Number(value)
+  if (!Number.isFinite(amount) || amount < 0) return '?'
+  if (amount < 1000) return String(Math.round(amount))
+  if (amount < 1_000_000) return `${formatOneDecimal(amount / 1000)}k`
+  return `${formatOneDecimal(amount / 1_000_000)}M`
+}
+
+/**
+ * One decimal place, dropping a trailing `.0`.
+ * @param {number} value number.
+ * @returns {string} text.
+ */
+function formatOneDecimal(value) {
+  return value >= 100 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/u, '')
+}
+
+/**
+ * Render the member conversation's context occupancy.
+ * @param {{usedTokens?: number|null, maxTokens?: number|null, percent?: number|null}|null} context occupancy.
+ * @returns {string} a line, or '' when the member reported nothing.
+ */
+function formatContextLine(context) {
+  if (context === null || typeof context !== 'object') return ''
+  const used = Number.isFinite(context.usedTokens) ? context.usedTokens : null
+  const max = Number.isFinite(context.maxTokens) ? context.maxTokens : null
+  const percent = Number.isFinite(context.percent) ? context.percent : null
+  if (used === null && max === null) return ''
+  const percentText = percent === null ? '' : `（${formatOneDecimal(percent)}%）`
+  if (max === null) return `对话上下文：已用 ${formatTokens(used)} tokens${percentText}（成员未报告上限）`
+  if (used === null) return `对话上下文：上限 ${formatTokens(max)} tokens（成员未报告已用）`
+  return `对话上下文：${formatTokens(used)} / ${formatTokens(max)} tokens${percentText}`
+}
+
+/**
+ * Recommend a pre-delivery compaction when the context is already loaded.
+ * @param {{percent?: number|null}|null} context occupancy.
+ * @returns {string} a line, or '' below the threshold.
+ */
+function formatCompactionAdvice(context) {
+  if (context === null || typeof context !== 'object') return ''
+  const percent = Number.isFinite(context.percent) ? context.percent : null
+  if (percent === null || percent <= CONTEXT_COMPACT_THRESHOLD) return ''
+  return `对话上下文已用 ${formatOneDecimal(percent)}%，超过 ${String(CONTEXT_COMPACT_THRESHOLD)}%：下次投递时建议加 "compress": true，先压缩上下文再投递。`
+}
+
+/**
  * Human-readable build result.
  * @param {object} job final job.
  * @returns {string} text.
@@ -467,26 +578,6 @@ function formatDeployResult(result) {
   if (result.logFile) lines.push(`日志：${result.logFile}`)
   const log = String(result.log ?? '').trimEnd()
   if (log !== '') lines.push('最近日志：', ...log.split(/\r?\n/u).slice(-25))
-  return lines.join('\n')
-}
-
-/**
- * Format one member task for the model.
- * @param {object} task task.
- * @returns {string} text.
- */
-function formatMemberTask(task) {
-  const lines = [
-    `任务 ${task.id}：${task.member}（${task.memberIp}），对话 ${task.conversationId}`,
-    `状态：${task.status}${task.notified ? '，已通知主对话' : ''}`,
-  ]
-  if (task.logFile) lines.push(`日志：${task.logFile}`)
-  if (task.error) lines.push(`错误：${task.error}`)
-  if (task.lastText) lines.push(`结果：\n${task.lastText}`)
-  if (task.interrupted === true) {
-    lines.push('目标成员的 DSH 重启（或运行时退出）打断了这一轮；对话还在，可以用 send 同一个 taskId 继续，或重新 delegate。')
-  }
-  if (task.notifyError) lines.push(`通知失败：${task.notifyError}`)
   return lines.join('\n')
 }
 

@@ -12,10 +12,18 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { formatEgressLine } from './egress-probe.mjs'
 
 const DEFAULT_INTEROP_PORT = 8765
 const WAIT_TIMEOUT_MS = 60_000
 const MAX_ATTEMPTS = 30
+/**
+ * How long one pre-delivery compaction may take.
+ *
+ * Compaction is model-backed: a long conversation can spend a couple of
+ * minutes in the member's summarizer, far longer than a normal message POST.
+ */
+const COMPACT_TIMEOUT_MS = 180_000
 /**
  * Errors that say the conversation itself is gone: the member's interop knows no
  * such conversation any more, or its runtime lost the session behind it (which
@@ -44,6 +52,51 @@ function envFile(file) {
 function truncate(text, limit) {
   const value = String(text ?? '')
   return value.length > limit ? `${value.slice(0, limit)}…` : value
+}
+
+/**
+ * A non-negative finite number, or null.
+ * @param {unknown} value raw value.
+ * @returns {number|null} the number.
+ */
+function finiteOrNull(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+}
+
+/**
+ * Normalise the context occupancy a member reports.
+ *
+ * The member answers with the same numbers its Web status line shows: the
+ * member-side interop derives them from the DSH token meter. A member from an
+ * older release sends nothing, which is not an error: the caller simply has no
+ * occupancy to display.
+ * @param {unknown} value `{usedTokens, maxTokens, percent}` or a raw pressure.
+ * @returns {{usedTokens: number|null, maxTokens: number|null, percent: number|null}|null} occupancy.
+ */
+function normalizeContext(value) {
+  if (value === null || typeof value !== 'object') return null
+  const usedTokens = finiteOrNull(value.usedTokens ?? value.used ?? value.pressureTokens)
+  const maxTokens = finiteOrNull(value.maxTokens ?? value.max ?? value.contextWindow)
+  if (usedTokens === null && maxTokens === null) return null
+  const percent = usedTokens !== null && maxTokens !== null && maxTokens > 0
+    ? Math.round((usedTokens / maxTokens) * 1000) / 10
+    : finiteOrNull(value.percent)
+  return { usedTokens, maxTokens, percent }
+}
+
+/**
+ * Join a compaction summary's content blocks into one string.
+ * @param {unknown} value string or content blocks.
+ * @returns {string} summary text.
+ */
+function summaryText(value) {
+  if (typeof value === 'string') return value
+  if (!Array.isArray(value)) return ''
+  return value
+    .filter(block => block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join('\n')
+    .trim()
 }
 
 export class MemberTaskService {
@@ -223,6 +276,39 @@ export class MemberTaskService {
   }
 
   /**
+   * Facts the target conversation starts with: the measured egress line and
+   * the mesh's git tokens.
+   *
+   * The proxy is the mesh networking config's direct link for this member:
+   * only its client has a local proxy, and a member without a client link is
+   * told nothing about egress. The probe measures the link's advertised HTTP
+   * proxy port before delivery; a failure is reported, never thrown.
+   * @param {{name: string, ip: string}} target resolved member.
+   * @returns {Promise<object>} create-request `mesh` field.
+   */
+  async #meshFor(target) {
+    const tokens = typeof this.service.releaseTokens === 'function'
+      ? await this.service.releaseTokens().catch(() => ({}))
+      : {}
+    const tokenPair = { github: tokens.github ?? null, gitee: tokens.gitee ?? null }
+    const link = typeof this.service.directLinkFor === 'function'
+      ? await this.service.directLinkFor(target.ip).catch(() => null)
+      : null
+    if (link === null) return { link: false, proxyPort: null, egress: null, tokens: tokenPair }
+    const probe = typeof this.service.probeMemberEgress === 'function'
+      ? await this.service.probeMemberEgress(target.ip, link.port).catch(() => ({ ok: false, error: 'probe failed' }))
+      : { ok: false, error: 'probe unavailable' }
+    return {
+      link: true,
+      proxyPort: link.port,
+      egress: probe?.ok === true
+        ? { ok: true, latencyMs: probe.latencyMs ?? null, downMbps: probe.downMbps ?? null }
+        : { ok: false, error: typeof probe?.error === 'string' ? probe.error : null },
+      tokens: tokenPair,
+    }
+  }
+
+  /**
    * Wait out a member runtime that is still booting.
    *
    * A member's interop answers 503 while its SDK child starts, which is exactly
@@ -265,11 +351,17 @@ export class MemberTaskService {
     if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('prompt is required')
     if (agent === undefined || agent === null) throw new Error('delegation must be called from a DSH conversation')
     const target = await this.#resolveMember(member)
+    // Measure the target's proxy before the message exists: the one-line
+    // result rides along in the create request, so the target conversation
+    // starts with what was actually measured, not a guess.
+    const mesh = await this.#meshFor(target)
+    const egressLine = mesh.link === true ? formatEgressLine(mesh) : ''
     const payload = {
       prompt,
       // The member's panel lists these; without a title it would show a UUID.
       title: truncate(prompt, 80),
       initiator: { ...(this.identity ?? { id: 'local' }), source: 'call_member' },
+      mesh,
       ...(typeof workspace === 'string' && workspace.trim() !== '' ? { workspace: workspace.trim() } : {}),
       ...(typeof cwd === 'string' && cwd !== '' ? { cwd } : {}),
     }
@@ -307,6 +399,14 @@ export class MemberTaskService {
       notifyError: null,
       originAgentId: String(agent.id ?? ''),
       originSessionId: String(agent.session?.id ?? ''),
+      /** One-line egress report the target received, or ''. */
+      egressLine,
+      /** Context occupancy last reported by the member, or null. */
+      context: null,
+      /** Last pre-delivery compaction, when the caller asked for one. */
+      lastCompaction: null,
+      /** True for a task attached to a conversation this initiator did not start. */
+      adopted: false,
     }
     this.controllers.set(task.id, new AbortController())
     this.tasks.set(task.id, task)
@@ -323,28 +423,31 @@ export class MemberTaskService {
    *
    * "News" is either a finished-turn reply the model has not seen yet, or the
    * task reaching a terminal state. The monitor keeps running in the background,
-   * so a timeout only ends this caller's wait; the same taskId can be waited
-   * again, and replies that arrived meanwhile are not lost.
+   * so a timeout only ends this caller's wait; the same conversationId can be
+   * waited again, and replies that arrived meanwhile are not lost.
+   *
+   * The conversation id is the only handle the caller needs; the task record
+   * it resolves to stays an implementation detail of this service.
    *
    * `signal` is the tool call's own cancellation. It ends the park at once
    * rather than at the next wake, so stopping the conversation does not leave
    * the call hanging until its deadline; the thrown reason is the signal's own
    * reason, which is what makes DSH report the call as cancelled.
-   * @param {string} taskId task id returned by call_member.
+   * @param {string} conversationId conversation id returned by call_member.
    * @param {{timeoutMs?: number, signal?: AbortSignal}} [options] wait options.
    * @returns {Promise<{done: boolean, timedOut: boolean, task: object, replies: object[], state: string}>} outcome.
    */
-  async wait(taskId, options = {}) {
+  async wait(conversationId, options = {}) {
     await this.#ensureLoaded()
-    const id = String(taskId ?? '')
-    if (id === '') throw new Error('taskId is required')
+    const key = String(conversationId ?? '')
+    if (key === '') throw new Error('conversationId is required')
+    const task = this.#taskOfConversation(key)
+    if (task === undefined) throw new Error(`member conversation is not tracked: ${key}`)
     const timeoutMs = Math.max(1000, Math.min(Number.isSafeInteger(options.timeoutMs) ? options.timeoutMs : 30_000, 300_000))
     const signal = options.signal
     const deadline = Date.now() + timeoutMs
     for (;;) {
       signal?.throwIfAborted()
-      const task = this.tasks.get(id)
-      if (task === undefined) throw new Error(`member task not found: ${id}`)
       const replies = this.#pendingReplies(task)
       const terminal = task.status === 'completed' || task.status === 'failed' || task.status === 'interrupted'
       if (replies.length > 0) {
@@ -365,6 +468,17 @@ export class MemberTaskService {
       if (left <= 0) return { done: false, timedOut: true, task, replies: [], state: 'running' }
       await this.#waitForWake(task, left, signal)
     }
+  }
+
+  /**
+   * The newest task tracked for one member conversation.
+   * @param {string} conversationId member conversation id.
+   * @returns {object|undefined} task record.
+   */
+  #taskOfConversation(conversationId) {
+    return [...this.tasks.values()]
+      .filter(task => task.conversationId === conversationId)
+      .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))[0]
   }
 
   /** Replies this task received but no `wait` call has returned yet. */
@@ -420,16 +534,42 @@ export class MemberTaskService {
     }
   }
 
-  async send(taskId, content, signal) {
+  /**
+   * Send one message into an existing member conversation.
+   *
+   * The conversation is named by the member's conversation id. That id is the
+   * portable key: it is what `call_member` / `wait_member` return, it survives a
+   * new process on this side, and it lets a model continue a conversation it
+   * did not start.
+   *
+   * `compress` runs the member's own compaction before the message is queued,
+   * so the next turn starts from a shortened context. It requires that
+   * conversation to be idle.
+   *
+   * @param {{conversationId: string, member?: string, prompt: string, compress?: boolean, agent?: any, signal?: AbortSignal}} request send request.
+   * @returns {Promise<object>} the tracked task.
+   */
+  async send(request) {
     await this.#ensureLoaded()
-    const task = this.tasks.get(String(taskId))
-    if (task === undefined) throw new Error('member task not found')
-    if (typeof content !== 'string' || content.trim() === '') throw new Error('content is required')
+    const prompt = request.prompt
+    if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('prompt is required')
+    const signal = request.signal
+    const { task, fresh } = await this.#sendTarget(request)
+    if (request.compress === true) await this.#compact(task, signal)
     const result = await this.#waitForRuntime(
-      () => this.#request(task.baseUrl, 'POST', `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content }, 30_000, signal),
+      () => this.#request(task.baseUrl, 'POST', `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content: prompt }, 30_000, signal),
       90_000,
       signal,
     )
+    if (fresh) {
+      // A conversation this initiator never tracked already has a reply
+      // history. Start the cursor where the member is now, or the first wait
+      // would replay turns the model has already seen (or never saw at all).
+      this.#adoptPosition(task, result?.conversation)
+      task.prompt = truncate(prompt, 2000)
+      this.tasks.set(task.id, task)
+    }
+    this.#rememberContext(task, result?.context ?? result?.conversation?.context)
     task.status = 'running'
     task.error = null
     task.interrupted = false
@@ -439,6 +579,7 @@ export class MemberTaskService {
     task.notifiedAt = null
     task.notifyError = null
     task.notify = false
+    if (!this.controllers.has(task.id)) this.controllers.set(task.id, new AbortController())
     await this.#save(task)
     await this.#log(task, `message queued: ${result?.receipt?.messageId ?? 'unknown'}`)
     if (!this.monitors.has(task.id)) {
@@ -447,6 +588,148 @@ export class MemberTaskService {
       void monitor.finally(() => this.monitors.delete(task.id)).catch(() => {})
     }
     return task
+  }
+
+  /**
+   * Resolve who a send targets: an existing tracked task, or a conversation on
+   * a named member that this initiator will adopt.
+   * @param {{conversationId: string, member?: string, prompt: string, agent?: any}} request send request.
+   * @returns {Promise<{task: object, fresh: boolean}>} target task.
+   */
+  async #sendTarget(request) {
+    const conversationId = typeof request.conversationId === 'string' ? request.conversationId.trim() : ''
+    if (conversationId === '') throw new Error('conversationId is required to continue a conversation')
+    const tracked = this.#taskOfConversation(conversationId)
+    if (tracked !== undefined) {
+      const named = typeof request.member === 'string' ? request.member.trim() : ''
+      if (named !== '') {
+        const target = await this.#resolveMember(named)
+        if (target.baseUrl !== tracked.baseUrl) {
+          throw new Error(`conversation ${conversationId} belongs to ${tracked.member} (${tracked.baseUrl}), not ${target.baseUrl}`)
+        }
+      }
+      return { task: tracked, fresh: false }
+    }
+    const named = typeof request.member === 'string' ? request.member.trim() : ''
+    if (named === '') {
+      throw new Error('send by conversationId needs member: no local task tracks this conversation')
+    }
+    const target = await this.#resolveMember(named)
+    return {
+      task: {
+        id: `member-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+        member: target.name,
+        memberIp: target.ip,
+        baseUrl: target.baseUrl,
+        conversationId,
+        prompt: truncate(request.prompt, 2000),
+        status: 'running',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lastText: '',
+        error: null,
+        interrupted: false,
+        attempts: 0,
+        turns: 0,
+        /** Replies already accepted from the member, oldest first. */
+        replies: [],
+        /** Newest reply sequence number seen on the member. */
+        replySeq: 0,
+        /** Newest reply seq a `wait_member` call already returned to the model. */
+        deliveredSeq: 0,
+        notify: false,
+        notified: false,
+        notifiedAt: null,
+        notifyError: null,
+        originAgentId: String(request.agent?.id ?? ''),
+        originSessionId: String(request.agent?.session?.id ?? ''),
+        context: null,
+        lastCompaction: null,
+        adopted: true,
+      },
+      fresh: true,
+    }
+  }
+
+  /**
+   * Move an adopted task's cursors to the member's current position.
+   * @param {object} task adopted task.
+   * @param {unknown} conversation the member's conversation projection.
+   * @returns {void}
+   */
+  #adoptPosition(task, conversation) {
+    if (conversation === null || typeof conversation !== 'object') return
+    const seq = Number.isSafeInteger(conversation.replySeq) ? conversation.replySeq : 0
+    task.replySeq = Math.max(Number.isSafeInteger(task.replySeq) ? task.replySeq : 0, seq)
+    task.deliveredSeq = Math.max(Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0, task.replySeq)
+    if (Number.isSafeInteger(conversation.turns)) task.turns = conversation.turns
+  }
+
+  /**
+   * Record the context occupancy a member reported.
+   * @param {object} task member task.
+   * @param {unknown} value raw occupancy.
+   * @returns {void}
+   */
+  #rememberContext(task, value) {
+    const context = normalizeContext(value)
+    if (context !== null) task.context = context
+  }
+
+  /**
+   * Compact a member conversation before delivering into it.
+   *
+   * The member owns the session, so only it can compact. An older member has
+   * no `/compact` endpoint; that is reported as "upgrade the member", not
+   * retried as a transient failure.
+   * @param {object} task member task.
+   * @param {AbortSignal} [signal] cancellation of the sending tool call.
+   * @returns {Promise<object>} the recorded compaction.
+   */
+  async #compact(task, signal) {
+    await this.#log(task, 'compacting context before delivery')
+    let result
+    try {
+      result = await this.#waitForRuntime(
+        () => this.#request(
+          task.baseUrl,
+          'POST',
+          `/v1/conversations/${encodeURIComponent(task.conversationId)}/compact`,
+          {},
+          COMPACT_TIMEOUT_MS,
+          signal,
+        ),
+        90_000,
+        signal,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/conversation not found|conversation_not_found/iu.test(message)) {
+        throw new Error(`成员 ${task.member} 上已经没有对话 ${task.conversationId}：${message}`)
+      }
+      if (/unknown endpoint|not_found|unsupported|compaction_unavailable/iu.test(message)) {
+        throw new Error(`成员 ${task.member} 的 interop 服务不支持上下文压缩（版本过旧）：${message}。去掉 compress 直接投递，或先升级该成员。`)
+      }
+      if (/busy|already has active work|conversation_busy|409/iu.test(message)) {
+        throw new Error(`对话 ${task.conversationId} 还在运行，不能压缩：${message}。等 wait_member 返回 state=done 后再投递，或去掉 compress。`)
+      }
+      throw error
+    }
+    task.lastCompaction = {
+      at: new Date().toISOString(),
+      compacted: result?.compacted === true,
+      summary: summaryText(result?.summary),
+      shadowedCount: Number.isSafeInteger(result?.shadowedCount) ? result.shadowedCount : 0,
+      shadowedTokenCount: Number.isSafeInteger(result?.shadowedTokenCount) ? result.shadowedTokenCount : null,
+    }
+    this.#rememberContext(task, result?.context)
+    await this.#log(
+      task,
+      task.lastCompaction.compacted
+        ? `compacted ${String(task.lastCompaction.shadowedCount)} item(s), ~${String(task.lastCompaction.shadowedTokenCount ?? 0)} tokens`
+        : 'no compactable history',
+    )
+    return task.lastCompaction
   }
 
   async #monitor(task) {
@@ -466,6 +749,7 @@ export class MemberTaskService {
         // A completed round trip proves the member is healthy: start the retry
         // budget over, so a long multi-turn task is not failed by one late blip.
         task.attempts = 0
+        this.#rememberContext(task, result.context ?? result.conversation?.context)
         if (result.timedOut === true) {
           task.status = 'running'
           await this.#save(task)
@@ -641,17 +925,17 @@ export class MemberTaskService {
         '结果：',
         truncate(task.lastText || '(成员没有返回文本结果)', 8000),
         '',
-        `taskId: ${task.id}`,
+        `会话id: ${task.conversationId}`,
       ].join('\n')
       : [
         `[成员任务失败] ${task.member} (${task.memberIp}) 的对话 ${task.conversationId} 失败。`,
         `任务：${truncate(task.prompt, 300)}`,
         `错误：${task.error ?? 'unknown'}`,
         ...(task.interrupted === true
-          ? ['', '目标的 DSH 重启（或运行时退出）打断了这一轮。对话和上下文还在：用 call_member send 同一个 taskId 继续，或重新 delegate 一个新任务。']
+          ? ['', `目标的 DSH 重启（或运行时退出）打断了这一轮。对话和上下文还在：用 call_member 带 conversationId ${task.conversationId} 继续，或新开一个任务。`]
           : []),
         '',
-        `taskId: ${task.id}`,
+        `会话id: ${task.conversationId}`,
       ].join('\n')
     try {
       agent.followup({

@@ -424,3 +424,85 @@ test('an upgrade plan carries the release download and the external proxy member
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('probeMemberEgress refuses an unknown member and a missing SSH key', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-probe-'))
+  const dataDir = path.join(dir, 'mesh')
+  try {
+    await mkdir(path.join(dir, 'wireguard'), { recursive: true })
+    await writeFile(path.join(dir, 'wireguard', 'state.json'), JSON.stringify({
+      version: 1,
+      role: 'server',
+      server: {
+        peers: [{ ip: '10.66.66.9', name: 'peer', publicKey: 'unknown-key', platform: 'linux', sshUser: 'root' }],
+      },
+    }), 'utf8')
+    const service = new MeshService({ dataDir, config: {}, log: () => {} })
+    assert.deepEqual(await service.probeMemberEgress('10.66.66.99', 8080), {
+      ok: false,
+      error: 'member is not in the WireGuard state',
+    })
+    assert.deepEqual(await service.probeMemberEgress('10.66.66.9', 8080), {
+      ok: false,
+      error: 'no SSH key for this member',
+    })
+    assert.deepEqual(await service.probeMemberEgress(''), { ok: false, error: 'member address is empty' })
+    assert.deepEqual(await service.probeMemberEgress('10.66.66.9'), { ok: false, error: 'proxy port is invalid' })
+    await service.dispose()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('releaseTokens returns the stored git tokens for the injected context', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-tokens-'))
+  const dataDir = path.join(dir, 'mesh')
+  try {
+    await mkdir(dataDir, { recursive: true })
+    await writeFile(path.join(dataDir, 'release.json'), JSON.stringify({
+      enabled: true,
+      tag: 'latest',
+      github: { repo: 'dsh-web-release', token: 'ghp_secretvalue' },
+      gitee: { repo: 'dsh-web-release', token: 'gitee_secret' },
+    }), 'utf8')
+    const service = new MeshService({ dataDir, config: {}, log: () => {} })
+    assert.deepEqual(await service.releaseTokens(), {
+      github: 'ghp_secretvalue',
+      gitee: 'gitee_secret',
+    })
+    await service.dispose()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('directLinkFor reports only the client side of a mesh networking link', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-mesh-link-'))
+  const dataDir = path.join(dir, 'mesh')
+  try {
+    await mkdir(path.join(dir, 'hysteria'), { recursive: true })
+    await writeFile(path.join(dir, 'hysteria', 'links.json'), JSON.stringify({
+      ok: true,
+      links: [
+        {
+          server: { name: 'edge', ip: '10.66.66.2' },
+          client: { name: 'worker', ip: '10.66.66.3' },
+          httpProxy: 'http://127.0.0.1:8080',
+          mode: 'socks',
+        },
+      ],
+    }), 'utf8')
+    const service = new MeshService({ dataDir, config: {}, log: () => {} })
+    assert.deepEqual(await service.directLinkFor('10.66.66.3'), {
+      proxy: 'http://127.0.0.1:8080',
+      port: 8080,
+    })
+    // The server side of the link has no local proxy to report.
+    assert.equal(await service.directLinkFor('10.66.66.2'), null)
+    assert.equal(await service.directLinkFor('10.66.66.9'), null)
+    assert.equal(await service.directLinkFor(''), null)
+    await service.dispose()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

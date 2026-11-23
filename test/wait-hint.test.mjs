@@ -59,7 +59,7 @@ test('a finished turn tells the model to keep waiting', async () => {
       replies: [{ seq: 1, turn: 2, text: '第一轮的答复' }],
       replySeq: 1,
     })
-    const result = await wait.execute({ taskId: 'member-hint' }, { signal: undefined })
+    const result = await wait.execute({ conversationId: 'c1' }, { signal: undefined })
     assert.equal(result.ok, true)
     assert.equal(result.data.done, false)
     assert.equal(result.data.state, 'progress')
@@ -77,7 +77,7 @@ test('a timeout says the task is still running and how to continue', async () =>
   const { dataDir, service, wait } = await harness()
   try {
     seed(service, { turns: 1 })
-    const result = await wait.execute({ taskId: 'member-hint', timeoutMs: 1000 }, { signal: undefined })
+    const result = await wait.execute({ conversationId: 'c1', timeoutMs: 1000 }, { signal: undefined })
     assert.equal(result.ok, true)
     assert.equal(result.data.done, false)
     assert.equal(result.data.timedOut, true)
@@ -98,7 +98,7 @@ test('completion says no further wait is needed', async () => {
       replies: [{ seq: 2, turn: 3, text: '最终结果' }],
       replySeq: 2,
     })
-    const result = await wait.execute({ taskId: 'member-hint' }, { signal: undefined })
+    const result = await wait.execute({ conversationId: 'c1' }, { signal: undefined })
     assert.equal(result.ok, true)
     assert.equal(result.data.done, true)
     assert.equal(result.data.state, 'done')
@@ -114,7 +114,7 @@ test('a failed task carries the reason', async () => {
   const { dataDir, service, wait } = await harness()
   try {
     seed(service, { status: 'failed', error: '目标 SSH 不可达' })
-    const result = await wait.execute({ taskId: 'member-hint' }, { signal: undefined })
+    const result = await wait.execute({ conversationId: 'c1' }, { signal: undefined })
     assert.equal(result.ok, false)
     assert.match(result.text, /failed/u)
     assert.match(result.text, /目标 SSH 不可达/u)

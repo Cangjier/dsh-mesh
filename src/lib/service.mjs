@@ -10,11 +10,12 @@
 
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 import {
   discoverMembers,
   probeMember,
@@ -56,6 +57,7 @@ import { buildUpdateReasons, memberDeployment, packageInfo, planUpgrades } from 
 import { autoUpgradeEnabled, pickBuildMember, pickProxyMember, pullBackEnabled } from './build-defaults.mjs'
 import { memberBuildTarget, pickArtifactForMember } from './build-artifacts.mjs'
 import { linkFor, resolveBuildEgress, resolveDeployLinkProxy } from './egress-plan.mjs'
+import { EGRESS_PROBE_SOURCE } from './egress-probe.mjs'
 import {
   isAllowedPackagePath,
   listPackagesScript,
@@ -68,6 +70,8 @@ import {
 } from './package-sources.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
+
+const execFileAsync = promisify(execFile)
 
 /** A good member probe outlives repeated failed re-probes by this long. */
 const PROBE_GRACE_MS = 10 * 60_000
@@ -98,6 +102,50 @@ function findRepositoryRoot(start) {
 }
 
 const REPOSITORY_ROOT = findRepositoryRoot(HERE)
+
+/**
+ * Run one ES module on a target over SSH and parse its single JSON line.
+ *
+ * The module arrives on stdin (`node --input-type=module -`), so nothing is
+ * written to the target's disk and no install path has to be guessed. A
+ * timeout, a missing key, or a silent SSH session all resolve to an error
+ * result instead of blocking the caller.
+ * @param {string[]} args ssh arguments.
+ * @param {string} source ES module text.
+ * @param {number} [timeoutMs] overall budget.
+ * @returns {Promise<Record<string, any>>} parsed probe result.
+ */
+function runSshProbe(args, source, timeoutMs = 30_000) {
+  return new Promise((resolve) => {
+    const child = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try { child.kill('SIGKILL') } catch { }
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish({ ok: false, error: 'probe timed out' }), timeoutMs)
+    timer.unref?.()
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.once('error', (error) => finish({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+    child.once('close', () => {
+      const line = String(stdout).trim().split(/\r?\n/u).filter(Boolean).pop() ?? ''
+      try {
+        const parsed = JSON.parse(line)
+        finish(parsed !== null && typeof parsed === 'object' ? parsed : { ok: false, error: 'probe returned no object' })
+      } catch {
+        finish({ ok: false, error: (String(stderr).trim() || 'no probe output').slice(0, 160) })
+      }
+    })
+    child.stdin.on('error', () => { })
+    child.stdin.end(source)
+  })
+}
 
 /**
  * Read this package's version once.
@@ -467,6 +515,75 @@ export class MeshService {
       }
     }
     return { ...snapshot, self, members, local: self }
+  }
+
+  /**
+   * The direct link the mesh networking config gives one member, if any.
+   *
+   * Only the link's client has a local proxy: the server side supplies the
+   * egress. A member without a client link gets no proxy information at all —
+   * there is nothing configured to report, and nothing to set up.
+   * @param {string} ip member VPN address.
+   * @returns {Promise<{proxy: string, port: number}|null>} proxy facts, or null.
+   */
+  async directLinkFor(ip) {
+    const address = String(ip ?? '').trim()
+    if (address === '') return null
+    const links = await this.#directLinks()
+    const link = links.find(item => item !== null && typeof item === 'object' && item?.client?.ip === address)
+    if (link === undefined) return null
+    const proxy = typeof link.httpProxy === 'string' ? link.httpProxy.trim() : ''
+    if (proxy === '') return null
+    try {
+      const url = new URL(proxy)
+      const port = Number(url.port) || (url.protocol === 'https:' ? 443 : 80)
+      return Number.isInteger(port) && port > 0 && port < 65_536 ? { proxy, port } : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * SSH into one member and measure its local proxy egress.
+   *
+   * The probe is the shipped ES module (`egress-probe.mjs`), piped into the
+   * target's own Node over the mesh SSH key: the measurement runs on the
+   * machine that will use the proxy, through the same loopback listeners the
+   * agent would use. The result is a one-line report for `call_member`.
+   * @param {string} ip member VPN address.
+   * @param {number} port HTTP proxy port the mesh networking config advertises.
+   * @returns {Promise<{ok: boolean, port?: number, latencyMs?: number, downMbps?: number|null, error?: string}>} probe result.
+   */
+  async probeMemberEgress(ip, port) {
+    const address = String(ip ?? '').trim()
+    if (address === '') return { ok: false, error: 'member address is empty' }
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) return { ok: false, error: 'proxy port is invalid' }
+    const { state } = await readWireGuardState({ file: path.join(this.home, 'wireguard', 'state.json') })
+    const peer = state?.server?.peers?.find(candidate => candidate?.ip === address)
+    if (peer === undefined || peer === null) return { ok: false, error: 'member is not in the WireGuard state' }
+    const digest = createHash('sha256').update(String(peer.publicKey ?? '')).digest('hex')
+    const key = path.join(this.home, 'wireguard', 'ssh', `${digest}.key`)
+    if (!existsSync(key)) return { ok: false, error: 'no SSH key for this member' }
+    const windows = String(peer.platform ?? '').toLowerCase().startsWith('win')
+    const remote = windows
+      ? `"%USERPROFILE%\\.dsh\\runtime\\node\\node.exe" --input-type=module - ${String(port)}`
+      : `~/.dsh/runtime/node/bin/node --input-type=module - ${String(port)}`
+    const user = typeof peer.sshUser === 'string' && peer.sshUser !== '' ? peer.sshUser : 'root'
+    return await runSshProbe([
+      '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'StrictHostKeyChecking=accept-new',
+      '-i', key, `${user}@${address}`, remote,
+    ], EGRESS_PROBE_SOURCE)
+  }
+
+  /**
+   * The git tokens the mesh's package management holds, for the injected
+   * context of a member conversation.
+   * @returns {Promise<{github: string|null, gitee: string|null}>} token values.
+   */
+  async releaseTokens() {
+    const release = await loadReleaseConfig({ file: this.releaseConfigFile })
+    const read = (value) => typeof value === 'string' && value.trim() !== '' ? value.trim() : null
+    return { github: read(release.github?.token), gitee: read(release.gitee?.token) }
   }
 
   /**

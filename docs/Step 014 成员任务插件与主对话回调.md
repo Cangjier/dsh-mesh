@@ -1,7 +1,8 @@
 # Step 014 成员任务插件：A 操作 B 的对话并回调主对话
 
-> 工具名已收敛：当前模型工具是 `call_member`，只保留 `delegate` / `run` / `send`。
-> `status` / `list` / `logs` / `system` 已移除；需要最终结果用 `run`，或读取返回的 `logFile`。本文保留当时的设计记录。
+> 工具名已收敛：当前模型工具是 `call_member` 和 `wait_member`，都没有 `action`。
+> `call_member` 没有 `conversationId` 就新建对话，有就继续；`wait_member` 也按 `conversationId` 等待。
+> 内部 task id 只用于任务记录和日志文件名，不对外。本文保留当时的设计记录。
 
 `dsh-mesh` 新增模型工具 `dsh_member_task`。成员 A 的 DSH 可以把任务交给成员 B 的独立 DSH 交互服务，并在 B 完成后自动把结果写回 A 的 **原对话**，就像子代理完成通知。
 
@@ -9,7 +10,7 @@
 
 ```text
 A 的 DSH（插件 dsh-mesh）
-  │ dsh_member_task action=delegate member=10.66.66.3 prompt="..."
+  │ call_member { member: "10.66.66.3", prompt: "..." }
   │
   ├─ 解析 WireGuard 成员 B，得到 http://10.66.66.3:8765
   ├─ POST /v1/conversations  （B 的 DSH-Interop 创建对话）
@@ -25,52 +26,69 @@ A 的插件不依赖 B 的网关，也不需要 B 主动访问 A；A 轮询 B �
 
 ## 工具
 
-### delegate：异步派发
+### 新建对话：没有 conversationId
 
 ```text
-dsh_member_task action="delegate" member="10.66.66.3" prompt="检查 /opt/app 的磁盘占用"
+call_member { "member": "10.66.66.3", "prompt": "检查 /opt/app 的磁盘占用" }
 ```
 
-- 立即返回 `taskId` 和 B 的 `conversationId`；
+- 立即返回 `conversationId`（会话id）；内部 task id 不出现在返回值里；
 - A 的模型可以继续当前回合；
 - B 完成后，A 的**同一个会话**会收到一条用户消息：
 
 ```text
-[成员任务完成] VM-0-2-ubuntu (10.66.66.3) 的对话 <id> 已完成。
+[成员任务完成] VM-0-2-ubuntu (10.66.66.3) 的对话 <会话id> 已完成。
 任务：...
 结果：
 ...
-taskId: member-...
+会话id: <会话id>
 ```
 
-### run：同步等待
+### 继续对话：带 conversationId
 
 ```text
-dsh_member_task action="run" member="10.66.66.3" prompt="..."
+call_member { "member": "10.66.66.3", "conversationId": "<会话id>", "prompt": "继续" }
 ```
 
-同步返回最终文本，不额外发通知（结果已经作为工具结果返回）。
+本机已经跟踪这个对话时 `member` 可以省略。本机没有该对话的任务记录时，插件会新建一条
+`adopted` 任务，并把回复游标设到成员当前的位置，避免回放旧回复。
 
-### send：继续操作 B 的对话
+### compress：投递前压缩上下文
 
 ```text
-dsh_member_task action="send" taskId="member-..." content="把结果写到 /tmp/result.txt"
+call_member { "conversationId": "<会话id>", "prompt": "继续", "compress": true }
 ```
 
-发送后重新进入等待；B 下一轮完成后继续通知 A。
+顺序固定为：`POST /v1/conversations/<id>/compact` → 完成后才 `POST .../messages`。
+成员侧用 DSH 的 `ctx.compaction.compactNow()`（等同 `/compact`，要求对话空闲）把旧历史
+替换成摘要；返回 `compacted` / `shadowedCount` / `shadowedTokenCount` / `context`。
+老成员没有这个接口时返回 404/501，A 侧直接报「先升级该成员」，不会为了压缩重开对话。
+
+### 上下文占用
+
+内嵌 interop 的 `POST /wait`、`POST /messages`、`POST /compact` 响应带顶层：
+
+```json
+"context": { "usedTokens": 41000, "maxTokens": 128000, "percent": 32.0 }
+```
+
+`usedTokens` 取 token meter 的 `projectedTokens`（下一次请求的 prompt 大小），
+没有时退回 `pressureTokens`；`maxTokens` 是 `contextWindow`。
+`wait_member` 在 `state=done` 时把这一行（`对话上下文：已用 / 上限`）和会话id一起写进 text；超过 20% 时追加
+「下次投递加 `compress: true`」的建议。成员没有活动 agent 或版本过旧时该行省略。
 
 ### wait_member：分轮等待
 
 ```text
-wait_member taskId="member-..." timeoutMs=30000
+wait_member { "conversationId": "<会话id>", "timeoutMs": 30000 }
 ```
 
 B 的对话**每结束一轮回答就立刻返回**，不等整段任务结束；返回值里的 `state` 说明后续：
 
 | `state` | 含义 | 下一步 |
 |---|---|---|
-| `progress` | 这一轮的回答已返回，但对话还会继续（还有排队的下一轮，或名下还有子代理在跑） | 用同一个 taskId 再 wait，拿下一轮 |
-| `done` | 整段任务结束，`text` 是最终回答 | 结束 |
+| `progress` | 这一轮的回答已返回，但对话还会继续（还有排队的下一轮，或名下还有子代理在跑） | 用同一个 conversationId 再 wait，拿下一轮 |
+| `done` | 整段任务结束，`text` 是最终回答（还带会话id和上下文占用） | 结束，或用会话id + `compress` 继续投递 |
 | `running` | 这段时间没有新回复（`done=false, timedOut=true`） | 继续 wait，回复不会丢 |
 
 实现要点：
@@ -80,22 +98,8 @@ B 的对话**每结束一轮回答就立刻返回**，不等整段任务结束�
 - 返回前的“完成探测”由成员侧完成：服务端复用一个常驻的 `session/wait`，300ms 内能结束就直接返回 `done`，所以单轮任务只返回一次。
 - 每条回复按 `seq` 去重，`progress` 之后跟一条 `done`（同一轮）不会让模型把同一段答案读两遍。
 - 老成员（没有 `since` 支持）仍走原来的“等到 idle”语义，A 侧自动兼容。
-
-### status / list / logs
-
-```text
-dsh_member_task action="status" taskId="member-..."
-dsh_member_task action="list"
-dsh_member_task action="logs" taskId="member-..." lines=120
-```
-
-### system：读取成员基础信息
-
-```text
-dsh_member_task action="system" member="10.66.66.3"
-```
-
-返回 B 的 CPU 使用率/核数/型号、内存、磁盘、网络、进程信息，等价于直接调用 B 的 `GET /v1/system`。
+- `wait` 的入参是 `conversationId`，服务内部用 `#taskOfConversation()` 找到任务记录；
+  task id 只作为文件和监控的 key。
 
 ## 面板：「对话」标签
 
@@ -146,9 +150,9 @@ A 侧（成员任务）：
   `interrupted: true`，不再按 30 次退避空转；
 - 一个「idle 但轮次没有前进、也没有任何文本」的 `wait` 结果不再算完成——这正是
   B 重启瞬间旧进程给出的假完成。容忍三次后按中断处理；
-- B 正在启动（503 `sdk_unavailable`）时 `delegate` / `send` 最多等 90 秒，把重启
+- B 正在启动（503 `sdk_unavailable`）时新建/继续最多等 90 秒，把重启
   窗口等过去；
-- 失败通知里附一句「可以用 call_member send 同一个 taskId 继续」，`send` 会复用
+- 失败通知里附一句「可以用 call_member 带同一个 conversationId 继续」，继续投递会复用
   被中断的对话。
 
 ## 通知机制
@@ -204,4 +208,4 @@ DSH_INTEROP_TOKEN 与 A 的一致（或都复用网关密码）
 - B 的 8765 不可达时按退避重试，约 30 次等待后标失败并通知；对话已经消失（404 /
   未知 SDK 会话 / 会话已存在）这种不可恢复错误立即失败，不重试。
 - 通知以用户消息形式出现，不是 DSH 子代理事件；模型会把它当作用户输入继续处理。
-- A 必须在该工具调用时有真实 `exec.agent`；程序化调用没有主对话，不能 delegate。
+- A 必须在该工具调用时有真实 `exec.agent`；程序化调用没有主对话，不能新建对话。

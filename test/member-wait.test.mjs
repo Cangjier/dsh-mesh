@@ -128,7 +128,7 @@ test('wait returns the completed member task', async () => {
   const { tasks, dataDir } = await buildService(member.port)
   try {
     const task = await tasks.start({ member: '127.0.0.1', prompt: 'hello', agent: AGENT, notify: false })
-    const result = await tasks.wait(task.id, { timeoutMs: 3000 })
+    const result = await tasks.wait(task.conversationId, { timeoutMs: 3000 })
     assert.equal(result.done, true)
     assert.equal(result.timedOut, false)
     assert.equal(result.state, 'done')
@@ -147,7 +147,7 @@ test('wait returns a finished turn immediately, then the completion', async () =
   const { tasks, dataDir } = await buildService(member.port)
   try {
     const task = await tasks.start({ member: '127.0.0.1', prompt: 'hello', agent: AGENT, notify: false })
-    const first = await tasks.wait(task.id, { timeoutMs: 3000 })
+    const first = await tasks.wait(task.conversationId, { timeoutMs: 3000 })
     assert.equal(first.done, false)
     assert.equal(first.timedOut, false)
     assert.equal(first.state, 'progress')
@@ -155,20 +155,20 @@ test('wait returns a finished turn immediately, then the completion', async () =
     assert.deepEqual(first.replies.map(reply => reply.text), ['first'])
 
     // No new reply yet: the same task must not replay the one already delivered.
-    const stillWaiting = await tasks.wait(task.id, { timeoutMs: 300 })
+    const stillWaiting = await tasks.wait(task.conversationId, { timeoutMs: 300 })
     assert.equal(stillWaiting.done, false)
     assert.equal(stillWaiting.timedOut, true)
     assert.deepEqual(stillWaiting.replies, [])
 
     member.finish()
-    const done = await tasks.wait(task.id, { timeoutMs: 3000 })
+    const done = await tasks.wait(task.conversationId, { timeoutMs: 3000 })
     assert.equal(done.done, true)
     assert.equal(done.state, 'done')
     assert.equal(done.task.status, 'completed')
     assert.deepEqual(done.replies.map(reply => reply.text), ['second'])
 
     // A done task answers at once, without the text being repeated.
-    const again = await tasks.wait(task.id, { timeoutMs: 1000 })
+    const again = await tasks.wait(task.conversationId, { timeoutMs: 1000 })
     assert.equal(again.done, true)
     assert.equal(again.state, 'done')
     assert.deepEqual(again.replies, [])
@@ -185,7 +185,7 @@ test('wait times out without ending the task', async () => {
   try {
     const task = await tasks.start({ member: '127.0.0.1', prompt: 'hello', agent: AGENT, notify: false })
     const started = Date.now()
-    const result = await tasks.wait(task.id, { timeoutMs: 400 })
+    const result = await tasks.wait(task.conversationId, { timeoutMs: 400 })
     assert.equal(result.done, false)
     assert.equal(result.timedOut, true)
     assert.equal(result.state, 'running')
@@ -206,7 +206,7 @@ test('wait aborts with the caller signal', async () => {
     const task = await tasks.start({ member: '127.0.0.1', prompt: 'hello', agent: AGENT, notify: false })
     const controller = new AbortController()
     const started = Date.now()
-    const pending = tasks.wait(task.id, { timeoutMs: 5000, signal: controller.signal })
+    const pending = tasks.wait(task.conversationId, { timeoutMs: 5000, signal: controller.signal })
     setTimeout(() => controller.abort(), 100)
     // The abort reason itself must surface: DSH compares it to the signal
     // reason to report the call as cancelled rather than as a tool failure.

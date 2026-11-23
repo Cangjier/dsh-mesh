@@ -954,10 +954,17 @@ const server = http.createServer(async (request, response) => {
       json(response, 201, { ok: true, conversation: publicConversation(conversation) })
       return
     }
-    const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result))?$/u.exec(url.pathname)
+    const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact))?$/u.exec(url.pathname)
     if (match === null) { fail(response, 404, 'not_found', 'Unknown endpoint.'); return }
     const conversation = findConversation(decodeURIComponent(match[1]))
     const suffix = match[2] ?? ''
+    if (suffix === 'compact') {
+      // The standalone service drives a child `dsh --profile sdk`; the SDK
+      // protocol has no maintenance/compaction call, so only the embedded
+      // interop service (a Web host with `ctx.compaction`) can compact.
+      fail(response, 501, 'compaction_unavailable', 'the standalone interop service cannot compact a conversation; use the embedded interop service')
+      return
+    }
     if (request.method === 'GET' && suffix === '') {
       json(response, 200, { ok: true, conversation: publicConversation(conversation) })
       return

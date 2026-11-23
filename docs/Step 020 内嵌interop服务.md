@@ -31,6 +31,8 @@ gate(:80)
   - `GET /v1/conversations/:id` → 先和 live agent 对账，再返回；`updatedAt` 随事件推进。
   - `POST /messages` → `agent.followup`；会话不在 live registry 时先 `ctx.agents.resume()`。
   - `POST /wait` → 按 `turn/end` + replies 返回 `progress`/`done`/`running`。
+  - `POST /compact` → 先在 `agentPresets.serviceFor(agent, 'compaction')` 取 preset 隔离组里的压缩后端（没有 preset 时回退宿主 `ctx.compaction`），再调 `compactNow()`；要求会话 idle，返回 `compacted` / `shadowedCount` / `shadowedTokenCount` / `summary` / `context`。Web profile 把 `compaction-basic` 关在宿主平面、由 preset 挂载，所以不能只查宿主。
+  - `POST /wait`、`POST /messages` 响应带顶层 `context: { usedTokens, maxTokens, percent }`：`usedTokens` 取 token meter 的 `projectedTokens`（下一次请求的 prompt 占用），`maxTokens` 取 `contextWindow`；拿不到活动 agent 时省略。
   - `DELETE /v1/conversations` → 只清已结束的会话记录并 dispose 对应 agent。
 - 权限：创建时应用 `DSH_INTEROP_PRESET`（默认 `workspace-write`）；`DSH_INTEROP_APPROVE=1` 时注册 `approval/request` answerer，只对自己的会话返回 `allowed-once`。
 - Agent preset：创建/恢复时在 `setup(agentCtx)` 里调用 `ctx.agentPresets.mount(agentCtx, 'standard')`，并写 `meta.agentPreset`。只传 `meta.agentPreset` 不够——Web 的 session controller 是在自己的 setup 里 mount 的；不 mount 就没有 bash/pwsh/fs/skills，任务只能看到全局注册的 mesh 工具。可用 `DSH_INTEROP_AGENT_PRESET` 改（默认 `standard`）。

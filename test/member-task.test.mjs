@@ -225,7 +225,12 @@ test('registerTools exposes build, deploy, members, call_member and repack', asy
     const deploy = tools.find(candidate => candidate.name === 'deploy')
     assert.deepEqual(deploy.parameters.required, ['host', 'package'])
     const call = tools.find(candidate => candidate.name === 'call_member')
-    assert.deepEqual(call.parameters.properties.action.enum, ['delegate', 'send'])
+    assert.equal(call.parameters.properties.action, undefined)
+    assert.deepEqual(call.parameters.required, ['prompt'])
+    assert.deepEqual(
+      Object.keys(call.parameters.properties).sort(),
+      ['compress', 'conversationId', 'cwd', 'member', 'prompt', 'workspace'].sort(),
+    )
     const repack = tools.find(candidate => candidate.name === 'repack')
     assert.deepEqual(repack.parameters.required, ['package'])
   } finally {
@@ -301,7 +306,7 @@ test('a member conversation the restart erased fails at once instead of retrying
   try {
     const started = Date.now()
     const created = await tasks.start({ member: '127.0.0.1', prompt: 'long job', agent: { id: 'a', session: { id: 'a' } }, notify: false })
-    const task = (await tasks.wait(created.id, { timeoutMs: 4000 })).task
+    const task = (await tasks.wait(created.conversationId, { timeoutMs: 4000 })).task
     assert.equal(task.status, 'failed')
     assert.equal(task.interrupted, true)
     assert.equal(task.attempts, 1, 'a lost conversation must not be retried')
@@ -347,7 +352,7 @@ test('an idle conversation that never ran a turn is a failure, not a success', a
     assert.match(final.error, /重启/u)
     assert.equal(messages.length, 1)
     assert.match(messages[0].content[0].text, /成员任务失败/u)
-    assert.match(messages[0].content[0].text, /call_member send/u)
+    assert.match(messages[0].content[0].text, /call_member 带 conversationId/u)
   } finally {
     await tasks.dispose()
     await new Promise(resolve => server.close(resolve))
@@ -396,7 +401,7 @@ test('a delegation waits out a member runtime that is still starting', async () 
   const tasks = new MemberTaskService({ ctx: { get: () => undefined }, service, dataDir })
   try {
     const created = await tasks.start({ member: '127.0.0.1', prompt: 'restart window', agent: { id: 'a', session: { id: 'a' } }, notify: false })
-    const task = (await tasks.wait(created.id, { timeoutMs: 4000 })).task
+    const task = (await tasks.wait(created.conversationId, { timeoutMs: 4000 })).task
     assert.equal(attempts, 2, 'the booting member must be retried once')
     assert.equal(task.status, 'completed')
     assert.equal(task.lastText, 'BOOTED')

@@ -30,9 +30,34 @@ import {
   titleFromPrompt,
 } from '../../code/shared/conversation-meta.mjs'
 import { applySessionEvent, repliesSince, summarizeReplies } from '../../code/shared/conversation-replies.mjs'
+import { formatMemberMesh } from './egress-probe.mjs'
 import { collectSystemInfo } from '../../code/shared/system-info.mjs'
 
 const execFileAsync = promisify(execFile)
+
+/**
+ * The one tool a member task conversation must not offer.
+ *
+ * A task conversation is created headless: its question would land in the
+ * member's own Web client (where nobody is watching) or wait out the tool's
+ * timeout, while the initiator only ever sees finished-turn text. Denying it
+ * makes the model put the question in its reply instead, which `wait_member`
+ * returns and `call_member` can answer in the same conversation.
+ */
+const QUESTION_TOOL = 'ask_user_question'
+
+/** Prompt context that explains the denied tool to the member agent. */
+const MEMBER_INTERACTION_RULE = [
+  '本会话禁用了 ask_user_question：没有可以应答的用户，提问不会得到回答。',
+  '需要额外信息或决策时，在回复里把问题写清楚并结束这一轮；委派方会用同一会话继续回答。',
+].join('\n')
+
+/**
+ * Prompt-context order for the interaction rule and the mesh environment.
+ * Both sit between the delegation note (120) and the harness facts (200).
+ */
+const INTERACTION_CONTEXT_ORDER = 125
+const ENVIRONMENT_CONTEXT_ORDER = 130
 
 /** How many events one conversation keeps for late `/events` readers. */
 const MAX_EVENTS = 5000
@@ -378,6 +403,29 @@ function userMessage(blocks) {
 }
 
 /**
+ * A non-negative finite number, or null.
+ * @param {unknown} value raw value.
+ * @returns {number|null} the number.
+ */
+function nonNegativeOrNull(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+}
+
+/**
+ * Join a compaction summary's content blocks into one string.
+ * @param {unknown} value content blocks.
+ * @returns {string} summary text.
+ */
+function summaryText(value) {
+  if (!Array.isArray(value)) return ''
+  return value
+    .filter(block => block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join('\n')
+    .trim()
+}
+
+/**
  * The embedded interop service.
  *
  * @param {object} options options.
@@ -466,6 +514,47 @@ export function createInteropService(options) {
       initiator: conversation.initiator ?? null,
       turns: Number.isSafeInteger(conversation.turns) ? conversation.turns : 0,
       replySeq: Number.isSafeInteger(conversation.replySeq) ? conversation.replySeq : 0,
+    }
+  }
+
+  /**
+   * Context occupancy of one live conversation, in the same numbers the Web
+   * status line shows.
+   *
+   * `projectedTokens` is what the next request's prompt would cost, which is
+   * exactly what a pre-delivery compaction shrinks; `pressureTokens` is the
+   * last provider-reported prompt size and is the fallback before a surface
+   * delta exists. No live agent (a restored conversation that was not resumed)
+   * means no measurement, not an error.
+   * @param {Record<string, any>} conversation conversation.
+   * @returns {{usedTokens: number|null, maxTokens: number|null, percent: number|null}|null} occupancy.
+   */
+  function contextOf(conversation) {
+    const session = conversation?.agent?.session
+    if (session === undefined || session === null) return null
+    let pressure
+    const projections = typeof ctx.get === 'function' ? ctx.get('sessionProjections') : undefined
+    if (typeof projections?.snapshot === 'function') {
+      try {
+        pressure = projections.snapshot(session, ['contextPressure']).values.contextPressure
+      } catch { }
+    }
+    if (pressure === undefined) {
+      const meter = typeof ctx.get === 'function' ? ctx.get('tokenMeter') : undefined
+      if (typeof meter?.contextPressure === 'function') {
+        try { pressure = meter.contextPressure(session) } catch { }
+      }
+    }
+    if (pressure === null || typeof pressure !== 'object') return null
+    const usedTokens = nonNegativeOrNull(pressure.projectedTokens) ?? nonNegativeOrNull(pressure.pressureTokens)
+    const maxTokens = nonNegativeOrNull(pressure.contextWindow)
+    if (usedTokens === null && maxTokens === null) return null
+    return {
+      usedTokens,
+      maxTokens,
+      percent: usedTokens !== null && maxTokens !== null && maxTokens > 0
+        ? Math.round((usedTokens / maxTokens) * 1000) / 10
+        : null,
     }
   }
 
@@ -721,13 +810,17 @@ export function createInteropService(options) {
     }
     try {
       const composition = await resolveAgentPreset()
+      const environment = typeof conversation.meshContext === 'string' ? conversation.meshContext : ''
       const handle = await ctx.agents.resume({
         resumeSessionId: conversation.sessionId,
-        ...(composition.presets === undefined || composition.id === '' ? {} : {
-          setup: async (agentCtx) => {
+        // Resume re-runs setup on the restored session, so the denied question
+        // tool and the environment note come back with it.
+        setup: async (agentCtx) => {
+          if (composition.presets !== undefined && composition.id !== '') {
             await composition.presets.mount(agentCtx, composition.id)
-          },
-        }),
+          }
+          applyMemberEnvironment(agentCtx, environment)
+        },
       })
       handles.set(conversation.id, handle)
       conversation.handle = handle
@@ -799,6 +892,52 @@ export function createInteropService(options) {
    * @param {Record<string, any>} request create body.
    * @returns {Promise<Record<string, any>>} conversation.
    */
+  /**
+   * Deny the question tool and register the environment context on one agent.
+   *
+   * Both registrations belong to the agent's scope, so they end with the
+   * conversation and never affect another agent. The preset mount has already
+   * run, which is what puts `ask_user_question` in the inherited layer that
+   * `tools.restrict()` filters. A failure is logged, not thrown: a preset
+   * without the tool needs no restriction, and losing the note must not lose
+   * the task.
+   * @param {any} agentCtx scoped setup context.
+   * @param {string} text formatted mesh environment.
+   * @returns {void}
+   */
+  function applyMemberEnvironment(agentCtx, text) {
+    if (agentCtx === null || typeof agentCtx !== 'object') return
+    const tools = agentCtx.tools
+    if (tools !== undefined && tools !== null && typeof tools.restrict === 'function') {
+      try {
+        tools.restrict({ deny: [QUESTION_TOOL] })
+      } catch (error) {
+        log(`could not disable ${QUESTION_TOOL}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    const systemPrompt = agentCtx.systemPrompt
+    if (systemPrompt !== undefined && systemPrompt !== null && typeof systemPrompt.context === 'function') {
+      try {
+        systemPrompt.context({
+          name: 'mesh:interaction',
+          order: INTERACTION_CONTEXT_ORDER,
+          interpolate: false,
+          text: MEMBER_INTERACTION_RULE,
+        })
+        if (text !== '') {
+          systemPrompt.context({
+            name: 'mesh:environment',
+            order: ENVIRONMENT_CONTEXT_ORDER,
+            interpolate: false,
+            text,
+          })
+        }
+      } catch (error) {
+        log(`could not inject the member environment: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+
   async function createConversation(request) {
     if (typeof ctx.agents?.create !== 'function') {
       throw httpError(503, 'sdk_unavailable', 'DSH agent runtime is not available')
@@ -845,6 +984,8 @@ export function createInteropService(options) {
     conversations.set(id, conversation)
     bySession.set(id, conversation)
     const composition = await resolveAgentPreset()
+    const environment = formatMemberMesh(request.mesh)
+    conversation.meshContext = environment
     let handle = null
     try {
       handle = await ctx.agents.create({
@@ -862,6 +1003,7 @@ export function createInteropService(options) {
             await composition.presets.mount(agentCtx, composition.id)
           }
           applyPreset(agent)
+          applyMemberEnvironment(agentCtx, environment)
         },
       })
       handles.set(id, handle)
@@ -908,6 +1050,51 @@ export function createInteropService(options) {
     broadcast(conversation, { type: 'message.accepted', sessionId: conversation.sessionId, ok: true })
     scheduleSave()
     return { accepted: true }
+  }
+
+  /**
+   * Explicitly compact one idle conversation.
+   *
+   * This is the member-side half of `call_member { compress: true }`: the
+   * caller cannot shorten another process's session, so it asks the owner to
+   * run the same manual compaction `/compact` runs. The transaction owns its
+   * own idle gate; a running conversation is refused instead of queued, so the
+   * caller can decide whether to wait or deliver without compressing.
+   * @param {Record<string, any>} conversation conversation.
+   * @returns {Promise<object|null>} compaction result, or null for no useful range.
+   */
+  async function compactConversation(conversation) {
+    const agent = await ensureAgent(conversation)
+    // In a preset-based composition (the Web profile disables the host-level
+    // backend) the compaction engine lives inside the Agent's isolated preset
+    // group. `agentPresets.serviceFor` is the registered reader for it; a
+    // composition without presets keeps the engine on the host context.
+    const presets = typeof ctx.get === 'function' ? ctx.get('agentPresets') : undefined
+    const scoped = typeof presets?.serviceFor === 'function' ? presets.serviceFor(agent, 'compaction') : undefined
+    const compaction = scoped ?? (typeof ctx.get === 'function' ? ctx.get('compaction') : undefined)
+    if (compaction === undefined || typeof compaction.compactNow !== 'function') {
+      throw httpError(501, 'compaction_unavailable', 'this member has no compaction service')
+    }
+    if (agent.status !== 'idle') {
+      throw httpError(409, 'conversation_busy', 'the conversation is running; wait until it is idle before compacting')
+    }
+    const timeoutMs = Number.isSafeInteger(settings.requestTimeoutMs) && settings.requestTimeoutMs > 0
+      ? settings.requestTimeoutMs
+      : 180_000
+    try {
+      return await compaction.compactNow(agent, AbortSignal.timeout(timeoutMs))
+    } catch (error) {
+      const code = typeof error?.code === 'string' ? error.code : ''
+      if (code === 'busy') {
+        throw httpError(409, 'conversation_busy', 'the conversation is not idle or another compaction is running')
+      }
+      if (code === 'cancelled') {
+        throw httpError(408, 'compaction_cancelled', 'compaction was cancelled')
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      log(`compaction failed for ${conversation.id}: ${message}`)
+      throw httpError(502, 'compaction_failed', `compaction failed${code === '' ? '' : ` (${code})`}: ${message}`)
+    }
   }
 
   /**
@@ -1145,7 +1332,7 @@ export function createInteropService(options) {
         json(response, 201, { ok: true, conversation: publicConversation(conversation) })
         return
       }
-      const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result))?$/u.exec(url.pathname)
+      const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact))?$/u.exec(url.pathname)
       if (match === null) { fail(response, 404, 'not_found', 'Unknown endpoint.'); return }
       const conversation = findConversation(decodeURIComponent(match[1]))
       const suffix = match[2] ?? ''
@@ -1188,7 +1375,29 @@ export function createInteropService(options) {
       if (request.method === 'POST' && (suffix === 'messages' || suffix === 'notify')) {
         const body = await readJson(request)
         const receipt = await sendMessage(conversation, body)
-        json(response, 202, { ok: true, conversation: publicConversation(conversation), receipt })
+        json(response, 202, {
+          ok: true,
+          conversation: publicConversation(conversation),
+          context: contextOf(conversation),
+          receipt,
+        })
+        return
+      }
+      if (request.method === 'POST' && suffix === 'compact') {
+        const result = await compactConversation(conversation)
+        json(response, 200, {
+          ok: true,
+          compacted: result !== null,
+          ...(result === null ? {} : {
+            summary: summaryText(result.summary),
+            shadowedCount: Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs.length : 0,
+            shadowedTokenCount: Number.isSafeInteger(result.shadowedTokenCount) ? result.shadowedTokenCount : null,
+            startSeq: result.startSeq,
+            summarySeq: result.summarySeq,
+            endSeq: result.endSeq,
+          }),
+          context: contextOf(conversation),
+        })
         return
       }
       if (request.method === 'POST' && suffix === 'wait') {
@@ -1206,6 +1415,7 @@ export function createInteropService(options) {
           seq: Number.isSafeInteger(result.seq) ? result.seq : seqOf(conversation),
           replies: Array.isArray(result.replies) ? result.replies : [],
           conversation: publicConversation(conversation),
+          context: contextOf(conversation),
         })
         return
       }

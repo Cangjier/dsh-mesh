@@ -126,7 +126,7 @@ interface TaskDoc { nodes: TaskNode[] }   // 全部对象，平铺存放，顺�
 2. `POST /api/dsh-wireguard/tasks/launch` → 网关 control-service：
    - 校验任务非空；执行成员必须是本网关的另一个 peer（本机只做协调，`local_member_not_allowed`）；
    - `POST http://<本机 VPN IP>:8765/v1/conversations`，带 `Authorization: Bearer <interop token>`，在本机建一个**协调对话**，body 是 `{ prompt: 协调指令 + markdown, title, workspace?, initiator }`。
-3. 协调对话的 agent 用 `call_member`（`action=delegate`，`member=<peer IP>`，`workspace=<name>`）把 markdown 交给执行成员，用 `wait_member` 等待，验收后给出结论。本机不执行具体任务，也不自己改文件。
+3. 协调对话的 agent 用 `call_member`（没有 `conversationId` 即新建，`member=<peer IP>`、`prompt`、`workspace=<name>`）把 markdown 交给执行成员，用 `wait_member`（`conversationId`）等待，验收后给出结论。本机不执行具体任务，也不自己改文件。
 4. 发起成功立刻返回并写入历史；状态是 `running`，`conversationId` 是本机协调对话的 id。
 
 interop token 的解析顺序：`DSH_TASKS_INTEROP_TOKEN` → `DSH_INTEROP_TOKEN` → `DSH_GATE_PASSWORD` → 从 cwd 往上最多 6 层的 `config/interop.env`、`config/gate.env`。部署里这几台机器这两者是同一个值，所以一枚 token 覆盖全网；哪台机器单独换了 token，请求会在那台机器上 401 并原样显示错误。

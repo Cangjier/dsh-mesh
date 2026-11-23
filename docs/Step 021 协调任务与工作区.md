@@ -28,7 +28,7 @@
        ├─ POST http://<本机 VPN IP>:8765/v1/conversations
        │    { prompt: 协调指令 + 任务 markdown, title, workspace, initiator }
        └─ 本机协调对话（DSH Web 自己拥有的 session）
-            ├─ call_member({ action: 'delegate', member: '<peer IP>', workspace })
+            ├─ call_member({ member: '<peer IP>', prompt, workspace })
             │    └─ 目标成员的 8765 开执行对话，cwd = ~/.dsh/workspaces/<name>
             ├─ wait_member(...)  一轮一轮等到 state=done
             └─ 验收后给出结论

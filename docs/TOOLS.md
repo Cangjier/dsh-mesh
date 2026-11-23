@@ -2,8 +2,8 @@
 
 - 插件：`@local/dsh-mesh`
 - 工具注册：`src/lib/tools.mjs` → `registerTools()`
-- 当前共 4 个模型可见工具：`build`、`deploy`、`members`、`call_member`
-- `build` / `deploy` / `members` 没有 `action` 参数，调用即执行对应行为；只有 `call_member` 保留 `delegate` / `run` / `send` 三个动作。
+- 当前共 6 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`wait_member`
+- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续，`wait_member` 只做有界等待。
 - 所有工具统一返回 `{ ok, text, data }`。`text` 是给人看的摘要，`data` 是结构化结果。
 - 同步执行的工具会在 `text` 和 `data` 里都返回日志文件地址，便于调用结束后继续读取完整日志。
 
@@ -13,8 +13,10 @@
 |---|---|---|---|
 | `build` | 从固定源码构建 Web 离线包，等待结束 | `source` `ref` `targets` `planOnly` `version` `jobId` `keepDist` | `false` |
 | `deploy` | SSH 部署/升级，等待结束 | `host` `package` | `false` |
+| `repack` | 用当前仓库刷新已有离线包 | `package` | `false` |
 | `members` | 只读成员发现 | 无 | `true` |
-| `call_member` | 在另一个成员上派发/等待/继续对话 | `action` + `member` / `prompt` / `content` / `taskId` / `cwd` | `false` |
+| `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `compress` / `cwd` / `workspace` | `false` |
+| `wait_member` | 有界等待成员会话，按轮返回 | `conversationId` `timeoutMs` | `true` |
 
 ## 2. 共享基础
 
@@ -312,19 +314,25 @@ deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-lin
 
 ## 6. `call_member`
 
-### 6.1 动作
+### 6.1 参数与两种模式
 
-| action | 必填参数 | 行为 |
-|---|---|---|
-| `delegate` | `member`、`prompt` | 在成员 B 上创建对话，异步执行，立即返回 `taskId` |
-| `run` | `member`、`prompt` | 同步等待 B 完成，返回最终文本 |
-| `send` | `taskId`、`content` | 向已有 B 对话继续发消息，并继续等待/通知 |
+没有 `action`：**没有 `conversationId` 就新建对话，有就继续那个对话。**
+
+| 模式 | 判据 | 必填 | 行为 |
+|---|---|---|---|
+| 新建 | 没有 `conversationId` | `member`、`prompt` | 在成员 B 上创建对话，异步执行，立即返回会话id |
+| 继续 | 有 `conversationId` | `prompt`（本机未跟踪该对话时再加 `member`） | 向已有对话投递，可先压缩上下文 |
 
 可选：
 
 ```text
-cwd    delegate/run 在成员 B 上的工作目录
+cwd / workspace  仅新建：成员 B 上的工作目录，或 ~/.dsh/workspaces/<name>
+compress         仅继续：投递前先在成员 B 上压缩该对话上下文（要求对话空闲）
 ```
+
+`conversationId`（会话id）是唯一对外的继续投递凭据：call_member / wait_member
+返回里一直有它，换一个 DSH 进程、或对话不是本机发起时，只要知道会话id + 成员，
+就能继续投递。插件内部的 task id 只用于任务记录和日志文件名，不出现在工具参数里。
 
 ### 6.2 成员解析
 
@@ -353,43 +361,81 @@ config.interopToken
 → config/gate.env 的 DSH_GATE_PASSWORD
 ```
 
-### 6.3 delegate
+### 6.3 新建对话
 
 ```text
-call_member { "action": "delegate", "member": "10.66.66.3", "prompt": "检查磁盘" }
+call_member { "member": "10.66.66.3", "prompt": "检查磁盘" }
   → POST http://10.66.66.3:8765/v1/conversations
-  → 立即返回 taskId + conversationId + logFile
-  → 后台循环 POST /wait
-  → 完成后 agent.followup() 把结果写回 A 的原对话
+  → 立即返回会话id + logFile
+  → 后台循环 POST /wait，按轮记录回复
+  → 由 wait_member 取回（call_member 不把结果写回 A 的原对话）
 ```
 
 返回里的 `data.logFile`：
 
 ```text
-$DSH_HOME/mesh/member-tasks/<taskId>.log
+$DSH_HOME/mesh/member-tasks/<内部 task id>.log
 ```
 
-### 6.4 run
+#### 新建对话前自动注入的信息
+
+创建对话之前，发起方会：
 
 ```text
-call_member { "action": "run", "member": "10.66.66.3", "prompt": "检查磁盘" }
-  → 同步等待 B 完成
-  → 返回最终文本、状态、logFile
+1. 从组网直连配置（hysteria links.json）确认目标成员是不是某个直连的 client；
+   没有直连配置 -> 不测、不注入任何出网信息。
+2. 有直连 -> 取该记录的 httpProxy 端口，用 SSH 把 egress-probe.mjs 的源码从 stdin
+   交给目标成员的 node 运行：node --input-type=module - <端口>。
+   探针只走这个已配置的 HTTP 代理，实测延迟和下行带宽，输出一行结果。
+3. 从 hub 的 release.json 取 GitHub/Gitee token，原值随请求下发。
 ```
 
-### 6.5 send
+注入给成员会话的运行时上下文只有：
 
 ```text
-call_member { "action": "send", "taskId": "member-...", "content": "把结果写到 /tmp/result.txt" }
-  → POST /v1/conversations/<conversationId>/messages
-  → 重新进入等待
-  → B 下一轮完成后继续通知 A
+本机代理端口 8080；经代理出网实测：延迟 118 ms，下行 42.3 Mbps。
+GitHub token: ghp_...
+Gitee token: ...
 ```
 
-### 6.6 wait_member：按轮返回
+- 不做额外配置：不写环境变量、不起 SSH 隧道、不扫描别的端口，也从不建议别的代理。
+- 没有组网直连时不会出现出网那一行；token 也没有就什么都不注入。
+- 探针失败写一行失败原因；同一行也会出现在 `call_member` 的返回里。
+- 这段上下文不进对话历史；DSH 重启恢复会话后需要重新发起才会再有。
+
+同一时机还会**禁用该会话的 `ask_user_question`**：成员任务没有可应答的用户，提问要么落到成员
+自己的 Web 界面、要么等到工具超时，而发起方只拿得到轮次结束时的文本。会话会被注入一条规则：
+需要信息或决策时，在回复里写清问题并结束这一轮；发起方用 `call_member` 带同一个
+`conversationId` 回答即可。恢复会话时这条规则会重新应用。
+
+### 6.4 继续对话
 
 ```text
-wait_member { "taskId": "member-...", "timeoutMs": 30000 }
+call_member { "member": "10.66.66.3", "conversationId": "<会话id>", "prompt": "继续" }
+```
+
+本机已经跟踪这个对话时 `member` 可以省略（按 `conversationId` 找到本机任务记录）。
+只给 `conversationId` 而本机没有记录时，必须给 `member`，插件会把它绑定成一个新的
+本机任务（`data.adopted: true`），并把回答游标设到成员当前的位置，避免把旧回复
+当成本轮结果重复读出来。
+
+投递前压缩上下文：
+
+```text
+call_member { "conversationId": "<会话id>", "prompt": "继续", "compress": true }
+  → POST /v1/conversations/<会话id>/compact
+  → 成员侧调用自己的 compaction.compactNow()（等同 /compact；preset 隔离组优先，回退宿主 ctx.compaction），完成后才投递
+  → POST /v1/conversations/<会话id>/messages
+```
+
+`compress` 只用于继续已有对话，并要求对话空闲；正在运行时返回错误而不是排队压缩。
+成员版本过旧（没有 `/compact` 或 `ctx.compaction`）会明确提示先升级；
+不要为了压缩而重开对话（那样上下文会丢）。
+
+### 6.5 wait_member：按轮返回
+
+```text
+wait_member { "conversationId": "<会话id>", "timeoutMs": 30000 }
 ```
 
 成员对话每结束一轮回答就返回，不等整段任务结束：
@@ -400,17 +446,37 @@ state=done      → 整段任务完成，text 为最终回答
 state=running   → 这段时间没有新回复（done=false, timedOut=true），继续 wait
 ```
 
-`data` 里带 `replies`（本轮及之前未返回的回复，按 `seq` 去重）、`text`、`seq`、`turn`。
+`data` 里带 `replies`（本轮及之前未返回的回复，按 `seq` 去重）、`text`、`seq`、`turn`；
+内部 task id 不出现在参数和 data 里。
+
+`state=done` 的 text 还会带：
+
+```text
+会话id：<会话id>
+继续这个对话：call_member { "member": "...", "conversationId": "...", "prompt": "..." }
+对话上下文：<已用> / <上限> tokens（<百分比>）
+```
+
+上下文占用来自成员侧的 DSH token meter（`contextPressure` 的 `projectedTokens` 和
+`contextWindow`），即「下一次请求的 prompt 会占多少」。超过 **20%** 时 text 会追加
+建议：下次投递加 `"compress": true`。成员版本过旧、或对话没有活动 agent 时，
+这一行会省略，不会让 wait 失败。该数值同时出现在 `data.context`：
+
+```json
+{ "usedTokens": 41000, "maxTokens": 128000, "percent": 32.0 }
+```
 
 实现上 A 侧不再轮询：`MemberTaskService.wait()` 被 `#notifyWaiters()` 直接唤醒；
 成员侧 `POST /wait` 带 `since`，由交互服务从 `session.event` 按轮累积回答并即时返回
-（详见 Step 013「等待对话」）。
+（详见 Step 013「等待对话」）。内嵌 interop 的 `POST /wait` 和 `POST /messages`
+响应新增顶层 `context`，`POST /compact` 返回 `compacted` / `shadowedCount` /
+`shadowedTokenCount` / `summary` / `context`。
 
-### 6.7 任务文件
+### 6.6 任务文件
 
 ```text
-$DSH_HOME/mesh/member-tasks/<taskId>.json
-$DSH_HOME/mesh/member-tasks/<taskId>.log
+$DSH_HOME/mesh/member-tasks/<内部 task id>.json
+$DSH_HOME/mesh/member-tasks/<内部 task id>.log
 ```
 
 状态：
@@ -424,15 +490,17 @@ interrupted    插件停止或重启时，未完成任务被标记
 
 失败时 `data.interrupted: true` 表示这一轮是被目标重启/运行时退出打断的：对话还在，
 
-`send` 同一个 taskId 会恢复上下文继续，而不是重开一个失忆的对话。
+`call_member` 带同一个 `conversationId` 会恢复上下文继续，而不是重开一个失忆的对话。
+文件名里的 `<内部 task id>` 只是插件内部记录，不接受作为工具参数。
 
 限制：
 
 - `wait` 单次 60s，最多 30 次尝试；
 - 目标成员的 8765 必须可达，token 必须正确；
-- 目标正在启动（503）时 `delegate` / `send` 会等最多 90 秒；
+- 目标正在启动（503）时新建/继续都会等最多 90 秒；
 - 对话已消失（404 / 未知 SDK 会话 / 会话已存在）立即失败，不进入退避重试；
-- 没有 status / list / logs / system 动作；需要看最终结果用 `run` 或读取 `logFile`；
+- `compress` 要求目标对话空闲，压缩请求最多等 180 秒；成员没有 `ctx.compaction` 时返回 501；
+- 需要看最终结果用 `wait_member`（state=done）或读取 `logFile`；
 - 插件重启后不会自动恢复等待。
 
 ---
@@ -455,7 +523,7 @@ members
 ```text
 members
   → 取成员 id/IP
-  → call_member { action: "delegate", member: "<id>", prompt: "..." }
+  → call_member { member: "<id>", prompt: "..." }
   → 继续当前对话
   → B 完成后收到 [成员任务完成] 用户消息
 ```

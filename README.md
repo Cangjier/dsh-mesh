@@ -137,16 +137,17 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.7z \
 - 默认由 `@local/dsh-mesh` host 插件在 **DSH Web 进程内**监听 `:8765`，会话直接走 `ctx.agents.create/resume`，所以 Web 侧边栏看到的是同一进程拥有的 live 会话，不会把运行中的任务冷读成「已停止」。
 - `code/interop-service/server.mjs` 保留为独立进程/回退（`interopEmbedded: false`），默认部署不再启动它。
 - 内部拉起 `dsh --profile sdk`，通过原生 stdio JSON-RPC 创建/驱动/等待对话。
-- 提供 `POST /v1/conversations`、`/messages`、`/notify`、`/wait`、`GET /events`、`/result`、`/healthz`；`/wait` 带 `since` 时按轮返回（`state: progress` / `done`）。
+- 提供 `POST /v1/conversations`、`/messages`、`/notify`、`/wait`、`/compact`、`GET /events`、`/result`、`/healthz`；`/wait` 带 `since` 时按轮返回（`state: progress` / `done`），并带当前上下文占用 `context`；`/compact` 用成员自己的 compaction 后端（优先 agent preset 隔离组，回退宿主 `ctx.compaction`）压缩对话上下文。
 - 提供 `GET /v1/system`（CPU/内存/磁盘/网络/进程）以及 `/v1/system/cpu|memory|disk|network|process` 分区接口。
 - Bearer token；成员部署会把旧的 Windows `DSH-Interop` / Linux `dsh-interop.service` 停用，`8765` 由 DSH Web 持有。
 - 详见 [Step 020](docs/Step%20020%20内嵌interop服务.md)；旧独立结构见 [Step 013](docs/Step%20013%20独立DSH交互HTTP服务.md)。
 
-### 7. 成员任务：A 操作 B 的对话并回调主对话
+### 7. 成员任务：A 操作 B 的对话并按轮取回
 
-- 新工具 `call_member`：`delegate` / `send`（只发起，立即返回 taskId）；`wait_member` 有界等待，**成员每结束一轮回答就返回**，`state` 区分进行中（还会继续/有子代理在跑）与完成。
-- A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话并等待；`run` 可直接同步等待最终结果。
-- B 完成后，A 的插件用 `agent.followup()` 把结果写回 **A 的同一个会话**；A 正忙就排到下一轮，空闲就唤醒一个 turn，类似子代理完成通知。
+- 新工具 `call_member`：没有 `action`；没有 `conversationId` 就新建对话，有就继续那个对话，只发起并立即返回会话id。`wait_member` 按 `conversationId` 有界等待，**成员每结束一轮回答就返回**，`state` 区分进行中（还会继续/有子代理在跑）与完成。
+- 新建对话前，`call_member` 先从组网直连配置找到目标成员的本地代理端口，用 SSH 在目标成员上跑 mjs 探针实测该端口的出网延迟和下行带宽，把**一行结果 + 代理端口 + hub 的 git token 原值**注入会话；组网里没有该成员的直连配置就不报出网信息。并**禁用该会话的 `ask_user_question`**——成员任务没有可应答的用户，需要信息时会在回复里提问并停下，用 `call_member` 带同一个 `conversationId` 回答。详见 [Step 025](docs/Step%20025%20成员任务的出网实测与token注入.md)。
+- `conversationId` 是唯一对外的继续投递凭据（内部 task id 不再出现在工具参数里）；`compress: true` 会让成员先压缩上下文再投递。`wait_member` 在 `state=done` 时返回会话id和上下文占用，超过 20% 时建议下次投递先压缩。
+- A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话；后台轮询 B 的 `/wait`，`wait_member` 按轮取回，不会把结果自动写回 A 的对话。
 - 不需要 B 主动访问 A；A 长轮询（阻塞式等待）B 的 `/wait`，避免回调端口/NAT 问题。
 
 ## 快速开始
@@ -312,6 +313,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 022 Release 发布与下载升级](docs/Step%20022%20Release%20发布与下载升级.md) | 固定 latest tag、GitHub 整包/Gitee 分片、仅保留最新版、成员经外网代理下载、失败回退上传 |
 | [Step 023 指针布局：稳定 mjs 启动器](docs/Step%20023%20指针布局：稳定%20mjs%20启动器.md) | 稳定 launcher + 指针文件、releases/shared 布局、环境变量注入、安装/升级/回退一条路径 |
 | [Step 024 7z 包格式与网关静态资源](docs/Step%20024%207z%20包格式与网关静态资源.md) | 7-Zip 二进制作为 gate 静态资源、`.7z` 打包/解压、从旧版本的迁移步骤、legacy 过渡格式 |
+| [Step 025 成员任务的出网实测与 token 注入](docs/Step%20025%20成员任务的出网实测与token注入.md) | 按组网直连配置在目标成员上 SSH 跑 mjs 测延迟/带宽、一行结果与 token 注入、禁用 `ask_user_question` |
 | [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、升级/取消、包内容 |
 | [Step 020 内嵌 interop 服务](docs/Step%20020%20内嵌interop服务.md) | 会话由 DSH Web 拥有、嵌入式 :8765、部署/回滚、冷读「已停止」根因 |
 
@@ -363,8 +365,8 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `deploy` | SSH 部署/升级成员（pointer） |
 | `repack` | 用当前仓库刷新已有离线包：只替换 `gate/`、`shared/`、`config/`、`code/*`、根脚本和 `plugins/dsh-mesh/`，DSH 主体（`app/`、`web/`、`runtime/`）复用，最后更新 `.sha256` |
 | `members` | WireGuard 成员发现 |
-| `call_member` | 在成员上发起/继续对话，返回 taskId |
-| `wait_member` | 有界等待成员任务：有新回复立刻返回（`state=progress`），完成返回 `done`；超时返回继续等待提示 |
+| `call_member` | 在成员上新建/继续对话，返回会话id |
+| `wait_member` | 有界等待成员会话：有新回复立刻返回（`state=progress`），完成返回 `done`；超时返回继续等待提示 |
 
 ## 约定与限制
 

@@ -40,6 +40,7 @@ function fakeHost(options = {}) {
       }
     },
     get(name) {
+      if (options.services !== undefined && name in options.services) return options.services[name]
       if (name === 'permissionPresets') {
         return { set: (session, preset) => { presetCalls.push([session.id, preset]) } }
       }
@@ -47,6 +48,7 @@ function fakeHost(options = {}) {
         return {
           resolve: async id => ({ id: id ?? 'standard' }),
           mount: async (_agentCtx, id) => { presetMounts.push(id) },
+          serviceFor: (_agent, service) => options.services?.scoped?.[service],
         }
       }
       return undefined
@@ -67,6 +69,7 @@ function fakeHost(options = {}) {
           id: input.sessionId,
           status: 'idle',
           session,
+          options: { provider: 'deepseek-account', model: 'deepseek-flash' },
           followup(message) {
             this.lastMessage = message
             this.status = 'running'
@@ -74,8 +77,9 @@ function fakeHost(options = {}) {
             emit('agent/status', { agent: this, status: 'running' })
             emit('session/event', session, { type: 'turn/start', seq: 0, time: Date.now(), data: { turn: 1 } })
           },
+          async runMaintenance(job) { return job(new AbortController().signal) },
         }
-        await input.setup?.({}, agent)
+        await input.setup?.(options.agentCtx ?? {}, agent)
         sessions.set(session.id, session)
         agents.set(session.id, agent)
         nextAgent = agent
@@ -93,15 +97,18 @@ function fakeHost(options = {}) {
           id: input.resumeSessionId,
           status: 'idle',
           session,
+          options: { provider: 'deepseek-account', model: 'deepseek-flash' },
           followup(message) {
             this.lastMessage = message
             this.status = 'running'
             emit('agent/status', { agent: this, status: 'running' })
             emit('session/event', session, { type: 'turn/start', seq: 0, time: Date.now(), data: { turn: 1 } })
           },
+          async runMaintenance(job) { return job(new AbortController().signal) },
         }
         sessions.set(session.id, session)
         agents.set(agent.id, agent)
+        await input.setup?.(options.agentCtx ?? {}, agent)
         return { agent, async dispose() { agents.delete(agent.id); emit('agent/disposed', { agent }) } }
       },
       get(id) { return agents.get(id) },
@@ -114,11 +121,12 @@ function fakeHost(options = {}) {
 /**
  * One service over a temp dir and a fake host.
  * @param {object} [overrides] settings overrides.
+ * @param {object} [hostOptions] fake-host options, such as extra services.
  * @returns {Promise<object>} service, host, port and dir.
  */
-async function serviceOf(overrides = {}) {
+async function serviceOf(overrides = {}, hostOptions = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'mesh-interop-'))
-  const fake = fakeHost()
+  const fake = fakeHost(hostOptions)
   const settings = {
     bind: '127.0.0.1',
     port: 0,
@@ -136,7 +144,12 @@ async function serviceOf(overrides = {}) {
     tokenSource: 'test',
     ...overrides,
   }
-  const service = createInteropService({ ctx: fake.host, settings, log: () => {}, retry: false })
+  const service = createInteropService({
+    ctx: fake.host,
+    settings,
+    log: () => {},
+    retry: false,
+  })
   const { port } = await service.start()
   const token = settings.token
   const call = async (method, url, body) => {
@@ -186,6 +199,121 @@ test('a launch creates a host agent, titles it and prompts it', async () => {
     assert.equal(answer.body.finalText, '完成')
     assert.equal(answer.body.conversation.turns, 1)
     assert.equal(answer.body.conversation.updatedAt >= created.body.conversation.updatedAt, true)
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a new conversation denies the question tool and carries the measured mesh facts', async () => {
+  const restricted = []
+  const contexts = []
+  const agentCtx = {
+    tools: { restrict: filter => { restricted.push(filter) } },
+    systemPrompt: { context: entry => { contexts.push(entry) } },
+  }
+  const { service, call, dir } = await serviceOf({}, { agentCtx })
+  try {
+    const created = await call('POST', '/v1/conversations', {
+      prompt: '做个任务',
+      mesh: {
+        link: true,
+        proxyPort: 8080,
+        egress: { ok: true, latencyMs: 118, downMbps: 42.3 },
+        tokens: { github: 'ghp_test_token', gitee: null },
+      },
+    })
+    assert.equal(created.status, 201)
+    // The question tool has no answerer in a task conversation, so the preset's
+    // contribution is filtered out for this agent only.
+    assert.deepEqual(restricted, [{ deny: ['ask_user_question'] }])
+    assert.deepEqual(contexts.map(entry => entry.name), ['mesh:interaction', 'mesh:environment'])
+    assert.match(contexts[0].text, /禁用了 ask_user_question/u)
+    assert.equal(contexts[0].interpolate, false)
+    assert.equal(contexts[1].text, '本机代理端口 8080；经代理出网实测：延迟 118 ms，下行 42.3 Mbps。\nGitHub token: ghp_test_token')
+    assert.equal(contexts[1].interpolate, false)
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a conversation without mesh facts still gets the interaction rule', async () => {
+  const contexts = []
+  const agentCtx = {
+    tools: { restrict: () => { throw new Error('unknown global tool "ask_user_question"') } },
+    systemPrompt: { context: entry => { contexts.push(entry) } },
+  }
+  const { service, call, dir } = await serviceOf({}, { agentCtx })
+  try {
+    const created = await call('POST', '/v1/conversations', { prompt: '照常执行' })
+    assert.equal(created.status, 201)
+    assert.deepEqual(contexts.map(entry => entry.name), ['mesh:interaction'])
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a resumed conversation re-applies the question-tool restriction', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'mesh-interop-'))
+  const settings = {
+    bind: '127.0.0.1',
+    port: 0,
+    token: 'test-token',
+    dataDir: dir,
+    workdir: dir,
+    workspaceRoot: path.join(dir, 'workspaces'),
+    stateFile: path.join(dir, 'conversations.json'),
+    logFile: path.join(dir, 'interop.log'),
+    provider: 'deepseek-account',
+    model: 'deepseek-flash',
+    approve: true,
+    preset: 'workspace-write',
+    agentPreset: 'standard',
+    tokenSource: 'test',
+  }
+  const call = async (port, method, url, body) => {
+    const response = await fetch(`http://127.0.0.1:${port}${url}`, {
+      method,
+      headers: { authorization: 'Bearer test-token', ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+    return { status: response.status, body: await response.json() }
+  }
+  let service = createInteropService({
+    ctx: fakeHost({ agentCtx: { tools: { restrict: () => {} }, systemPrompt: { context: () => {} } } }).host,
+    settings,
+    log: () => {},
+    retry: false,
+  })
+  let port = 0
+  try {
+    ;({ port } = await service.start())
+    const created = await call(port, 'POST', '/v1/conversations', { prompt: '先做一半' })
+    assert.equal(created.status, 201)
+    const id = created.body.conversation.id
+    await service.dispose()
+
+    // A restart loses the live agent; the next message resumes the session and
+    // must restore the restriction or the tool comes back unanswerable.
+    const restricted = []
+    const contexts = []
+    const resumedCtx = {
+      tools: { restrict: filter => { restricted.push(filter) } },
+      systemPrompt: { context: entry => { contexts.push(entry) } },
+    }
+    service = createInteropService({
+      ctx: fakeHost({ agentCtx: resumedCtx }).host,
+      settings,
+      log: () => {},
+      retry: false,
+    })
+    ;({ port } = await service.start())
+    const sent = await call(port, 'POST', `/v1/conversations/${id}/messages`, { content: '继续' })
+    assert.equal(sent.status, 202)
+    assert.deepEqual(restricted, [{ deny: ['ask_user_question'] }])
+    assert.deepEqual(contexts.map(entry => entry.name), ['mesh:interaction'])
   } finally {
     await service.dispose()
     await rm(dir, { recursive: true, force: true })
@@ -336,6 +464,84 @@ test('approval requests are answered only for owned agents', async () => {
   } finally {
     await service.dispose()
     await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('manual compaction runs through the agent preset compaction service and reports context', async () => {
+  const calls = []
+  const compaction = {
+    async compactNow(agent) {
+      calls.push(agent.id)
+      return {
+        compactionId: 'c-1',
+        startSeq: 10,
+        summarySeq: 11,
+        endSeq: 12,
+        summary: [{ type: 'text', text: '早先工作的摘要' }],
+        shadowedSeqs: [1, 2, 3],
+        shadowedTokenCount: 4321,
+      }
+    },
+  }
+  const sessionProjections = {
+    snapshot: () => ({
+      values: {
+        contextPressure: { pressureTokens: 1000, projectedTokens: 1200, contextWindow: 128_000 },
+      },
+    }),
+  }
+  // The Web profile mounts compaction inside the Agent's isolated preset
+  // group, not on the host context, so the scoped lookup is what must work.
+  const { service, fake, call, dir } = await serviceOf({}, {
+    services: { scoped: { compaction }, sessionProjections },
+  })
+  try {
+    const created = await call('POST', '/v1/conversations', { title: '空白' })
+    const id = created.body.conversation.id
+    const agent = fake.agents.get(id)
+    fake.emit('agent/status', { agent, status: 'idle' })
+
+    const compacted = await call('POST', `/v1/conversations/${id}/compact`)
+    assert.equal(compacted.status, 200)
+    assert.equal(compacted.body.compacted, true)
+    assert.equal(compacted.body.summary, '早先工作的摘要')
+    assert.equal(compacted.body.shadowedCount, 3)
+    assert.equal(compacted.body.shadowedTokenCount, 4321)
+    assert.deepEqual(compacted.body.context, { usedTokens: 1200, maxTokens: 128_000, percent: 0.9 })
+    assert.deepEqual(calls, [id], 'the member compacts its own live agent')
+
+    const waited = await call('POST', `/v1/conversations/${id}/wait`, { timeoutMs: 1000 })
+    assert.equal(waited.body.state, 'done')
+    assert.deepEqual(waited.body.context, { usedTokens: 1200, maxTokens: 128_000, percent: 0.9 })
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('compaction refuses a running conversation and an absent compaction service', async () => {
+  const compaction = { compactNow: async () => null }
+  const { service, call, dir } = await serviceOf({}, { services: { scoped: { compaction } } })
+  try {
+    const created = await call('POST', '/v1/conversations', { prompt: '跑很久' })
+    const id = created.body.conversation.id
+    const busy = await call('POST', `/v1/conversations/${id}/compact`)
+    assert.equal(busy.status, 409)
+    assert.equal(busy.body.error.code, 'conversation_busy')
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+
+  const bare = await serviceOf()
+  try {
+    const created = await bare.call('POST', '/v1/conversations', { title: '空白' })
+    const missing = await bare.call('POST', `/v1/conversations/${created.body.conversation.id}/compact`)
+    assert.equal(missing.status, 501)
+    assert.equal(missing.body.error.code, 'compaction_unavailable')
+  } finally {
+    await bare.service.dispose()
+    await rm(bare.dir, { recursive: true, force: true })
   }
 })
 

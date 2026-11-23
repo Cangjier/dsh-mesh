@@ -996,15 +996,20 @@ export function createInteropService(options) {
     if (registry !== undefined && registry !== null && typeof registry.list === 'function') {
       try {
         const listed = registry.list()
+        // The directory check belongs in the predicate: an older record whose
+        // directory has gone must not hide a later valid one with the same title.
         const existing = Array.isArray(listed)
-          ? listed.find(workspace => workspace?.title === DEFAULT_WORKSPACE
-            && typeof workspace.path === 'string' && workspace.path !== '')
+          ? listed.find((workspace) => {
+              if (workspace?.title !== DEFAULT_WORKSPACE) return false
+              if (typeof workspace.path !== 'string' || workspace.path === '') return false
+              try {
+                return statSync(workspace.path).isDirectory()
+              } catch {
+                return false
+              }
+            })
           : undefined
-        if (existing !== undefined) {
-          try {
-            if (statSync(existing.path).isDirectory()) return existing.path
-          } catch { }
-        }
+        if (existing !== undefined) return existing.path
       } catch { }
     }
     return workspacePath(settings, DEFAULT_WORKSPACE)
@@ -1022,9 +1027,17 @@ export function createInteropService(options) {
     // workspace field stays empty. Only a request with neither field is routed
     // into the default workspace, so it never lands under "Ungrouped".
     const workspace = requested !== '' ? requested : explicitCwd === '' ? DEFAULT_WORKSPACE : ''
+    // `call_member` sends `workspace: 'default-workspace'` whenever the caller
+    // has no workspace of its own, so the fixed title must take the same reuse
+    // branch as a request with neither field; otherwise it would still create a
+    // second group titled 「默认工作区」.
     const cwd = requested !== ''
-      ? workspacePath(settings, requested)
-      : explicitCwd !== '' ? explicitCwd : defaultWorkspaceDirectory(registry, settings)
+      ? requested === DEFAULT_WORKSPACE
+        ? defaultWorkspaceDirectory(registry, settings)
+        : workspacePath(settings, requested)
+      : explicitCwd !== ''
+        ? explicitCwd
+        : defaultWorkspaceDirectory(registry, settings)
     const prompt = request.prompt
     try {
       mkdirSync(cwd, { recursive: true })

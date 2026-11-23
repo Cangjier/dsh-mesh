@@ -41,6 +41,7 @@
    | 请求 | cwd | `conversation.workspace` |
    | --- | --- | --- |
    | `workspace: '<name>'` | `<workspaceRoot>/<name>` | `<name>` |
+   | `workspace: 'default-workspace'` | 同“两者都没有”的复用分支 | `'default-workspace'` |
    | `cwd: '<dir>'` | `<dir>`（`path.resolve`） | `''` |
    | 两者都没有 | 先复用注册表里标题为 `default-workspace` 的记录，否则 `<workspaceRoot>/default-workspace` | `'default-workspace'` |
 
@@ -55,6 +56,8 @@
    `<Documents>/deepseek-harness/default-workspace`），就用它的 `path` 当 cwd 并
    attach；没有才用 `<workspaceRoot>/default-workspace` 并 `create`。这样侧栏
    不会出现两行都叫「默认工作区」。
+   显式 `workspace: 'default-workspace'` 也走这条复用分支：`call_member` 在调用方
+   没有工作区时正是显式发送这个名字，不这样处理的话主路径仍会建出第二个分组。
 
 3. **挂载时机**：`ctx.agents.create` 成功之后。注册表的 `attachSession` 会用
    **已持久化**的 session header cwd 校验归属，而 `agents.create` 在返回前已经
@@ -155,7 +158,8 @@ curl -s -H "authorization: Bearer <token>" http://<member>:8765/v1/conversations
     标题 `default-workspace`、`attachSession` 收到会话 id、
     `conversation.workspace === 'default-workspace'`；
   - 已有标题为 `default-workspace` 的记录 → 用它的 path 当 cwd、不重复 create、
-    仍然 attach；
+    仍然 attach（缺省请求和显式 `workspace: 'default-workspace'` 都覆盖）；
+  - 同名记录里第一条目录已丢失 → 跳过它，复用后面有效的同名记录；
   - 指定 workspace → 目录在 workspaceRoot 下、标题为名称、attach；
   - 路径已有记录 → 复用、不重复 create、仍然 attach；
   - 没有 workspaceRegistry → 会话照常创建；
@@ -191,8 +195,9 @@ curl -s -H "authorization: Bearer <token>" http://<member>:8765/v1/conversations
 - **超长/非法标题回退而不是截断**：截断后的名字和调用方工作区不同名，会在成员
   上悄悄造出一个“看起来像”的第二个工作区；回退到默认工作区至少是诚实的。
 - **注册表按路径复用，不按标题复用**：同名标题允许指向不同目录（DSH 本身允许），
-  按路径复用才和 Web 的“一个目录一个工作区”一致。默认分支是唯一的按标题例外：
-  它挑的正是 DSH 自带的 `default-workspace`，再用它的路径 attach，避免两个同名分组。
+  按路径复用才和 Web 的“一个目录一个工作区”一致。唯一的按标题例外是
+  `default-workspace`（缺省和显式都算）：它挑的正是 DSH 自带的同名记录，再用
+  它的路径 attach，避免两个同名分组。
 - **自动派生的名字比 interop 更严**：调用方从工作区标题派生名字时额外拒绝
   `:`、`*`、`?`、`<`、`>`、`|`，因为这类标题在 Linux 上合法、在 Windows 成员上
   却建不出目录，而调用方无法在发起时知道成员的操作系统；代价是个别 Linux 标题

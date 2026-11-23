@@ -254,6 +254,48 @@ test('an existing default workspace is reused instead of creating a second one',
   }
 })
 
+test('an explicit default-workspace request reuses the existing record too', async () => {
+  const memory = memoryWorkspaceRegistry()
+  const { service, call, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+  try {
+    // `call_member` sends this exact name when the caller has no workspace.
+    const documents = path.join(dir, 'Documents', 'deepseek-harness', 'default-workspace')
+    mkdirSync(documents, { recursive: true })
+    memory.seed(documents, 'default-workspace')
+
+    const created = await call('POST', '/v1/conversations', { prompt: '显式默认', workspace: 'default-workspace' })
+    assert.equal(created.status, 201)
+    const conversation = created.body.conversation
+    assert.equal(conversation.cwd, documents)
+    assert.equal(conversation.workspace, 'default-workspace')
+    assert.deepEqual(memory.creates, [])
+    assert.deepEqual(memory.attaches, [[documents, conversation.id]])
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a broken default record does not hide a later valid one', async () => {
+  const memory = memoryWorkspaceRegistry()
+  const { service, call, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+  try {
+    memory.seed(path.join(dir, 'gone', 'default-workspace'), 'default-workspace')
+    const documents = path.join(dir, 'Documents', 'deepseek-harness', 'default-workspace')
+    mkdirSync(documents, { recursive: true })
+    memory.seed(documents, 'default-workspace')
+
+    const created = await call('POST', '/v1/conversations', { prompt: '跳过损坏记录' })
+    assert.equal(created.status, 201)
+    assert.equal(created.body.conversation.cwd, documents)
+    assert.deepEqual(memory.creates, [])
+    assert.deepEqual(memory.attaches, [[documents, created.body.conversation.id]])
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a root cwd still gets a non-empty workspace title', async () => {
   const memory = memoryWorkspaceRegistry()
   const { service, call, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })

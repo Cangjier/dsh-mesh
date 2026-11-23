@@ -1063,7 +1063,7 @@ export function createInteropService(options) {
       // Attach after the session exists: the registry validates the attach
       // against the persisted header cwd, which `agents.create` just wrote.
       const registry = typeof ctx.get === 'function' ? ctx.get('workspaceRegistry') : ctx.workspaceRegistry
-      await attachWorkspaceSession(registry, cwd, workspace !== '' ? workspace : path.basename(cwd), id)
+      await attachWorkspaceSession(registry, cwd, workspace !== '' ? workspace : path.basename(cwd) || DEFAULT_WORKSPACE, id)
       scheduleSave()
       return conversation
     } catch (error) {

@@ -292,6 +292,22 @@ test('a failing attach never fails the conversation', async () => {
   }
 })
 
+test('a failing registry lookup or create never fails the conversation', async () => {
+  for (const options of [{ resolveThrows: true }, { createThrows: true }]) {
+    const memory = memoryWorkspaceRegistry(options)
+    const { service, call, fake, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+    try {
+      const created = await call('POST', '/v1/conversations', { prompt: '注册表失败' })
+      assert.equal(created.status, 201)
+      assert.ok(fake.agents.get(created.body.conversation.id))
+      assert.equal(created.body.conversation.workspace, 'default-workspace')
+    } finally {
+      await service.dispose()
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+})
+
 test('an explicit cwd keeps its own meaning and carries no workspace name', async () => {
   const memory = memoryWorkspaceRegistry()
   const { service, call, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })

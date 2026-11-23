@@ -48,6 +48,8 @@
    默认值 `settings.workdir` 不再用于新建会话（它仍用于恢复旧记录的兜底）。
    名称仍走 `normalizeWorkspaceName`：只允许一层目录，拒绝 `/`、`\`、`"`、`.`、
    `..` 和控制字符，所以 `../escape` 还是 400。
+   显式 cwd 的会话照样进入第 3 步挂载：按该目录复用/新建工作区，新记录标题取
+   `path.basename(cwd)`；只是请求和记录里的 `workspace` 字段为空。
 
 3. **挂载时机**：`ctx.agents.create` 成功之后。注册表的 `attachSession` 会用
    **已持久化**的 session header cwd 校验归属，而 `agents.create` 在返回前已经
@@ -124,8 +126,8 @@ payload 的 `workspace` 现在按优先级决定：
 # 单元测试（本机 Node v24，不需要 pnpm）
 ~/.dsh/runtime/node/bin/node --test test/member-task.test.mjs test/interop-service.test.mjs test/conversation-meta.test.mjs
 
-# 全量
-~/.dsh/runtime/node/bin/node --test "test/*.test.mjs"
+# 全量；PATH 里要有 node，否则 test/build.test.mjs 的 prepare 步骤会 spawn node ENOENT
+PATH="/root/.dsh/runtime/node/bin:$PATH" ~/.dsh/runtime/node/bin/node --test "test/*.test.mjs"
 ```
 
 手工验证（部署后）：从 `dsh-mesh` 工作区的会话里 `call_member` 一台成员，然后
@@ -162,9 +164,10 @@ curl -s -H "authorization: Bearer <token>" http://<member>:8765/v1/conversations
 
 - **默认工作区用固定英文标题**：客户端只对这个字符串做本地化，换来界面上
   统一的「默认工作区」；代价是成员上真实目录名也是 `default-workspace`。
-- **显式 cwd 不归入工作区**：cwd 的语义是“就在这个目录跑”，把它改写成工作区
-  名会改变调用方要求；这类会话确实可能仍显示「未分组」，但这是调用方显式选择
-  的结果，不是默认路径。
+- **显式 cwd 保留语义但仍归组**：cwd 的语义是“就在这个目录跑”，所以 cwd 本身
+  不改写、`conversation.workspace` 保持 `''`；但会话仍按这个目录挂到已有/新建的
+  工作区记录（新记录的标题取 `path.basename(cwd)`），否则显式 cwd 的任务又会掉回
+  「未分组」。也就是说，“不带工作区名”指的是请求字段，不是不归组。
 - **挂载失败只记日志**：注册表不可用（独立服务、旧宿主、持久化抖动）时任务
   必须照常跑；分组可以在 Web 里事后手工调整，任务失败却不能。
 - **不迁移历史会话**：这次只影响新建会话；之前已经在「未分组」的旧任务保持
@@ -173,3 +176,11 @@ curl -s -H "authorization: Bearer <token>" http://<member>:8765/v1/conversations
   上悄悄造出一个“看起来像”的第二个工作区；回退到默认工作区至少是诚实的。
 - **注册表按路径复用，不按标题复用**：同名标题允许指向不同目录（DSH 本身允许），
   按路径复用才和 Web 的“一个目录一个工作区”一致。
+- **工作区名沿用 interop 的名字规则**：只拒绝 `/`、`\`、`"`、`.`/`..` 和控制字符；
+  `:`、`*`、`?`、`<`、`>`、`|` 在 Windows 上仍非法，但那是 interop 既有的名字
+  契约（面板手填同样受此限制），这次不另加一套平台相关规则。极端标题在 Windows
+  成员上仍可能建目录失败；届时到成员侧改一个可用的工作区名即可。
+- **默认工作区可能与 DSH 自己的默认工作区同名**：DSH 首次使用的默认工作区在
+  `<Documents>/deepseek-harness/default-workspace`，这里是
+  `<workspaceRoot>/default-workspace`；两者标题相同，侧栏会出现两个「默认工作区」
+  分组。这是“固定标题”换来的代价，按目录区分即可。

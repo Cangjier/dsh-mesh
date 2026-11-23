@@ -54,8 +54,8 @@
    两者都没有时先看 `registry.list()`：如果已有标题恰为 `default-workspace` 且
    目录存在的记录（DSH 首次使用的默认工作区在
    `<Documents>/deepseek-harness/default-workspace`），就用它的 `path` 当 cwd 并
-   attach；没有才用 `<workspaceRoot>/default-workspace` 并 `create`。这样侧栏
-   不会出现两行都叫「默认工作区」。
+   attach；没有才用 `<workspaceRoot>/default-workspace` 并 `create`。这样不会
+   新增第二行「默认工作区」分组。
    显式 `workspace: 'default-workspace'` 也走这条复用分支：`call_member` 在调用方
    没有工作区时正是显式发送这个名字，不这样处理的话主路径仍会建出第二个分组。
 
@@ -83,7 +83,7 @@
 
 6. **默认标题固定为 `default-workspace`**：DSH 客户端把标题恰好等于这个字符串
    的工作区显示成本地化的「默认工作区」。用中文或 `default` 都会在界面上露出
-   不一致的原始名字。默认分支复用同名记录，正是为了不出现两个这样的分组。
+   不一致的原始名字。默认分支复用同名记录，正是为了不再新增第二个这样的分组。
 
 ### 调用方：`src/lib/member-tasks.mjs`（`MemberTaskService.start`）
 
@@ -192,12 +192,14 @@ curl -s -H "authorization: Bearer <token>" http://<member>:8765/v1/conversations
   必须照常跑；分组可以在 Web 里事后手工调整，任务失败却不能。
 - **不迁移历史会话**：这次只影响新建会话；之前已经在「未分组」的旧任务保持
   原样，没有做一次性回填（回填要在宿主启动时扫全量 session，副作用大于收益）。
+  同理，旧版本如果已经写入了两条 `default-workspace` 记录，本版本不会再新增
+  第三条，但也不会自动合并已有的两条，需要在 Web 里手动删掉其中一条。
 - **超长/非法标题回退而不是截断**：截断后的名字和调用方工作区不同名，会在成员
   上悄悄造出一个“看起来像”的第二个工作区；回退到默认工作区至少是诚实的。
 - **注册表按路径复用，不按标题复用**：同名标题允许指向不同目录（DSH 本身允许），
   按路径复用才和 Web 的“一个目录一个工作区”一致。唯一的按标题例外是
   `default-workspace`（缺省和显式都算）：它挑的正是 DSH 自带的同名记录，再用
-  它的路径 attach，避免两个同名分组。
+  它的路径 attach，避免再新增一个同名分组。
 - **自动派生的名字比 interop 更严**：调用方从工作区标题派生名字时额外拒绝
   `:`、`*`、`?`、`<`、`>`、`|`，因为这类标题在 Linux 上合法、在 Windows 成员上
   却建不出目录，而调用方无法在发起时知道成员的操作系统；代价是个别 Linux 标题

@@ -358,6 +358,42 @@ test('set_member_scope updates a tracked member conversation and ignores keep', 
   }
 })
 
+test('setting only compressPercent preserves the tracked task profile', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-scope-profile-'))
+  const dataDir = path.join(dir, 'mesh')
+  let service
+  try {
+    service = new MeshService({ dataDir, config: {}, log: () => {} })
+    const set = register(service).find(tool => tool.name === 'set_member_scope')
+    service.memberTasks.tasks.set('task-1', {
+      id: 'task-1',
+      conversationId: 'conv-9',
+      member: 'B',
+      memberIp: '10.66.66.2',
+      baseUrl: 'http://127.0.0.1:1',
+      originSessionId: 'main-1',
+      status: 'completed',
+      workspace: 'dsh-mesh',
+      createdAt: '2026-11-24T00:00:00.000Z',
+      updatedAt: '2026-11-24T00:00:00.000Z',
+      profile: null,
+    })
+    const oldProfile = { name: 'B', identity: '旧身份', scope: '旧范围' }
+    await service.memberTasks.syncTaskScope('conv-9', { identity: '旧身份', scope: '旧范围' })
+    assert.deepEqual(service.memberTasks.tasks.get('task-1').profile, oldProfile)
+
+    const result = await set.execute({ conversationId: 'conv-9', compressPercent: 10 }, { agent: mainAgent })
+    assert.equal(result.data.tracked, true)
+    assert.deepEqual(service.memberTasks.tasks.get('task-1').profile, oldProfile)
+    const saved = JSON.parse(await readFile(path.join(dataDir, 'member-tasks', 'task-1.json'), 'utf8'))
+    assert.deepEqual(saved.profile, oldProfile)
+    assert.deepEqual(await service.memberScope('conv-9'), { compressPercent: 10 })
+  } finally {
+    await service?.memberTasks.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('concurrent saves of one task serialize and never collide on a temporary file', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-scope-concurrent-'))
   const dataDir = path.join(dir, 'mesh')

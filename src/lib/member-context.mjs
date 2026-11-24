@@ -58,6 +58,21 @@ export function formatMemberPushDelay(ms) {
 }
 
 /**
+ * Resolve the quiet-period delay for one main conversation.
+ *
+ * An unset `idlePushMs` keeps the injected `pushDelayMs` (the test knob); an
+ * explicit one is validated again, so an out-of-range stored value falls back
+ * to {@link DEFAULT_MEMBER_IDLE_PUSH_MS} rather than a huge or tiny timeout.
+ * @param {{idlePushMs?: number}|null} selfScope stored self scope.
+ * @param {number} [pushDelayMs] default/test delay.
+ * @returns {number} delay in milliseconds.
+ */
+export function resolveMemberPushDelayMs(selfScope, pushDelayMs = MEMBER_PUSH_DELAY_MS) {
+  if (selfScope?.idlePushMs === undefined) return pushDelayMs
+  return effectiveMemberIdlePushMs(selfScope)
+}
+
+/**
  * Render a percentage threshold without a trailing `.0`.
  * @param {number} value percentage.
  * @returns {string} "35%" / "12.5%".
@@ -121,8 +136,8 @@ async function compactMainAgent(ctx, agent) {
   }
   if (agent.status !== 'idle') return { ok: false, reason: 'agent is not idle' }
   try {
-    await compaction.compactNow(agent, AbortSignal.timeout(PUSH_COMPACT_TIMEOUT_MS))
-    return { ok: true }
+    const result = await compaction.compactNow(agent, AbortSignal.timeout(PUSH_COMPACT_TIMEOUT_MS))
+    return { ok: true, result }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
@@ -403,8 +418,8 @@ export function createMemberContext({
     if (selfScope?.keep === false) return
     cancelPush(sessionId)
     // The per-conversation setting wins over the process default; injecting
-    // `pushDelayMs` remains the test knob for conversations without one.
-    const delay = Number.isSafeInteger(selfScope?.idlePushMs) ? selfScope.idlePushMs : pushDelayMs
+    // `pushDelayMs` remains the test knob only when no setting is stored.
+    const delay = resolveMemberPushDelayMs(selfScope, pushDelayMs)
     const timer = setTimeout(() => {
       pushTimers.delete(sessionId)
       void pushSnapshot(sessionId, turn).catch(error => {
@@ -437,10 +452,8 @@ export function createMemberContext({
     if (selfScope?.keep === false) return
     if (agent.status !== 'idle') return
     // Signature first: an unchanged snapshot must not pay for a compaction.
-    const at = now()
     const signature = formatMemberStatusSignature({ selfId: sessionId, selfScope, tasks, scopes })
     if (lastPushSignature.get(sessionId) === signature) return
-    const text = formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes })
     // Measure and, when the main conversation is over its threshold, compact
     // before the push. A missing/failed compaction never blocks the push, but
     // a turn that started meanwhile invalidates this snapshot.
@@ -454,8 +467,12 @@ export function createMemberContext({
         return
       }
       if (outcome.ok) {
-        const afterPercent = measureMemberContextPercent(ctx, agent)
-        compressionLine = `compressed ${formatMemberPercent(beforePercent)} -> ${afterPercent === null ? '未测' : formatMemberPercent(afterPercent)}（阈值 ${formatMemberPercent(threshold)}）`
+        if (outcome.result === null) {
+          compressionLine = `no compactable range（上下文 ${formatMemberPercent(beforePercent)}，阈值 ${formatMemberPercent(threshold)}）`
+        } else {
+          const afterPercent = measureMemberContextPercent(ctx, agent)
+          compressionLine = `compressed ${formatMemberPercent(beforePercent)} -> ${afterPercent === null ? '未测' : formatMemberPercent(afterPercent)}（阈值 ${formatMemberPercent(threshold)}）`
+        }
       } else {
         compressionLine = `compression skipped: ${outcome.reason}（上下文 ${formatMemberPercent(beforePercent)}，阈值 ${formatMemberPercent(threshold)}）`
       }
@@ -464,6 +481,13 @@ export function createMemberContext({
     } else {
       compressionLine = `no compression（上下文 ${formatMemberPercent(beforePercent)} <= 阈值 ${formatMemberPercent(threshold)}）`
     }
+    // A slow compaction must not leave the injection clock at the old start
+    // time: the snapshot text (and the timestamp used to suppress the next
+    // pre-step injection) belongs to the moment the push actually happens.
+    // The signature stays the pre-compaction one so a time-only difference
+    // never re-pushes.
+    const at = now()
+    const text = formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes })
     try {
       agent.followup({
         id: randomUUID(),

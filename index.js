@@ -14032,17 +14032,22 @@ var MemberTaskService = class {
    *
    * `set_member_scope` writes the scope file; a tracking task keeps its own
    * snapshot so status lists and restarts see the same value. No message is
-   * delivered and no prompt prefix is added here.
+   * delivered and no prompt prefix is added here. A caller that changed only a
+   * non-profile field (for example compressPercent) passes `{ profile: false }`
+   * so the existing profile snapshot is preserved.
    * @param {string} conversationId member conversation id.
    * @param {{identity?: string, scope?: string}|null} scope stored scope.
-   * @returns {Promise<boolean>} whether a tracked task was updated.
+   * @param {{profile?: boolean}} [options] `profile: false` skips the profile write.
+   * @returns {Promise<boolean>} whether a tracked task was found.
    */
-  async syncTaskScope(conversationId, scope) {
+  async syncTaskScope(conversationId, scope, options = {}) {
     await this.#ensureLoaded();
     const task = this.#taskOfConversation(String(conversationId ?? ""));
     if (task === void 0) return false;
-    task.profile = profileFromScope(scope, task.member);
-    await this.#save(task);
+    if (options.profile !== false) {
+      task.profile = profileFromScope(scope, task.member);
+      await this.#save(task);
+    }
     return true;
   }
   /**
@@ -15053,6 +15058,10 @@ function formatMemberPushDelay(ms) {
   }
   return `${String(Math.round(value / 1e3))} \u79D2`;
 }
+function resolveMemberPushDelayMs(selfScope, pushDelayMs = MEMBER_PUSH_DELAY_MS) {
+  if (selfScope?.idlePushMs === void 0) return pushDelayMs;
+  return effectiveMemberIdlePushMs(selfScope);
+}
 function formatMemberPercent(value) {
   const amount = Number.isFinite(value) ? value : DEFAULT_COMPRESS_PERCENT;
   return `${amount >= 100 ? String(Math.round(amount)) : amount.toFixed(1).replace(/\.0$/u, "")}%`;
@@ -15093,8 +15102,8 @@ async function compactMainAgent(ctx, agent) {
   }
   if (agent.status !== "idle") return { ok: false, reason: "agent is not idle" };
   try {
-    await compaction.compactNow(agent, AbortSignal.timeout(PUSH_COMPACT_TIMEOUT_MS));
-    return { ok: true };
+    const result = await compaction.compactNow(agent, AbortSignal.timeout(PUSH_COMPACT_TIMEOUT_MS));
+    return { ok: true, result };
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   }
@@ -15260,7 +15269,7 @@ function createMemberContext({
     if (tasks.length === 0 && selfScope === null) return;
     if (selfScope?.keep === false) return;
     cancelPush(sessionId);
-    const delay2 = Number.isSafeInteger(selfScope?.idlePushMs) ? selfScope.idlePushMs : pushDelayMs;
+    const delay2 = resolveMemberPushDelayMs(selfScope, pushDelayMs);
     const timer = setTimeout(() => {
       pushTimers.delete(sessionId);
       void pushSnapshot(sessionId, turn).catch((error) => {
@@ -15284,10 +15293,8 @@ function createMemberContext({
     if (tasks.length === 0 && selfScope === null) return;
     if (selfScope?.keep === false) return;
     if (agent.status !== "idle") return;
-    const at = now();
     const signature = formatMemberStatusSignature({ selfId: sessionId, selfScope, tasks, scopes });
     if (lastPushSignature.get(sessionId) === signature) return;
-    const text = formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes });
     const threshold = effectiveCompressPercent(selfScope);
     const beforePercent = measureMemberContextPercent(ctx, agent);
     let compressionLine;
@@ -15298,8 +15305,12 @@ function createMemberContext({
         return;
       }
       if (outcome.ok) {
-        const afterPercent = measureMemberContextPercent(ctx, agent);
-        compressionLine = `compressed ${formatMemberPercent(beforePercent)} -> ${afterPercent === null ? "\u672A\u6D4B" : formatMemberPercent(afterPercent)}\uFF08\u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
+        if (outcome.result === null) {
+          compressionLine = `no compactable range\uFF08\u4E0A\u4E0B\u6587 ${formatMemberPercent(beforePercent)}\uFF0C\u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
+        } else {
+          const afterPercent = measureMemberContextPercent(ctx, agent);
+          compressionLine = `compressed ${formatMemberPercent(beforePercent)} -> ${afterPercent === null ? "\u672A\u6D4B" : formatMemberPercent(afterPercent)}\uFF08\u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
+        }
       } else {
         compressionLine = `compression skipped: ${outcome.reason}\uFF08\u4E0A\u4E0B\u6587 ${formatMemberPercent(beforePercent)}\uFF0C\u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
       }
@@ -15308,6 +15319,8 @@ function createMemberContext({
     } else {
       compressionLine = `no compression\uFF08\u4E0A\u4E0B\u6587 ${formatMemberPercent(beforePercent)} <= \u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
     }
+    const at = now();
+    const text = formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes });
     try {
       agent.followup({
         id: randomUUID2(),
@@ -15772,7 +15785,7 @@ function registerTools(ctx, toolsCtx, service) {
       const targetId = isSelf ? selfId : rawId;
       const saved = await service.setMemberScope(targetId, patch);
       const scope = saved.scope ?? null;
-      const tracked = isSelf ? false : await memberTasks.syncTaskScope(targetId, scope);
+      const tracked = isSelf ? false : await memberTasks.syncTaskScope(targetId, scope, { profile: hasIdentity || hasScope });
       const idleDelay = effectiveMemberIdlePushMs(scope);
       const compressThreshold = effectiveCompressPercent(scope);
       const lines = [

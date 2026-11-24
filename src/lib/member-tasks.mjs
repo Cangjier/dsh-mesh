@@ -1120,17 +1120,22 @@ export class MemberTaskService {
    *
    * `set_member_scope` writes the scope file; a tracking task keeps its own
    * snapshot so status lists and restarts see the same value. No message is
-   * delivered and no prompt prefix is added here.
+   * delivered and no prompt prefix is added here. A caller that changed only a
+   * non-profile field (for example compressPercent) passes `{ profile: false }`
+   * so the existing profile snapshot is preserved.
    * @param {string} conversationId member conversation id.
    * @param {{identity?: string, scope?: string}|null} scope stored scope.
-   * @returns {Promise<boolean>} whether a tracked task was updated.
+   * @param {{profile?: boolean}} [options] `profile: false` skips the profile write.
+   * @returns {Promise<boolean>} whether a tracked task was found.
    */
-  async syncTaskScope(conversationId, scope) {
+  async syncTaskScope(conversationId, scope, options = {}) {
     await this.#ensureLoaded()
     const task = this.#taskOfConversation(String(conversationId ?? ''))
     if (task === undefined) return false
-    task.profile = profileFromScope(scope, task.member)
-    await this.#save(task)
+    if (options.profile !== false) {
+      task.profile = profileFromScope(scope, task.member)
+      await this.#save(task)
+    }
     return true
   }
 

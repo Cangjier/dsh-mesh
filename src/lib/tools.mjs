@@ -450,7 +450,11 @@ export function registerTools(ctx, toolsCtx, service) {
       const targetId = isSelf ? selfId : rawId
       const saved = await service.setMemberScope(targetId, patch)
       const scope = saved.scope ?? null
-      const tracked = isSelf ? false : await memberTasks.syncTaskScope(targetId, scope)
+      // Only identity/scope change the task's profile snapshot; setting just
+      // keep/idlePushMs/compressPercent must preserve the old profile.
+      const tracked = isSelf
+        ? false
+        : await memberTasks.syncTaskScope(targetId, scope, { profile: hasIdentity || hasScope })
       const idleDelay = effectiveMemberIdlePushMs(scope)
       const compressThreshold = effectiveCompressPercent(scope)
       const lines = [

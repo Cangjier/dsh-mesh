@@ -727,6 +727,8 @@ set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "
   生效，设置成员会话时忽略，返回文字会说明。
 - `compressPercent`：自动压缩阈值，数字 1–100，默认 35；主对话推送快照前和成员会话下一次
   投递前都用它，自身和成员会话都可设置。
+- `idlePushMs` / `compressPercent` 目前只能设置数值，不支持直接清除；要恢复默认就把
+  `idlePushMs` 设回 `300000`、`compressPercent` 设回 `35`。
 - 至少提供 `identity` / `scope` / `keep` / `idlePushMs` / `compressPercent` 之一；设置成员会话时
   必须有 `identity` / `scope` / `compressPercent` 之一（允许只设 `compressPercent`）。
 - 返回文字显示有效值（例如 `静默推送：5 分钟`、`压缩阈值：35%`）以及被忽略的字段。

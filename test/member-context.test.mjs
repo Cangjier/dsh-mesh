@@ -7,6 +7,7 @@ import {
   createMemberContext,
   formatMemberStatusSignature,
   formatMemberStatusSnapshot,
+  resolveMemberPushDelayMs,
 } from '../src/lib/member-context.mjs'
 import { markMemberSession, unmarkMemberSession } from '../src/lib/member-sessions.mjs'
 
@@ -546,6 +547,28 @@ test('a failed pre-push compaction is logged but does not block the push', async
   }
 })
 
+test('a compaction with no compactable range logs that instead of a fake before/after', async () => {
+  const h = harness({
+    tasks: [running],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', keep: true, compressPercent: 35 } },
+    pushDelayMs: 15,
+    services: {
+      sessionProjections: projectionsAt(50_000),
+      compaction: { async compactNow() { return null } },
+    },
+  })
+  try {
+    h.emit('turn/start', { turn: 1 })
+    h.emit('turn/end', { turn: 1 })
+    await sleep(120)
+    assert.equal(h.followups.length, 1)
+    assert.equal(h.logs.some(line => /no compactable range（上下文 50%，阈值 35%）/u.test(line)), true)
+    assert.equal(h.logs.some(line => /compressed 50% -> 50%/u.test(line)), false)
+  } finally {
+    h.context.dispose()
+  }
+})
+
 test('a new turn that starts during the pre-push compaction abandons the push', async () => {
   let release
   const gate = new Promise(resolve => { release = resolve })
@@ -567,6 +590,54 @@ test('a new turn that starts during the pre-push compaction abandons the push', 
     await sleep(80)
     assert.equal(h.followups.length, 0)
     assert.equal(h.logs.some(line => /abandoned: conversation resumed while compacting/u.test(line)), true)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+
+test('the push delay prefers a valid idlePushMs and otherwise keeps the test knob', () => {
+  assert.equal(resolveMemberPushDelayMs(null, 15), 15)
+  assert.equal(resolveMemberPushDelayMs({}, 15), 15)
+  assert.equal(resolveMemberPushDelayMs({ identity: '网关' }, 15), 15)
+  assert.equal(resolveMemberPushDelayMs({ idlePushMs: 1_000 }, 15), 1_000)
+  assert.equal(resolveMemberPushDelayMs({ idlePushMs: 500 }, 15), 300_000, 'out of range falls back to the default')
+  assert.equal(resolveMemberPushDelayMs({ idlePushMs: 86_400_001 }, 15), 300_000)
+})
+
+test('a slow pre-push compaction stamps the injection clock at push time and does not re-push', async () => {
+  let now = 1_000_000
+  let compactions = 0
+  const h = harness({
+    tasks: [running],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', keep: true, compressPercent: 35 } },
+    now: () => now,
+    pushDelayMs: 15,
+    services: {
+      sessionProjections: projectionsAt(60_000),
+      compaction: { async compactNow() { compactions += 1; now += 61_000 } },
+    },
+  })
+  try {
+    h.emit('turn/start', { turn: 1 })
+    h.emit('turn/end', { turn: 1 })
+    await sleep(120)
+    assert.equal(compactions, 1)
+    assert.equal(h.followups.length, 1)
+    const pushedAt = now
+    assert.equal(h.context.lastInjection.get('session-a'), pushedAt, 'the clock must be the post-compaction push time')
+
+    // A pre-step right after the slow push must not re-inject the same snapshot.
+    const decision = await h.preStep(h.payload, h.next)
+    assert.deepEqual(decision.messages, [])
+
+    // Same content, new turn: the unchanged signature suppresses both the push
+    // and another compaction even though the snapshot timestamp would differ.
+    h.emit('turn/start', { turn: 2 })
+    h.emit('turn/end', { turn: 2 })
+    await sleep(80)
+    assert.equal(h.followups.length, 1)
+    assert.equal(compactions, 1)
   } finally {
     h.context.dispose()
   }

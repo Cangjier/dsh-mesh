@@ -1,14 +1,13 @@
 /**
  * Model-visible tools for the mesh plugin.
  *
- * Seven tools:
- *   build             deterministic source build, waits for the final state
- *   deploy            SSH blue-green deployment, waits for the final state
- *   repack            refresh an existing offline package from this checkout
- *   members           read-only WireGuard member discovery
- *   call_member       start / continue a conversation on another member
- *   wait_member       bounded wait for one member task
- *   compact_subagent  compact an idle child agent once its context passes 35%
+ * Six tools:
+ *   build        deterministic source build, waits for the final state
+ *   deploy       SSH blue-green deployment, waits for the final state
+ *   repack       refresh an existing offline package from this checkout
+ *   members      read-only WireGuard member discovery
+ *   call_member  start / continue a conversation on another member
+ *   wait_member  bounded wait for one member task
  *
  * @module @local/dsh-mesh/tools
  */
@@ -467,108 +466,7 @@ export function registerTools(ctx, toolsCtx, service) {
     },
   }
 
-  const compactSubagentDefinition = {
-    name: 'compact_subagent',
-    description: [
-      '压缩一个空闲子代理的上下文，把它的上下文占比控制在本插件的阈值以内。',
-      '',
-      '`agent` 用 list_agents 里的名字（和 send_message 用的是同一套名字）。',
-      '子代理每一轮结束、回到主对话并通知之后调用；工具先读取该子代理的上下文占比，',
-      `严格超过 ${String(SUBAGENT_COMPACT_PERCENT)}% 时执行压缩，没超过就不压缩。`,
-      '运行中的子代理无法压缩：等这一轮结束、它回到空闲后再调用；长任务拆成多轮，给压缩留出时机。',
-      '压缩只减少子代理自己的上下文（旧历史换成摘要），不会影响主对话。',
-      '返回压缩前后的占比；没有可压缩的历史时照常返回，不算失败。',
-    ].join('\n'),
-    parameters: {
-      type: 'object',
-      properties: {
-        agent: { type: 'string', description: '要压缩的子代理名字（list_agents 返回的 name）。' },
-      },
-      required: ['agent'],
-      additionalProperties: false,
-    },
-    output: {
-      schema: { type: 'object', additionalProperties: true },
-      render: (_args, value) => [{
-        type: 'text',
-        text: typeof value?.text === 'string' ? value.text : JSON.stringify(value, null, 2),
-      }],
-    },
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      if (typeof args.agent !== 'string' || args.agent.trim() === '') throw new Error('agent is required')
-      const name = args.agent.trim()
-      const sender = exec.agent
-      if (sender === undefined) throw new Error('compact_subagent requires a calling agent')
-      const subagents = typeof ctx.get === 'function' ? ctx.get('subagents') : undefined
-      if (subagents === undefined || typeof subagents.resolveName !== 'function') {
-        throw new Error('this host has no subagent service')
-      }
-      const targetId = await subagents.resolveName(sender, name, exec.signal)
-      const agents = typeof ctx.get === 'function' ? ctx.get('agents') : undefined
-      const target = typeof agents?.get === 'function' ? agents.get(targetId) : undefined
-      if (target === undefined) {
-        throw new Error(`子代理 ${name} 当前不在内存中，无法压缩；等它运行并回报后再试。`)
-      }
-      if (target.status !== 'idle') {
-        throw new Error(`子代理 ${name} 正在运行（${String(target.status)}），压缩只能在它这一轮结束并通知主对话之后进行。`)
-      }
-      const before = agentContextOccupancy(ctx, target)
-      if (before === null || before.usedTokens === null || before.maxTokens === null) {
-        throw new Error(`子代理 ${name} 的上下文占比暂时无法测量（没有可用的会话压力），无法判断是否超过 ${String(SUBAGENT_COMPACT_PERCENT)}%。`)
-      }
-      const percentBefore = Math.round((before.usedTokens / before.maxTokens) * 1000) / 10
-      // Decide on the same one-decimal figure the caller sees, so a report of
-      // "35%（...tokens）未超过 35%" can never contradict itself.
-      if (percentBefore <= SUBAGENT_COMPACT_PERCENT) {
-        return {
-          ok: true,
-          text: `子代理 ${name}：上下文 ${formatOneDecimal(percentBefore)}%（${formatTokens(before.usedTokens)} / ${formatTokens(before.maxTokens)} tokens），未超过 ${String(SUBAGENT_COMPACT_PERCENT)}%，没有压缩。`,
-          data: { agent: name, percentBefore, percentAfter: percentBefore, compacted: false },
-        }
-      }
-      const compaction = compactionServiceFor(ctx, target)
-      if (compaction === undefined) throw new Error('当前进程没有可用的压缩服务，无法压缩子代理')
-      const timeout = AbortSignal.timeout(SUBAGENT_COMPACT_TIMEOUT_MS)
-      const signal = typeof AbortSignal.any === 'function' && exec.signal !== undefined
-        ? AbortSignal.any([exec.signal, timeout])
-        : timeout
-      let result
-      try {
-        result = await compaction.compactNow(target, signal)
-      } catch (error) {
-        const code = typeof error?.code === 'string' ? error.code : ''
-        if (code === 'busy') {
-          throw new Error(`子代理 ${name} 正忙或已有压缩在进行，等它空闲后再试。`)
-        }
-        if (code === 'cancelled' || signal.aborted === true) {
-          throw new Error(`子代理 ${name} 的压缩已取消。`)
-        }
-        throw new Error(`子代理 ${name} 压缩失败${code === '' ? '' : `（${code}）`}：${error instanceof Error ? error.message : String(error)}`)
-      }
-      const after = agentContextOccupancy(ctx, target)
-      const percentAfter = after !== null && after.usedTokens !== null && after.maxTokens !== null
-        ? Math.round((after.usedTokens / after.maxTokens) * 1000) / 10
-        : null
-      const afterText = percentAfter === null ? '压缩后占比无法测量' : `现在 ${formatOneDecimal(percentAfter)}%`
-      if (result === null) {
-        return {
-          ok: true,
-          text: `子代理 ${name}：上下文 ${formatOneDecimal(percentBefore)}% 超过 ${String(SUBAGENT_COMPACT_PERCENT)}%，已尝试压缩，但没有可压缩的历史（${afterText}）。`,
-          data: { agent: name, percentBefore, percentAfter, compacted: false },
-        }
-      }
-      const shadowed = Number.isSafeInteger(result.shadowedSeqs?.length) ? result.shadowedSeqs.length : 0
-      const tokens = Number.isFinite(result.shadowedTokenCount) ? result.shadowedTokenCount : 0
-      return {
-        ok: true,
-        text: `子代理 ${name}：上下文 ${formatOneDecimal(percentBefore)}% 超过 ${String(SUBAGENT_COMPACT_PERCENT)}%，已压缩：替换 ${String(shadowed)} 项历史（约 ${formatTokens(tokens)} tokens），${afterText}。`,
-        data: { agent: name, percentBefore, percentAfter, compacted: true, shadowedCount: shadowed, shadowedTokenCount: tokens },
-      }
-    },
-  }
-
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, waitMemberDefinition, membersDefinition, repackDefinition, compactSubagentDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, waitMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool)
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`)
@@ -600,71 +498,6 @@ function memberTaskData(task, memberTasks) {
  * that a small exchange is not summarized for nothing.
  */
 const CONTEXT_COMPACT_THRESHOLD = 20
-
-/**
- * Context percentage above which an idle child agent is compacted.
- *
- * The injected member rule asks the main conversation to call
- * `compact_subagent` after each child turn; a long single turn cannot be
- * compacted mid-flight, so the rule also asks for multi-turn child work.
- */
-const SUBAGENT_COMPACT_PERCENT = 35
-
-/** A compaction is one summarization call; bound it like the member side. */
-const SUBAGENT_COMPACT_TIMEOUT_MS = 180_000
-
-/**
- * Context occupancy of one live agent, in the same numbers the Web status line
- * shows: the next request's projected prompt, falling back to the last
- * provider-reported prompt size.
- * @param {object} ctx host context.
- * @param {object} agent live agent.
- * @returns {{usedTokens: number|null, maxTokens: number|null}|null} occupancy.
- */
-function agentContextOccupancy(ctx, agent) {
-  const session = agent?.session
-  if (session === undefined || session === null) return null
-  let pressure
-  const projections = typeof ctx.get === 'function' ? ctx.get('sessionProjections') : undefined
-  if (typeof projections?.snapshot === 'function') {
-    try {
-      pressure = projections.snapshot(session, ['contextPressure']).values.contextPressure
-    } catch { }
-  }
-  if (pressure === undefined) {
-    const meter = typeof ctx.get === 'function' ? ctx.get('tokenMeter') : undefined
-    if (typeof meter?.contextPressure === 'function') {
-      try { pressure = meter.contextPressure(session) } catch { }
-    }
-  }
-  if (pressure === null || typeof pressure !== 'object') return null
-  return {
-    usedTokens: nonNegativeCount(pressure.projectedTokens) ?? nonNegativeCount(pressure.pressureTokens),
-    maxTokens: nonNegativeCount(pressure.contextWindow),
-  }
-}
-
-/**
- * The compaction engine that owns one agent's history. A preset-based
- * composition keeps it inside the agent's isolated group.
- * @param {object} ctx host context.
- * @param {object} agent live agent.
- * @returns {object|undefined} compaction service.
- */
-function compactionServiceFor(ctx, agent) {
-  const presets = typeof ctx.get === 'function' ? ctx.get('agentPresets') : undefined
-  const scoped = typeof presets?.serviceFor === 'function' ? presets.serviceFor(agent, 'compaction') : undefined
-  return scoped ?? (typeof ctx.get === 'function' ? ctx.get('compaction') : undefined)
-}
-
-/**
- * A token count as a rounded non-negative integer, or null.
- * @param {unknown} value raw token count.
- * @returns {number|null} count.
- */
-function nonNegativeCount(value) {
-  return Number.isFinite(value) && value >= 0 ? Math.round(value) : null
-}
 
 /**
  * Format a token count for a one-line status.

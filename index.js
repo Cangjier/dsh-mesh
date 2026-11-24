@@ -14680,101 +14680,7 @@ sha256 ${data.sha256}
       };
     }
   };
-  const compactSubagentDefinition = {
-    name: "compact_subagent",
-    description: [
-      "\u538B\u7F29\u4E00\u4E2A\u7A7A\u95F2\u5B50\u4EE3\u7406\u7684\u4E0A\u4E0B\u6587\uFF0C\u628A\u5B83\u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\u63A7\u5236\u5728\u672C\u63D2\u4EF6\u7684\u9608\u503C\u4EE5\u5185\u3002",
-      "",
-      "`agent` \u7528 list_agents \u91CC\u7684\u540D\u5B57\uFF08\u548C send_message \u7528\u7684\u662F\u540C\u4E00\u5957\u540D\u5B57\uFF09\u3002",
-      "\u5B50\u4EE3\u7406\u6BCF\u4E00\u8F6E\u7ED3\u675F\u3001\u56DE\u5230\u4E3B\u5BF9\u8BDD\u5E76\u901A\u77E5\u4E4B\u540E\u8C03\u7528\uFF1B\u5DE5\u5177\u5148\u8BFB\u53D6\u8BE5\u5B50\u4EE3\u7406\u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\uFF0C",
-      `\u4E25\u683C\u8D85\u8FC7 ${String(SUBAGENT_COMPACT_PERCENT)}% \u65F6\u6267\u884C\u538B\u7F29\uFF0C\u6CA1\u8D85\u8FC7\u5C31\u4E0D\u538B\u7F29\u3002`,
-      "\u8FD0\u884C\u4E2D\u7684\u5B50\u4EE3\u7406\u65E0\u6CD5\u538B\u7F29\uFF1A\u7B49\u8FD9\u4E00\u8F6E\u7ED3\u675F\u3001\u5B83\u56DE\u5230\u7A7A\u95F2\u540E\u518D\u8C03\u7528\uFF1B\u957F\u4EFB\u52A1\u62C6\u6210\u591A\u8F6E\uFF0C\u7ED9\u538B\u7F29\u7559\u51FA\u65F6\u673A\u3002",
-      "\u538B\u7F29\u53EA\u51CF\u5C11\u5B50\u4EE3\u7406\u81EA\u5DF1\u7684\u4E0A\u4E0B\u6587\uFF08\u65E7\u5386\u53F2\u6362\u6210\u6458\u8981\uFF09\uFF0C\u4E0D\u4F1A\u5F71\u54CD\u4E3B\u5BF9\u8BDD\u3002",
-      "\u8FD4\u56DE\u538B\u7F29\u524D\u540E\u7684\u5360\u6BD4\uFF1B\u6CA1\u6709\u53EF\u538B\u7F29\u7684\u5386\u53F2\u65F6\u7167\u5E38\u8FD4\u56DE\uFF0C\u4E0D\u7B97\u5931\u8D25\u3002"
-    ].join("\n"),
-    parameters: {
-      type: "object",
-      properties: {
-        agent: { type: "string", description: "\u8981\u538B\u7F29\u7684\u5B50\u4EE3\u7406\u540D\u5B57\uFF08list_agents \u8FD4\u56DE\u7684 name\uFF09\u3002" }
-      },
-      required: ["agent"],
-      additionalProperties: false
-    },
-    output: {
-      schema: { type: "object", additionalProperties: true },
-      render: (_args, value) => [{
-        type: "text",
-        text: typeof value?.text === "string" ? value.text : JSON.stringify(value, null, 2)
-      }]
-    },
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      if (typeof args.agent !== "string" || args.agent.trim() === "") throw new Error("agent is required");
-      const name = args.agent.trim();
-      const sender = exec.agent;
-      if (sender === void 0) throw new Error("compact_subagent requires a calling agent");
-      const subagents = typeof ctx.get === "function" ? ctx.get("subagents") : void 0;
-      if (subagents === void 0 || typeof subagents.resolveName !== "function") {
-        throw new Error("this host has no subagent service");
-      }
-      const targetId = await subagents.resolveName(sender, name, exec.signal);
-      const agents = typeof ctx.get === "function" ? ctx.get("agents") : void 0;
-      const target = typeof agents?.get === "function" ? agents.get(targetId) : void 0;
-      if (target === void 0) {
-        throw new Error(`\u5B50\u4EE3\u7406 ${name} \u5F53\u524D\u4E0D\u5728\u5185\u5B58\u4E2D\uFF0C\u65E0\u6CD5\u538B\u7F29\uFF1B\u7B49\u5B83\u8FD0\u884C\u5E76\u56DE\u62A5\u540E\u518D\u8BD5\u3002`);
-      }
-      if (target.status !== "idle") {
-        throw new Error(`\u5B50\u4EE3\u7406 ${name} \u6B63\u5728\u8FD0\u884C\uFF08${String(target.status)}\uFF09\uFF0C\u538B\u7F29\u53EA\u80FD\u5728\u5B83\u8FD9\u4E00\u8F6E\u7ED3\u675F\u5E76\u901A\u77E5\u4E3B\u5BF9\u8BDD\u4E4B\u540E\u8FDB\u884C\u3002`);
-      }
-      const before = agentContextOccupancy(ctx, target);
-      if (before === null || before.usedTokens === null || before.maxTokens === null) {
-        throw new Error(`\u5B50\u4EE3\u7406 ${name} \u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\u6682\u65F6\u65E0\u6CD5\u6D4B\u91CF\uFF08\u6CA1\u6709\u53EF\u7528\u7684\u4F1A\u8BDD\u538B\u529B\uFF09\uFF0C\u65E0\u6CD5\u5224\u65AD\u662F\u5426\u8D85\u8FC7 ${String(SUBAGENT_COMPACT_PERCENT)}%\u3002`);
-      }
-      const percentBefore = Math.round(before.usedTokens / before.maxTokens * 1e3) / 10;
-      if (percentBefore <= SUBAGENT_COMPACT_PERCENT) {
-        return {
-          ok: true,
-          text: `\u5B50\u4EE3\u7406 ${name}\uFF1A\u4E0A\u4E0B\u6587 ${formatOneDecimal(percentBefore)}%\uFF08${formatTokens(before.usedTokens)} / ${formatTokens(before.maxTokens)} tokens\uFF09\uFF0C\u672A\u8D85\u8FC7 ${String(SUBAGENT_COMPACT_PERCENT)}%\uFF0C\u6CA1\u6709\u538B\u7F29\u3002`,
-          data: { agent: name, percentBefore, percentAfter: percentBefore, compacted: false }
-        };
-      }
-      const compaction = compactionServiceFor(ctx, target);
-      if (compaction === void 0) throw new Error("\u5F53\u524D\u8FDB\u7A0B\u6CA1\u6709\u53EF\u7528\u7684\u538B\u7F29\u670D\u52A1\uFF0C\u65E0\u6CD5\u538B\u7F29\u5B50\u4EE3\u7406");
-      const timeout = AbortSignal.timeout(SUBAGENT_COMPACT_TIMEOUT_MS);
-      const signal = typeof AbortSignal.any === "function" && exec.signal !== void 0 ? AbortSignal.any([exec.signal, timeout]) : timeout;
-      let result;
-      try {
-        result = await compaction.compactNow(target, signal);
-      } catch (error) {
-        const code = typeof error?.code === "string" ? error.code : "";
-        if (code === "busy") {
-          throw new Error(`\u5B50\u4EE3\u7406 ${name} \u6B63\u5FD9\u6216\u5DF2\u6709\u538B\u7F29\u5728\u8FDB\u884C\uFF0C\u7B49\u5B83\u7A7A\u95F2\u540E\u518D\u8BD5\u3002`);
-        }
-        if (code === "cancelled" || signal.aborted === true) {
-          throw new Error(`\u5B50\u4EE3\u7406 ${name} \u7684\u538B\u7F29\u5DF2\u53D6\u6D88\u3002`);
-        }
-        throw new Error(`\u5B50\u4EE3\u7406 ${name} \u538B\u7F29\u5931\u8D25${code === "" ? "" : `\uFF08${code}\uFF09`}\uFF1A${error instanceof Error ? error.message : String(error)}`);
-      }
-      const after = agentContextOccupancy(ctx, target);
-      const percentAfter = after !== null && after.usedTokens !== null && after.maxTokens !== null ? Math.round(after.usedTokens / after.maxTokens * 1e3) / 10 : null;
-      const afterText = percentAfter === null ? "\u538B\u7F29\u540E\u5360\u6BD4\u65E0\u6CD5\u6D4B\u91CF" : `\u73B0\u5728 ${formatOneDecimal(percentAfter)}%`;
-      if (result === null) {
-        return {
-          ok: true,
-          text: `\u5B50\u4EE3\u7406 ${name}\uFF1A\u4E0A\u4E0B\u6587 ${formatOneDecimal(percentBefore)}% \u8D85\u8FC7 ${String(SUBAGENT_COMPACT_PERCENT)}%\uFF0C\u5DF2\u5C1D\u8BD5\u538B\u7F29\uFF0C\u4F46\u6CA1\u6709\u53EF\u538B\u7F29\u7684\u5386\u53F2\uFF08${afterText}\uFF09\u3002`,
-          data: { agent: name, percentBefore, percentAfter, compacted: false }
-        };
-      }
-      const shadowed = Number.isSafeInteger(result.shadowedSeqs?.length) ? result.shadowedSeqs.length : 0;
-      const tokens = Number.isFinite(result.shadowedTokenCount) ? result.shadowedTokenCount : 0;
-      return {
-        ok: true,
-        text: `\u5B50\u4EE3\u7406 ${name}\uFF1A\u4E0A\u4E0B\u6587 ${formatOneDecimal(percentBefore)}% \u8D85\u8FC7 ${String(SUBAGENT_COMPACT_PERCENT)}%\uFF0C\u5DF2\u538B\u7F29\uFF1A\u66FF\u6362 ${String(shadowed)} \u9879\u5386\u53F2\uFF08\u7EA6 ${formatTokens(tokens)} tokens\uFF09\uFF0C${afterText}\u3002`,
-        data: { agent: name, percentBefore, percentAfter, compacted: true, shadowedCount: shadowed, shadowedTokenCount: tokens }
-      };
-    }
-  };
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, waitMemberDefinition, membersDefinition, repackDefinition, compactSubagentDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, waitMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool);
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`);
@@ -14788,42 +14694,6 @@ function memberTaskData(task, memberTasks) {
   return { ...fields, logFile: memberTasks.logPath(taskId) };
 }
 var CONTEXT_COMPACT_THRESHOLD = 20;
-var SUBAGENT_COMPACT_PERCENT = 35;
-var SUBAGENT_COMPACT_TIMEOUT_MS = 18e4;
-function agentContextOccupancy(ctx, agent) {
-  const session = agent?.session;
-  if (session === void 0 || session === null) return null;
-  let pressure;
-  const projections = typeof ctx.get === "function" ? ctx.get("sessionProjections") : void 0;
-  if (typeof projections?.snapshot === "function") {
-    try {
-      pressure = projections.snapshot(session, ["contextPressure"]).values.contextPressure;
-    } catch {
-    }
-  }
-  if (pressure === void 0) {
-    const meter = typeof ctx.get === "function" ? ctx.get("tokenMeter") : void 0;
-    if (typeof meter?.contextPressure === "function") {
-      try {
-        pressure = meter.contextPressure(session);
-      } catch {
-      }
-    }
-  }
-  if (pressure === null || typeof pressure !== "object") return null;
-  return {
-    usedTokens: nonNegativeCount(pressure.projectedTokens) ?? nonNegativeCount(pressure.pressureTokens),
-    maxTokens: nonNegativeCount(pressure.contextWindow)
-  };
-}
-function compactionServiceFor(ctx, agent) {
-  const presets = typeof ctx.get === "function" ? ctx.get("agentPresets") : void 0;
-  const scoped = typeof presets?.serviceFor === "function" ? presets.serviceFor(agent, "compaction") : void 0;
-  return scoped ?? (typeof ctx.get === "function" ? ctx.get("compaction") : void 0);
-}
-function nonNegativeCount(value) {
-  return Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
-}
 function formatTokens(value) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount < 0) return "?";
@@ -15091,12 +14961,7 @@ var MEMBER_INTERACTION_RULE = [
   "\u672C\u4F1A\u8BDD\u7981\u7528\u4E86 ask_user_question\uFF1A\u6CA1\u6709\u53EF\u4EE5\u5E94\u7B54\u7684\u7528\u6237\uFF0C\u63D0\u95EE\u4E0D\u4F1A\u5F97\u5230\u56DE\u7B54\u3002",
   "\u9700\u8981\u989D\u5916\u4FE1\u606F\u6216\u51B3\u7B56\u65F6\uFF0C\u5728\u56DE\u590D\u91CC\u628A\u95EE\u9898\u5199\u6E05\u695A\u5E76\u7ED3\u675F\u8FD9\u4E00\u8F6E\uFF1B\u59D4\u6D3E\u65B9\u4F1A\u7528\u540C\u4E00\u4F1A\u8BDD\u7EE7\u7EED\u56DE\u7B54\u3002"
 ].join("\n");
-var MEMBER_SUBAGENT_RULE = [
-  '\u8C03\u7528\u5B50\u4EE3\u7406\u65F6\u52A1\u5FC5\u63A7\u5236\u5B50\u4EE3\u7406\u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\uFF1A\u5B50\u4EE3\u7406\u6BCF\u4E00\u8F6E\u7ED3\u675F\u3001\u56DE\u5230\u4E3B\u5BF9\u8BDD\u5E76\u901A\u77E5\u4E4B\u540E\uFF0C\u7528 compact_subagent({ agent: "<\u5B50\u4EE3\u7406\u540D>" }) \u68C0\u67E5\u4E00\u6B21\uFF0C\u4E25\u683C\u8D85\u8FC7 35% \u5FC5\u987B\u538B\u7F29\uFF1B\u8FD0\u884C\u4E2D\u7684\u5B50\u4EE3\u7406\u4E0D\u80FD\u538B\u7F29\u3002',
-  "\u957F\u4EFB\u52A1\u62C6\u6210\u591A\u8F6E\u5B50\u4EE3\u7406\u6267\u884C\uFF0C\u8BA9\u5B50\u4EE3\u7406\u5B9A\u671F\u6C47\u62A5\u3001\u56DE\u5230\u4E3B\u5BF9\u8BDD\uFF0C\u7ED9\u538B\u7F29\u7559\u51FA\u65F6\u673A\u3002"
-].join("\n");
 var INTERACTION_CONTEXT_ORDER = 125;
-var SUBAGENT_CONTEXT_ORDER = 128;
 var ENVIRONMENT_CONTEXT_ORDER = 130;
 var MAX_EVENTS = 5e3;
 var DEFAULT_WORKSPACE2 = "default-workspace";
@@ -15681,12 +15546,6 @@ data: ${JSON.stringify(payload)}
           order: INTERACTION_CONTEXT_ORDER,
           interpolate: false,
           text: MEMBER_INTERACTION_RULE
-        });
-        systemPrompt.context({
-          name: "mesh:subagent",
-          order: SUBAGENT_CONTEXT_ORDER,
-          interpolate: false,
-          text: MEMBER_SUBAGENT_RULE
         });
         if (text !== "") {
           systemPrompt.context({

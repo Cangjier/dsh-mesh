@@ -2,7 +2,7 @@
 
 - 插件：`@local/dsh-mesh`
 - 工具注册：`src/lib/tools.mjs` → `registerTools()`
-- 当前共 7 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`wait_member`、`compact_subagent`
+- 当前共 6 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`wait_member`
 - 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续，`wait_member` 只做有界等待。
 - 所有工具统一返回 `{ ok, text, data }`。`text` 是给人看的摘要，`data` 是结构化结果。
 - 同步执行的工具会在 `text` 和 `data` 里都返回日志文件地址，便于调用结束后继续读取完整日志。
@@ -17,7 +17,6 @@
 | `members` | 只读成员发现 | 无 | `true` |
 | `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `compress` / `cwd` / `workspace` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回 | `conversationId` `timeoutMs` | `true` |
-| `compact_subagent` | 子代理空闲且上下文严格超过 35% 时压缩 | `agent` | `false` |
 
 ## 2. 共享基础
 
@@ -403,7 +402,6 @@ Gitee token: ...
 - 没有组网直连时不会出现出网那一行；token 也没有就什么都不注入。
 - 探针失败写一行失败原因；同一行也会出现在 `call_member` 的返回里。
 - 这段上下文不进对话历史；DSH 重启恢复会话后需要重新发起才会再有。
-- 除此之外还有两条固定规则（不依赖出网信息，始终注入）：禁用 `ask_user_question`，以及子代理上下文超过 35% 时必须用 `compact_subagent` 压缩（见 6.7）。
 
 同一时机还会**禁用该会话的 `ask_user_question`**：成员任务没有可应答的用户，提问要么落到成员
 自己的 Web 界面、要么等到工具超时，而发起方只拿得到轮次结束时的文本。会话会被注入一条规则：
@@ -523,37 +521,6 @@ interrupted    插件停止或重启时，未完成任务被标记
 - `compress` 要求目标对话空闲，压缩请求最多等 180 秒；成员没有 `ctx.compaction` 时返回 501；
 - 需要看最终结果用 `wait_member`（state=done）或读取 `logFile`；不继续等待也没关系：终态后 3 秒内没人取走结果会自动投递回发起对话；
 - 插件重启会把停止前仍在跑的任务接回监控（24 小时内），继续等待并按原规则投递；目标对话已经消失时任务失败并通知。原对话当时不在线会重试几次。
-
-### 6.7 `compact_subagent`：成员内部子代理的上下文
-
-成员会话需要调用子代理时，注入的规则要求它控制子代理的上下文占比：
-
-```text
-调用子代理时务必控制子代理的上下文占比：子代理每一轮结束、回到主对话并通知之后，
-用 compact_subagent({ agent: "<子代理名>" }) 检查一次，严格超过 35% 必须压缩；
-运行中的子代理不能压缩。
-长任务拆成多轮子代理执行，让子代理定期汇报、回到主对话，给压缩留出时机。
-```
-
-工具行为：
-
-```text
-compact_subagent { "agent": "reviewer" }
-  → 按名字解析子代理（就是 list_agents / send_message 用的那套名字）
-  → 读取该子代理当前上下文占比（与会话状态栏同一口径）
-  → 占比 <= 35%：不压缩，返回占比
-  → 占比 > 35%：调用该子代理所属 preset 的 compaction.compactNow()
-     （preset 隔离组优先，回退宿主 ctx.compaction）；完成后重新读取占比
-```
-
-- 只能压缩空闲子代理：子代理正在跑一轮时返回错误，等它这一轮结束、通知主对话后再调用。
-  单轮跑很久的子代理没有压缩时机，因此注入规则要求把长任务拆成多轮。
-- 压缩只改子代理自己的历史（旧历史换成摘要），主对话不受影响；返回
-  `percentBefore` / `percentAfter` / `compacted`。
-- 没有可压缩历史时 `compacted: false`，不算失败；测量不到占比、子代理不在内存、
-  宿主没有压缩服务时明确报错。
-- 严格大于 35.0% 才压缩，正好 35.0% 不压缩；判断与返回文案使用同一个一位小数口径。
-- 成员新建对话或恢复会话时，这条规则随 `mesh:subagent` 上下文一起注入。
 
 ---
 

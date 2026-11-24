@@ -53,24 +53,10 @@ const MEMBER_INTERACTION_RULE = [
 ].join('\n')
 
 /**
- * Prompt context that keeps delegated child agents inside a context budget.
- *
- * A child can only be compacted while it is idle, which is exactly the moment
- * it notifies its parent at the end of a turn. Long single-turn work therefore
- * has to be split so those notification points exist.
- */
-const MEMBER_SUBAGENT_RULE = [
-  '调用子代理时务必控制子代理的上下文占比：子代理每一轮结束、回到主对话并通知之后，用 compact_subagent({ agent: "<子代理名>" }) 检查一次，严格超过 35% 必须压缩；运行中的子代理不能压缩。',
-  '长任务拆成多轮子代理执行，让子代理定期汇报、回到主对话，给压缩留出时机。',
-].join('\n')
-
-/**
  * Prompt-context order for the interaction rule and the mesh environment.
  * Both sit between the delegation note (120) and the harness facts (200).
  */
 const INTERACTION_CONTEXT_ORDER = 125
-/** Sits between the interaction rule and the measured mesh facts. */
-const SUBAGENT_CONTEXT_ORDER = 128
 const ENVIRONMENT_CONTEXT_ORDER = 130
 
 /** How many events one conversation keeps for late `/events` readers. */
@@ -944,12 +930,6 @@ export function createInteropService(options) {
           order: INTERACTION_CONTEXT_ORDER,
           interpolate: false,
           text: MEMBER_INTERACTION_RULE,
-        })
-        systemPrompt.context({
-          name: 'mesh:subagent',
-          order: SUBAGENT_CONTEXT_ORDER,
-          interpolate: false,
-          text: MEMBER_SUBAGENT_RULE,
         })
         if (text !== '') {
           systemPrompt.context({

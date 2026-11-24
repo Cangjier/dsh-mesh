@@ -181,7 +181,7 @@ export function createTurnGuard({ ctx, memberTasks, log = () => {} }) {
       '[成员任务提醒] 你上一轮的回复看起来准备把工作交给成员或等待成员结果，但这一轮没有实际调用 call_member。',
       `最近一次成员对话：${task.member}（${task.memberIp}），会话id：${task.conversationId}`,
       ...(lastPrompt === '' ? [] : [`最近一次投递：${lastPrompt}`]),
-      '如果还需要这个成员继续，请调用 call_member（带同一个 conversationId），再用 wait_member 取结果；如果不需要，请直接回答用户。',
+      '如果还需要这个成员继续，请调用 call_member（带同一个 conversationId），再用 wait_member { "all": true } 取结果；如果不需要，请直接回答用户。',
       `这是第 ${String(count)}/${String(MAX_REMINDERS)} 次连续提醒，调用过 call_member 后会重置。`,
     ]
     try {

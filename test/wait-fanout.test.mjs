@@ -215,8 +215,9 @@ test('wait_member lists the conversations it did not return and how to wait for 
     assert.equal(result.ok, true)
     assert.match(result.text, /第一条回复/u)
     assert.match(result.text, /还有 1 个会话没有返回/u)
-    assert.match(result.text, /c2（B 10\.66\.66\.2，第 3 轮，进行中）/u)
+    assert.match(result.text, /c2（B 10\.66\.66\.2，工作区 unknown，第 3 轮，进行中）/u)
     assert.match(result.text, /"conversationIds": \["c2"\]/u)
+    assert.match(result.text, /"all": true/u)
     assert.deepEqual(result.data.remaining.map(entry => entry.conversationId), ['c2'])
     assert.deepEqual(result.data.conversationIds, ['c1', 'c2'])
   } finally {
@@ -225,18 +226,76 @@ test('wait_member lists the conversations it did not return and how to wait for 
   }
 })
 
-test('wait_member merges conversationId with conversationIds', async () => {
+test('wait_member refuses conversationId and the all/conversationIds mix', async () => {
   const member = await fakeMember()
   const { service, dataDir } = await buildStub(member.port)
   const wait = register(service).get('wait_member')
   seed(service.memberTasks, 'c1', { replies: [{ seq: 1, turn: 1, text: '单独那个' }], replySeq: 1 })
-  seed(service.memberTasks, 'c2', { replies: [{ seq: 1, turn: 1, text: '列表里那个' }], replySeq: 1 })
   try {
-    // conversationId comes first, so its conversation has priority in the fan-out.
-    const result = await wait.execute({ conversationId: 'c1', conversationIds: ['c2'] }, { signal: undefined })
-    assert.match(result.text, /单独那个/u)
+    await assert.rejects(
+      () => wait.execute({ conversationId: 'c1' }, { signal: undefined }),
+      /不再接受 conversationId/u,
+    )
+    await assert.rejects(
+      () => wait.execute({ all: true, conversationIds: ['c1'] }, { signal: undefined }),
+      /all 和 conversationIds 互斥/u,
+    )
+    await assert.rejects(
+      () => wait.execute({}, { signal: undefined }),
+      /conversationIds is required/u,
+    )
+  } finally {
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('wait_member all waits every running conversation of this origin', async () => {
+  const member = await fakeMember()
+  const { service, dataDir } = await buildStub(member.port)
+  const wait = register(service).get('wait_member')
+  seed(service.memberTasks, 'c1', {
+    workspace: 'dsh-mesh',
+    replies: [{ seq: 1, turn: 2, text: '第一条回复' }],
+    replySeq: 1,
+  })
+  seed(service.memberTasks, 'c2', { workspace: 'other', turns: 1 })
+  try {
+    const result = await wait.execute({ all: true }, { agent: { session: { id: 'session-a' } }, signal: undefined })
+    assert.equal(result.ok, true)
+    assert.equal(result.data.all, true)
+    assert.deepEqual(result.data.conversationIds, ['c1', 'c2'])
+    assert.match(result.text, /第一条回复/u)
     assert.deepEqual(result.data.remaining.map(entry => entry.conversationId), ['c2'])
-    await assert.rejects(() => wait.execute({}, { signal: undefined }), /conversationId or conversationIds is required/u)
+    assert.deepEqual(result.data.conversations.map(entry => entry.workspace), ['dsh-mesh', 'other'])
+    assert.deepEqual(result.data.conversations.map(entry => entry.statusLabel), ['进行中', '进行中'])
+    assert.equal(result.data.conversations.find(entry => entry.current)?.conversationId, 'c1')
+  } finally {
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('wait_member all with nothing running is ok and lists every conversation', async () => {
+  const member = await fakeMember()
+  const { service, dataDir } = await buildStub(member.port)
+  const wait = register(service).get('wait_member')
+  seed(service.memberTasks, 'c1', {
+    status: 'completed',
+    workspace: 'dsh-mesh',
+    turns: 3,
+    replies: [{ seq: 1, turn: 3, text: '已经完成' }],
+    replySeq: 1,
+  })
+  try {
+    const result = await wait.execute({ all: true }, { agent: { session: { id: 'session-a' } }, signal: undefined })
+    assert.equal(result.ok, true)
+    assert.equal(result.data.waiting, false)
+    assert.equal(result.data.state, 'idle')
+    assert.deepEqual(result.data.conversationIds, [])
+    assert.match(result.text, /本对话当前没有进行中的成员会话/u)
+    assert.match(result.text, /c1（B 10\.66\.66\.2，工作区 dsh-mesh，空闲，第 3 轮）/u)
+    assert.deepEqual(result.data.conversations.map(entry => entry.statusLabel), ['空闲'])
   } finally {
     await member.close()
     await rm(dataDir, { recursive: true, force: true })
@@ -275,6 +334,12 @@ test('call_member points at every conversation the turn already has running', as
     assert.match(result.text, /conv-old/u)
     assert.match(result.text, /conv-new/u)
     assert.match(result.text, /"conversationIds": \["conv-old","conv-new"\]/u)
+    assert.match(result.text, /"all": true/u)
+    assert.equal(result.data.currentConversationId, 'conv-new')
+    assert.deepEqual(result.data.conversations.map(entry => entry.conversationId), ['conv-old', 'conv-new'])
+    assert.deepEqual(result.data.conversations.map(entry => entry.statusLabel), ['进行中', '进行中'])
+    assert.deepEqual(result.data.conversations.map(entry => entry.workspace), ['unknown', 'default-workspace'])
+    assert.equal(result.data.conversations.find(entry => entry.current)?.conversationId, 'conv-new')
   } finally {
     await service.memberTasks.dispose()
     await member.close()
@@ -289,7 +354,8 @@ test('call_member keeps the single-conversation hint when nothing else is runnin
   const call = register(service).get('call_member')
   try {
     const result = await call.execute({ member: '127.0.0.1', prompt: '只跑一件' }, { agent })
-    assert.match(result.text, /用 wait_member 等待结果：conversationId="conv-new"/u)
+    assert.match(result.text, /用 wait_member 等待结果（推荐 all: true）：wait_member \{ "all": true \}/u)
+    assert.match(result.text, /"conversationIds": \["conv-new"\]/u)
     assert.doesNotMatch(result.text, /同时在跑/u)
   } finally {
     await service.memberTasks.dispose()

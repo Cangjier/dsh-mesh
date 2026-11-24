@@ -102,6 +102,69 @@ function isTerminalStatus(status) {
 }
 
 /**
+ * Coarse state of one tracked conversation, for the model-visible lists.
+ *
+ * Only the initiator's task state is read here: the lists are built on every
+ * tool call and after every injected snapshot, so they must not turn into one
+ * HTTP read per conversation. `status_member` remains the live view.
+ * @param {object} task task record.
+ * @returns {'running'|'idle'|'interrupted'|string} coarse state.
+ */
+export function memberTaskState(task) {
+  const status = String(task?.status ?? '')
+  if (status === 'running' || status === 'starting') return 'running'
+  if (status === 'completed') return 'idle'
+  if (status === 'failed' || status === 'interrupted') return 'interrupted'
+  return status === '' ? 'unknown' : status
+}
+
+/**
+ * Chinese label for one task state.
+ * @param {object} task task record.
+ * @returns {string} 进行中 / 空闲 / 异常中止.
+ */
+export function memberTaskStatusLabel(task) {
+  const state = memberTaskState(task)
+  if (state === 'running') return '进行中'
+  if (state === 'idle') return '空闲'
+  if (state === 'interrupted') return '异常中止'
+  return state
+}
+
+/**
+ * The workspace name to show for one task.
+ *
+ * New records carry the name the member resolved; records written by an older
+ * release have no field at all, and an empty value is not a workspace name.
+ * @param {object} task task record.
+ * @returns {string} workspace name or 'unknown'.
+ */
+export function memberTaskWorkspace(task) {
+  return typeof task?.workspace === 'string' && task.workspace.trim() !== ''
+    ? task.workspace.trim()
+    : 'unknown'
+}
+
+/**
+ * One model-facing summary of a tracked conversation.
+ * @param {object} task task record.
+ * @param {string} [currentConversationId] the conversation this call is about.
+ * @returns {object} summary.
+ */
+export function describeMemberTask(task, currentConversationId) {
+  return {
+    conversationId: String(task.conversationId ?? ''),
+    member: String(task.member ?? ''),
+    memberIp: String(task.memberIp ?? ''),
+    workspace: memberTaskWorkspace(task),
+    status: String(task.status ?? ''),
+    statusLabel: memberTaskStatusLabel(task),
+    turns: Number.isSafeInteger(task.turns) ? task.turns : null,
+    current: typeof currentConversationId === 'string' && task.conversationId === currentConversationId,
+  }
+}
+
+/**
  * Clean one workspace title into a name the member's interop accepts.
  *
  * The member rejects a name longer than 120 characters or one containing a
@@ -210,6 +273,14 @@ export class MemberTaskService {
     this.taskRoot = path.join(this.dataDir, 'member-tasks')
     this.tasks = new Map()
     this.monitors = new Map()
+    /**
+     * How long a terminal task waits for a `wait_member` call to take its
+     * result. The default is the documented three seconds; tests shorten it to
+     * exercise the race deterministically.
+     */
+    this.deliveryGraceMs = Number.isSafeInteger(options.deliveryGraceMs) && options.deliveryGraceMs >= 0
+      ? options.deliveryGraceMs
+      : DELIVERY_GRACE_MS
     /** @type {Map<string, AbortController>} per-task cancellation for the in-flight wait */
     this.controllers = new Map()
     /** @type {Map<string, Set<() => void>>} `wait_member` calls parked on a task */
@@ -287,6 +358,9 @@ export class MemberTaskService {
         task.replySeq = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0
         task.deliveredSeq = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0
         task.terminalDelivered = task.terminalDelivered === true
+        // Old records predate the workspace field. An empty value is not a
+        // name, so both fall back to the same placeholder the model sees.
+        if (typeof task.workspace !== 'string' || task.workspace.trim() === '') task.workspace = 'unknown'
         if (!Array.isArray(task.sentMessages)) {
           task.sentMessages = typeof task.prompt === 'string' && task.prompt !== ''
             ? [{ text: task.prompt, at: String(task.createdAt ?? '') }]
@@ -417,7 +491,15 @@ export class MemberTaskService {
     try { parsed = text === '' ? null : JSON.parse(text) } catch { }
     if (!response.ok) {
       const message = parsed?.error?.message ?? text ?? `HTTP ${String(response.status)}`
-      throw new Error(`${String(response.status)} ${message}`)
+      // Tools decide on the member's stable error code (the workspace guard is
+      // the first one that is reported instead of thrown), so it must survive
+      // this layer along with the structured detail the member sent.
+      const failure = new Error(`${String(response.status)} ${message}`)
+      failure.status = response.status
+      failure.code = typeof parsed?.error?.code === 'string' ? parsed.error.code : ''
+      failure.detail = parsed?.error?.detail ?? null
+      failure.memberMessage = String(message)
+      throw failure
     }
     if (parsed === null) throw new Error('member interop returned a non-JSON response')
     return parsed
@@ -494,7 +576,7 @@ export class MemberTaskService {
     }
   }
 
-  async start({ member, prompt, cwd, workspace, agent, notify = true, signal }) {
+  async start({ member, prompt, cwd, workspace, force = false, agent, notify = true, signal }) {
     await this.#ensureLoaded()
     if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('prompt is required')
     if (agent === undefined || agent === null) throw new Error('delegation must be called from a DSH conversation')
@@ -512,6 +594,12 @@ export class MemberTaskService {
     const targetWorkspace = explicitWorkspace
       ? workspace.trim()
       : explicitCwd ? '' : await callerWorkspaceName(this.ctx, agent)
+    // What the caller records as this conversation's workspace. The member's
+    // projection is the source of truth on every later delivery; this is the
+    // best value known before the first response.
+    const taskWorkspace = explicitWorkspace
+      ? workspace.trim()
+      : explicitCwd ? (path.basename(path.resolve(cwd)) || 'unknown') : (targetWorkspace || 'unknown')
     const payload = {
       prompt,
       // The member's panel lists these; without a title it would show a UUID.
@@ -520,6 +608,9 @@ export class MemberTaskService {
       mesh,
       ...(targetWorkspace !== '' ? { workspace: targetWorkspace } : {}),
       ...(explicitCwd ? { cwd } : {}),
+      // Only a caller that was told about the workspace conflict sends this;
+      // it is the member-side escape hatch for intentional concurrency.
+      ...(force === true ? { forceWorkspace: true } : {}),
     }
     const created = await this.#waitForRuntime(
       () => this.#request(target.baseUrl, 'POST', '/v1/conversations', payload, 60_000, signal),
@@ -528,12 +619,20 @@ export class MemberTaskService {
     )
     const conversation = created.conversation
     if (conversation === undefined || typeof conversation.id !== 'string') throw new Error('member interop did not return a conversation id')
+    // The member resolved the actual directory/workspace; prefer its answer,
+    // but keep the local value for an explicit-cwd conversation whose
+    // projection intentionally reports an empty workspace name.
+    const reportedWorkspace = typeof conversation.workspace === 'string' && conversation.workspace.trim() !== ''
+      ? conversation.workspace.trim()
+      : taskWorkspace
     const task = {
       id: `member-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
       member: target.name,
       memberIp: target.ip,
       baseUrl: target.baseUrl,
       conversationId: conversation.id,
+      /** Workspace name the member resolved, or a best-known fallback. */
+      workspace: reportedWorkspace,
       prompt: truncate(prompt, 2000),
       status: 'running',
       createdAt: new Date().toISOString(),
@@ -620,8 +719,9 @@ export class MemberTaskService {
       if (replies.length > 0) {
         task.deliveredSeq = replies[replies.length - 1].seq
         // A terminal answer handed over together with its text also tells the
-        // model the task is over, so the post-completion delivery is skipped.
-        if (terminal) task.terminalDelivered = true
+        // model the task is over, so the post-completion delivery is skipped
+        // and any timer already scheduled for it is cancelled.
+        if (terminal) this.#consumeTerminal(task)
         await this.#save(task).catch(() => {})
         return {
           done: terminal,
@@ -633,8 +733,10 @@ export class MemberTaskService {
       }
       if (terminal) {
         // A terminal outcome with no new text (a failure, or an idle finish)
-        // still counts as consumed: the model knows the task ended.
-        task.terminalDelivered = true
+        // still counts as consumed: the model knows the task ended, and the
+        // fallback delivery must not repeat the text a progress reply already
+        // handed over.
+        this.#consumeTerminal(task)
         await this.#save(task).catch(() => {})
         return { done: true, timedOut: false, task, replies: [], state: task.status === 'completed' ? 'done' : 'failed' }
       }
@@ -709,10 +811,11 @@ export class MemberTaskService {
         if (replies.length > 0) {
           task.deliveredSeq = replies[replies.length - 1].seq
           // A terminal answer handed over together with its text also tells
-          // the model the task is over, so the fallback delivery is skipped.
-          if (terminal) task.terminalDelivered = true
-        } else {
-          task.terminalDelivered = true
+          // the model the task is over, so the fallback delivery is skipped
+          // and its timer cancelled.
+          if (terminal) this.#consumeTerminal(task)
+        } else if (terminal) {
+          this.#consumeTerminal(task)
         }
         await this.#save(task).catch(() => {})
         return {
@@ -752,7 +855,9 @@ export class MemberTaskService {
         conversationId: task.conversationId,
         member: task.member,
         memberIp: task.memberIp,
+        workspace: memberTaskWorkspace(task),
         status: task.status,
+        statusLabel: memberTaskStatusLabel(task),
         turns: Number.isSafeInteger(task.turns) ? task.turns : null,
         settled: isTerminalStatus(task.status),
         context: task.context ?? null,
@@ -883,6 +988,26 @@ export class MemberTaskService {
   }
 
   /**
+   * Every conversation one origin session tracks, oldest first.
+   *
+   * `wait_member` and `call_member` return this so the model always sees the
+   * whole picture — not just the conversation the call was about — including
+   * each conversation's state and workspace. Old settled conversations stay in
+   * the list, exactly like the task table they come from.
+   * @param {string} sessionId origin session id.
+   * @returns {Promise<object[]>} tasks, oldest delivery first.
+   */
+  async listForOrigin(sessionId) {
+    await this.#ensureLoaded()
+    const key = String(sessionId ?? '')
+    if (key === '') return []
+    return [...this.tasks.values()]
+      .filter(task => task.originSessionId === key)
+      .sort((left, right) => String(left.createdAt ?? '')
+        .localeCompare(String(right.createdAt ?? '')))
+  }
+
+  /**
    * Live status of one tracked member conversation, for `status_member`.
    *
    * The member's own projection is the source of truth while it is reachable;
@@ -994,6 +1119,7 @@ export class MemberTaskService {
     }
     const conversation = state?.conversation
     if (conversation === null || typeof conversation !== 'object') return
+    this.#rememberWorkspace(task, conversation)
     if (String(conversation.status ?? '') !== 'idle') return
     const reset = this.#replyCursorReset(task, conversation)
     if (reset) await this.#resetReplyCursor(task, conversation.replySeq)
@@ -1114,12 +1240,14 @@ export class MemberTaskService {
       this.tasks.set(task.id, task)
     }
     this.#rememberContext(task, result?.context ?? result?.conversation?.context)
+    this.#rememberWorkspace(task, result?.conversation)
     task.status = 'running'
     task.error = null
     task.interrupted = false
     task.attempts = 0
     task.emptyWaits = 0
     task.terminalDelivered = false
+    task.deliveryReplies = null
     task.notified = false
     task.notifiedAt = null
     task.notifyError = null
@@ -1137,9 +1265,16 @@ export class MemberTaskService {
       clearTimeout(pendingNotify)
       this.notifyTimers.delete(task.id)
     }
+    // How the member took the message: steer into the running turn, or an
+    // ordinary follow-up. An older member sends no receipt field; that member
+    // only had followup, so the fallback label is still accurate.
+    const receipt = result?.receipt
+    task.lastDelivery = receipt?.delivery === 'steer' || receipt?.steered === true
+      ? 'steer'
+      : receipt?.delivery === 'followup' || receipt?.accepted === true ? 'followup' : null
     if (!this.controllers.has(task.id)) this.controllers.set(task.id, new AbortController())
     await this.#save(task)
-    await this.#log(task, `message queued: ${result?.receipt?.messageId ?? 'unknown'}`)
+    await this.#log(task, `message queued: ${result?.receipt?.messageId ?? 'unknown'}${task.lastDelivery === null ? '' : ` (${task.lastDelivery})`}`)
     if (!this.monitors.has(task.id)) {
       const monitor = this.#monitor(task)
       this.monitors.set(task.id, monitor)
@@ -1180,6 +1315,8 @@ export class MemberTaskService {
         memberIp: target.ip,
         baseUrl: target.baseUrl,
         conversationId,
+        /** Filled from the member's live projection by the delivery probe. */
+        workspace: 'unknown',
         prompt: truncate(request.prompt, 2000),
         status: 'running',
         createdAt: new Date().toISOString(),
@@ -1237,6 +1374,23 @@ export class MemberTaskService {
   }
 
   /**
+   * Refresh the workspace name the member resolved for a conversation.
+   *
+   * The member owns the mapping between a request and a directory, so its
+   * projection wins over the value guessed at creation. An explicit-cwd
+   * conversation reports `workspace: ''`; that is "no workspace name", not a
+   * reason to forget the directory name already recorded.
+   * @param {object} task member task.
+   * @param {unknown} conversation the member's conversation projection.
+   * @returns {void}
+   */
+  #rememberWorkspace(task, conversation) {
+    const workspace = conversation?.workspace
+    if (typeof workspace === 'string' && workspace.trim() !== '') task.workspace = workspace.trim()
+    else if (typeof task.workspace !== 'string' || task.workspace.trim() === '') task.workspace = 'unknown'
+  }
+
+  /**
    * Compact before delivery when the target conversation is already loaded.
    *
    * The occupancy is re-read from the member first: the cached figure comes
@@ -1275,6 +1429,7 @@ export class MemberTaskService {
         signal,
       )
       this.#rememberContext(task, result?.context)
+      this.#rememberWorkspace(task, result?.conversation)
       if (this.#replyCursorReset(task, result?.conversation)) {
         await this.#resetReplyCursor(task, result.conversation.replySeq)
       }
@@ -1376,6 +1531,7 @@ export class MemberTaskService {
         task.attempts = 0
         this.#rememberContext(task, result.context ?? result.conversation?.context)
         const conversation = result.conversation ?? {}
+        this.#rememberWorkspace(task, conversation)
         if (this.#replyCursorReset(task, conversation)) {
           // The member restarted and its reply counter began a new epoch; the
           // old `since` would hide every reply the member still has, and a
@@ -1550,6 +1706,24 @@ export class MemberTaskService {
   }
 
   /**
+   * Cancel a pending fallback delivery for one consumed terminal task.
+   *
+   * A `wait_member` call that returns the terminal outcome (with or without
+   * new text) tells the model the task ended; the fallback timer must not fire
+   * afterwards and hand the same answer over a second time.
+   * @param {object} task terminal task.
+   * @returns {void}
+   */
+  #consumeTerminal(task) {
+    task.terminalDelivered = true
+    const pending = this.deliveryTimers.get(task.id)
+    if (pending !== undefined) {
+      clearTimeout(pending)
+      this.deliveryTimers.delete(task.id)
+    }
+  }
+
+  /**
    * Hand a finished task's result to the calling conversation after a grace window.
    *
    * A parked `wait_member` is woken before this runs, and the model's next step
@@ -1560,29 +1734,62 @@ export class MemberTaskService {
    * @returns {void}
    */
   #scheduleDelivery(task) {
+    if (task.terminalDelivered === true) return
     const previous = this.deliveryTimers.get(task.id)
     if (previous !== undefined) clearTimeout(previous)
     const timer = setTimeout(() => {
       this.deliveryTimers.delete(task.id)
       void this.#deliverIfUnconsumed(task).catch(() => {})
-    }, DELIVERY_GRACE_MS)
+    }, this.deliveryGraceMs)
     timer.unref?.()
     this.deliveryTimers.set(task.id, timer)
   }
 
   /**
    * Deliver a terminal result unless a `wait_member` call already returned it.
+   *
+   * The fallback only ever sends replies the model has not seen. Two cases are
+   * deliberately distinct:
+   *
+   * - unreported replies (`seq > deliveredSeq`) are claimed here and delivered
+   *   as the result; a wait that runs afterwards cannot return the same text;
+   * - with nothing unreported, only a short completion notice is sent — the
+   *   text itself was already handed over by an earlier `progress` reply, and
+   *   repeating it was the ai-cad duplicate bug.
+   *
+   * A terminal outcome a wait already consumed cancels the timer, so no
+   * fallback runs at all.
    * @param {object} task terminal task.
    * @returns {Promise<void>} resolution after the notification attempt.
    */
   async #deliverIfUnconsumed(task) {
     if (this.disposed) return
     if (task.status !== 'completed' && task.status !== 'failed') return
-    if (task.terminalDelivered === true) {
+    let pending = this.#pendingReplies(task)
+    if (pending.length === 0 && task.terminalDelivered !== true
+      && (!Array.isArray(task.replies) || task.replies.length === 0)
+      && typeof task.lastText === 'string' && task.lastText !== '') {
+      // A member from an older release reports the answer only as `lastText`,
+      // not as per-turn replies. No wait can have returned that text while
+      // `terminalDelivered` is false (the legacy wait path marks it when it
+      // finishes), so this is the one copy the fallback must deliver.
+      const seq = Number.isSafeInteger(task.replySeq) && task.replySeq > 0 ? task.replySeq : 1
+      pending = [{ seq, turn: Number.isSafeInteger(task.turns) ? task.turns : null, text: task.lastText }]
+    }
+    if (pending.length === 0 && task.terminalDelivered === true) {
       await this.#log(task, 'delivery skipped: a wait_member call already returned the result')
       return
     }
-    await this.#notify(task)
+    if (pending.length > 0) {
+      // Claim before the first await: this assignment and the wait call's own
+      // cursor advance cannot interleave, so the same text is never handed out
+      // twice even when both paths wake at the same moment.
+      task.deliveredSeq = pending[pending.length - 1].seq
+      task.deliveryReplies = pending
+      await this.#save(task).catch(() => {})
+      await this.#log(task, `fallback delivers ${String(pending.length)} unread reply(ies)`)
+    }
+    await this.#notify(task, pending)
   }
 
   /**
@@ -1608,10 +1815,20 @@ export class MemberTaskService {
     this.notifyTimers.set(task.id, timer)
   }
 
-  async #notify(task) {
+  /**
+   * Write one terminal outcome back into the conversation that delegated.
+   * @param {object} task terminal task.
+   * @param {object[]} replies unread replies this delivery owns; empty means a
+   *   short completion notice because the text was already returned by a wait.
+   * @returns {Promise<void>} resolution after the notification attempt.
+   */
+  async #notify(task, replies = Array.isArray(task.deliveryReplies) ? task.deliveryReplies : []) {
     const agents = typeof this.ctx.get === 'function' ? this.ctx.get('agents') : this.ctx.agents
     const agent = agents?.get?.(task.originAgentId)
     if (agent === undefined || agent === null) {
+      // The claimed replies must survive the origin being offline, or a
+      // delivery retry would silently lose the only copy of the answer.
+      if (replies.length > 0) task.deliveryReplies = replies
       task.notifyError = 'the originating conversation is no longer live'
       task.notifyRetries = Number.isSafeInteger(task.notifyRetries) ? task.notifyRetries : 0
       if (task.notifyRetries < NOTIFY_RETRY_LIMIT) {
@@ -1622,12 +1839,18 @@ export class MemberTaskService {
       await this.#log(task, `notification deferred: origin agent unavailable (retry ${String(task.notifyRetries)})`)
       return
     }
+    const resultText = replies
+      .map(reply => (typeof reply?.text === 'string' ? reply.text : ''))
+      .filter(text => text !== '')
+      .join('\n\n')
+      .trim()
     const text = task.status === 'completed'
       ? [
         `[成员任务完成] ${task.member} (${task.memberIp}) 的对话 ${task.conversationId} 已完成。`,
         `任务：${truncate(task.prompt, 300)}`,
-        '结果：',
-        truncate(task.lastText || '(成员没有返回文本结果)', 8000),
+        resultText !== ''
+          ? ['结果：', truncate(resultText, 8000)].join('\n')
+          : '结果已经通过 wait_member 返回，这条只是完成提示，不重复回复正文。',
         '',
         `会话id: ${task.conversationId}`,
       ].join('\n')
@@ -1635,6 +1858,7 @@ export class MemberTaskService {
         `[成员任务失败] ${task.member} (${task.memberIp}) 的对话 ${task.conversationId} 失败。`,
         `任务：${truncate(task.prompt, 300)}`,
         `错误：${task.error ?? 'unknown'}`,
+        ...(resultText !== '' ? ['', '中断前的回复：', truncate(resultText, 8000)] : []),
         ...(task.interrupted === true
           ? ['', `目标的 DSH 重启（或运行时退出）打断了这一轮。对话和上下文还在：用 call_member 带 conversationId ${task.conversationId} 继续，或新开一个任务。`]
           : []),
@@ -1674,6 +1898,7 @@ export class MemberTaskService {
       task.notifiedVia = steered ? 'steer' : 'followup'
       task.notifyError = null
       task.notifyRetries = 0
+      task.deliveryReplies = null
       await this.#save(task)
       await this.#log(task, `notification ${steered ? 'steered into' : 'queued into'} ${task.originSessionId}`)
     } catch (error) {

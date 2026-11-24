@@ -282,6 +282,35 @@ function workspacePath(settings, name) {
 }
 
 /**
+ * Whether a directory is a git worktree (`.git` is a directory, or a file in a
+ * linked worktree / submodule).
+ * @param {string} directory absolute directory.
+ * @returns {boolean} true when a `.git` marker exists.
+ */
+function isGitWorktree(directory) {
+  try {
+    return existsSync(path.join(directory, '.git'))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether two directory strings name the same directory.
+ * @param {unknown} left one path.
+ * @param {unknown} right other path.
+ * @returns {boolean} true when both resolve to the same absolute path.
+ */
+function sameDirectory(left, right) {
+  if (typeof left !== 'string' || left === '' || typeof right !== 'string' || right === '') return false
+  try {
+    return path.resolve(left) === path.resolve(right)
+  } catch {
+    return false
+  }
+}
+
+/**
  * The workspace root, with the documented default when settings omit it.
  * @param {Record<string, any>} settings interop settings.
  * @returns {string} absolute root.
@@ -319,10 +348,11 @@ function listWorkspaces(settings) {
  * @param {number} status HTTP status.
  * @param {string} code stable code.
  * @param {string} message human message.
- * @returns {Error & {status: number, code: string}} error.
+ * @param {object} [detail] structured fields a caller may act on.
+ * @returns {Error & {status: number, code: string, detail?: object}} error.
  */
-function httpError(status, code, message) {
-  return Object.assign(new Error(message), { status, code })
+function httpError(status, code, message, detail) {
+  return Object.assign(new Error(message), { status, code, ...(detail === undefined ? {} : { detail }) })
 }
 
 /**
@@ -350,8 +380,11 @@ function json(response, status, value) {
  * @param {string} message message.
  * @returns {void}
  */
-function fail(response, status, code, message) {
-  json(response, status, { ok: false, error: { code, message } })
+function fail(response, status, code, message, detail) {
+  json(response, status, {
+    ok: false,
+    error: { code, message, ...(detail === undefined ? {} : { detail }) },
+  })
 }
 
 /**
@@ -1057,6 +1090,26 @@ export function createInteropService(options) {
       : explicitCwd !== ''
         ? explicitCwd
         : defaultWorkspaceDirectory(registry, settings)
+    // A git worktree must not be driven by two conversations at once: the
+    // file edits and git commands of one task can silently corrupt the other.
+    // A non-git scratch directory has no such shared history and stays
+    // concurrent by default. `forceWorkspace` is the caller's explicit
+    // acknowledgement and is only read on this create path; continuing an
+    // existing conversation never passes through here.
+    if (request.forceWorkspace !== true && isGitWorktree(cwd)) {
+      const running = [...conversations.values()].filter(conversation =>
+        conversation.status === 'running' && sameDirectory(conversation.cwd, cwd))
+      if (running.length > 0) {
+        const runningIds = running.map(conversation => conversation.id)
+        const busyName = workspace !== '' ? workspace : path.basename(cwd) || cwd
+        throw httpError(
+          409,
+          'workspace_busy_git',
+          `目标工作区「${busyName}」（${cwd}）已有进行中的对话：${runningIds.join('、')}。该目录存在 .git，多个对话并发可能造成文件/git 竞争。推荐为这次任务新建一个工作区；如果确认要并发，请在输入中设置 force: true 后重新调用 call_member。`,
+          { workspace: busyName, cwd, conversationIds: runningIds },
+        )
+      }
+    }
     const prompt = request.prompt
     try {
       mkdirSync(cwd, { recursive: true })
@@ -1143,9 +1196,16 @@ export function createInteropService(options) {
 
   /**
    * Send one user message to an existing conversation.
+   *
+   * A conversation that is currently running is steered: the message is
+   * consumed at the next step boundary of the turn in progress, which is what
+   * a user pushing a message into a running turn gets, instead of waiting for
+   * the whole turn to end. An idle conversation still gets an ordinary
+   * follow-up turn. A steer the driver refuses (the agent was just disposed)
+   * falls back to followup so the message is never dropped.
    * @param {Record<string, any>} conversation conversation.
    * @param {Record<string, any>} request message body.
-   * @returns {Promise<{accepted: boolean}>} receipt.
+   * @returns {Promise<{accepted: boolean, steered: boolean, delivery: 'steer'|'followup'}>} receipt.
    */
   async function sendMessage(conversation, request) {
     const blocks = contentBlocks(request.content ?? request.message ?? request.prompt)
@@ -1158,11 +1218,22 @@ export function createInteropService(options) {
     conversation.interrupted = false
     conversation.notifiedAt = null
     if (request.callbackUrl !== undefined) conversation.callbackUrl = String(request.callbackUrl)
-    agent.followup(userMessage(blocks))
+    const message = userMessage(blocks)
+    let steered = false
+    if (agent.status === 'running' && typeof agent.steer === 'function') {
+      try {
+        agent.steer(message)
+        steered = true
+      } catch (error) {
+        log(`steer refused for ${conversation.id}, falling back to followup: ${error instanceof Error ? error.message : String(error)}`)
+        steered = false
+      }
+    }
+    if (!steered) agent.followup(message)
     conversation.updatedAt = new Date().toISOString()
-    broadcast(conversation, { type: 'message.accepted', sessionId: conversation.sessionId, ok: true })
+    broadcast(conversation, { type: 'message.accepted', sessionId: conversation.sessionId, ok: true, steered })
     scheduleSave()
-    return { accepted: true }
+    return { accepted: true, steered, delivery: steered ? 'steer' : 'followup' }
   }
 
   /**
@@ -1547,7 +1618,7 @@ export function createInteropService(options) {
       const code = typeof error?.code === 'string' ? error.code : 'internal_error'
       const message = error instanceof Error ? error.message : String(error)
       if (status >= 500) log(`request failed: ${message}`)
-      fail(response, status, code, message)
+      fail(response, status, code, message, error?.detail)
     }
   }
 

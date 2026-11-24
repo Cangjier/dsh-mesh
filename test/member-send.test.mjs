@@ -23,6 +23,8 @@ async function fakeMember(options = {}) {
     // What a conversation read reports before a delivery; null keeps an older
     // member's response (no context on the read).
     liveContext: options.liveContext ?? null,
+    // Workspace name the member's projection reports for this conversation.
+    workspace: options.workspace ?? '',
     // Live conversation position. `reset` simulates a member restart, where
     // the reply counter begins a new epoch at zero.
     turns: 5,
@@ -71,7 +73,7 @@ async function fakeMember(options = {}) {
     if (request.method === 'GET' && (request.url === `/v1/conversations/${use}` || request.url === `/v1/conversations/${use}?resume=1`)) {
       reply(200, {
         ok: true,
-        conversation: { id: use, status: 'idle', turns: members.turns, replySeq: members.replySeq },
+        conversation: { id: use, status: 'idle', turns: members.turns, replySeq: members.replySeq, workspace: members.workspace },
         ...(members.liveContext === null ? {} : { context: members.liveContext }),
       })
       return
@@ -414,7 +416,7 @@ test('wait_member and call_member expose the conversation id and context advice'
     registerTools(ctx, { tools: { register: tool => { tools.push(tool) } } }, service)
     const task = await service.memberTasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' })
     const wait = tools.find(tool => tool.name === 'wait_member')
-    const result = await wait.execute({ conversationId: task.conversationId, timeoutMs: 3000 }, {})
+    const result = await wait.execute({ conversationIds: [task.conversationId], timeoutMs: 3000 }, {})
     assert.equal(result.ok, true)
     assert.match(result.text, /会话id：conv-9/u)
     assert.match(result.text, /继续这个对话：call_member/u)
@@ -427,6 +429,7 @@ test('wait_member and call_member expose the conversation id and context advice'
     assert.deepEqual(call.parameters.required, ['prompt'])
     assert.equal(call.parameters.properties.compress.type, 'boolean')
     assert.equal(call.parameters.properties.conversationId.type, 'string')
+    assert.equal(call.parameters.properties.force.type, 'boolean')
     await assert.rejects(
       () => call.execute({ member: '127.0.0.1', prompt: 'x', compress: true }, {}),
       /compress only applies/u,
@@ -474,6 +477,19 @@ test('call_member starts a new conversation when conversationId is absent', asyn
     assert.deepEqual(waited.replies.map(reply => reply.text), ['新任务完成'])
   } finally {
     await service.memberTasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a continued conversation records the workspace the member reports', async () => {
+  const member = await fakeMember({ workspace: 'dsh-mesh' })
+  const { tasks, dataDir } = await buildService(member.port)
+  try {
+    const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' })
+    assert.equal(task.workspace, 'dsh-mesh', 'the live projection wins over the unknown placeholder')
+  } finally {
+    await tasks.dispose()
     await member.close()
     await rm(dataDir, { recursive: true, force: true })
   }

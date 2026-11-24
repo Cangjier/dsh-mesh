@@ -46,6 +46,7 @@ function seed(service, overrides = {}) {
     replySeq: 0,
     deliveredSeq: 0,
     notify: false,
+    originSessionId: 'session-a',
     ...overrides,
   }
   service.memberTasks.tasks.set(task.id, task)
@@ -59,13 +60,13 @@ test('a finished turn tells the model to keep waiting', async () => {
       replies: [{ seq: 1, turn: 2, text: '第一轮的答复' }],
       replySeq: 1,
     })
-    const result = await wait.execute({ conversationId: 'c1' }, { signal: undefined })
+    const result = await wait.execute({ conversationIds: ['c1'] }, { agent: { session: { id: 'session-a' } }, signal: undefined })
     assert.equal(result.ok, true)
     assert.equal(result.data.done, false)
     assert.equal(result.data.state, 'progress')
     assert.match(result.text, /进行中/u)
     assert.match(result.text, /第 2 轮/u)
-    assert.match(result.text, /请继续调用 wait_member/u)
+    assert.match(result.text, /继续等下一轮：wait_member \{ "all": true \}/u)
     assert.match(result.text, /state=done 才是最终结果/u)
     assert.match(result.text, /第一轮的答复/u)
   } finally {
@@ -77,14 +78,14 @@ test('a timeout says the task is still running and how to continue', async () =>
   const { dataDir, service, wait } = await harness()
   try {
     seed(service, { turns: 1 })
-    const result = await wait.execute({ conversationId: 'c1', timeoutMs: 1000 }, { signal: undefined })
+    const result = await wait.execute({ conversationIds: ['c1'], timeoutMs: 1000 }, { agent: { session: { id: 'session-a' } }, signal: undefined })
     assert.equal(result.ok, true)
     assert.equal(result.data.done, false)
     assert.equal(result.data.timedOut, true)
     assert.equal(result.data.state, 'running')
     assert.match(result.text, /仍在运行/u)
-    assert.match(result.text, /请继续调用 wait_member/u)
-    assert.match(result.text, /timeoutMs=1000/u)
+    assert.match(result.text, /继续等待（推荐 all: true）/u)
+    assert.match(result.text, /"timeoutMs": 1000/u)
   } finally {
     await rm(dataDir, { recursive: true, force: true })
   }
@@ -98,7 +99,7 @@ test('completion says no further wait is needed', async () => {
       replies: [{ seq: 2, turn: 3, text: '最终结果' }],
       replySeq: 2,
     })
-    const result = await wait.execute({ conversationId: 'c1' }, { signal: undefined })
+    const result = await wait.execute({ conversationIds: ['c1'] }, { agent: { session: { id: 'session-a' } }, signal: undefined })
     assert.equal(result.ok, true)
     assert.equal(result.data.done, true)
     assert.equal(result.data.state, 'done')
@@ -114,7 +115,7 @@ test('a failed task carries the reason', async () => {
   const { dataDir, service, wait } = await harness()
   try {
     seed(service, { status: 'failed', error: '目标 SSH 不可达' })
-    const result = await wait.execute({ conversationId: 'c1' }, { signal: undefined })
+    const result = await wait.execute({ conversationIds: ['c1'] }, { agent: { session: { id: 'session-a' } }, signal: undefined })
     assert.equal(result.ok, false)
     assert.match(result.text, /failed/u)
     assert.match(result.text, /目标 SSH 不可达/u)

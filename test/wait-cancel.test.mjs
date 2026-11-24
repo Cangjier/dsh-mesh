@@ -60,7 +60,7 @@ test('cancelling the turn ends a parked wait instead of letting it time out', as
     const started = Date.now()
     setTimeout(() => controller.abort(reason), 20)
     const outcome = await wait
-      .execute({ conversationId: 'c1', timeoutMs: 60_000 }, { signal: controller.signal })
+      .execute({ conversationIds: ['c1'], timeoutMs: 60_000 }, { signal: controller.signal })
       .then(value => ({ kind: 'returned', value }), error => ({ kind: 'threw', error }))
     const elapsed = Date.now() - started
     assert.equal(outcome.kind, 'threw', 'a cancelled wait must not return a keep-waiting hint')
@@ -82,7 +82,7 @@ test('an already-aborted call refuses to park at all', async () => {
     controller.abort(reason)
     const started = Date.now()
     await assert.rejects(
-      wait.execute({ conversationId: 'c1', timeoutMs: 60_000 }, { signal: controller.signal }),
+      wait.execute({ conversationIds: ['c1'], timeoutMs: 60_000 }, { signal: controller.signal }),
       error => error === reason,
     )
     assert.ok(Date.now() - started < 1_000)

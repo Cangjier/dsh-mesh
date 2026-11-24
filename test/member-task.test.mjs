@@ -93,8 +93,9 @@ async function delegationPayload(options = {}) {
     members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
   }
   const tasks = new MemberTaskService({ ctx, service, dataDir, log: () => {} })
+  let task
   try {
-    await tasks.start({
+    task = await tasks.start({
       member: '127.0.0.1',
       prompt: 'do the member job',
       agent,
@@ -106,12 +107,12 @@ async function delegationPayload(options = {}) {
     await new Promise(resolve => server.close(resolve))
     await rm(dataDir, { recursive: true, force: true })
   }
-  return { created }
+  return { created, task }
 }
 
 test('a delegation from a workspace session carries that workspace title', async () => {
   const cwd = path.join(os.tmpdir(), 'caller-dsh-mesh')
-  const { created } = await delegationPayload({
+  const { created, task } = await delegationPayload({
     session: { id: 'session-A', header: { cwd } },
     registry: {
       async resolveByPath(dir) {
@@ -123,6 +124,7 @@ test('a delegation from a workspace session carries that workspace title', async
   // workspace; the member resolves it below its own workspace root.
   assert.equal(created[0].workspace, 'dsh-mesh')
   assert.equal('cwd' in created[0], false)
+  assert.equal(task.workspace, 'dsh-mesh')
 })
 
 test('a delegation without a resolvable workspace falls back to the default one', async () => {
@@ -164,13 +166,14 @@ test('an auto-derived title with a Windows-invalid name falls back to the defaul
 })
 
 test('an explicit cwd keeps its own meaning and carries no workspace', async () => {
-  const { created } = await delegationPayload({
+  const { created, task } = await delegationPayload({
     session: { id: 'session-A', header: { cwd: '/work/dsh-mesh' } },
     registry: { async resolveByPath() { return { title: 'dsh-mesh' } } },
     start: { cwd: '/srv/task-dir' },
   })
   assert.equal(created[0].cwd, '/srv/task-dir')
   assert.equal('workspace' in created[0], false)
+  assert.equal(task.workspace, 'task-dir')
 })
 
 test('a completed member conversation notifies the originating agent', async () => {
@@ -565,7 +568,7 @@ test('registerTools exposes build, deploy, members, call_member, wait_member, st
     assert.deepEqual(call.parameters.required, ['prompt'])
     assert.deepEqual(
       Object.keys(call.parameters.properties).sort(),
-      ['compress', 'conversationId', 'cwd', 'member', 'prompt', 'workspace'].sort(),
+      ['compress', 'conversationId', 'cwd', 'force', 'member', 'prompt', 'workspace'].sort(),
     )
     const repack = tools.find(candidate => candidate.name === 'repack')
     assert.deepEqual(repack.parameters.required, ['package'])
@@ -744,6 +747,85 @@ test('a delegation waits out a member runtime that is still starting', async () 
   } finally {
     await tasks.dispose()
     await new Promise(resolve => server.close(resolve))
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('force only crosses the create boundary as forceWorkspace', async () => {
+  const forced = await delegationPayload({ start: { force: true } })
+  assert.equal(forced.created[0].forceWorkspace, true)
+  const plain = await delegationPayload({})
+  assert.equal('forceWorkspace' in plain.created[0], false)
+})
+
+test('call_member reports a git-workspace conflict and retries only with force', async () => {
+  const created = []
+  const member = http.createServer(async (request, response) => {
+    let body = ''
+    for await (const chunk of request) body += String(chunk)
+    if (request.method !== 'POST' || request.url !== '/v1/conversations') {
+      response.writeHead(404, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: false, error: { code: 'not_found', message: 'not found' } }))
+      return
+    }
+    const parsed = body === '' ? {} : JSON.parse(body)
+    created.push(parsed)
+    if (parsed.forceWorkspace === true) {
+      response.writeHead(201, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: true, conversation: { id: 'conv-forced', status: 'running', workspace: 'repo' } }))
+      return
+    }
+    response.writeHead(409, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({
+      ok: false,
+      error: {
+        code: 'workspace_busy_git',
+        message: '目标工作区「repo」（/w/repo）已有进行中的对话：conv-busy。该目录存在 .git，多个对话并发可能造成文件/git 竞争。推荐为这次任务新建一个工作区；如果确认要并发，请在输入中设置 force: true 后重新调用 call_member。',
+        detail: { workspace: 'repo', cwd: '/w/repo', conversationIds: ['conv-busy'] },
+      },
+    }))
+  })
+  await new Promise(resolve => member.listen(0, '127.0.0.1', resolve))
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-guard-'))
+  const service = {
+    config: { interopPort: member.address().port, interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
+  }
+  const tools = []
+  const ctx = {
+    logger: { info: () => {}, error: () => {} },
+    effect: () => () => {},
+    get: () => undefined,
+  }
+  try {
+    registerTools(ctx, { tools: { register: tool => { tools.push(tool) } } }, service)
+    const call = tools.find(tool => tool.name === 'call_member')
+    const agent = { id: 'session-A', session: { id: 'session-A' } }
+
+    const blocked = await call.execute({ member: '127.0.0.1', prompt: '并发任务' }, { agent })
+    assert.equal(blocked.ok, false)
+    assert.equal(blocked.data.code, 'workspace_busy_git')
+    assert.deepEqual(blocked.data.runningConversationIds, ['conv-busy'])
+    assert.equal(blocked.data.workspace, 'repo')
+    assert.match(blocked.text, /这次没有创建新对话/u)
+    assert.match(blocked.text, /force: true/u)
+    assert.equal(service.memberTasks.tasks.size, 0, 'a refused create must not be tracked as a task')
+
+    const forced = await call.execute({ member: '127.0.0.1', prompt: '确认并发', force: true }, { agent })
+    assert.equal(forced.ok, true)
+    assert.equal(forced.data.conversationId, 'conv-forced')
+    assert.equal(created.length, 2)
+    assert.equal(created[1].forceWorkspace, true)
+
+    await assert.rejects(
+      () => call.execute({ conversationId: 'conv-forced', prompt: '继续', force: true }, { agent }),
+      /force only applies when starting a new conversation/u,
+    )
+  } finally {
+    await service.memberTasks.dispose()
+    await new Promise(resolve => member.close(resolve))
     await rm(dataDir, { recursive: true, force: true })
   }
 })

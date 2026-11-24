@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -70,12 +70,19 @@ function fakeHost(options = {}) {
           status: 'idle',
           session,
           options: { provider: 'deepseek-account', model: 'deepseek-flash' },
+          followupCalls: [],
+          steerCalls: [],
           followup(message) {
             this.lastMessage = message
+            this.followupCalls.push(message)
             this.status = 'running'
             input.followupCalls?.push?.(message)
             emit('agent/status', { agent: this, status: 'running' })
             emit('session/event', session, { type: 'turn/start', seq: 0, time: Date.now(), data: { turn: 1 } })
+          },
+          steer(message) {
+            this.lastMessage = message
+            this.steerCalls.push(message)
           },
           async runMaintenance(job) { return job(new AbortController().signal) },
         }
@@ -98,11 +105,18 @@ function fakeHost(options = {}) {
           status: 'idle',
           session,
           options: { provider: 'deepseek-account', model: 'deepseek-flash' },
+          followupCalls: [],
+          steerCalls: [],
           followup(message) {
             this.lastMessage = message
+            this.followupCalls.push(message)
             this.status = 'running'
             emit('agent/status', { agent: this, status: 'running' })
             emit('session/event', session, { type: 'turn/start', seq: 0, time: Date.now(), data: { turn: 1 } })
+          },
+          steer(message) {
+            this.lastMessage = message
+            this.steerCalls.push(message)
           },
           async runMaintenance(job) { return job(new AbortController().signal) },
         }
@@ -850,6 +864,93 @@ test('settings discovery honors the deployed interop env', async () => {
       else process.env.DSH_HOME = oldHome
     }
   } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a message to a running conversation is steered, an idle one is a followup', async () => {
+  const { service, fake, call, dir } = await serviceOf()
+  try {
+    const created = await call('POST', '/v1/conversations', { prompt: '先做一件事' })
+    const id = created.body.conversation.id
+    const agent = fake.agents.get(id)
+    assert.ok(agent)
+    const followupsBefore = agent.followupCalls.length
+    agent.status = 'running'
+    const sent = await call('POST', `/v1/conversations/${id}/messages`, { content: '补充一句' })
+    assert.equal(sent.status, 202)
+    assert.equal(sent.body.receipt.steered, true)
+    assert.equal(sent.body.receipt.delivery, 'steer')
+    assert.equal(agent.steerCalls.length, 1)
+    assert.equal(agent.steerCalls[0].content[0].text, '补充一句')
+    assert.equal(agent.followupCalls.length, followupsBefore, 'a running conversation must not queue a new turn')
+
+    agent.status = 'idle'
+    const second = await call('POST', `/v1/conversations/${id}/messages`, { content: '继续' })
+    assert.equal(second.status, 202)
+    assert.equal(second.body.receipt.steered, false)
+    assert.equal(second.body.receipt.delivery, 'followup')
+    assert.equal(agent.followupCalls.length, followupsBefore + 1)
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a running conversation in a git workspace blocks a second one unless forced', async () => {
+  const { service, call, dir } = await serviceOf()
+  try {
+    const repo = path.join(dir, 'workspaces', 'repo')
+    mkdirSync(path.join(repo, '.git'), { recursive: true })
+    const first = await call('POST', '/v1/conversations', { prompt: '第一个任务', workspace: 'repo' })
+    assert.equal(first.status, 201)
+    const firstId = first.body.conversation.id
+
+    const blocked = await call('POST', '/v1/conversations', { prompt: '第二个任务', workspace: 'repo' })
+    assert.equal(blocked.status, 409)
+    assert.equal(blocked.body.error.code, 'workspace_busy_git')
+    assert.match(blocked.body.error.message, /已有进行中的对话/u)
+    assert.match(blocked.body.error.message, /force: true/u)
+    assert.deepEqual(blocked.body.error.detail.conversationIds, [firstId])
+    assert.equal(blocked.body.error.detail.workspace, 'repo')
+    assert.equal(service.conversations.size, 1, 'a refused create must not register a conversation')
+
+    const forced = await call('POST', '/v1/conversations', {
+      prompt: '确认并发',
+      workspace: 'repo',
+      forceWorkspace: true,
+    })
+    assert.equal(forced.status, 201)
+
+    // Continuing an existing conversation never passes through the create guard.
+    const sent = await call('POST', `/v1/conversations/${firstId}/messages`, { content: '继续第一个' })
+    assert.equal(sent.status, 202)
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a .git file (linked worktree) also blocks, while a non-git directory stays concurrent', async () => {
+  const { service, call, dir } = await serviceOf()
+  try {
+    const linked = path.join(dir, 'workspaces', 'linked')
+    mkdirSync(linked, { recursive: true })
+    writeFileSync(path.join(linked, '.git'), 'gitdir: /elsewhere/.git/worktrees/linked\n')
+    const first = await call('POST', '/v1/conversations', { prompt: '链接工作树一', workspace: 'linked' })
+    assert.equal(first.status, 201)
+    const blocked = await call('POST', '/v1/conversations', { prompt: '链接工作树二', workspace: 'linked' })
+    assert.equal(blocked.status, 409)
+    assert.equal(blocked.body.error.code, 'workspace_busy_git')
+
+    const scratch = path.join(dir, 'workspaces', 'scratch')
+    mkdirSync(scratch, { recursive: true })
+    const one = await call('POST', '/v1/conversations', { prompt: '非 git 一', workspace: 'scratch' })
+    const two = await call('POST', '/v1/conversations', { prompt: '非 git 二', workspace: 'scratch' })
+    assert.equal(one.status, 201)
+    assert.equal(two.status, 201, 'a directory without .git may host concurrent conversations')
+  } finally {
+    await service.dispose()
     await rm(dir, { recursive: true, force: true })
   }
 })

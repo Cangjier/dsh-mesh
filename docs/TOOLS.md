@@ -3,7 +3,7 @@
 - 插件：`@local/dsh-mesh`
 - 工具注册：`src/lib/tools.mjs` → `registerTools()`
 - 当前共 7 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`wait_member`、`status_member`；另有一个 turn 结束后的自动提醒 hook
-- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续，`wait_member` 只做有界等待，`wait_member` / `status_member` 都支持一次传多个会话id（`conversationIds`）。
+- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）。
 - 所有工具统一返回 `{ ok, text, data }`。`text` 是给人看的摘要，`data` 是结构化结果。
 - 同步执行的工具会在 `text` 和 `data` 里都返回日志文件地址，便于调用结束后继续读取完整日志。
 
@@ -15,8 +15,8 @@
 | `deploy` | SSH 部署/升级，等待结束 | `host` `package` | `false` |
 | `repack` | 用当前仓库刷新已有离线包 | `package` | `false` |
 | `members` | 只读成员发现 | 无 | `true` |
-| `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `compress` / `cwd` / `workspace` | `false` |
-| `wait_member` | 有界等待成员会话，按轮返回；多个会话时任意一个先返回 | `conversationId` / `conversationIds` `timeoutMs` | `true` |
+| `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `compress` / `cwd` / `workspace` / `force` | `false` |
+| `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
 | `status_member` | 目标会话状态 + 最近两次用户消息 + 最近一次思考；可一次查多个 | `conversationId` / `conversationIds` | `true` |
 
 ## 2. 共享基础
@@ -329,7 +329,11 @@ deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-lin
 ```text
 cwd / workspace  仅新建：成员 B 上的工作目录，或 ~/.dsh/workspaces/<name>
 compress         仅继续：投递前先在成员 B 上压缩该对话上下文（要求对话空闲）
+force            仅新建：目标工作区目录有 .git 且已有进行中的对话时仍然创建（确认并发风险）
 ```
+
+`force` 只对新建对话生效，透传成成员侧的 `forceWorkspace`；继续已有
+`conversationId` 不会触发工作区并发拦截，传了会报错。
 
 `conversationId`（会话id）是唯一对外的继续投递凭据：call_member / wait_member
 返回里一直有它，换一个 DSH 进程、或对话不是本机发起时，只要知道会话id + 成员，
@@ -372,18 +376,36 @@ call_member { "member": "10.66.66.3", "prompt": "检查磁盘" }
   → 由 wait_member 取回；不再等待时，终态后 3 秒内无人取走则自动投递回发起对话
 ```
 
-同一个对话里已经有好几个成员会话在跑时，`call_member` 的返回值会直接列出它们，并提示
-用 `wait_member { "conversationIds": [...] }` 一次等多个：
+同一个对话里已经有好几个成员会话在跑时，`call_member` 的返回值会直接列出它们，并推荐
+用 `wait_member { "all": true }` 一次等全部：
 
 ```text
 当前对话有 2 个成员会话同时在跑：
-- conv-a（B 10.66.66.2，第 2 轮）
-- conv-b（B 10.66.66.2）
-可以一次等多个：wait_member { "conversationIds": ["conv-a","conv-b"] }，其中任意一个先返回就立刻返回；
-也可以只等这个：wait_member { "conversationId": "conv-b" }。
+- conv-a（B 10.66.66.2，工作区 dsh-mesh，第 2 轮）
+- conv-b（B 10.66.66.2，工作区 unknown）
+一次等全部：wait_member { "all": true }（推荐，任意一个先返回就立刻返回）；
+也可以只等这些：wait_member { "conversationIds": ["conv-a","conv-b"] }。
 ```
 
-只有一个会话在跑时，仍然是原来的单 `conversationId` 提示。
+只有一个会话在跑时，提示同样是 `all: true` 优先，并给出只等这个会话的
+`conversationIds` 写法。
+
+返回值还包含 `currentConversationId` 和 `conversations`：本对话跟踪的所有成员会话
+（会话id、`进行中` / `空闲` / `异常中止`、工作区、轮次），当前会话 `current: true`。
+
+**工作区并发保护**：成员在真正 create 之前检查目标目录。目录存在 `.git`（目录或
+linked worktree 的 `.git` 文件）且该目录已有 `status=running` 的会话时返回：
+
+```text
+409 workspace_busy_git
+目标工作区「repo」（/home/u/.dsh/workspaces/repo）已有进行中的对话：conv-a。
+该目录存在 .git，多个对话并发可能造成文件/git 竞争。推荐为这次任务新建一个工作区；
+如果确认要并发，请在输入中设置 force: true 后重新调用 call_member。
+```
+
+`call_member` 捕获后以 `ok: false` 直接返回这段说明，不创建对话，`data` 里带
+`code` / `workspace` / `cwd` / `runningConversationIds`。推荐换工作区；确认并发时
+加 `force: true` 重新调用。没有 `.git` 的目录默认允许并发。
 
 返回里的 `data.logFile`：
 
@@ -432,6 +454,10 @@ Gitee token: ...
 call_member { "member": "10.66.66.3", "conversationId": "<会话id>", "prompt": "继续" }
 ```
 
+目标对话正在运行时，成员侧用 `agent.steer()` 把消息直接插入当前 turn 的下一步边界，
+不等这一轮结束；`steer` 不可用或抛错时回退 `followup`，消息不会丢。空闲对话保持
+`followup`。响应回执和 `call_member` 的返回都会说明是 `steer` 还是 `followup`。
+
 本机已经跟踪这个对话时 `member` 可以省略（按 `conversationId` 找到本机任务记录）。
 只给 `conversationId` 而本机没有记录时，必须给 `member`，插件会把它绑定成一个新的
 本机任务（`data.adopted: true`），并把回答游标设到成员当前的位置，避免把旧回复
@@ -456,27 +482,46 @@ call_member { "conversationId": "<会话id>", "prompt": "继续", "compress": tr
 投递（不会跳过压缩直接发），等 `wait_member` 到 `state=done` 后重试即可。成员侧读取返回
 `context` 的能力随插件一起升级；旧成员不返回 `context` 时退回到最近一次 `wait` 报告的占用。
 
-### 6.5 wait_member：按轮返回、一次等多个
+### 6.5 wait_member：按轮返回、`all` 优先
 
 ```text
-wait_member { "conversationId": "<会话id>", "timeoutMs": 30000 }
-wait_member { "conversationIds": ["<会话id1>", "<会话id2>"], "timeoutMs": 30000 }
+wait_member { "all": true, "timeoutMs": 30000 }                 # 推荐：等本对话所有进行中的会话
+wait_member { "conversationIds": ["<会话id1>", "<会话id2>"] }   # 只等指定的会话
 ```
 
-传 `conversationIds` 时**任意一个会话先有消息就立刻返回**，只取走那一个的回复；其余会话的
-回复保持未读，返回值里会列出它们（带成员、轮次、进行中/已完成），并提示怎么继续等：
-
-```text
-还有 1 个会话没有返回：
-- conv-b（B 10.66.66.2，第 3 轮，进行中）
-一次等剩下的任意一个：wait_member { "conversationIds": ["conv-b"], "timeoutMs": 30000 }（其中任意一个返回就立刻返回）。
-也可以只等某一个：wait_member { "conversationId": "<会话id>" }。
-```
-
-- 优先级按传入顺序；`conversationId` 和 `conversationIds` 可以并用，`conversationId` 排在最前。
+- `all: true`：等本对话（相同 `originSessionId`）所有 `running` / `starting` 的成员会话；
+  **任意一个先有新回复或进入终态就立刻返回**，其余会话的回复保持未读并在结果里列出。
+  没有进行中的会话时直接返回 `ok: true`，附本对话所有会话的状态，不报错。
+- `conversationIds`：只等指定会话；一次最多 `20` 个，任何一个本机没有跟踪都会报错。
+- `all` 与 `conversationIds` 互斥，同时传会报错。`wait_member` 不再接受单个
+  `conversationId`：只等一个会话请写成 `conversationIds: ["<id>"]`。
 - 有回复的会话优先于「已经结束但没有新文本」的会话：先把实际内容给模型。
-- 全部会话在 `timeoutMs` 内都没有新回复时，返回一行超时说明和完整的剩余列表。
-- 一次最多 `20` 个会话id；列表里任何一个本机没有跟踪都会报错（不会静默跳过）。
+- 全部会话在 `timeoutMs` 内都没有新回复时，返回超时说明和完整的剩余列表。
+
+工具描述和返回值里的所有提示都优先推荐 `all: true`：
+
+```text
+继续等下一轮：wait_member { "all": true }（推荐，任意一个先返回就返回）；
+也可以只等这个：wait_member { "conversationIds": ["conv-a"] }；收到 state=done 才是最终结果。
+```
+
+每次返回的 `data.conversations` 都是本对话跟踪的**所有成员会话**：
+
+```json
+[
+  { "conversationId": "conv-a", "member": "B", "memberIp": "10.66.66.2",
+    "workspace": "dsh-mesh", "status": "running", "statusLabel": "进行中",
+    "turns": 2, "current": true },
+  { "conversationId": "conv-b", "workspace": "unknown", "status": "completed",
+    "statusLabel": "空闲", "turns": 1, "current": false }
+]
+```
+
+状态映射固定为：`running` / `starting` = 进行中，`completed` = 空闲，
+`failed` / `interrupted` = 异常中止。工作区名来自任务记录；新建时取显式
+`workspace`、显式 `cwd` 的目录名或调用方工作区，继续投递时用成员实时 projection
+刷新，旧记录缺失时是 `unknown`。当前返回的会话在 text 里标记 `*`，在 data 里
+`current: true`。
 
 成员对话每结束一轮回答就返回，不等整段任务结束：
 
@@ -489,12 +534,16 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 `data` 里带 `replies`（本轮及之前未返回的回复，按 `seq` 去重）、`text`、`seq`、`turn`；
 内部 task id 不出现在参数和 data 里。
 
-**没人继续等待时的兜底投递**：模型拿到 `progress` 后可能就不再 `wait_member`。对话进入终态
-（`completed` / `failed`，含被目标重启打断）时，插件先唤醒正在等待的 `wait_member`，再等
-**3 秒**，让紧接着发起的 `wait_member` 取走结果；3 秒内没有 `wait_member` 返回该终态结果，
-才把结果（失败时是原因和会话id）按下面的 `[成员任务完成]` / `[成员任务失败]` 文本作为一条
-用户消息投递回发起 `call_member` 的对话。`wait_member` 已经返回过的结果——包括没有新文本的
-`done` 和失败——不会重复投递。新建对话和带 `conversationId` 的继续投递都适用。
+**没人继续等待时的兜底投递（不会重复）**：模型拿到 `progress` 后可能就不再
+`wait_member`。对话进入终态（`completed` / `failed`，含被目标重启打断）时，插件先
+唤醒正在等待的 `wait_member`，再等 **3 秒**，让紧接着发起的 `wait_member` 取走结果。
+兜底规则：
+
+- 只投递 `seq > deliveredSeq` 的**未取回复**；投递前先同步占用这些 `seq`，并发的
+  `wait_member` 不会再拿到同一段文本。
+- 终态文本已经被 `wait_member` 取走时，最多发一条**不含回复正文**的简短完成提示。
+- `wait_member` 消费终态时同步取消待投递 timer 并标记 `terminalDelivered`，兜底整体跳过。
+- 旧成员只报 `lastText`、没有按轮 `replies` 时，兜底把 `lastText` 当成唯一未取回复投递。
 
 **主对话正在跑时直接插入**：投递时如果发起对话仍在执行 turn（`agent.status === 'running'`），
 插件用 `agent.steer()` 把这条结果**插进当前 turn 的下一步边界**（等同于用户在执行中手动推一条
@@ -531,7 +580,27 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 响应新增顶层 `context`，`POST /compact` 返回 `compacted` / `shadowedCount` /
 `shadowedTokenCount` / `summary` / `context`。
 
-### 6.6 任务文件
+### 6.6 成员会话状态快照（`agent/pre-step` 注入）
+
+本对话有进行中的成员会话时，插件每 30 秒最多把一份状态快照附加到当前 step 的请求：
+
+```text
+[成员任务状态] 本对话跟踪 2 个成员会话，其中 1 个进行中（快照 ...）。
+- conv-a（B 10.66.66.2，工作区 dsh-mesh，进行中，第 2 轮）
+- conv-b（B 10.66.66.2，工作区 unknown，空闲，第 1 轮）
+继续用 wait_member { "all": true } 等所有进行中的会话：任意一个先返回就立刻返回；
+也可以只等指定的会话：wait_member { "conversationIds": [...] }。
+```
+
+- 通过 `agent/pre-step` 把消息附加到 `decision.messages`，和 time-context 同一条路径；
+- **不新开 turn**，不调用 `followup` / `steer`，不是用户输入；
+- 注入消息的 `source.kind` 是 `mesh-member-status`（不是 `user`），带
+  `form: "snapshot"` 和 `sections`；
+- 没有进行中的会话、或距上次注入不足 30 秒时不注入；
+- 读取任务表失败只记日志并吞掉，step 的 decision 原样返回，不影响 agent loop；
+- 每个会话的注入时钟在 `session/disposed` 时清掉。
+
+### 6.7 任务文件
 
 ```text
 $DSH_HOME/mesh/member-tasks/<内部 task id>.json
@@ -564,7 +633,7 @@ interrupted    插件停止或重启时，未完成任务被标记
 
 ---
 
-### 6.7 `status_member`
+### 6.8 `status_member`
 
 ```text
 status_member { "conversationId": "<会话id>" }

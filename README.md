@@ -144,17 +144,22 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.7z \
 
 ### 7. 成员任务：A 操作 B 的对话并按轮取回
 
-- 新工具 `call_member`：没有 `action`；没有 `conversationId` 就新建对话，有就继续那个对话，只发起并立即返回会话id。`wait_member` 按 `conversationId` 有界等待，**成员每结束一轮回答就返回**，`state` 区分进行中（还会继续/有子代理在跑）与完成；传 `conversationIds` 可一次等多个，**任意一个先返回就立刻返回**，返回值列出其余会话id并提示继续等；`call_member` 发现本对话已有多个成员会话在跑时也会直接给出 `conversationIds` 提示。
+- 新工具 `call_member`：没有 `action`；没有 `conversationId` 就新建对话，有就继续那个对话，只发起并立即返回会话id。目标对话正在运行时，消息用 `agent.steer()` 直接插入当前 turn，不等这一轮结束；空闲时按普通 `followup` 开一轮。回执里带 `steered` / `delivery`，`call_member` 的返回会说明这次是怎么投递的。
+- `wait_member` 只有两种输入：`conversationIds` 指定会话，或 `all: true` 等本对话所有「进行中」的会话（推荐，工具描述和所有提示都推荐它）；两者互斥，同时传会报错。任意一个先有新回复或进入终态就立刻返回，其余会话在结果里列出。没有进行中的会话时 `all: true` 直接返回 ok 并附上所有会话状态，不报错。
+- `call_member` / `wait_member` 返回本对话跟踪的**所有成员会话**（按 `originSessionId`，不是成员上的全部对话）：会话id、进行中/空闲/异常中止、工作区名、轮次；当前会话带 `current` 标记，`call_member` 另给 `currentConversationId`。状态映射：running/starting=进行中，completed=空闲，failed/interrupted=异常中止。
+- **30 秒状态注入**：本对话有进行中的成员会话时，`agent/pre-step` 在每个 step 前把一份状态快照附加到 `decision.messages`（同一会话最多每 30 秒一次）：每个会话id、状态、工作区，并提示 `wait_member { "all": true }`。快照不新开 turn、不调用 `followup`/`steer`，source kind 不是 `user`；读取失败吞掉，不影响 agent loop。
+- **工作区并发保护**：新建对话时，解析出的目标目录存在 `.git`（目录，或 linked worktree 的 `.git` 文件）且该目录已有 `status=running` 的对话，成员返回 `409 workspace_busy_git`，消息里列出工作区名、目录和进行中的会话id。`call_member` 捕获后以 `ok:false` 直接返回说明，**不创建对话**；推荐换一个工作区，确认要并发时在输入中设 `force: true` 后重新调用。`force` 只在新建时生效（透传为成员侧 `forceWorkspace`），继续已有 `conversationId` 永远不触发这个拦截。
 - 新建对话前，`call_member` 先从组网直连配置找到目标成员的本地代理端口，用 SSH 在目标成员上跑 mjs 探针实测该端口的出网延迟和下行带宽，把**一行结果 + 代理端口 + hub 的 git token 原值**注入会话；组网里没有该成员的直连配置就不报出网信息。并**禁用该会话的 `ask_user_question`**——成员任务没有可应答的用户，需要信息时会在回复里提问并停下，用 `call_member` 带同一个 `conversationId` 回答。详见 [Step 025](docs/Step%20025%20成员任务的出网实测与token注入.md)。
-- **工作区归属**：显式 `workspace` 优先；显式 `cwd` 保持原语义（不带工作区名，但会话仍按该目录归组，标题取目录名）；两者都没有时用调用方会话当前所属工作区的标题（自动派生的名称会额外拒绝 `: * ? < > |`，避免 Windows 成员建不出目录）。目标成员创建会话后把它挂到 `ctx.workspaceRegistry`；默认分支（含调用方兜底显式发送的 `default-workspace`）优先复用已有的同名记录，所以不会新增第二个「默认工作区」（旧版本已写入的重复记录需手动清理），也不会再留在「未分组」。详见 [Step 026](docs/Step%20026%20成员任务的工作区归属.md)。
+- **工作区归属**：显式 `workspace` 优先；显式 `cwd` 保持原语义（不带工作区名，但会话仍按该目录归组，标题取目录名）；两者都没有时用调用方会话当前所属工作区的标题（自动派生的名称会额外拒绝 `: * ? < > |`，避免 Windows 成员建不出目录）。目标成员创建会话后把它挂到 `ctx.workspaceRegistry`；默认分支（含调用方兜底显式发送的 `default-workspace`）优先复用已有的同名记录，所以不会新增第二个「默认工作区」（旧版本已写入的重复记录需手动清理），也不会再留在「未分组」。任务记录同时保存工作区名：新建时取显式 workspace / 显式 cwd 的目录名 / 调用方工作区，继续投递时用成员实时 projection 的 `workspace` 刷新，旧记录缺失时回退 `unknown`。详见 [Step 026](docs/Step%20026%20成员任务的工作区归属.md)。
 - `conversationId` 是唯一对外的继续投递凭据（内部 task id 不再出现在工具参数里）；`compress: true` 会让成员先压缩上下文再投递。**不传 `compress` 时，如果目标对话的上下文占比已经超过 30%，投递前也会自动强制压缩**（压缩要求对话空闲，目标还在跑时拒绝投递）。`wait_member` 在 `state=done` 时返回会话id和上下文占用，超过 20% 时建议下次投递先压缩。
 - A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话；后台轮询 B 的 `/wait`，`wait_member` 按轮取回。
 - **重启不丢结果**：插件停止前仍在跑的任务会被重新接回监控（24 小时内），成员完成后照常投递；原对话当时不在线会重试几次。
 - **子代理上下文预算**：注入给成员会话的规则要求控制子代理的上下文占比——某个子代理超过 35% 时尽量改用新的子代理（交接已有结论），不再继续用旧的；DSH 在子代理一轮结束时就会卸载它，父对话既量不到也压不了。
 - **`status_member`**：按会话id 返回目标会话状态（进行中/空闲/被异常中止/出错）、最近两次用户消息（本机 `call_member` 投递记录）和最近一次思考（目标会话的 reasoning）；`conversationIds` 可一次查多个，分块输出并带汇总。
 - **turn 结束后的自动提醒**：会话用过 `call_member` 后，每轮结束检查这一轮有没有调用；没有的话取最近一次成员会话，仍在进行就不管，否则用一个小 LLM 判断最后的回复是否“预期交给成员但没实际调用”，命中就把提醒投回**调用方会话**，最多连续 3 次，调用过 `call_member` 重置。
-- **没人继续等待时的兜底投递**：模型拿到 `progress` 后可能就不再 `wait_member`。对话完成（或失败/中断）后，插件先等 3 秒，让正在等待或紧接着发起的 `wait_member` 取走结果；3 秒内没人取走，才把结果（失败时是原因和会话id）作为一条用户消息投递回调用 `call_member` 的那个对话。已经被 `wait_member` 取走的结果不会重复投递。投递时如果主对话正在执行 turn，用 `agent.steer()` 把结果**直接插入当前 turn 的下一步边界**，不等 turn 结束；空闲时才开新 turn。
+- **没人继续等待时的兜底投递（不重复）**：模型拿到 `progress` 后可能就不再 `wait_member`。对话完成（或失败/中断）后，插件先等 3 秒，让正在等待或紧接着发起的 `wait_member` 取走结果。兜底**只投递 `seq > deliveredSeq` 的未取回复**，同一个回复文本绝不重复投递；终态文本已经被 `wait_member` 取走时，最多发一条不含回复正文的简短完成提示；`wait_member` 消费终态时同步取消待投递 timer 并标记已消费。投递时如果主对话正在执行 turn，用 `agent.steer()` 把结果**直接插入当前 turn 的下一步边界**，不等 turn 结束；空闲时才开新 turn。
 - 不需要 B 主动访问 A；A 长轮询（阻塞式等待）B 的 `/wait`，避免回调端口/NAT 问题。
+- 状态快照、工作区并发保护、steer 与结果去重的完整边界见 [Step 027](docs/Step%20027%20成员任务状态、工作区并发保护与结果不重复投递.md)。
 
 ## 快速开始
 
@@ -321,6 +326,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 024 7z 包格式与网关静态资源](docs/Step%20024%207z%20包格式与网关静态资源.md) | 7-Zip 二进制作为 gate 静态资源、`.7z` 打包/解压、从旧版本的迁移步骤、legacy 过渡格式 |
 | [Step 025 成员任务的出网实测与 token 注入](docs/Step%20025%20成员任务的出网实测与token注入.md) | 按组网直连配置在目标成员上 SSH 跑 mjs 测延迟/带宽、一行结果与 token 注入、禁用 `ask_user_question` |
 | [Step 026 成员任务的工作区归属](docs/Step%20026%20成员任务的工作区归属.md) | 成员任务挂到 `workspaceRegistry`、调用方工作区名过界、默认 `default-workspace` 与显式 cwd |
+| [Step 027 成员任务状态、工作区并发保护与结果不重复投递](docs/Step%20027%20成员任务状态、工作区并发保护与结果不重复投递.md) | `wait_member` 的 `all`、会话状态/工作区列表、30 秒 pre-step 注入、`.git` 工作区并发拦截与 `force`、steer 与结果去重 |
 | [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、升级/取消、包内容 |
 | [Step 020 内嵌 interop 服务](docs/Step%20020%20内嵌interop服务.md) | 会话由 DSH Web 拥有、嵌入式 :8765、部署/回滚、冷读「已停止」根因 |
 
@@ -344,6 +350,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `src/lib/interop-service.mjs` | 内嵌 HTTP 服务：`ctx.agents` 创建/恢复、等待/通知/事件/回调 |
 | `code/interop-service/server.mjs` | 旧独立 HTTP 服务（回退用，默认不启动） |
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
+| `src/lib/member-context.mjs` | 成员会话状态快照：`agent/pre-step` 每 30 秒附加一次，不开新 turn |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
 | `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` / `status_member` 工具 |
@@ -374,7 +381,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `repack` | 用当前仓库刷新已有离线包：只替换 `gate/`、`shared/`、`config/`、`code/*`、根脚本和 `plugins/dsh-mesh/`，DSH 主体（`app/`、`web/`、`runtime/`）复用，最后更新 `.sha256` |
 | `members` | WireGuard 成员发现 |
 | `call_member` | 在成员上新建/继续对话，返回会话id |
-| `wait_member` | 有界等待成员会话：有新回复立刻返回（`state=progress`），完成返回 `done`；超时返回继续等待提示 |
+| `wait_member` | 有界等待成员会话：`all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定；有新回复立刻返回（`state=progress`），完成返回 `done` |
 | `status_member` | 目标会话状态、最近两次用户消息、最近一次思考 |
 
 ## 约定与限制

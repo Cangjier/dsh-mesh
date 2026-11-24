@@ -568,13 +568,13 @@ test('registerTools exposes build, deploy, members, call_member, set_member_scop
     assert.deepEqual(call.parameters.required, ['prompt'])
     assert.deepEqual(
       Object.keys(call.parameters.properties).sort(),
-      ['compress', 'conversationId', 'cwd', 'force', 'identity', 'member', 'prompt', 'scope', 'workspace'].sort(),
+      ['conversationId', 'cwd', 'force', 'identity', 'member', 'prompt', 'scope', 'workspace'].sort(),
     )
     const setScope = tools.find(candidate => candidate.name === 'set_member_scope')
     assert.equal(setScope.parameters.properties.action, undefined)
     assert.deepEqual(
       Object.keys(setScope.parameters.properties).sort(),
-      ['conversationId', 'identity', 'keep', 'scope'].sort(),
+      ['compressPercent', 'conversationId', 'identity', 'idlePushMs', 'keep', 'scope'].sort(),
     )
     const repack = tools.find(candidate => candidate.name === 'repack')
     assert.deepEqual(repack.parameters.required, ['package'])

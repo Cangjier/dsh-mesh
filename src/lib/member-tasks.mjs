@@ -13,7 +13,9 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promise
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { formatEgressLine } from './egress-probe.mjs'
-import { normalizeMemberScopePatch } from './service.mjs'
+import { DEFAULT_COMPRESS_PERCENT, effectiveCompressPercent, normalizeMemberScopePatch } from './service.mjs'
+
+export { DEFAULT_COMPRESS_PERCENT }
 
 const DEFAULT_INTEROP_PORT = 8765
 const WAIT_TIMEOUT_MS = 60_000
@@ -41,15 +43,6 @@ const DELIVERY_GRACE_MS = 3_000
  * cancelled meanwhile, the fallback still fires once the window expires.
  */
 const WAIT_DELIVERY_GRACE_MS = 15_000
-/**
- * Context occupancy above which a delivery compacts before sending.
- *
- * `compress: true` always compacts; this threshold makes the same compaction
- * non-optional once the target conversation is already loaded, so a
- * long-running conversation cannot keep growing just because the caller
- * forgot the flag. "超过" is strict: exactly 30.0% still delivers directly.
- */
-export const FORCED_COMPACT_PERCENT = 30
 /** Error a graceful stop writes; a later start resumes watching that task. */
 const STOPPED_ERROR = 'the plugin stopped before the member conversation completed'
 /**
@@ -1401,17 +1394,18 @@ export class MemberTaskService {
    * new process on this side, and it lets a model continue a conversation it
    * did not start.
    *
-   * `compress` runs the member's own compaction before the message is queued,
-   * so the next turn starts from a shortened context. It requires that
-   * conversation to be idle. Without the flag, a conversation whose context
-   * occupancy is already above {@link FORCED_COMPACT_PERCENT} is compacted
-   * anyway before the message is delivered.
+   * Before the message is queued, a conversation whose context occupancy is
+   * already above its own `compressPercent` (default
+   * {@link DEFAULT_COMPRESS_PERCENT}) is compacted first, so the next turn
+   * starts from a shortened context. The threshold is read from the
+   * conversation's stored scope; the compaction requires that conversation to
+   * be idle.
    *
    * Passing `identity` / `scope` merges the conversation's stored scope and
    * prefixes this delivery with a one-line identity note, so a conversation
    * created before the setting existed can complete it in place.
    *
-   * @param {{conversationId: string, member?: string, prompt: string, compress?: boolean, identity?: unknown, scope?: unknown, agent?: any, signal?: AbortSignal}} request send request.
+   * @param {{conversationId: string, member?: string, prompt: string, identity?: unknown, scope?: unknown, agent?: any, signal?: AbortSignal}} request send request.
    * @returns {Promise<object>} the tracked task.
    */
   async send(request) {
@@ -1442,11 +1436,8 @@ export class MemberTaskService {
     // The read also detects a member whose reply counter restarted; the cursor
     // must move to the new epoch before the monitor polls it again.
     await this.#refreshContext(task, signal)
-    if (request.compress === true) {
-      await this.#compact(task, signal)
-    } else {
-      await this.#compactIfCrowded(task, signal)
-    }
+    const threshold = await this.#compressThreshold(task)
+    await this.#compactIfCrowded(task, signal, threshold)
     const result = await this.#waitForRuntime(
       () => this.#request(task.baseUrl, 'POST', `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content: deliveredPrompt }, 30_000, signal),
       90_000,
@@ -1619,20 +1610,38 @@ export class MemberTaskService {
   }
 
   /**
+   * Read the compaction threshold stored for one conversation.
+   *
+   * A conversation created before the setting, or one whose scope was cleared,
+   * uses {@link DEFAULT_COMPRESS_PERCENT}. An unreadable store is treated the
+   * same way: the delivery still works with the default.
+   * @param {object} task member task.
+   * @returns {Promise<number>} percentage threshold.
+   */
+  async #compressThreshold(task) {
+    if (typeof this.service?.memberScope !== 'function') return DEFAULT_COMPRESS_PERCENT
+    const scope = await this.service.memberScope(task.conversationId).catch(() => null)
+    return effectiveCompressPercent(scope)
+  }
+
+  /**
    * Compact before delivery when the target conversation is already loaded.
    *
    * The occupancy is re-read from the member first: the cached figure comes
    * from the last wait, and an adopted conversation has none. A member that
    * does not answer the read with a context leaves the cached value alone, so
-   * an older member still decides on what the last wait reported.
+   * an older member still decides on what the last wait reported. The threshold
+   * comes from the conversation's scope (`compressPercent`, default 35%).
+   * "超过" is strict: exactly the threshold delivers directly.
    * @param {object} task member task.
    * @param {AbortSignal} [signal] cancellation of the sending tool call.
+   * @param {number} threshold percentage threshold for this conversation.
    * @returns {Promise<boolean>} whether a compaction was attempted.
    */
-  async #compactIfCrowded(task, signal) {
+  async #compactIfCrowded(task, signal, threshold) {
     const percent = task.context?.percent
-    if (typeof percent !== 'number' || percent <= FORCED_COMPACT_PERCENT) return false
-    await this.#compact(task, signal, { forced: true, percent })
+    if (typeof percent !== 'number' || percent <= threshold) return false
+    await this.#compact(task, signal, { threshold, percent })
     return true
   }
 
@@ -1678,17 +1687,16 @@ export class MemberTaskService {
    * retried as a transient failure.
    * @param {object} task member task.
    * @param {AbortSignal} [signal] cancellation of the sending tool call.
-   * @param {{forced?: boolean, percent?: number}} [options] set by the
-   *   automatic over-threshold path, which has no `compress` flag to drop.
+   * @param {{threshold: number, percent: number}} options the conversation's
+   *   threshold and the occupancy that crossed it.
    * @returns {Promise<object>} the recorded compaction.
    */
-  async #compact(task, signal, options = {}) {
-    const forced = options.forced === true
+  async #compact(task, signal, options) {
+    const threshold = options.threshold
+    const percent = options.percent
     await this.#log(
       task,
-      forced
-        ? `compacting context before delivery (forced at ${String(options.percent)}%)`
-        : 'compacting context before delivery',
+      `compacting context before delivery (over ${String(threshold)}%, observed ${String(percent)}%)`,
     )
     let result
     try {
@@ -1710,21 +1718,18 @@ export class MemberTaskService {
         throw new Error(`成员 ${task.member} 上已经没有对话 ${task.conversationId}：${message}`)
       }
       if (/unknown endpoint|not_found|unsupported|compaction_unavailable/iu.test(message)) {
-        throw new Error(forced
-          ? `对话 ${task.conversationId} 的上下文占比已超过 ${String(FORCED_COMPACT_PERCENT)}%，但成员 ${task.member} 的 interop 服务不支持上下文压缩（版本过旧）：${message}。先升级该成员再投递。`
-          : `成员 ${task.member} 的 interop 服务不支持上下文压缩（版本过旧）：${message}。去掉 compress 直接投递，或先升级该成员。`)
+        throw new Error(`对话 ${task.conversationId} 的上下文占比 ${String(percent)}% 已超过压缩阈值 ${String(threshold)}%，但成员 ${task.member} 的 interop 服务不支持上下文压缩（版本过旧）：${message}。先升级该成员再投递。`)
       }
       if (/busy|already has active work|conversation_busy|409/iu.test(message)) {
-        throw new Error(forced
-          ? `对话 ${task.conversationId} 的上下文占比已超过 ${String(FORCED_COMPACT_PERCENT)}%，需要先压缩，但它还在运行：${message}。等 wait_member 返回 state=done 后再投递。`
-          : `对话 ${task.conversationId} 还在运行，不能压缩：${message}。等 wait_member 返回 state=done 后再投递，或去掉 compress。`)
+        throw new Error(`对话 ${task.conversationId} 的上下文占比 ${String(percent)}% 已超过压缩阈值 ${String(threshold)}%，需要先压缩，但它还在运行：${message}。等 wait_member 返回 state=done 后再投递。`)
       }
       throw error
     }
     task.lastCompaction = {
       at: new Date().toISOString(),
-      forced,
-      ...(forced ? { forcedPercent: options.percent } : {}),
+      forced: true,
+      forcedPercent: threshold,
+      observedPercent: percent,
       compacted: result?.compacted === true,
       summary: summaryText(result?.summary),
       shadowedCount: Number.isSafeInteger(result?.shadowedCount) ? result.shadowedCount : 0,

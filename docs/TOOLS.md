@@ -3,7 +3,7 @@
 - 插件：`@local/dsh-mesh`
 - 工具注册：`src/lib/tools.mjs` → `registerTools()`
 - 当前共 8 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`set_member_scope`、`wait_member`、`status_member`
-- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续，`set_member_scope` 单独设置任意会话或自身的身份/工作范围，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）。
+- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续（不再有 `compress` 参数），`set_member_scope` 单独设置任意会话或自身的身份/工作范围、静默推送延迟和自动压缩阈值，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）。
 - 所有工具统一返回 `{ ok, text, data }`。`text` 是给人看的摘要，`data` 是结构化结果。
 - 同步执行的工具会在 `text` 和 `data` 里都返回日志文件地址，便于调用结束后继续读取完整日志。
 
@@ -15,8 +15,8 @@
 | `deploy` | SSH 部署/升级，等待结束 | `host` `package` | `false` |
 | `repack` | 用当前仓库刷新已有离线包 | `package` | `false` |
 | `members` | 只读成员发现 | 无 | `true` |
-| `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `compress` / `cwd` / `workspace` / `force` / `identity` / `scope` | `false` |
-| `set_member_scope` | 单独设置成员会话或自身的身份/工作范围 | `conversationId` / `identity` / `scope` / `keep` | `false` |
+| `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `cwd` / `workspace` / `force` / `identity` / `scope` | `false` |
+| `set_member_scope` | 设置成员会话或自身的身份/工作范围、推送延迟与压缩阈值 | `conversationId` / `identity` / `scope` / `keep` / `idlePushMs` / `compressPercent` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
 | `status_member` | 目标会话状态 + 身份/工作范围 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区/身份/工作范围）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
 
@@ -32,7 +32,7 @@ $DSH_HOME/mesh/
   deploy/                  部署 job
   member-tasks/            成员任务
   member-tags.json         成员标签
-  member-scopes.json       按会话存的身份 / 工作范围 / keep
+  member-scopes.json       按会话存的身份 / 工作范围 / keep / idlePushMs / compressPercent
   schedule.json            自动编译 / 每成员自动升级设置与上次结果
   cache/sources/           源码 tarball 缓存
 ```
@@ -326,17 +326,19 @@ deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-lin
 | 模式 | 判据 | 必填 | 行为 |
 |---|---|---|---|
 | 新建 | 没有 `conversationId` | `member`、`prompt` | 在成员 B 上创建对话，异步执行，立即返回会话id |
-| 继续 | 有 `conversationId` | `prompt`（本机未跟踪该对话时再加 `member`） | 向已有对话投递，可先压缩上下文 |
+| 继续 | 有 `conversationId` | `prompt`（本机未跟踪该对话时再加 `member`） | 向已有对话投递；上下文超过该会话阈值时自动先压缩 |
 
 可选：
 
 ```text
 cwd / workspace  仅新建：成员 B 上的工作目录，或 ~/.dsh/workspaces/<name>
-compress         仅继续：投递前先在成员 B 上压缩该对话上下文（要求对话空闲）
 force            仅新建：目标工作区目录有 .git 且已有进行中的对话时仍然创建（确认并发风险）
 identity         身份/角色（例如 开发、测试、网关、客户 A），≤40 字符，按会话合并
 scope            负责的工作范围（例如 dsh-mesh 插件开发与构建、跨平台验收），≤120 字符
 ```
+
+继续投递没有单独的单次压缩开关；压缩阈值按会话存储，由
+`set_member_scope { compressPercent }` 设置（默认 35%）。
 
 `identity` / `scope` 可新建或继续时传入，空字符串表示清除；非字符串或超长会报错。
 
@@ -402,8 +404,8 @@ call_member { "member": "10.66.66.3", "prompt": "检查磁盘" }
 （会话id、`进行中` / `空闲` / `异常中止`、工作区、轮次），当前会话 `current: true`。
 
 **身份与工作范围**：两个值按**会话 id** 合并保存到 `$DSH_HOME/mesh/member-scopes.json`
-（`{ "<conversationId>": { identity, scope, keep } }`；自身用当前主对话 session id，`keep`
-只对自身有意义）。新建对话时本次有效 scope 随 `mesh.profile = { name, identity, scope }`
+（`{ "<conversationId>": { identity, scope, keep, idlePushMs, compressPercent } }`，只存显式设置过的字段；
+自身用当前主对话 session id，`keep` / `idlePushMs` 只对自身有意义，`compressPercent` 对自身和成员会话都生效）。新建对话时本次有效 scope 随 `mesh.profile = { name, identity, scope }`
 进入成员的系统上下文；继续已有对话时合并该会话的 scope，并在投递的 prompt 前加一行
 `【成员身份】你的身份：…；负责范围：…。`（只写已设置的部分）。返回的 `text` 显示
 `身份：…；负责范围：…`；完全没有设置时提示用 `call_member` 的 `identity`/`scope` 或
@@ -480,24 +482,25 @@ call_member { "member": "10.66.66.3", "conversationId": "<会话id>", "prompt": 
 本机任务（`data.adopted: true`），并把回答游标设到成员当前的位置，避免把旧回复
 当成本轮结果重复读出来。
 
-投递前压缩上下文：
+投递前自动压缩上下文（`call_member` 没有 `compress` 参数）：
 
 ```text
-call_member { "conversationId": "<会话id>", "prompt": "继续", "compress": true }
-  → POST /v1/conversations/<会话id>/compact
+set_member_scope { "conversationId": "<会话id>", "compressPercent": 10 }
+call_member { "conversationId": "<会话id>", "prompt": "继续" }
+  → GET /v1/conversations/<会话id>（读上下文占比）
+  → 超过该会话阈值时 POST /v1/conversations/<会话id>/compact
   → 成员侧调用自己的 compaction.compactNow()（等同 /compact；preset 隔离组优先，回退宿主 ctx.compaction），完成后才投递
   → POST /v1/conversations/<会话id>/messages
 ```
 
-`compress` 只用于继续已有对话，并要求对话空闲；正在运行时返回错误而不是排队压缩。
-成员版本过旧（没有 `/compact` 或 `ctx.compaction`）会明确提示先升级；
-不要为了压缩而重开对话（那样上下文会丢）。
-
-**超过 30% 自动强制压缩**：不传 `compress` 时，投递前会先读一次目标对话的上下文占用
-（`GET /v1/conversations/<id>`，响应里的 `context`），**严格大于 30.0%** 就先压缩、压缩完成
-才投递；正好 30.0% 不压缩。自动压缩同样要求对话空闲：目标还在跑时会返回错误并拒绝这次
-投递（不会跳过压缩直接发），等 `wait_member` 到 `state=done` 后重试即可。成员侧读取返回
-`context` 的能力随插件一起升级；旧成员不返回 `context` 时退回到最近一次 `wait` 报告的占用。
+阈值取该 conversationId 在 `member-scopes.json` 里的 `compressPercent`，默认 35%；新会话
+还没设置时也用默认值，设置后下一次 `call_member` 投递生效。投递前会先读一次目标对话的
+上下文占用（`GET /v1/conversations/<id>`，响应里的 `context`），**严格大于阈值** 就先压缩、
+压缩完成才投递；正好等于阈值不压缩。压缩同样要求对话空闲：目标还在跑时会返回错误并拒绝
+这次投递（不会跳过压缩直接发），等 `wait_member` 到 `state=done` 后重试即可。成员版本过旧
+（没有 `/compact` 或 `ctx.compaction`）会明确提示先升级；不要为了压缩而重开对话（那样上下文
+会丢）。成员侧读取返回 `context` 的能力随插件一起升级；旧成员不返回 `context` 时退回到最近
+一次 `wait` 报告的占用。
 
 ### 6.5 wait_member：按轮返回、`all` 优先
 
@@ -583,8 +586,9 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 ```
 
 上下文占用来自成员侧的 DSH token meter（`contextPressure` 的 `projectedTokens` 和
-`contextWindow`），即「下一次请求的 prompt 会占多少」。超过 **20%** 时 text 会追加
-建议：下次投递加 `"compress": true`。成员版本过旧、或对话没有活动 agent 时，
+`contextWindow`），即「下一次请求的 prompt 会占多少」。text 只显示占比；超过该会话的
+压缩阈值（`set_member_scope` 的 `compressPercent`，默认 35%）时会说明“下次 call_member
+投递前会自动压缩”，不再引导传 `compress`。成员版本过旧、或对话没有活动 agent 时，
 这一行会省略，不会让 wait 失败。该数值同时出现在 `data.context`：
 
 ```json
@@ -603,8 +607,8 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 
 ```text
 [成员任务状态] 本对话跟踪 2 个成员会话，其中 1 个进行中（快照 ...）。
-- 自身（会话 <selfId>）：身份：…；工作范围：…；保持目标：开启/关闭（只对主对话生效）
-- conv-a（B 10.66.66.2，工作区 dsh-mesh，进行中，第 2 轮）身份：…；工作范围：…
+- 自身（会话 <selfId>）：身份：…；工作范围：…；保持目标：开启/关闭（只对主对话生效）；静默推送：5 分钟（只对主对话生效）；压缩阈值：35%
+- conv-a（B 10.66.66.2，工作区 dsh-mesh，进行中，第 2 轮）身份：…；工作范围：…；压缩阈值：10%
 - conv-b（B 10.66.66.2，工作区 unknown，空闲，第 1 轮）身份：未设置；工作范围：未设置
 继续用 wait_member { "all": true } 等所有进行中的会话：任意一个先返回就立刻返回；
 也可以只等指定的会话：wait_member { "conversationIds": [...] }。
@@ -616,6 +620,8 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
   `form: "snapshot"` 和 `sections`；
 - 没有进行中的会话、或距上次注入不足 60 秒时不注入；
 - 身份/工作范围优先取 `member-scopes.json`（按 conversationId），回退任务 profile 快照；
+- 自身行显示有效配置：保持目标、静默推送（`idlePushMs`，默认 300000 = 5 分钟）和压缩阈值
+  （`compressPercent`，默认 35%）；成员行只在显式设置过 `compressPercent` 时显示该阈值；
 - 缺成员会话身份/工作范围时聚合提示 `call_member` / `set_member_scope`；自身缺失时提示
   `set_member_scope`（省略 conversationId 或传 `self`）；全齐时不提示；
 - 读取任务表失败只记日志并吞掉，step 的 decision 原样返回，不影响 agent loop；
@@ -624,14 +630,21 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 ### 6.6.1 主对话空闲主动推送
 
 主对话 `turn/end` 后，若该会话不是 interop 创建的成员会话、`keep !== false`、且有被跟踪的
-成员任务或自身 scope，插件在 30 秒静默后检查：主 agent 仍 idle、没有新 turn、会话未 dispose。
-满足时用 `agent.followup(...)` 投递**与快照完全相同**的内容；`turn/start` 取消计时，
+成员任务或自身 scope，插件在默认 **5 分钟**静默后检查：主 agent 仍 idle、没有新 turn、会话
+未 dispose。静默时长取自身 scope 的 `idlePushMs`（1000–86400000 毫秒，默认 300000），只对
+主对话生效。满足时先测量主对话上下文占比：超过 `compressPercent`（默认 35%）就用
+`agentPresets.serviceFor(agent, 'compaction') ?? ctx.compaction` 的 `compactNow()` 压缩；压缩
+失败只记日志、仍继续推送；压缩期间开始了新 turn 或 agent 不再 idle 则放弃本次推送；压缩
+成功后再检查一遍才 `followup`。推送日志记录是否压缩和压缩前后占比。
+最后用 `agent.followup(...)` 投递**与快照完全相同**的内容；`turn/start` 取消计时，
 dispose 清理全部 timer。
 
 - 消息 `role: "user"`，`source: { kind: "mesh-member-status", form: "push" }`，不是普通用户输入；
-- 用不含时间戳的内容签名去重（自身 scope/keep + 各任务 conversationId/member/status/turns/profile），
-  相同签名不再推送；任务进展/完成或 scope 变化才再次推送；
-- 推送成功后更新注入时钟，避免紧接着的 pre-step 再注入同一内容；
+- 用不含时间戳的内容签名去重（自身 scope/keep/idlePushMs/compressPercent + 各任务
+  conversationId/member/status/turns/profile/compressPercent）；**先算签名、相同就直接返回**，
+  再测量上下文/按需压缩，所以状态没变的 turn/end 不会白白触发 compactNow；
+- 任务进展/完成或 scope 变化才再次推送；推送成功后更新注入时钟，避免紧接着的 pre-step
+  再注入同一内容；
 - 成员会话由 `src/lib/member-sessions.mjs` 标记，永不主动推送；
 - 推送失败只记日志，不影响会话。
 
@@ -662,7 +675,7 @@ interrupted    插件停止或重启时，未完成任务被标记
 - 目标成员的 8765 必须可达，token 必须正确；
 - 目标正在启动（503）时新建/继续都会等最多 90 秒；
 - 对话已消失（404 / 未知 SDK 会话 / 会话已存在）立即失败，不进入退避重试；
-- `compress` 要求目标对话空闲，压缩请求最多等 180 秒；成员没有 `ctx.compaction` 时返回 501；
+- 自动压缩要求目标对话空闲，压缩请求最多等 180 秒；成员没有 `ctx.compaction` 时返回 501；
 - 需要看最终结果用 `wait_member`（state=done）或读取 `logFile`；不继续等待也没关系：终态后 3 秒内没人取走结果会自动投递回发起对话（有 wait 停在任务上时为 15 秒）；
 - 插件重启会把停止前仍在跑的任务接回监控（24 小时内），继续等待并按原规则投递；目标对话已经消失时任务失败并通知。原对话当时不在线会重试几次。
 
@@ -701,15 +714,22 @@ status_member { "conversationIds": ["<会话id1>", "<会话id2>"] }
 
 ```text
 set_member_scope { "identity": "开发", "scope": "插件开发" }
-set_member_scope { "conversationId": "self", "keep": false }
-set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "scope": "跨平台验收" }
+set_member_scope { "conversationId": "self", "keep": false, "idlePushMs": 300000 }
+set_member_scope { "compressPercent": 35 }
+set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "scope": "跨平台验收", "compressPercent": 10 }
 ```
 
 - `conversationId` 省略、`self`、`local` 或等于当前会话 id → 设置“自身”；其他值作为成员会话 id。
 - `identity` / `scope` 只传要改的字段，空字符串清除；identity ≤40 字符，scope ≤120 字符。
-- `keep` 默认 true，只对自身生效：首次给自身设置且未传 keep 时写入 true；已有 keep=false 时
-  只传 identity/scope 不会重置。设置成员会话时忽略，返回文字会说明。
-- 至少提供 `identity` / `scope` / `keep` 之一；成员会话必须有 identity 或 scope 之一。
+- `keep` 默认 true，只对自身生效：首次给自身设置 identity/scope 且未传 keep 时写入 true；已有
+  keep=false 时只传 identity/scope 不会重置。设置成员会话时忽略，返回文字会说明。
+- `idlePushMs`：静默推送延迟，整数毫秒 1000–86400000，默认 300000（5 分钟）；只对自身/主对话
+  生效，设置成员会话时忽略，返回文字会说明。
+- `compressPercent`：自动压缩阈值，数字 1–100，默认 35；主对话推送快照前和成员会话下一次
+  投递前都用它，自身和成员会话都可设置。
+- 至少提供 `identity` / `scope` / `keep` / `idlePushMs` / `compressPercent` 之一；设置成员会话时
+  必须有 `identity` / `scope` / `compressPercent` 之一（允许只设 `compressPercent`）。
+- 返回文字显示有效值（例如 `静默推送：5 分钟`、`压缩阈值：35%`）以及被忽略的字段。
 - “自身”写入当前 session id；成员会话写入 conversationId，并同步本机跟踪任务的 profile
   快照。未跟踪的 conversationId 仍保存，返回注明“本机未跟踪该会话，只保存设置”。
 - 不给成员会话投递消息，也不自动在下次投递加前缀；随对话设置/更新仍用 `call_member` 的

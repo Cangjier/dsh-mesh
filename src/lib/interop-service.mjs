@@ -1243,11 +1243,11 @@ export function createInteropService(options) {
   /**
    * Explicitly compact one idle conversation.
    *
-   * This is the member-side half of `call_member { compress: true }`: the
-   * caller cannot shorten another process's session, so it asks the owner to
-   * run the same manual compaction `/compact` runs. The transaction owns its
-   * own idle gate; a running conversation is refused instead of queued, so the
-   * caller can decide whether to wait or deliver without compressing.
+   * Retained as the member-side compaction endpoint: the initiator's automatic
+   * pre-delivery path asks the owner to run the same manual compaction
+   * `/compact` runs. The transaction owns its own idle gate; a running
+   * conversation is refused instead of queued, so the caller can decide whether
+   * to wait or deliver without compressing.
    * @param {Record<string, any>} conversation conversation.
    * @returns {Promise<object|null>} compaction result, or null for no useful range.
    */

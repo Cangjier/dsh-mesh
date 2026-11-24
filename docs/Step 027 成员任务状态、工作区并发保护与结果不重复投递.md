@@ -7,6 +7,12 @@
 > 用 `steer` 插入；并修掉了「wait_member 已经返回的回复又被兜底投递重复写回主对话」的
 > ai-cad bug。
 
+> **后续更新（feat/member-idle-compress）**：本文描述的「30 秒状态注入」和
+> `call_member` 的 `compress` 选项已被取代。当前实现：`agent/pre-step` 注入间隔为 60 秒；
+> 主对话空闲主动推送默认 **5 分钟**（`set_member_scope` 的 `idlePushMs`，1000–86400000 毫秒，
+> 只对主对话生效）；压缩阈值默认 **35%**（`compressPercent`，主对话和成员会话都生效），
+> `call_member` 不再有 `compress` 参数，投递前按会话阈值自动压缩。下文相关旧描述保留作历史记录。
+
 ## 为什么改
 
 - 并行调用 `call_member` 后，模型只拿得到一个会话id；要等几个会话就得逐个

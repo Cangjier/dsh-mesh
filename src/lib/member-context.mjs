@@ -22,15 +22,111 @@
 import { randomUUID } from 'node:crypto'
 import { describeMemberTask, memberTaskProfile } from './member-tasks.mjs'
 import { isMemberSession } from './member-sessions.mjs'
+import {
+  DEFAULT_COMPRESS_PERCENT,
+  DEFAULT_MEMBER_IDLE_PUSH_MS,
+  effectiveCompressPercent,
+  effectiveMemberIdlePushMs,
+} from './service.mjs'
 
 /** Minimum distance between two status snapshots in one session. */
 export const MEMBER_STATUS_INTERVAL_MS = 60_000
 
-/** Quiet time after a main-conversation turn end before the active push. */
-export const MEMBER_PUSH_DELAY_MS = 30_000
+/** Default quiet time after a main-conversation turn end before the active push. */
+export const MEMBER_PUSH_DELAY_MS = DEFAULT_MEMBER_IDLE_PUSH_MS
+
+/** How long one pre-push main-conversation compaction may take. */
+const PUSH_COMPACT_TIMEOUT_MS = 180_000
 
 /** Source kind of the injected/pushed message; it must never read as user input. */
 export const MEMBER_STATUS_SOURCE = 'mesh-member-status'
+
+/**
+ * Render a push delay in human-readable form.
+ * @param {number} ms delay in milliseconds.
+ * @returns {string} "5 分钟" / "30 秒" / "1 分 30 秒".
+ */
+export function formatMemberPushDelay(ms) {
+  const value = Number.isFinite(ms) && ms > 0 ? Math.round(ms) : DEFAULT_MEMBER_IDLE_PUSH_MS
+  if (value % 60_000 === 0) return `${String(value / 60_000)} 分钟`
+  if (value >= 60_000) {
+    const minutes = Math.floor(value / 60_000)
+    const seconds = Math.round((value % 60_000) / 1000)
+    return `${String(minutes)} 分 ${String(seconds)} 秒`
+  }
+  return `${String(Math.round(value / 1000))} 秒`
+}
+
+/**
+ * Render a percentage threshold without a trailing `.0`.
+ * @param {number} value percentage.
+ * @returns {string} "35%" / "12.5%".
+ */
+export function formatMemberPercent(value) {
+  const amount = Number.isFinite(value) ? value : DEFAULT_COMPRESS_PERCENT
+  return `${amount >= 100 ? String(Math.round(amount)) : amount.toFixed(1).replace(/\.0$/u, '')}%`
+}
+
+/**
+ * Measure the main agent's context occupancy, matching the interop service.
+ *
+ * `projectedTokens` is what the next request would cost; `pressureTokens` is
+ * the last provider-reported prompt size. A projection snapshot is preferred,
+ * with the token meter as fallback. No live session or no usable numbers means
+ * "unmeasured", never an error.
+ * @param {any} ctx host context.
+ * @param {any} agent live agent.
+ * @returns {number|null} percentage, or null when unmeasured.
+ */
+export function measureMemberContextPercent(ctx, agent) {
+  const session = agent?.session
+  if (session === undefined || session === null) return null
+  const nonNegative = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+  let pressure
+  const projections = typeof ctx?.get === 'function' ? ctx.get('sessionProjections') : undefined
+  if (typeof projections?.snapshot === 'function') {
+    try {
+      pressure = projections.snapshot(session, ['contextPressure']).values.contextPressure
+    } catch { }
+  }
+  if (pressure === undefined) {
+    const meter = typeof ctx?.get === 'function' ? ctx.get('tokenMeter') : undefined
+    if (typeof meter?.contextPressure === 'function') {
+      try { pressure = meter.contextPressure(session) } catch { }
+    }
+  }
+  if (pressure === null || typeof pressure !== 'object') return null
+  const usedTokens = nonNegative(pressure.projectedTokens) ?? nonNegative(pressure.pressureTokens)
+  const maxTokens = nonNegative(pressure.contextWindow)
+  if (usedTokens === null || maxTokens === null || maxTokens <= 0) return null
+  return Math.round((usedTokens / maxTokens) * 1000) / 10
+}
+
+/**
+ * Run one compaction of the main conversation before pushing its snapshot.
+ *
+ * The Web profile keeps the compaction engine inside the agent's isolated
+ * preset group; a composition without presets keeps it on the host context.
+ * @param {any} ctx host context.
+ * @param {any} agent idle main agent.
+ * @returns {Promise<{ok: boolean, reason?: string}>} outcome; a failure is only
+ *   informational because the push still proceeds.
+ */
+async function compactMainAgent(ctx, agent) {
+  const presets = typeof ctx?.get === 'function' ? ctx.get('agentPresets') : undefined
+  const scoped = typeof presets?.serviceFor === 'function' ? presets.serviceFor(agent, 'compaction') : undefined
+  const compaction = scoped ?? (typeof ctx?.get === 'function' ? ctx.get('compaction') : undefined)
+  if (compaction === undefined || compaction === null || typeof compaction.compactNow !== 'function') {
+    return { ok: false, reason: 'no compaction service' }
+  }
+  if (agent.status !== 'idle') return { ok: false, reason: 'agent is not idle' }
+  try {
+    await compaction.compactNow(agent, AbortSignal.timeout(PUSH_COMPACT_TIMEOUT_MS))
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
 
 /**
  * The scope shown for one tracked conversation.
@@ -101,16 +197,22 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfId = String(options.selfId ?? '')
   const selfScope = options.selfScope ?? null
   const scopes = options.scopes ?? {}
+  const selfIdlePushMs = effectiveMemberIdlePushMs(selfScope)
+  const selfCompressPercent = effectiveCompressPercent(selfScope)
   const lines = [
     `[成员任务状态] 本对话跟踪 ${String(list.length)} 个成员会话，其中 ${String(running.length)} 个进行中（快照 ${new Date(at).toISOString()}）。`,
-    `- 自身（会话 ${selfId === '' ? 'unknown' : selfId}）：身份：${selfScope?.identity ?? '未设置'}；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === false ? '关闭' : '开启'}（只对主对话生效）`,
+    `- 自身（会话 ${selfId === '' ? 'unknown' : selfId}）：身份：${selfScope?.identity ?? '未设置'}；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === false ? '关闭' : '开启'}（只对主对话生效）；静默推送：${formatMemberPushDelay(selfIdlePushMs)}（只对主对话生效）；压缩阈值：${formatMemberPercent(selfCompressPercent)}`,
   ]
   for (const task of list) {
     const entry = describeMemberTask(task)
     const profile = scopeForTask(task, scopes)
+    const stored = scopes[String(task?.conversationId ?? '')]
+    const explicitCompress = typeof stored?.compressPercent === 'number' && Number.isFinite(stored.compressPercent)
+      ? `；压缩阈值：${formatMemberPercent(stored.compressPercent)}`
+      : ''
     const turn = entry.turns !== null && entry.turns > 0 ? `第 ${String(entry.turns)} 轮` : ''
     lines.push(
-      `- ${entry.conversationId}（${entry.member} ${entry.memberIp}，工作区 ${entry.workspace}，${entry.statusLabel}${turn === '' ? '' : `，${turn}`}）身份：${profile?.identity ?? '未设置'}；工作范围：${profile?.scope ?? '未设置'}`,
+      `- ${entry.conversationId}（${entry.member} ${entry.memberIp}，工作区 ${entry.workspace}，${entry.statusLabel}${turn === '' ? '' : `，${turn}`}）身份：${profile?.identity ?? '未设置'}；工作范围：${profile?.scope ?? '未设置'}${explicitCompress}`,
     )
   }
   lines.push(
@@ -141,14 +243,20 @@ export function formatMemberStatusSignature(state = {}) {
       identity: state.selfScope?.identity ?? null,
       scope: state.selfScope?.scope ?? null,
       keep: state.selfScope?.keep !== false,
+      idlePushMs: effectiveMemberIdlePushMs(state.selfScope),
+      compressPercent: effectiveCompressPercent(state.selfScope),
     },
     tasks: tasks.map((task) => {
       const profile = scopeForTask(task, scopes)
+      const stored = scopes[String(task?.conversationId ?? '')]
       return {
         conversationId: String(task?.conversationId ?? ''),
         member: String(task?.member ?? ''),
         status: String(task?.status ?? ''),
         turns: Number.isSafeInteger(task?.turns) ? task.turns : null,
+        ...(typeof stored?.compressPercent === 'number' && Number.isFinite(stored.compressPercent)
+          ? { compressPercent: stored.compressPercent }
+          : {}),
         profile: profile === null
           ? null
           : { name: profile.name, identity: profile.identity, scope: profile.scope },
@@ -294,12 +402,15 @@ export function createMemberContext({
     if (tasks.length === 0 && selfScope === null) return
     if (selfScope?.keep === false) return
     cancelPush(sessionId)
+    // The per-conversation setting wins over the process default; injecting
+    // `pushDelayMs` remains the test knob for conversations without one.
+    const delay = Number.isSafeInteger(selfScope?.idlePushMs) ? selfScope.idlePushMs : pushDelayMs
     const timer = setTimeout(() => {
       pushTimers.delete(sessionId)
       void pushSnapshot(sessionId, turn).catch(error => {
         log(`member status push failed: ${error instanceof Error ? error.message : String(error)}`)
       })
-    }, pushDelayMs)
+    }, delay)
     timer.unref?.()
     pushTimers.set(sessionId, timer)
   }
@@ -325,10 +436,34 @@ export function createMemberContext({
     if (tasks.length === 0 && selfScope === null) return
     if (selfScope?.keep === false) return
     if (agent.status !== 'idle') return
+    // Signature first: an unchanged snapshot must not pay for a compaction.
     const at = now()
     const signature = formatMemberStatusSignature({ selfId: sessionId, selfScope, tasks, scopes })
     if (lastPushSignature.get(sessionId) === signature) return
     const text = formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes })
+    // Measure and, when the main conversation is over its threshold, compact
+    // before the push. A missing/failed compaction never blocks the push, but
+    // a turn that started meanwhile invalidates this snapshot.
+    const threshold = effectiveCompressPercent(selfScope)
+    const beforePercent = measureMemberContextPercent(ctx, agent)
+    let compressionLine
+    if (beforePercent !== null && beforePercent > threshold) {
+      const outcome = await compactMainAgent(ctx, agent)
+      if (closed || turns.get(sessionId) !== turn || agent.status !== 'idle') {
+        log(`member status push abandoned: conversation resumed while compacting (context ${formatMemberPercent(beforePercent)}, threshold ${formatMemberPercent(threshold)})`)
+        return
+      }
+      if (outcome.ok) {
+        const afterPercent = measureMemberContextPercent(ctx, agent)
+        compressionLine = `compressed ${formatMemberPercent(beforePercent)} -> ${afterPercent === null ? '未测' : formatMemberPercent(afterPercent)}（阈值 ${formatMemberPercent(threshold)}）`
+      } else {
+        compressionLine = `compression skipped: ${outcome.reason}（上下文 ${formatMemberPercent(beforePercent)}，阈值 ${formatMemberPercent(threshold)}）`
+      }
+    } else if (beforePercent === null) {
+      compressionLine = `context not measured（阈值 ${formatMemberPercent(threshold)}）`
+    } else {
+      compressionLine = `no compression（上下文 ${formatMemberPercent(beforePercent)} <= 阈值 ${formatMemberPercent(threshold)}）`
+    }
     try {
       agent.followup({
         id: randomUUID(),
@@ -338,7 +473,7 @@ export function createMemberContext({
       })
       lastPushSignature.set(sessionId, signature)
       lastInjection.set(sessionId, at)
-      log(`member status pushed to ${sessionId}`)
+      log(`member status pushed to ${sessionId}: ${compressionLine}`)
     } catch (error) {
       log(`member status push failed: ${error instanceof Error ? error.message : String(error)}`)
     }

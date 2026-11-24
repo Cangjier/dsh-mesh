@@ -150,14 +150,14 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.7z \
 - **60 秒状态注入**：本对话有进行中的成员会话时，`agent/pre-step` 在每个 step 前把一份状态快照附加到 `decision.messages`（同一会话最多每 60 秒一次）：首行汇总、自身（会话id/身份/工作范围/保持目标）、每个成员会话id/状态/工作区/轮次/身份/工作范围（缺失标 `未设置`），并提示 `wait_member { "all": true }`。缺身份/工作范围时按“成员会话”和“自身”分别聚合提示；全部齐全时不出现提示。快照不新开 turn、不调用 `followup`/`steer`，source kind 不是 `user`；读取失败吞掉，不影响 agent loop。
 - **工作区并发保护**：新建对话时，解析出的目标目录存在 `.git`（目录，或 linked worktree 的 `.git` 文件）且该目录已有 `status=running` 的对话，成员返回 `409 workspace_busy_git`，消息里列出工作区名、目录和进行中的会话id。`call_member` 捕获后以 `ok:false` 直接返回说明，**不创建对话**；推荐换一个工作区，确认要并发时在输入中设 `force: true` 后重新调用。`force` 只在新建时生效（透传为成员侧 `forceWorkspace`），继续已有 `conversationId` 永远不触发这个拦截。
 - 新建对话前，`call_member` 先从组网直连配置找到目标成员的本地代理端口，用 SSH 在目标成员上跑 mjs 探针实测该端口的出网延迟和下行带宽，把**一行结果 + 代理端口 + hub 的 git token 原值**注入会话；组网里没有该成员的直连配置就不报出网信息。并**禁用该会话的 `ask_user_question`**——成员任务没有可应答的用户，需要信息时会在回复里提问并停下，用 `call_member` 带同一个 `conversationId` 回答。详见 [Step 025](docs/Step%20025%20成员任务的出网实测与token注入.md)。
-- **会话身份与工作范围**：`call_member` 的可选参数 `identity`（身份/角色，≤40 字符）和 `scope`（负责范围，≤120 字符）按**会话**合并保存到 `$DSH_HOME/mesh/member-scopes.json`（`{ "<conversationId>": { identity, scope, keep } }`；自身用当前主对话 session id）。新建对话时随 `mesh.profile` 注入成员系统上下文；继续已有对话时合并设置，并在投递内容前加一行 `【成员身份】你的身份：…；负责范围：…。`。任意时候可用 `set_member_scope` 单独设置成员会话或自身（省略 `conversationId` / `self` / `local` 即自身），不给成员发消息；成员会话的 `keep` 会被忽略。`members` 恢复为只读成员发现，不再显示会话身份。
+- **会话身份、工作范围与推送/压缩配置**：`call_member` 的可选参数 `identity`（身份/角色，≤40 字符）和 `scope`（负责范围，≤120 字符）按**会话**合并保存到 `$DSH_HOME/mesh/member-scopes.json`（记录形如 `{ "<conversationId>": { identity, scope, keep, idlePushMs, compressPercent } }`，只存显式设置过的字段，默认值读取时应用；自身用当前主对话 session id）。新建对话时随 `mesh.profile` 注入成员系统上下文；继续已有对话时合并设置，并在投递内容前加一行 `【成员身份】你的身份：…；负责范围：…。`。任意时候可用 `set_member_scope` 单独设置成员会话或自身（省略 `conversationId` / `self` / `local` 即自身），不给成员发消息：`keep` 和 `idlePushMs` 只对主对话自身有效，设置成员会话时忽略；`compressPercent` 对两者都生效。`members` 恢复为只读成员发现，不再显示会话身份。
 - **工作区归属**：显式 `workspace` 优先；显式 `cwd` 保持原语义（不带工作区名，但会话仍按该目录归组，标题取目录名）；两者都没有时用调用方会话当前所属工作区的标题（自动派生的名称会额外拒绝 `: * ? < > |`，避免 Windows 成员建不出目录）。目标成员创建会话后把它挂到 `ctx.workspaceRegistry`；默认分支（含调用方兜底显式发送的 `default-workspace`）优先复用已有的同名记录，所以不会新增第二个「默认工作区」（旧版本已写入的重复记录需手动清理），也不会再留在「未分组」。任务记录同时保存工作区名：新建时取显式 workspace / 显式 cwd 的目录名 / 调用方工作区，继续投递时用成员实时 projection 的 `workspace` 刷新，旧记录缺失时回退 `unknown`。详见 [Step 026](docs/Step%20026%20成员任务的工作区归属.md)。
-- `conversationId` 是唯一对外的继续投递凭据（内部 task id 不再出现在工具参数里）；`compress: true` 会让成员先压缩上下文再投递。**不传 `compress` 时，如果目标对话的上下文占比已经超过 30%，投递前也会自动强制压缩**（压缩要求对话空闲，目标还在跑时拒绝投递）。`wait_member` 在 `state=done` 时返回会话id和上下文占用，超过 20% 时建议下次投递先压缩。
+- `conversationId` 是唯一对外的继续投递凭据（内部 task id 不再出现在工具参数里）；**`call_member` 不再有 `compress` 参数**。继续投递前会读取该会话的压缩阈值（`set_member_scope` 的 `compressPercent`，默认 35%）：上下文占比**严格超过阈值**就先让成员压缩再投递（压缩要求对话空闲，目标还在跑时拒绝投递），不超过就直接投递。`wait_member` 在 `state=done` 时返回会话id和上下文占用（只显示占比）；超过该会话阈值时说明“下次投递前会自动压缩”，不引导传任何压缩参数。
 - A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话；后台轮询 B 的 `/wait`，`wait_member` 按轮取回。
 - **重启不丢结果**：插件停止前仍在跑的任务会被重新接回监控（24 小时内），成员完成后照常投递；原对话当时不在线会重试几次。
 - **子代理上下文预算**：注入给成员会话的规则要求控制子代理的上下文占比——某个子代理超过 35% 时尽量改用新的子代理（交接已有结论），不再继续用旧的；DSH 在子代理一轮结束时就会卸载它，父对话既量不到也压不了。
 - **`status_member`**：按会话id 返回目标会话状态（进行中/空闲/异常中止/出错）、工作区、身份/工作范围、最近两次用户消息（本机 `call_member` 投递记录）和最近一次思考（目标会话的 reasoning）；`conversationIds` 可一次查多个，分块输出并带汇总；返回值同时列出本对话跟踪的**所有**成员会话（id、状态、工作区名称、身份/工作范围），不只看本次查询的会话，缺失项会提示用 `call_member` 或 `set_member_scope` 补齐。
-- **主对话空闲主动推送**：`session/event` 的 `turn/end` 后，若会话不是 interop 创建的成员会话、且 `keep` 不为 false（默认 true）、且有被跟踪的成员任务或已有自身 scope，插件会在 30 秒静默后检查主 agent 仍 idle、没有新 turn，然后以 `followup` 投递**与快照完全相同**的内容（source 为 `mesh-member-status` / `form: push`，非 user 来源）。`turn/start` 取消计时，dispose 清理；用不含时间戳的内容签名去重，相同状态不会重复推送，任务进展/完成或 scope 变化才再次推送。成员会话永不主动推送。
+- **主对话空闲主动推送**：`session/event` 的 `turn/end` 后，若会话不是 interop 创建的成员会话、且 `keep` 不为 false（默认 true）、且有被跟踪的成员任务或已有自身 scope，插件会在**默认 5 分钟**静默后检查主 agent 仍 idle、没有新 turn，然后以 `followup` 投递**与快照完全相同**的内容（source 为 `mesh-member-status` / `form: push`，非 user 来源）。静默时长用 `set_member_scope` 的 `idlePushMs` 配置（1000–86400000 毫秒，只对主对话生效）。投递前会测量主对话上下文占比：超过 `compressPercent`（默认 35%）先压缩再推送；压缩失败只记日志、不阻塞推送，压缩期间开始了新 turn 则放弃本次推送。`turn/start` 取消计时，dispose 清理；用不含时间戳的内容签名**先去重**，相同状态直接返回、不触发压缩，任务进展/完成或 scope 变化才再次推送。成员会话永不主动推送。
 - **没人继续等待时的兜底投递（不重复）**：模型拿到 `progress` 后可能就不再 `wait_member`。对话完成（或失败/中断）后，插件先等 3 秒，让正在等待或紧接着发起的 `wait_member` 取走结果；如果任务结束时有 `wait_member` 正停在上面，窗口延长到 15 秒，让它先完成终态复读。兜底**只投递 `seq > deliveredSeq` 的未取回复**，同一个回复文本绝不重复投递；终态文本已经被 `wait_member` 取走时，最多发一条不含回复正文的简短完成提示；后到的 `wait_member` 也不会再从 `lastText` 重印已取走或已由兜底认领的正文。`wait_member` 消费终态时同步取消待投递 timer 并标记已消费；兜底投递失败会释放已认领的回复，后续 wait 仍能返回正文。投递时如果主对话正在执行 turn，用 `agent.steer()` 把结果**直接插入当前 turn 的下一步边界**，不等 turn 结束；空闲时才开新 turn。
 - 不需要 B 主动访问 A；A 长轮询（阻塞式等待）B 的 `/wait`，避免回调端口/NAT 问题。
 - 状态快照、工作区并发保护、steer 与结果去重的完整边界见 [Step 027](docs/Step%20027%20成员任务状态、工作区并发保护与结果不重复投递.md)。
@@ -351,7 +351,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `src/lib/interop-service.mjs` | 内嵌 HTTP 服务：`ctx.agents` 创建/恢复、等待/通知/事件/回调 |
 | `code/interop-service/server.mjs` | 旧独立 HTTP 服务（回退用，默认不启动） |
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
-| `src/lib/member-context.mjs` | 成员会话状态快照：`agent/pre-step` 每 60 秒附加一次；主对话 `turn/end` 后 30 秒空闲主动 `followup` 推送 |
+| `src/lib/member-context.mjs` | 成员会话状态快照：`agent/pre-step` 每 60 秒附加一次；主对话 `turn/end` 后默认 5 分钟空闲主动 `followup` 推送（`idlePushMs` 可配），超过压缩阈值（默认 35%）先压缩 |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
 | `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `set_member_scope` / `wait_member` / `status_member` 工具 |
@@ -382,7 +382,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `repack` | 用当前仓库刷新已有离线包：只替换 `gate/`、`shared/`、`config/`、`code/*`、根脚本和 `plugins/dsh-mesh/`，DSH 主体（`app/`、`web/`、`runtime/`）复用，最后更新 `.sha256` |
 | `members` | WireGuard 成员发现 |
 | `call_member` | 在成员上新建/继续对话，返回会话id；可设 `identity` / `scope` |
-| `set_member_scope` | 单独设置成员会话或自身的 `identity` / `scope`；自身可设 `keep` |
+| `set_member_scope` | 设置成员会话或自身的 `identity` / `scope` / `compressPercent`；自身还可设 `keep` / `idlePushMs` |
 | `wait_member` | 有界等待成员会话：`all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定；有新回复立刻返回（`state=progress`），完成返回 `done` |
 | `status_member` | 目标会话状态、工作区、身份/工作范围、最近两次用户消息、最近一次思考；附带本对话全部成员会话的状态、工作区与身份/工作范围 |
 

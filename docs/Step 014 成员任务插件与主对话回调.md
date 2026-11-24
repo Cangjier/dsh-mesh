@@ -53,13 +53,12 @@ call_member { "member": "10.66.66.3", "conversationId": "<会话id>", "prompt": 
 本机已经跟踪这个对话时 `member` 可以省略。本机没有该对话的任务记录时，插件会新建一条
 `adopted` 任务，并把回复游标设到成员当前的位置，避免回放旧回复。
 
-### compress：投递前压缩上下文
+### 投递前自动压缩上下文（后续版本取代了 compress 选项）
 
-```text
-call_member { "conversationId": "<会话id>", "prompt": "继续", "compress": true }
-```
-
-顺序固定为：`POST /v1/conversations/<id>/compact` → 完成后才 `POST .../messages`。
+初版 `call_member` 曾提供 `compress: true` 强制压缩；该参数已被移除。现在压缩阈值按会话
+保存在 `member-scopes.json`，用 `set_member_scope { compressPercent }` 设置（默认 35%）：
+投递前读取目标上下文占比，**超过阈值**才执行
+`POST /v1/conversations/<id>/compact`，完成后才 `POST .../messages`。
 成员侧用 DSH 的 `ctx.compaction.compactNow()`（等同 `/compact`，要求对话空闲）把旧历史
 替换成摘要；返回 `compacted` / `shadowedCount` / `shadowedTokenCount` / `context`。
 老成员没有这个接口时返回 404/501，A 侧直接报「先升级该成员」，不会为了压缩重开对话。
@@ -74,8 +73,9 @@ call_member { "conversationId": "<会话id>", "prompt": "继续", "compress": tr
 
 `usedTokens` 取 token meter 的 `projectedTokens`（下一次请求的 prompt 大小），
 没有时退回 `pressureTokens`；`maxTokens` 是 `contextWindow`。
-`wait_member` 在 `state=done` 时把这一行（`对话上下文：已用 / 上限`）和会话id一起写进 text；超过 20% 时追加
-「下次投递加 `compress: true`」的建议。成员没有活动 agent 或版本过旧时该行省略。
+`wait_member` 在 `state=done` 时把这一行（`对话上下文：已用 / 上限`）和会话id一起写进 text；
+超过该会话压缩阈值时说明「下次 call_member 投递前会自动压缩」，不再引导传 `compress`。
+成员没有活动 agent 或版本过旧时该行省略。
 
 ### wait_member：分轮等待
 

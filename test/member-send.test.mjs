@@ -189,15 +189,13 @@ test('send by conversationId adopts the conversation without replaying its histo
       member: '127.0.0.1',
       conversationId: 'conv-9',
       prompt: '继续',
-      compress: true,
     })
     assert.equal(task.adopted, true)
     assert.equal(task.conversationId, 'conv-9')
     assert.equal(task.replySeq, 5, 'the cursor starts at the member’s current reply')
-    assert.deepEqual(member.order, ['compact', 'message'], 'compaction must finish before delivery')
+    assert.deepEqual(member.order, ['message'], 'a context below the threshold needs no compaction')
     assert.deepEqual(member.messages, ['继续'])
-    assert.equal(task.lastCompaction.compacted, true)
-    assert.equal(task.lastCompaction.shadowedTokenCount, 1234)
+    assert.equal(task.lastCompaction, null)
 
     const result = await tasks.wait(task.conversationId, { timeoutMs: 3000 })
     assert.equal(result.done, true)
@@ -211,13 +209,18 @@ test('send by conversationId adopts the conversation without replaying its histo
   }
 })
 
-test('send refuses compress when the member cannot compact, before delivering anything', async () => {
+test('send uses the conversation scope threshold before delivering', async () => {
   for (const mode of ['unsupported', 'busy']) {
-    const member = await fakeMember({ compact: mode })
-    const { tasks, dataDir } = await buildService(member.port)
+    const member = await fakeMember({
+      compact: mode,
+      liveContext: { usedTokens: 20_000, maxTokens: 128_000, percent: 15.6 },
+    })
+    const { tasks, service, dataDir } = await buildService(member.port)
+    // A low explicit threshold (10%) makes the 15.6% context over the limit.
+    service.memberScope = async () => ({ compressPercent: 10 })
     try {
       await assert.rejects(
-        () => tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续', compress: true }),
+        () => tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' }),
         mode === 'busy' ? /还在运行/u : /不支持上下文压缩/u,
       )
       assert.deepEqual(member.messages, [], 'a failed compaction must not deliver the message')
@@ -294,16 +297,17 @@ test('a continued conversation is delivered back when nobody waits for it', asyn
   }
 })
 
-test('a delivery whose context is already over 30% compacts before sending', async () => {
+test('a delivery whose context is over the default 35% compacts before sending', async () => {
   const member = await fakeMember({
     liveContext: { usedTokens: 60_000, maxTokens: 128_000, percent: 46.9 },
   })
   const { tasks, dataDir } = await buildService(member.port)
   try {
     const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' })
-    assert.deepEqual(member.order, ['compact', 'message'], 'the forced compaction must finish before delivery')
+    assert.deepEqual(member.order, ['compact', 'message'], 'the automatic compaction must finish before delivery')
     assert.equal(task.lastCompaction?.forced, true)
-    assert.equal(task.lastCompaction?.forcedPercent, 46.9)
+    assert.equal(task.lastCompaction?.forcedPercent, 35, 'the stored threshold, not the observed occupancy')
+    assert.equal(task.lastCompaction?.observedPercent, 46.9)
     assert.equal(task.lastCompaction?.compacted, true)
     assert.deepEqual(member.messages, ['继续'])
   } finally {
@@ -313,14 +317,14 @@ test('a delivery whose context is already over 30% compacts before sending', asy
   }
 })
 
-test('exactly 30% does not force a compaction', async () => {
+test('exactly the default 35% does not trigger a compaction', async () => {
   const member = await fakeMember({
-    liveContext: { usedTokens: 38_400, maxTokens: 128_000, percent: 30 },
+    liveContext: { usedTokens: 44_800, maxTokens: 128_000, percent: 35 },
   })
   const { tasks, dataDir } = await buildService(member.port)
   try {
     const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' })
-    assert.deepEqual(member.order, ['message'], '30.0% is not over the threshold')
+    assert.deepEqual(member.order, ['message'], '35.0% is not over the threshold')
     assert.equal(task.lastCompaction, null)
     assert.deepEqual(member.messages, ['继续'])
   } finally {
@@ -330,7 +334,44 @@ test('exactly 30% does not force a compaction', async () => {
   }
 })
 
-test('a forced compaction that cannot reach an idle conversation refuses the delivery', async () => {
+test('a lower conversation threshold compacts an otherwise unremarkable context', async () => {
+  const member = await fakeMember({
+    liveContext: { usedTokens: 19_200, maxTokens: 128_000, percent: 15 },
+  })
+  const { tasks, service, dataDir } = await buildService(member.port)
+  service.memberScope = async () => ({ compressPercent: 10 })
+  try {
+    const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' })
+    assert.deepEqual(member.order, ['compact', 'message'])
+    assert.equal(task.lastCompaction?.forcedPercent, 10)
+    assert.equal(task.lastCompaction?.observedPercent, 15)
+    assert.deepEqual(member.messages, ['继续'])
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a higher conversation threshold leaves a 15% context alone', async () => {
+  const member = await fakeMember({
+    liveContext: { usedTokens: 19_200, maxTokens: 128_000, percent: 15 },
+  })
+  const { tasks, service, dataDir } = await buildService(member.port)
+  service.memberScope = async () => ({ compressPercent: 50 })
+  try {
+    const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' })
+    assert.deepEqual(member.order, ['message'])
+    assert.equal(task.lastCompaction, null)
+    assert.deepEqual(member.messages, ['继续'])
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a compaction that cannot reach an idle conversation refuses the delivery', async () => {
   const member = await fakeMember({
     compact: 'busy',
     liveContext: { usedTokens: 60_000, maxTokens: 128_000, percent: 46.9 },
@@ -339,7 +380,7 @@ test('a forced compaction that cannot reach an idle conversation refuses the del
   try {
     await assert.rejects(
       () => tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' }),
-      /超过 30%|还在运行/u,
+      /超过压缩阈值 35%|还在运行/u,
     )
     assert.deepEqual(member.order, ['compact'], 'the message must not be delivered without the compaction')
     assert.deepEqual(member.messages, [])
@@ -350,7 +391,7 @@ test('a forced compaction that cannot reach an idle conversation refuses the del
   }
 })
 
-test('call_member reports the forced compaction', async () => {
+test('call_member reports the automatic compaction with the threshold', async () => {
   const member = await fakeMember({
     liveContext: { usedTokens: 60_000, maxTokens: 128_000, percent: 46.9 },
   })
@@ -368,7 +409,7 @@ test('call_member reports the forced compaction', async () => {
       { member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' },
       { agent: { id: 'session-a', session: { id: 'session-a' } } },
     )
-    assert.match(result.text, /上下文占比已超过 30%（46\.9%），投递前已强制压缩/u)
+    assert.match(result.text, /上下文占比 46\.9% 已超过压缩阈值 35%，投递前已自动压缩/u)
     assert.deepEqual(member.messages, ['继续'])
   } finally {
     await service.memberTasks.dispose()
@@ -403,7 +444,7 @@ test('a wait on a finished task re-syncs after the member counter resets', async
   }
 })
 
-test('wait_member and call_member expose the conversation id and context advice', async () => {
+test('wait_member and call_member expose the conversation id but no compress flag', async () => {
   const member = await fakeMember({ usedTokens: 40_000 })
   const { service, dataDir } = await buildService(member.port)
   const tools = []
@@ -423,19 +464,16 @@ test('wait_member and call_member expose the conversation id and context advice'
     assert.match(result.text, /会话id：conv-9/u)
     assert.match(result.text, /继续这个对话：call_member/u)
     assert.match(result.text, /上下文：40k \/ 128k tokens（31\.3%）/u)
-    assert.match(result.text, /超过 20%：下次投递时建议加 "compress": true/u)
+    assert.doesNotMatch(result.text, /compress/u, '31.3% is under the default 35% threshold')
     assert.equal(result.data.context.percent, 31.3)
 
     const call = tools.find(tool => tool.name === 'call_member')
     assert.equal(call.parameters.properties.action, undefined)
     assert.deepEqual(call.parameters.required, ['prompt'])
-    assert.equal(call.parameters.properties.compress.type, 'boolean')
+    assert.equal(call.parameters.properties.compress, undefined)
+    assert.doesNotMatch(call.description, /compress: true/u)
     assert.equal(call.parameters.properties.conversationId.type, 'string')
     assert.equal(call.parameters.properties.force.type, 'boolean')
-    await assert.rejects(
-      () => call.execute({ member: '127.0.0.1', prompt: 'x', compress: true }, {}),
-      /compress only applies/u,
-    )
     await assert.rejects(
       () => call.execute({ prompt: 'x' }, {}),
       /member is required/u,
@@ -444,6 +482,30 @@ test('wait_member and call_member expose the conversation id and context advice'
       () => call.execute({ member: '127.0.0.1', conversationId: 'conv-9', prompt: 'x', cwd: '/tmp' }, {}),
       /only apply to a new conversation/u,
     )
+  } finally {
+    await service.memberTasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('wait_member says the next delivery will auto-compact over the conversation threshold', async () => {
+  const member = await fakeMember({ usedTokens: 40_000 })
+  const { service, dataDir } = await buildService(member.port)
+  service.memberScope = async () => ({ compressPercent: 10 })
+  const tools = []
+  const ctx = {
+    logger: { info: () => {}, error: () => {} },
+    effect: () => () => {},
+    get: () => undefined,
+  }
+  try {
+    registerTools(ctx, { tools: { register: tool => { tools.push(tool) } } }, service)
+    const task = await service.memberTasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' })
+    const wait = tools.find(tool => tool.name === 'wait_member')
+    const result = await wait.execute({ conversationIds: [task.conversationId], timeoutMs: 3000 }, {})
+    assert.match(result.text, /超过本会话压缩阈值 10%：下次 call_member 投递前会自动压缩/u)
+    assert.doesNotMatch(result.text, /compress: true|加 "compress"/u)
   } finally {
     await service.memberTasks.dispose()
     await member.close()

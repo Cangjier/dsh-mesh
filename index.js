@@ -9872,6 +9872,10 @@ var PROBE_RETRY_MS = 4500;
 var PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 6e4;
 var MEMBER_IDENTITY_MAX = 40;
 var MEMBER_SCOPE_MAX = 120;
+var DEFAULT_MEMBER_IDLE_PUSH_MS = 3e5;
+var MEMBER_IDLE_PUSH_MIN_MS = 1e3;
+var MEMBER_IDLE_PUSH_MAX_MS = 864e5;
+var DEFAULT_COMPRESS_PERCENT = 35;
 function normalizeMemberScopePatch(patch = {}) {
   if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
     throw new Error("member scope must be an object");
@@ -9897,12 +9901,43 @@ function normalizeMemberScopePatch(patch = {}) {
     if (typeof patch.keep !== "boolean") throw new Error("keep must be a boolean");
     normalized.keep = patch.keep;
   }
+  if (patch.idlePushMs !== void 0) {
+    const value = patch.idlePushMs;
+    if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+      throw new Error("idlePushMs must be an integer number of milliseconds");
+    }
+    if (value < MEMBER_IDLE_PUSH_MIN_MS || value > MEMBER_IDLE_PUSH_MAX_MS) {
+      throw new Error(`idlePushMs is out of range: ${String(value)} (${String(MEMBER_IDLE_PUSH_MIN_MS)}-${String(MEMBER_IDLE_PUSH_MAX_MS)})`);
+    }
+    normalized.idlePushMs = value;
+  }
+  if (patch.compressPercent !== void 0) {
+    const value = patch.compressPercent;
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new Error("compressPercent must be a number");
+    }
+    if (value < 1 || value > 100) {
+      throw new Error(`compressPercent is out of range: ${String(value)} (1-100)`);
+    }
+    normalized.compressPercent = value;
+  }
   return normalized;
+}
+function effectiveMemberIdlePushMs(scope) {
+  const value = scope?.idlePushMs;
+  return Number.isSafeInteger(value) && value >= MEMBER_IDLE_PUSH_MIN_MS && value <= MEMBER_IDLE_PUSH_MAX_MS ? value : DEFAULT_MEMBER_IDLE_PUSH_MS;
+}
+function effectiveCompressPercent(scope) {
+  const value = scope?.compressPercent;
+  return typeof value === "number" && Number.isFinite(value) && value >= 1 && value <= 100 ? value : DEFAULT_COMPRESS_PERCENT;
 }
 function savedScopeText(value, max) {
   if (typeof value !== "string") return null;
   const text = value.trim();
   return text === "" || text.length > max ? null : text;
+}
+function savedScopeNumber(value, valid) {
+  return typeof value === "number" && Number.isFinite(value) && valid(value) ? value : void 0;
 }
 function findRepositoryRoot(start) {
   let current = start;
@@ -10369,12 +10404,14 @@ var MeshService = class {
     return { ok: true, tags };
   }
   /**
-   * Identity, work scope and keep flag for conversations, keyed by conversation id.
+   * Identity, work scope, keep flag and push/compaction settings for
+   * conversations, keyed by conversation id.
    *
    * The file is only an optional hint book: a missing, unreadable, or damaged
    * file is the same as "nothing set yet", never a startup failure. Only the
-   * fields that were actually set are stored.
-   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean}>>} scopes.
+   * fields that were actually set are stored; defaults are applied by readers
+   * ({@link effectiveMemberIdlePushMs}, {@link effectiveCompressPercent}).
+   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean, idlePushMs?: number, compressPercent?: number}>>} scopes.
    */
   async memberScopes() {
     try {
@@ -10387,11 +10424,18 @@ var MeshService = class {
         const identity = savedScopeText(value.identity, MEMBER_IDENTITY_MAX);
         const scope = savedScopeText(value.scope, MEMBER_SCOPE_MAX);
         const keep = typeof value.keep === "boolean" ? value.keep : void 0;
-        if (identity === null && scope === null && keep === void 0) continue;
+        const idlePushMs = savedScopeNumber(
+          value.idlePushMs,
+          (candidate) => Number.isSafeInteger(candidate) && candidate >= MEMBER_IDLE_PUSH_MIN_MS && candidate <= MEMBER_IDLE_PUSH_MAX_MS
+        );
+        const compressPercent = savedScopeNumber(value.compressPercent, (candidate) => candidate >= 1 && candidate <= 100);
+        if (identity === null && scope === null && keep === void 0 && idlePushMs === void 0 && compressPercent === void 0) continue;
         scopes[rawId.trim()] = {
           ...identity === null ? {} : { identity },
           ...scope === null ? {} : { scope },
-          ...keep === void 0 ? {} : { keep }
+          ...keep === void 0 ? {} : { keep },
+          ...idlePushMs === void 0 ? {} : { idlePushMs },
+          ...compressPercent === void 0 ? {} : { compressPercent }
         };
       }
       return scopes;
@@ -10402,7 +10446,7 @@ var MeshService = class {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean}|null>} scope.
+   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean, idlePushMs?: number, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? "").trim();
@@ -10411,13 +10455,15 @@ var MeshService = class {
     return scopes[id] ?? null;
   }
   /**
-   * Merge and save one conversation's identity/work scope.
+   * Merge and save one conversation's identity/work scope and settings.
    *
    * Only the fields present in the patch change. An empty string clears that
-   * field (the record is dropped when nothing remains). `keep` is stored as
-   * given; only the self target is supposed to pass it.
+   * text field (the record is dropped when nothing remains). `keep` is stored
+   * as given; only the self target is supposed to pass it. `idlePushMs` is only
+   * meaningful for the self target; `compressPercent` applies to both self and
+   * member conversations.
    * @param {string} conversationId conversation or session id.
-   * @param {{identity?: unknown, scope?: unknown, keep?: unknown}} [patch] fields to change.
+   * @param {{identity?: unknown, scope?: unknown, keep?: unknown, idlePushMs?: unknown, compressPercent?: unknown}} [patch] fields to change.
    * @returns {Promise<{ok: boolean, scopes: Record<string, object>, scope: object|null}>} saved scopes.
    */
   async setMemberScope(conversationId, patch = {}) {
@@ -10435,7 +10481,9 @@ var MeshService = class {
       else next.scope = normalized.scope;
     }
     if (normalized.keep !== void 0) next.keep = normalized.keep;
-    if (next.identity === void 0 && next.scope === void 0 && next.keep === void 0) delete scopes[id];
+    if (normalized.idlePushMs !== void 0) next.idlePushMs = normalized.idlePushMs;
+    if (normalized.compressPercent !== void 0) next.compressPercent = normalized.compressPercent;
+    if (Object.keys(next).length === 0) delete scopes[id];
     else scopes[id] = next;
     await mkdir12(this.dataDir, { recursive: true });
     await writeFile12(this.memberScopesFile, `${JSON.stringify(scopes, null, 2)}
@@ -13171,7 +13219,6 @@ var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
 var DELIVERY_GRACE_MS = 3e3;
 var WAIT_DELIVERY_GRACE_MS = 15e3;
-var FORCED_COMPACT_PERCENT = 30;
 var STOPPED_ERROR = "the plugin stopped before the member conversation completed";
 var RESUME_WINDOW_MS = 24 * 60 * 60 * 1e3;
 var NOTIFY_RETRY_LIMIT = 5;
@@ -14247,17 +14294,18 @@ var MemberTaskService = class {
    * new process on this side, and it lets a model continue a conversation it
    * did not start.
    *
-   * `compress` runs the member's own compaction before the message is queued,
-   * so the next turn starts from a shortened context. It requires that
-   * conversation to be idle. Without the flag, a conversation whose context
-   * occupancy is already above {@link FORCED_COMPACT_PERCENT} is compacted
-   * anyway before the message is delivered.
+   * Before the message is queued, a conversation whose context occupancy is
+   * already above its own `compressPercent` (default
+   * {@link DEFAULT_COMPRESS_PERCENT}) is compacted first, so the next turn
+   * starts from a shortened context. The threshold is read from the
+   * conversation's stored scope; the compaction requires that conversation to
+   * be idle.
    *
    * Passing `identity` / `scope` merges the conversation's stored scope and
    * prefixes this delivery with a one-line identity note, so a conversation
    * created before the setting existed can complete it in place.
    *
-   * @param {{conversationId: string, member?: string, prompt: string, compress?: boolean, identity?: unknown, scope?: unknown, agent?: any, signal?: AbortSignal}} request send request.
+   * @param {{conversationId: string, member?: string, prompt: string, identity?: unknown, scope?: unknown, agent?: any, signal?: AbortSignal}} request send request.
    * @returns {Promise<object>} the tracked task.
    */
   async send(request) {
@@ -14282,11 +14330,8 @@ ${prompt}`;
     }
     task.lastCompaction = null;
     await this.#refreshContext(task, signal);
-    if (request.compress === true) {
-      await this.#compact(task, signal);
-    } else {
-      await this.#compactIfCrowded(task, signal);
-    }
+    const threshold = await this.#compressThreshold(task);
+    await this.#compactIfCrowded(task, signal, threshold);
     const result = await this.#waitForRuntime(
       () => this.#request(task.baseUrl, "POST", `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content: deliveredPrompt }, 3e4, signal),
       9e4,
@@ -14445,20 +14490,37 @@ ${prompt}`;
     else if (typeof task.workspace !== "string" || task.workspace.trim() === "") task.workspace = "unknown";
   }
   /**
+   * Read the compaction threshold stored for one conversation.
+   *
+   * A conversation created before the setting, or one whose scope was cleared,
+   * uses {@link DEFAULT_COMPRESS_PERCENT}. An unreadable store is treated the
+   * same way: the delivery still works with the default.
+   * @param {object} task member task.
+   * @returns {Promise<number>} percentage threshold.
+   */
+  async #compressThreshold(task) {
+    if (typeof this.service?.memberScope !== "function") return DEFAULT_COMPRESS_PERCENT;
+    const scope = await this.service.memberScope(task.conversationId).catch(() => null);
+    return effectiveCompressPercent(scope);
+  }
+  /**
    * Compact before delivery when the target conversation is already loaded.
    *
    * The occupancy is re-read from the member first: the cached figure comes
    * from the last wait, and an adopted conversation has none. A member that
    * does not answer the read with a context leaves the cached value alone, so
-   * an older member still decides on what the last wait reported.
+   * an older member still decides on what the last wait reported. The threshold
+   * comes from the conversation's scope (`compressPercent`, default 35%).
+   * "超过" is strict: exactly the threshold delivers directly.
    * @param {object} task member task.
    * @param {AbortSignal} [signal] cancellation of the sending tool call.
+   * @param {number} threshold percentage threshold for this conversation.
    * @returns {Promise<boolean>} whether a compaction was attempted.
    */
-  async #compactIfCrowded(task, signal) {
+  async #compactIfCrowded(task, signal, threshold) {
     const percent = task.context?.percent;
-    if (typeof percent !== "number" || percent <= FORCED_COMPACT_PERCENT) return false;
-    await this.#compact(task, signal, { forced: true, percent });
+    if (typeof percent !== "number" || percent <= threshold) return false;
+    await this.#compact(task, signal, { threshold, percent });
     return true;
   }
   /**
@@ -14499,15 +14561,16 @@ ${prompt}`;
    * retried as a transient failure.
    * @param {object} task member task.
    * @param {AbortSignal} [signal] cancellation of the sending tool call.
-   * @param {{forced?: boolean, percent?: number}} [options] set by the
-   *   automatic over-threshold path, which has no `compress` flag to drop.
+   * @param {{threshold: number, percent: number}} options the conversation's
+   *   threshold and the occupancy that crossed it.
    * @returns {Promise<object>} the recorded compaction.
    */
-  async #compact(task, signal, options = {}) {
-    const forced = options.forced === true;
+  async #compact(task, signal, options) {
+    const threshold = options.threshold;
+    const percent = options.percent;
     await this.#log(
       task,
-      forced ? `compacting context before delivery (forced at ${String(options.percent)}%)` : "compacting context before delivery"
+      `compacting context before delivery (over ${String(threshold)}%, observed ${String(percent)}%)`
     );
     let result;
     try {
@@ -14529,17 +14592,18 @@ ${prompt}`;
         throw new Error(`\u6210\u5458 ${task.member} \u4E0A\u5DF2\u7ECF\u6CA1\u6709\u5BF9\u8BDD ${task.conversationId}\uFF1A${message}`);
       }
       if (/unknown endpoint|not_found|unsupported|compaction_unavailable/iu.test(message)) {
-        throw new Error(forced ? `\u5BF9\u8BDD ${task.conversationId} \u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF0C\u4F46\u6210\u5458 ${task.member} \u7684 interop \u670D\u52A1\u4E0D\u652F\u6301\u4E0A\u4E0B\u6587\u538B\u7F29\uFF08\u7248\u672C\u8FC7\u65E7\uFF09\uFF1A${message}\u3002\u5148\u5347\u7EA7\u8BE5\u6210\u5458\u518D\u6295\u9012\u3002` : `\u6210\u5458 ${task.member} \u7684 interop \u670D\u52A1\u4E0D\u652F\u6301\u4E0A\u4E0B\u6587\u538B\u7F29\uFF08\u7248\u672C\u8FC7\u65E7\uFF09\uFF1A${message}\u3002\u53BB\u6389 compress \u76F4\u63A5\u6295\u9012\uFF0C\u6216\u5148\u5347\u7EA7\u8BE5\u6210\u5458\u3002`);
+        throw new Error(`\u5BF9\u8BDD ${task.conversationId} \u7684\u4E0A\u4E0B\u6587\u5360\u6BD4 ${String(percent)}% \u5DF2\u8D85\u8FC7\u538B\u7F29\u9608\u503C ${String(threshold)}%\uFF0C\u4F46\u6210\u5458 ${task.member} \u7684 interop \u670D\u52A1\u4E0D\u652F\u6301\u4E0A\u4E0B\u6587\u538B\u7F29\uFF08\u7248\u672C\u8FC7\u65E7\uFF09\uFF1A${message}\u3002\u5148\u5347\u7EA7\u8BE5\u6210\u5458\u518D\u6295\u9012\u3002`);
       }
       if (/busy|already has active work|conversation_busy|409/iu.test(message)) {
-        throw new Error(forced ? `\u5BF9\u8BDD ${task.conversationId} \u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF0C\u9700\u8981\u5148\u538B\u7F29\uFF0C\u4F46\u5B83\u8FD8\u5728\u8FD0\u884C\uFF1A${message}\u3002\u7B49 wait_member \u8FD4\u56DE state=done \u540E\u518D\u6295\u9012\u3002` : `\u5BF9\u8BDD ${task.conversationId} \u8FD8\u5728\u8FD0\u884C\uFF0C\u4E0D\u80FD\u538B\u7F29\uFF1A${message}\u3002\u7B49 wait_member \u8FD4\u56DE state=done \u540E\u518D\u6295\u9012\uFF0C\u6216\u53BB\u6389 compress\u3002`);
+        throw new Error(`\u5BF9\u8BDD ${task.conversationId} \u7684\u4E0A\u4E0B\u6587\u5360\u6BD4 ${String(percent)}% \u5DF2\u8D85\u8FC7\u538B\u7F29\u9608\u503C ${String(threshold)}%\uFF0C\u9700\u8981\u5148\u538B\u7F29\uFF0C\u4F46\u5B83\u8FD8\u5728\u8FD0\u884C\uFF1A${message}\u3002\u7B49 wait_member \u8FD4\u56DE state=done \u540E\u518D\u6295\u9012\u3002`);
       }
       throw error;
     }
     task.lastCompaction = {
       at: (/* @__PURE__ */ new Date()).toISOString(),
-      forced,
-      ...forced ? { forcedPercent: options.percent } : {},
+      forced: true,
+      forcedPercent: threshold,
+      observedPercent: percent,
       compacted: result?.compacted === true,
       summary: summaryText(result?.summary),
       shadowedCount: Number.isSafeInteger(result?.shadowedCount) ? result.shadowedCount : 0,
@@ -14976,8 +15040,65 @@ function clearMemberSessions() {
 
 // src/lib/member-context.mjs
 var MEMBER_STATUS_INTERVAL_MS = 6e4;
-var MEMBER_PUSH_DELAY_MS = 3e4;
+var MEMBER_PUSH_DELAY_MS = DEFAULT_MEMBER_IDLE_PUSH_MS;
+var PUSH_COMPACT_TIMEOUT_MS = 18e4;
 var MEMBER_STATUS_SOURCE = "mesh-member-status";
+function formatMemberPushDelay(ms) {
+  const value = Number.isFinite(ms) && ms > 0 ? Math.round(ms) : DEFAULT_MEMBER_IDLE_PUSH_MS;
+  if (value % 6e4 === 0) return `${String(value / 6e4)} \u5206\u949F`;
+  if (value >= 6e4) {
+    const minutes = Math.floor(value / 6e4);
+    const seconds = Math.round(value % 6e4 / 1e3);
+    return `${String(minutes)} \u5206 ${String(seconds)} \u79D2`;
+  }
+  return `${String(Math.round(value / 1e3))} \u79D2`;
+}
+function formatMemberPercent(value) {
+  const amount = Number.isFinite(value) ? value : DEFAULT_COMPRESS_PERCENT;
+  return `${amount >= 100 ? String(Math.round(amount)) : amount.toFixed(1).replace(/\.0$/u, "")}%`;
+}
+function measureMemberContextPercent(ctx, agent) {
+  const session = agent?.session;
+  if (session === void 0 || session === null) return null;
+  const nonNegative = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  let pressure;
+  const projections = typeof ctx?.get === "function" ? ctx.get("sessionProjections") : void 0;
+  if (typeof projections?.snapshot === "function") {
+    try {
+      pressure = projections.snapshot(session, ["contextPressure"]).values.contextPressure;
+    } catch {
+    }
+  }
+  if (pressure === void 0) {
+    const meter = typeof ctx?.get === "function" ? ctx.get("tokenMeter") : void 0;
+    if (typeof meter?.contextPressure === "function") {
+      try {
+        pressure = meter.contextPressure(session);
+      } catch {
+      }
+    }
+  }
+  if (pressure === null || typeof pressure !== "object") return null;
+  const usedTokens = nonNegative(pressure.projectedTokens) ?? nonNegative(pressure.pressureTokens);
+  const maxTokens = nonNegative(pressure.contextWindow);
+  if (usedTokens === null || maxTokens === null || maxTokens <= 0) return null;
+  return Math.round(usedTokens / maxTokens * 1e3) / 10;
+}
+async function compactMainAgent(ctx, agent) {
+  const presets = typeof ctx?.get === "function" ? ctx.get("agentPresets") : void 0;
+  const scoped = typeof presets?.serviceFor === "function" ? presets.serviceFor(agent, "compaction") : void 0;
+  const compaction = scoped ?? (typeof ctx?.get === "function" ? ctx.get("compaction") : void 0);
+  if (compaction === void 0 || compaction === null || typeof compaction.compactNow !== "function") {
+    return { ok: false, reason: "no compaction service" };
+  }
+  if (agent.status !== "idle") return { ok: false, reason: "agent is not idle" };
+  try {
+    await compaction.compactNow(agent, AbortSignal.timeout(PUSH_COMPACT_TIMEOUT_MS));
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
 function scopeForTask(task, scopes = {}) {
   const stored = scopes[String(task?.conversationId ?? "")];
   return stored !== void 0 ? memberTaskProfile({ profile: stored }) : memberTaskProfile(task);
@@ -15007,16 +15128,20 @@ function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfId = String(options.selfId ?? "");
   const selfScope = options.selfScope ?? null;
   const scopes = options.scopes ?? {};
+  const selfIdlePushMs = effectiveMemberIdlePushMs(selfScope);
+  const selfCompressPercent = effectiveCompressPercent(selfScope);
   const lines = [
     `[\u6210\u5458\u4EFB\u52A1\u72B6\u6001] \u672C\u5BF9\u8BDD\u8DDF\u8E2A ${String(list.length)} \u4E2A\u6210\u5458\u4F1A\u8BDD\uFF0C\u5176\u4E2D ${String(running.length)} \u4E2A\u8FDB\u884C\u4E2D\uFF08\u5FEB\u7167 ${new Date(at).toISOString()}\uFF09\u3002`,
-    `- \u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1A\u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${selfScope?.keep === false ? "\u5173\u95ED" : "\u5F00\u542F"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`
+    `- \u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1A\u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${selfScope?.keep === false ? "\u5173\u95ED" : "\u5F00\u542F"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u9759\u9ED8\u63A8\u9001\uFF1A${formatMemberPushDelay(selfIdlePushMs)}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(selfCompressPercent)}`
   ];
   for (const task of list) {
     const entry = describeMemberTask(task);
     const profile = scopeForTask(task, scopes);
+    const stored = scopes[String(task?.conversationId ?? "")];
+    const explicitCompress = typeof stored?.compressPercent === "number" && Number.isFinite(stored.compressPercent) ? `\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(stored.compressPercent)}` : "";
     const turn = entry.turns !== null && entry.turns > 0 ? `\u7B2C ${String(entry.turns)} \u8F6E` : "";
     lines.push(
-      `- ${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${entry.workspace}\uFF0C${entry.statusLabel}${turn === "" ? "" : `\uFF0C${turn}`}\uFF09\u8EAB\u4EFD\uFF1A${profile?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${profile?.scope ?? "\u672A\u8BBE\u7F6E"}`
+      `- ${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${entry.workspace}\uFF0C${entry.statusLabel}${turn === "" ? "" : `\uFF0C${turn}`}\uFF09\u8EAB\u4EFD\uFF1A${profile?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${profile?.scope ?? "\u672A\u8BBE\u7F6E"}${explicitCompress}`
     );
   }
   lines.push(
@@ -15036,15 +15161,19 @@ function formatMemberStatusSignature(state = {}) {
     self: {
       identity: state.selfScope?.identity ?? null,
       scope: state.selfScope?.scope ?? null,
-      keep: state.selfScope?.keep !== false
+      keep: state.selfScope?.keep !== false,
+      idlePushMs: effectiveMemberIdlePushMs(state.selfScope),
+      compressPercent: effectiveCompressPercent(state.selfScope)
     },
     tasks: tasks.map((task) => {
       const profile = scopeForTask(task, scopes);
+      const stored = scopes[String(task?.conversationId ?? "")];
       return {
         conversationId: String(task?.conversationId ?? ""),
         member: String(task?.member ?? ""),
         status: String(task?.status ?? ""),
         turns: Number.isSafeInteger(task?.turns) ? task.turns : null,
+        ...typeof stored?.compressPercent === "number" && Number.isFinite(stored.compressPercent) ? { compressPercent: stored.compressPercent } : {},
         profile: profile === null ? null : { name: profile.name, identity: profile.identity, scope: profile.scope }
       };
     })
@@ -15131,12 +15260,13 @@ function createMemberContext({
     if (tasks.length === 0 && selfScope === null) return;
     if (selfScope?.keep === false) return;
     cancelPush(sessionId);
+    const delay2 = Number.isSafeInteger(selfScope?.idlePushMs) ? selfScope.idlePushMs : pushDelayMs;
     const timer = setTimeout(() => {
       pushTimers.delete(sessionId);
       void pushSnapshot(sessionId, turn).catch((error) => {
         log(`member status push failed: ${error instanceof Error ? error.message : String(error)}`);
       });
-    }, pushDelayMs);
+    }, delay2);
     timer.unref?.();
     pushTimers.set(sessionId, timer);
   }
@@ -15158,6 +15288,26 @@ function createMemberContext({
     const signature = formatMemberStatusSignature({ selfId: sessionId, selfScope, tasks, scopes });
     if (lastPushSignature.get(sessionId) === signature) return;
     const text = formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes });
+    const threshold = effectiveCompressPercent(selfScope);
+    const beforePercent = measureMemberContextPercent(ctx, agent);
+    let compressionLine;
+    if (beforePercent !== null && beforePercent > threshold) {
+      const outcome = await compactMainAgent(ctx, agent);
+      if (closed || turns.get(sessionId) !== turn || agent.status !== "idle") {
+        log(`member status push abandoned: conversation resumed while compacting (context ${formatMemberPercent(beforePercent)}, threshold ${formatMemberPercent(threshold)})`);
+        return;
+      }
+      if (outcome.ok) {
+        const afterPercent = measureMemberContextPercent(ctx, agent);
+        compressionLine = `compressed ${formatMemberPercent(beforePercent)} -> ${afterPercent === null ? "\u672A\u6D4B" : formatMemberPercent(afterPercent)}\uFF08\u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
+      } else {
+        compressionLine = `compression skipped: ${outcome.reason}\uFF08\u4E0A\u4E0B\u6587 ${formatMemberPercent(beforePercent)}\uFF0C\u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
+      }
+    } else if (beforePercent === null) {
+      compressionLine = `context not measured\uFF08\u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
+    } else {
+      compressionLine = `no compression\uFF08\u4E0A\u4E0B\u6587 ${formatMemberPercent(beforePercent)} <= \u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
+    }
     try {
       agent.followup({
         id: randomUUID2(),
@@ -15167,7 +15317,7 @@ function createMemberContext({
       });
       lastPushSignature.set(sessionId, signature);
       lastInjection.set(sessionId, at);
-      log(`member status pushed to ${sessionId}`);
+      log(`member status pushed to ${sessionId}: ${compressionLine}`);
     } catch (error) {
       log(`member status push failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -15390,8 +15540,8 @@ function registerTools(ctx, toolsCtx, service) {
       "\u76EE\u6807\u5BF9\u8BDD\u6B63\u5728\u8FD0\u884C\u65F6\uFF0C\u6D88\u606F\u7528 steer \u76F4\u63A5\u63D2\u5165\u5F53\u524D turn\uFF0C\u4E0D\u7B49\u5B83\u7ED3\u675F\uFF1B\u7A7A\u95F2\u65F6\u6309\u666E\u901A followup \u5F00\u4E00\u8F6E\u3002",
       "\u4F1A\u8BDDid\uFF08conversationId\uFF09\u662F\u8DE8\u8FDB\u7A0B\u7684\u7EE7\u7EED\u6295\u9012\u51ED\u636E\uFF1A\u91CD\u65B0\u542F\u52A8\u540E\u3001\u6216\u4E0D\u662F\u672C\u673A\u53D1\u8D77\u7684\u5BF9\u8BDD\uFF0C",
       "\u53EA\u8981\u77E5\u9053\u4F1A\u8BDDid\uFF0C\u914D\u4E0A member \u5C31\u80FD\u7EE7\u7EED\uFF1B\u672C\u673A\u5DF2\u8DDF\u8E2A\u8BE5\u5BF9\u8BDD\u65F6 member \u53EF\u4EE5\u7701\u7565\u3002",
-      "`compress: true`\uFF1A\u7EE7\u7EED\u6295\u9012\u524D\u5148\u5728\u6210\u5458 B \u4E0A\u538B\u7F29\u8BE5\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\uFF08\u8981\u6C42\u5BF9\u8BDD\u5F53\u524D\u7A7A\u95F2\uFF09\uFF1B\u65B0\u5EFA\u5BF9\u8BDD\u4E0D\u9002\u7528\u3002",
-      `\u4E0D\u4F20 compress \u65F6\uFF0C\u5982\u679C\u76EE\u6807\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u7ECF\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF0C\u6295\u9012\u524D\u4F1A\u81EA\u52A8\u5F3A\u5236\u538B\u7F29\uFF08\u540C\u6837\u8981\u6C42\u5BF9\u8BDD\u7A7A\u95F2\uFF09\u3002`,
+      "\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u65F6\uFF0C\u6295\u9012\u524D\u4F1A\u6309\u8BE5\u4F1A\u8BDD\u7684\u538B\u7F29\u9608\u503C\uFF08`set_member_scope` \u7684 `compressPercent`\uFF0C\u9ED8\u8BA4 35%\uFF09\u68C0\u67E5\u4E0A\u4E0B\u6587\u5360\u6BD4\uFF1A",
+      "\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u8BA9\u6210\u5458\u538B\u7F29\u4E0A\u4E0B\u6587\u518D\u6295\u9012\uFF08\u8981\u6C42\u5BF9\u8BDD\u7A7A\u95F2\uFF09\uFF1B\u4E0D\u8D85\u8FC7\u5C31\u76F4\u63A5\u6295\u9012\u3002\u538B\u7F29\u9608\u503C\u53EA\u6309\u4F1A\u8BDD\u8BBE\u7F6E\uFF0C\u4E0D\u63A5\u53D7\u6BCF\u6B21\u8C03\u7528\u5355\u72EC\u6307\u5B9A\u3002",
       "`force: true`\uFF1A\u53EA\u5728\u65B0\u5EFA\u5BF9\u8BDD\u65F6\u751F\u6548\u3002\u76EE\u6807\u5DE5\u4F5C\u533A\u76EE\u5F55\u5B58\u5728 .git \u4E14\u5DF2\u6709\u8FDB\u884C\u4E2D\u7684\u5BF9\u8BDD\u65F6\uFF0C\u521B\u5EFA\u4F1A\u8FD4\u56DE",
       "409 workspace_busy_git\uFF08\u5217\u51FA\u5DE5\u4F5C\u533A\u3001\u76EE\u5F55\u548C\u8FDB\u884C\u4E2D\u7684\u4F1A\u8BDDid\uFF09\uFF1B\u786E\u8BA4\u8981\u5728\u8FD9\u4E2A\u76EE\u5F55\u5E76\u53D1\u65F6\u52A0 force: true",
       "\u91CD\u65B0\u8C03\u7528 call_member\u3002\u6362\u4E2A\u5DE5\u4F5C\u533A\u901A\u5E38\u66F4\u5B89\u5168\u3002\u7EE7\u7EED\u5DF2\u6709 conversationId \u4E0D\u4F1A\u89E6\u53D1\u8FD9\u4E2A\u62E6\u622A\u3002",
@@ -15418,7 +15568,6 @@ function registerTools(ctx, toolsCtx, service) {
         prompt: { type: "string", description: "\u53D1\u7ED9\u6210\u5458\u7684\u6D88\u606F\uFF1A\u65B0\u5EFA\u5BF9\u8BDD\u65F6\u662F\u521D\u59CB\u4EFB\u52A1\uFF0C\u7EE7\u7EED\u6295\u9012\u65F6\u662F\u8FD9\u4E00\u8F6E\u7684\u5185\u5BB9\u3002" },
         member: { type: "string", description: "\u6210\u5458 id\u3001\u540D\u79F0\u3001VPN IP \u6216 http(s) URL\u3002\u65B0\u5EFA\u5BF9\u8BDD\u65F6\u5FC5\u586B\uFF1B\u7EE7\u7EED\u6295\u9012\u4E14\u672C\u673A\u5DF2\u8DDF\u8E2A\u8BE5\u5BF9\u8BDD\u65F6\u53EF\u7701\u7565\u3002" },
         conversationId: { type: "string", description: "\u8981\u7EE7\u7EED\u7684\u4F1A\u8BDDid\uFF08call_member / wait_member \u8FD4\u56DE\uFF09\u3002\u7701\u7565\u5C31\u65B0\u5EFA\u5BF9\u8BDD\u3002" },
-        compress: { type: "boolean", description: "\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u65F6\uFF0C\u6295\u9012\u524D\u5148\u8BA9\u6210\u5458\u538B\u7F29\u8BE5\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\uFF1B\u8981\u6C42\u5BF9\u8BDD\u7A7A\u95F2\u3002\u7701\u7565\u65F6\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7 30% \u4F1A\u81EA\u52A8\u538B\u7F29\u3002" },
         cwd: { type: "string", description: "\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u6210\u5458 B \u4E0A\u7684\u5DE5\u4F5C\u76EE\u5F55\uFF08\u7EDD\u5BF9\u8DEF\u5F84\uFF0C\u53EF\u7A7A\uFF09\u3002" },
         workspace: { type: "string", description: "\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u6210\u5458 B \u4E0A\u7684\u4EFB\u52A1\u5DE5\u4F5C\u533A\u540D\u79F0\uFF1B\u5B9E\u9645\u76EE\u5F55\u56FA\u5B9A\u4E3A\u6210\u5458\u672C\u673A\u7684 ~/.dsh/workspaces/<name>\u3002\u548C cwd \u4E8C\u9009\u4E00\u3002" },
         force: { type: "boolean", description: "\u53EA\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u76EE\u6807\u5DE5\u4F5C\u533A\u76EE\u5F55\u6709 .git \u4E14\u5DF2\u6709\u8FDB\u884C\u4E2D\u7684\u5BF9\u8BDD\u65F6\u4ECD\u7136\u521B\u5EFA\uFF08\u786E\u8BA4\u6587\u4EF6/git \u7ADE\u4E89\u98CE\u9669\uFF09\u3002\u7EE7\u7EED\u6295\u9012\u4E0D\u63A5\u53D7\u3002" },
@@ -15441,9 +15590,6 @@ function registerTools(ctx, toolsCtx, service) {
       const conversationId = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
       const originSessionId = originSessionOf(exec.agent);
       if (conversationId === "") {
-        if (args.compress === true) {
-          throw new Error("compress only applies when continuing an existing conversation: a new conversation has no context to compress");
-        }
         if (typeof args.member !== "string" || args.member.trim() === "") {
           throw new Error("member is required to start a new conversation");
         }
@@ -15500,7 +15646,6 @@ function registerTools(ctx, toolsCtx, service) {
         conversationId,
         member: args.member,
         prompt: args.prompt,
-        compress: args.compress === true,
         identity: args.identity,
         scope: args.scope,
         agent: exec.agent,
@@ -15508,9 +15653,8 @@ function registerTools(ctx, toolsCtx, service) {
       });
       const data = memberTaskData(task, memberTasks);
       const compaction = task.lastCompaction;
-      const forced = compaction?.forced === true;
-      const forcedLine = forced ? compaction.compacted === true ? `\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF08${formatOneDecimal(compaction.forcedPercent)}%\uFF09\uFF0C\u6295\u9012\u524D\u5DF2\u5F3A\u5236\u538B\u7F29\uFF1A\u66FF\u6362 ${String(compaction.shadowedCount)} \u9879\u5386\u53F2\uFF08\u7EA6 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens\uFF09\u3002` : `\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF08${formatOneDecimal(compaction.forcedPercent)}%\uFF09\uFF0C\u6295\u9012\u524D\u5DF2\u5C1D\u8BD5\u5F3A\u5236\u538B\u7F29\uFF0C\u4F46\u6CA1\u6709\u53EF\u538B\u7F29\u7684\u5386\u53F2\u3002` : "";
-      const compactionLine = forcedLine !== "" ? forcedLine : args.compress === true ? compaction?.compacted === true ? `\u4E0A\u4E0B\u6587\u538B\u7F29\uFF1A\u5DF2\u538B\u7F29\uFF0C\u66FF\u6362 ${String(compaction.shadowedCount)} \u9879\u5386\u53F2\uFF08\u7EA6 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens\uFF09\u3002` : "\u4E0A\u4E0B\u6587\u538B\u7F29\uFF1A\u6CA1\u6709\u53EF\u538B\u7F29\u7684\u5386\u53F2\u3002" : "";
+      const observedPercent = Number.isFinite(compaction?.observedPercent) ? formatOneDecimal(compaction.observedPercent) : Number.isFinite(compaction?.forcedPercent) ? formatOneDecimal(compaction.forcedPercent) : "?";
+      const forcedLine = compaction?.forced === true ? compaction.compacted === true ? `\u4E0A\u4E0B\u6587\u5360\u6BD4 ${observedPercent}% \u5DF2\u8D85\u8FC7\u538B\u7F29\u9608\u503C ${formatOneDecimal(compaction.forcedPercent)}%\uFF0C\u6295\u9012\u524D\u5DF2\u81EA\u52A8\u538B\u7F29\uFF1A\u66FF\u6362 ${String(compaction.shadowedCount)} \u9879\u5386\u53F2\uFF08\u7EA6 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens\uFF09\u3002` : `\u4E0A\u4E0B\u6587\u5360\u6BD4 ${observedPercent}% \u5DF2\u8D85\u8FC7\u538B\u7F29\u9608\u503C ${formatOneDecimal(compaction.forcedPercent)}%\uFF0C\u6295\u9012\u524D\u5DF2\u5C1D\u8BD5\u81EA\u52A8\u538B\u7F29\uFF0C\u4F46\u6CA1\u6709\u53EF\u538B\u7F29\u7684\u5386\u53F2\u3002` : "";
       const inFlight = await memberTasks.inFlightForOrigin(originSessionId).catch(() => []);
       const parallelHint = formatParallelWaitHint(inFlight, task);
       const conversationBlock = await originConversationBlock(memberTasks, originSessionId, task.conversationId);
@@ -15523,7 +15667,7 @@ function registerTools(ctx, toolsCtx, service) {
           formatTaskProfileMissingHint(task),
           `\u4F1A\u8BDDid\uFF1A${task.conversationId}`,
           deliveryLine,
-          compactionLine,
+          forcedLine,
           formatContextLine(task.context),
           parallelHint !== "" ? parallelHint : formatWaitHint("\u7B49\u5F85\u56DE\u590D", task.conversationId),
           "\u4E0D\u518D\u7B49\u5F85\u4E5F\u6CA1\u5173\u7CFB\uFF1A\u5B8C\u6210\u540E 3 \u79D2\u5185\u6CA1\u6709 wait_member \u53D6\u8D70\u7ED3\u679C\uFF0C\u63D2\u4EF6\u53EA\u6295\u9012\u5C1A\u672A\u53D6\u8D70\u7684\u56DE\u590D\uFF0C\u5DF2\u53D6\u8D70\u7684\u4E0D\u91CD\u590D\u3002",
@@ -15541,14 +15685,17 @@ function registerTools(ctx, toolsCtx, service) {
   const setMemberScopeDefinition = {
     name: "set_member_scope",
     description: [
-      "\u8BBE\u7F6E\u4E00\u4E2A\u6210\u5458\u4F1A\u8BDD\u6216\u5F53\u524D\u4E3B\u5BF9\u8BDD\uFF08\u81EA\u8EAB\uFF09\u7684\u8EAB\u4EFD\u548C\u5DE5\u4F5C\u8303\u56F4\u3002",
+      "\u8BBE\u7F6E\u4E00\u4E2A\u6210\u5458\u4F1A\u8BDD\u6216\u5F53\u524D\u4E3B\u5BF9\u8BDD\uFF08\u81EA\u8EAB\uFF09\u7684\u8EAB\u4EFD\u3001\u5DE5\u4F5C\u8303\u56F4\uFF0C\u4EE5\u53CA\u72B6\u6001\u63A8\u9001\u548C\u81EA\u52A8\u538B\u7F29\u53C2\u6570\u3002",
       "",
       "`conversationId` \u7701\u7565\u3001`self`\u3001`local` \u6216\u7B49\u4E8E\u5F53\u524D\u4F1A\u8BDD id \u65F6\u8BBE\u7F6E\u201C\u81EA\u8EAB\u201D\uFF1B\u5176\u4ED6\u503C\u4F5C\u4E3A\u6210\u5458\u4F1A\u8BDD id\u3002",
       "`identity` / `scope` \u662F\u53EF\u9009\u7684\u5B57\u7B26\u4E32\uFF0C\u53EA\u4F20\u8981\u6539\u7684\u5B57\u6BB5\uFF1B\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002",
-      "identity \u6700\u957F 40 \u5B57\u7B26\uFF0Cscope \u6700\u957F 120 \u5B57\u7B26\uFF1B\u9996\u6B21\u7ED9\u81EA\u8EAB\u8BBE\u7F6E\u4E14\u672A\u4F20 keep \u65F6 keep=true\u3002",
-      "`keep` \u9ED8\u8BA4 true\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1Aturn \u7ED3\u675F\u540E\u82E5\u4E3A true\uFF0C\u4E3B\u5BF9\u8BDD\u7A7A\u95F2 30 \u79D2\u65F6\u4F1A\u4E3B\u52A8\u6536\u5230\u6210\u5458\u72B6\u6001\u5FEB\u7167\uFF1B",
-      "\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6 keep \u88AB\u5FFD\u7565\u3002",
-      "\u81F3\u5C11\u63D0\u4F9B identity\u3001scope\u3001keep \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity \u6216 scope \u4E4B\u4E00\u3002",
+      "identity \u6700\u957F 40 \u5B57\u7B26\uFF0Cscope \u6700\u957F 120 \u5B57\u7B26\u3002",
+      "`keep` \u9ED8\u8BA4 true\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1Aturn \u7ED3\u675F\u540E\u82E5\u4E3A true\uFF0C\u4E3B\u5BF9\u8BDD\u7A7A\u95F2\u65F6\u4F1A\u4E3B\u52A8\u6536\u5230\u6210\u5458\u72B6\u6001\u5FEB\u7167\u3002",
+      `\`idlePushMs\`\uFF1A\u9759\u9ED8\u63A8\u9001\u5EF6\u8FDF\uFF08\u6574\u6570\u6BEB\u79D2\uFF0C${String(MEMBER_IDLE_PUSH_MIN_MS)}\u2013${String(MEMBER_IDLE_PUSH_MAX_MS)}\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_MEMBER_IDLE_PUSH_MS)} \u5373 5 \u5206\u949F\uFF09\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002`,
+      `\`compressPercent\`\uFF1A\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u6570\u5B57 1\u2013100\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_COMPRESS_PERCENT)}\uFF09\uFF1B\u4E3B\u5BF9\u8BDD\u548C\u6210\u5458\u4F1A\u8BDD\u90FD\u751F\u6548\uFF1A\u4E3B\u5BF9\u8BDD\u63A8\u9001\u5FEB\u7167\u524D\u3001\u6216\u6210\u5458\u4F1A\u8BDD\u4E0B\u4E00\u6B21\u6295\u9012\u524D\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u538B\u7F29\u3002`,
+      "\u9996\u6B21\u7ED9\u81EA\u8EAB\u8BBE\u7F6E identity/scope \u4E14\u672A\u4F20 keep \u65F6 keep \u9ED8\u8BA4\u5F00\u542F\uFF1B\u5DF2\u6709 keep=false \u4E0D\u4F1A\u88AB\u91CD\u7F6E\u3002",
+      "\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6 keep \u548C idlePushMs \u88AB\u5FFD\u7565\uFF0C\u8FD4\u56DE\u6587\u5B57\u4F1A\u8BF4\u660E\u3002",
+      "\u81F3\u5C11\u63D0\u4F9B identity\u3001scope\u3001keep\u3001idlePushMs\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001scope \u6216 compressPercent \u4E4B\u4E00\u3002",
       "\u6210\u5458\u4F1A\u8BDD\u53EF\u4EE5\u672A\u88AB\u672C\u673A\u8DDF\u8E2A\uFF0C\u8BBE\u7F6E\u4ECD\u4F1A\u4FDD\u5B58\uFF0C\u53EA\u662F\u4E0D\u4F1A\u540C\u6B65\u4EFB\u52A1\u5FEB\u7167\u3002",
       "\u8FD9\u4E2A\u5DE5\u5177\u53EA\u4FDD\u5B58\u8BBE\u7F6E\uFF0C\u4E0D\u7ED9\u6210\u5458\u4F1A\u8BDD\u53D1\u6D88\u606F\u3001\u4E0D\u81EA\u52A8\u52A0\u6295\u9012\u524D\u7F00\uFF1B\u968F\u5BF9\u8BDD\u4E00\u8D77\u8BBE\u7F6E/\u66F4\u65B0\u7528 call_member \u7684 identity/scope \u53C2\u6570\u3002"
     ].join("\n"),
@@ -15570,6 +15717,18 @@ function registerTools(ctx, toolsCtx, service) {
         keep: {
           type: "boolean",
           description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 true\uFF1B\u63A7\u5236\u4E3B\u5BF9\u8BDD\u7A7A\u95F2\u540E\u662F\u5426\u4E3B\u52A8\u63A8\u9001\u6210\u5458\u72B6\u6001\u5FEB\u7167\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
+        },
+        idlePushMs: {
+          type: "integer",
+          minimum: MEMBER_IDLE_PUSH_MIN_MS,
+          maximum: MEMBER_IDLE_PUSH_MAX_MS,
+          description: "\u4E3B\u5BF9\u8BDD\u9759\u9ED8\u63A8\u9001\u5EF6\u8FDF\uFF08\u6BEB\u79D2\uFF0C\u9ED8\u8BA4 300000 = 5 \u5206\u949F\uFF09\uFF1B\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
+        },
+        compressPercent: {
+          type: "number",
+          minimum: 1,
+          maximum: 100,
+          description: "\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u767E\u5206\u6BD4\uFF0C\u9ED8\u8BA4 35\uFF09\uFF1B\u4E3B\u5BF9\u8BDD\u548C\u6210\u5458\u4F1A\u8BDD\u90FD\u751F\u6548\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u8BE5\u503C\u624D\u538B\u7F29\u3002"
         }
       },
       additionalProperties: false
@@ -15589,20 +15748,24 @@ function registerTools(ctx, toolsCtx, service) {
       const hasIdentity = args.identity !== void 0;
       const hasScope = args.scope !== void 0;
       const hasKeep = args.keep !== void 0;
-      if (!hasIdentity && !hasScope && !hasKeep) {
-        throw new Error("identity, scope, or keep is required");
+      const hasIdlePushMs = args.idlePushMs !== void 0;
+      const hasCompressPercent = args.compressPercent !== void 0;
+      if (!hasIdentity && !hasScope && !hasKeep && !hasIdlePushMs && !hasCompressPercent) {
+        throw new Error("identity, scope, keep, idlePushMs, or compressPercent is required");
       }
       if (isSelf && selfId === "") throw new Error("cannot set the current session scope: no current session");
-      if (!isSelf && !hasIdentity && !hasScope) {
-        throw new Error("keep only applies to the current session; set identity or scope for a member conversation");
+      if (!isSelf && !hasIdentity && !hasScope && !hasCompressPercent) {
+        throw new Error("keep and idlePushMs only apply to the current session; set identity, scope, or compressPercent for a member conversation");
       }
       const patch = {
         ...hasIdentity ? { identity: args.identity } : {},
         ...hasScope ? { scope: args.scope } : {},
-        ...isSelf && hasKeep ? { keep: args.keep } : {}
+        ...isSelf && hasKeep ? { keep: args.keep } : {},
+        ...isSelf && hasIdlePushMs ? { idlePushMs: args.idlePushMs } : {},
+        ...hasCompressPercent ? { compressPercent: args.compressPercent } : {}
       };
       normalizeMemberScopePatch(patch);
-      if (isSelf && !hasKeep) {
+      if (isSelf && !hasKeep && (hasIdentity || hasScope)) {
         const existing = await service.memberScope(selfId);
         if (existing === null || existing.keep === void 0) patch.keep = true;
       }
@@ -15610,12 +15773,18 @@ function registerTools(ctx, toolsCtx, service) {
       const saved = await service.setMemberScope(targetId, patch);
       const scope = saved.scope ?? null;
       const tracked = isSelf ? false : await memberTasks.syncTaskScope(targetId, scope);
+      const idleDelay = effectiveMemberIdlePushMs(scope);
+      const compressThreshold = effectiveCompressPercent(scope);
       const lines = [
-        isSelf ? `\u5DF2\u8BBE\u7F6E\u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId}\uFF09\u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u3002` : `\u5DF2\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD ${targetId} \u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u3002`,
+        isSelf ? `\u5DF2\u8BBE\u7F6E\u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId}\uFF09\u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u4E0E\u63A8\u9001\u914D\u7F6E\u3002` : `\u5DF2\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD ${targetId} \u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u4E0E\u538B\u7F29\u9608\u503C\u3002`,
         `\u8EAB\u4EFD\uFF1A${scope?.identity ?? "\u672A\u8BBE\u7F6E"}`,
         `\u5DE5\u4F5C\u8303\u56F4\uFF1A${scope?.scope ?? "\u672A\u8BBE\u7F6E"}`,
-        ...isSelf ? [`\u4FDD\u6301\u76EE\u6807\uFF1A${scope?.keep === false ? "\u5173\u95ED" : "\u5F00\u542F"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`] : [],
-        ...!isSelf && hasKeep ? ["keep \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
+        ...isSelf ? [
+          `\u4FDD\u6301\u76EE\u6807\uFF1A${scope?.keep === false ? "\u5173\u95ED" : "\u5F00\u542F"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
+          `\u9759\u9ED8\u63A8\u9001\uFF1A${formatMemberPushDelay(idleDelay)}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
+          `\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%\uFF08\u4E3B\u5BF9\u8BDD\u63A8\u9001\u524D\u548C\u6210\u5458\u4F1A\u8BDD\u6295\u9012\u524D\u751F\u6548\uFF09`
+        ] : [`\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%\uFF08\u6295\u9012\u524D\u8D85\u8FC7\u8BE5\u5360\u6BD4\u81EA\u52A8\u538B\u7F29\uFF09`],
+        ...!isSelf && (hasKeep || hasIdlePushMs) ? ["keep / idlePushMs \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...!isSelf && !tracked ? ["\u672C\u673A\u672A\u8DDF\u8E2A\u8BE5\u4F1A\u8BDD\uFF0C\u53EA\u4FDD\u5B58\u8BBE\u7F6E\u3002"] : []
       ];
       return {
@@ -15626,8 +15795,11 @@ function registerTools(ctx, toolsCtx, service) {
           conversationId: targetId,
           self: isSelf,
           scope,
+          idlePushMs: idleDelay,
+          compressPercent: compressThreshold,
           tracked,
-          ignoredKeep: !isSelf && hasKeep
+          ignoredKeep: !isSelf && hasKeep,
+          ignoredIdlePushMs: !isSelf && hasIdlePushMs
         }
       };
     }
@@ -15651,7 +15823,7 @@ function registerTools(ctx, toolsCtx, service) {
       "\u63D2\u4EF6\u53EA\u628A\u5C1A\u672A\u53D6\u8D70\u7684\u56DE\u590D\u6295\u9012\u56DE\u53D1\u8D77\u5BF9\u8BDD\uFF1B\u5DF2\u7ECF\u53D6\u8D70\u7684\u7ED3\u679C\uFF08\u5305\u62EC\u672C\u8F6E\u6587\u672C\uFF09\u4E0D\u4F1A\u91CD\u590D\u6295\u9012\u3002",
       "\u53D1\u8D77\u5BF9\u8BDD\u5F53\u65F6\u6B63\u5728\u6267\u884C turn \u65F6\uFF0C\u8FD9\u6761\u7ED3\u679C\u4F1A\u76F4\u63A5\u63D2\u5165\u5F53\u524D turn\uFF08\u4E0D\u7B49 turn \u7ED3\u675F\uFF09\u3002",
       "state=done \u65F6\u53EF\u4EE5\u7528\u8FD4\u56DE\u7684\u4F1A\u8BDDid\u7EE7\u7EED\u6295\u9012\uFF1Acall_member { conversationId, prompt }\uFF1B",
-      '\u4E0A\u4E0B\u6587\u5360\u7528\u8D85\u8FC7 20% \u65F6\u4F1A\u5EFA\u8BAE\u4E0B\u6B21\u6295\u9012\u52A0 "compress": true\uFF0C\u5148\u538B\u7F29\u518D\u6295\u9012\u3002',
+      "\u7ED3\u679C\u91CC\u4F1A\u663E\u793A\u76EE\u6807\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\uFF1B\u8D85\u8FC7\u8BE5\u4F1A\u8BDD\u7684\u538B\u7F29\u9608\u503C\u65F6\uFF0C\u4E0B\u6B21 call_member \u6295\u9012\u524D\u4F1A\u81EA\u52A8\u538B\u7F29",
       "\u6BCF\u6B21\u8C03\u7528\u6709\u4E0A\u9650\uFF08\u9ED8\u8BA4 30000\uFF0C\u6700\u5927 300000 \u6BEB\u79D2\uFF09\uFF0C\u4E0D\u4F1A\u65E0\u9650\u963B\u585E\uFF1B\u7528\u6237\u505C\u6B62\u5F53\u524D\u5BF9\u8BDD\u4F1A\u4E2D\u6B62\u672C\u6B21\u7B49\u5F85\u3002"
     ].join("\n"),
     parameters: {
@@ -15734,7 +15906,7 @@ function registerTools(ctx, toolsCtx, service) {
         const turn2 = Number.isSafeInteger(task2.turns) && task2.turns > 0 ? `\u7B2C ${String(task2.turns)} \u8F6E` : "";
         const where2 = `${task2.member}\uFF08${task2.memberIp}\uFF09`;
         const contextLine = formatContextLine(task2.context);
-        const advice = formatCompactionAdvice(task2.context);
+        const advice = formatCompactionAdvice(task2.context, await compressThresholdFor(service, task2.conversationId));
         if (!result2.done && result2.state === "progress") {
           return {
             ok: true,
@@ -15852,7 +16024,7 @@ ${replyText}` : "",
             `\u4F1A\u8BDDid\uFF1A${task.conversationId}`,
             `\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\uFF1Acall_member { "member": ${JSON.stringify(String(task.member))}, "conversationId": ${JSON.stringify(String(task.conversationId))}, "prompt": "..." }`,
             formatContextLine(task.context),
-            formatCompactionAdvice(task.context),
+            formatCompactionAdvice(task.context, await compressThresholdFor(service, task.conversationId)),
             "\u7ED3\u679C\uFF1A",
             terminal.text !== "" ? terminal.text : terminal.alreadyDelivered ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7531\u5B8C\u6210\u6D88\u606F\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : terminal.alreadyReturned ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7ECF\u7531\u5148\u524D\u7684 wait_member \u8FD4\u56DE\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
             ...remainingHint,
@@ -16084,7 +16256,6 @@ function formatTaskProfileMissingHint(task) {
   if (memberTaskProfile(task) !== null) return "";
   return "\u8BE5\u4F1A\u8BDD\u8FD8\u6CA1\u6709\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\uFF1A\u4E0B\u6B21 call_member \u5E26 identity \u548C scope \u53C2\u6570\uFF0C\u6216\u7528 set_member_scope \u8BBE\u7F6E\u3002";
 }
-var CONTEXT_COMPACT_THRESHOLD = 20;
 var MAX_FANOUT_CONVERSATIONS = 20;
 function formatTokens(value) {
   const amount = Number(value);
@@ -16289,11 +16460,16 @@ function truncateText(text, limit) {
   const value = String(text ?? "");
   return value.length <= limit ? value : `${value.slice(0, limit)}\u2026`;
 }
-function formatCompactionAdvice(context) {
+async function compressThresholdFor(service, conversationId) {
+  if (typeof service?.memberScope !== "function") return DEFAULT_COMPRESS_PERCENT;
+  const scope = await service.memberScope(conversationId).catch(() => null);
+  return effectiveCompressPercent(scope);
+}
+function formatCompactionAdvice(context, threshold = DEFAULT_COMPRESS_PERCENT) {
   if (context === null || typeof context !== "object") return "";
   const percent = Number.isFinite(context.percent) ? context.percent : null;
-  if (percent === null || percent <= CONTEXT_COMPACT_THRESHOLD) return "";
-  return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\u5DF2\u7528 ${formatOneDecimal(percent)}%\uFF0C\u8D85\u8FC7 ${String(CONTEXT_COMPACT_THRESHOLD)}%\uFF1A\u4E0B\u6B21\u6295\u9012\u65F6\u5EFA\u8BAE\u52A0 "compress": true\uFF1B\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}% \u65F6\u6295\u9012\u524D\u4F1A\u81EA\u52A8\u5F3A\u5236\u538B\u7F29\u3002`;
+  if (percent === null || percent <= threshold) return "";
+  return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\u5DF2\u7528 ${formatOneDecimal(percent)}%\uFF0C\u8D85\u8FC7\u672C\u4F1A\u8BDD\u538B\u7F29\u9608\u503C ${formatOneDecimal(threshold)}%\uFF1A\u4E0B\u6B21 call_member \u6295\u9012\u524D\u4F1A\u81EA\u52A8\u538B\u7F29\u3002`;
 }
 function formatBuild(job) {
   const lines = [

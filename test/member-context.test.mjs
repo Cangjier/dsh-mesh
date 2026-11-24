@@ -29,7 +29,7 @@ function taskService(tasks) {
 
 /**
  * Build one context harness.
- * @param {{tasks?: object[], sessionId?: string, now?: () => number, memberTasks?: object}} [options] knobs.
+ * @param {{tasks?: object[], sessionId?: string, now?: () => number, memberTasks?: object, services?: Record<string, any>, scopes?: Record<string, object>, pushDelayMs?: number}} [options] knobs.
  * @returns {object} harness.
  */
 function harness(options = {}) {
@@ -46,6 +46,7 @@ function harness(options = {}) {
   }
   const scopes = options.scopes ?? {}
   const service = options.service ?? { async memberScopes() { return scopes } }
+  const services = options.services ?? {}
   const ctx = {
     on(name, handler) {
       handlers.set(name, handler)
@@ -55,7 +56,7 @@ function harness(options = {}) {
     },
     get(name) {
       if (name === 'agents') return { get: id => (id === sessionId ? agent : undefined) }
-      return undefined
+      return services[name]
     },
   }
   const memberTasks = options.memberTasks ?? taskService(options.tasks ?? [])
@@ -257,19 +258,36 @@ test('an old conversation without a profile snapshot is reported as missing', ()
   assert.equal(text.match(/下次 call_member 带 identity 和 scope 参数/gu)?.length, 1)
 })
 
-test('the injection interval is 60 seconds and the push delay is 30 seconds', () => {
+test('the injection interval is 60 seconds and the default push delay is 5 minutes', () => {
   assert.equal(MEMBER_STATUS_INTERVAL_MS, 60_000)
-  assert.equal(MEMBER_PUSH_DELAY_MS, 30_000)
+  assert.equal(MEMBER_PUSH_DELAY_MS, 300_000)
 })
 
-test('a snapshot shows the self identity, work scope and keep state', () => {
+test('a snapshot shows the self identity, work scope, keep state and effective settings', () => {
   const text = formatMemberStatusSnapshot([], {
     now: 1_000_000,
     selfId: 'session-a',
-    selfScope: { identity: '网关', scope: '成员发现', keep: false },
+    selfScope: { identity: '网关', scope: '成员发现', keep: false, idlePushMs: 30_000, compressPercent: 12.5 },
   })
-  assert.match(text, /自身（会话 session-a）：身份：网关；工作范围：成员发现；保持目标：关闭（只对主对话生效）/u)
+  assert.match(text, /自身（会话 session-a）：身份：网关；工作范围：成员发现；保持目标：关闭（只对主对话生效）；静默推送：30 秒（只对主对话生效）；压缩阈值：12\.5%/u)
   assert.doesNotMatch(text, /还没有身份\/工作范围/u)
+})
+
+test('a snapshot shows the default 5-minute push delay and 35% threshold', () => {
+  const text = formatMemberStatusSnapshot([], { now: 1_000_000, selfId: 'session-a' })
+  assert.match(text, /静默推送：5 分钟（只对主对话生效）；压缩阈值：35%/u)
+})
+
+test('a member line only shows an explicitly configured compression threshold', () => {
+  const text = formatMemberStatusSnapshot([
+    { ...running, conversationId: 'c1' },
+    { ...settled, conversationId: 'c2' },
+  ], {
+    now: 1_000_000,
+    scopes: { c1: { compressPercent: 10 } },
+  })
+  assert.match(text, /c1（B 10\.66\.66\.2，工作区 dsh-mesh，进行中，第 2 轮）身份：未设置；工作范围：未设置；压缩阈值：10%/u)
+  assert.doesNotMatch(text, /c2（B[^\n]*压缩阈值/u, 'the default 35% is not repeated on every member line')
 })
 
 test('a snapshot asks for the self scope and marks missing fields', () => {
@@ -319,21 +337,30 @@ test('a main turn end pushes the snapshot after the quiet delay', async () => {
   }
 })
 
-test('the same snapshot signature is not pushed twice', async () => {
+test('the same snapshot signature is not pushed twice and pays for no compaction', async () => {
+  let compactions = 0
   const h = harness({
     tasks: [running],
-    scopes: { 'session-a': { identity: '网关', scope: '成员发现', keep: true } },
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', keep: true, compressPercent: 35 } },
     pushDelayMs: 15,
+    services: {
+      sessionProjections: projectionsAt(60_000),
+      compaction: { async compactNow() { compactions += 1 } },
+    },
   })
   try {
     h.emit('turn/start', { turn: 1 })
     h.emit('turn/end', { turn: 1 })
     await sleep(80)
     assert.equal(h.followups.length, 1)
+    assert.equal(compactions, 1)
+    // Same state, new turn: the signature is checked before measuring, so the
+    // over-threshold context must not trigger a second compactNow.
     h.emit('turn/start', { turn: 2 })
     h.emit('turn/end', { turn: 2 })
     await sleep(80)
     assert.equal(h.followups.length, 1, 'unchanged content must not repeat')
+    assert.equal(compactions, 1, 'an unchanged snapshot must not compact again')
   } finally {
     h.context.dispose()
   }
@@ -420,6 +447,126 @@ test('a conversation with neither tasks nor a self scope does not schedule a pus
     h.emit('turn/end', { turn: 1 })
     await sleep(80)
     assert.equal(h.followups.length, 0)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('a configured idlePushMs replaces the default push delay', async () => {
+  const h = harness({
+    tasks: [running],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', keep: true, idlePushMs: 1_000 } },
+  })
+  try {
+    h.emit('turn/start', { turn: 1 })
+    h.emit('turn/end', { turn: 1 })
+    await sleep(300)
+    assert.equal(h.followups.length, 0, '1 second has not passed yet')
+    await sleep(900)
+    assert.equal(h.followups.length, 1)
+    assert.match(h.followups[0].content[0].text, /静默推送：1 秒（只对主对话生效）/u)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+/** Context projection service reporting one fixed occupancy. */
+function projectionsAt(usedTokens, contextWindow = 100_000) {
+  return {
+    snapshot() {
+      return { values: { contextPressure: { projectedTokens: usedTokens, contextWindow } } }
+    },
+  }
+}
+
+test('a status push compacts the main conversation when it is over the threshold', async () => {
+  let compactions = 0
+  const h = harness({
+    tasks: [running],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', keep: true, compressPercent: 35 } },
+    pushDelayMs: 15,
+    services: {
+      sessionProjections: projectionsAt(50_000),
+      compaction: { async compactNow() { compactions += 1 } },
+    },
+  })
+  try {
+    h.emit('turn/start', { turn: 1 })
+    h.emit('turn/end', { turn: 1 })
+    await sleep(120)
+    assert.equal(compactions, 1, 'over 35% must compact before the followup')
+    assert.equal(h.followups.length, 1)
+    assert.equal(h.logs.some(line => /compressed 50% -> 50%（阈值 35%）/u.test(line)), true)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('a status push below the threshold does not compact', async () => {
+  let compactions = 0
+  const h = harness({
+    tasks: [running],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', keep: true, compressPercent: 35 } },
+    pushDelayMs: 15,
+    services: {
+      sessionProjections: projectionsAt(20_000),
+      compaction: { async compactNow() { compactions += 1 } },
+    },
+  })
+  try {
+    h.emit('turn/start', { turn: 1 })
+    h.emit('turn/end', { turn: 1 })
+    await sleep(120)
+    assert.equal(compactions, 0)
+    assert.equal(h.followups.length, 1)
+    assert.equal(h.logs.some(line => /no compression（上下文 20% <= 阈值 35%）/u.test(line)), true)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('a failed pre-push compaction is logged but does not block the push', async () => {
+  const h = harness({
+    tasks: [running],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', keep: true, compressPercent: 35 } },
+    pushDelayMs: 15,
+    services: {
+      sessionProjections: projectionsAt(60_000),
+      compaction: { async compactNow() { throw new Error('summarizer exploded') } },
+    },
+  })
+  try {
+    h.emit('turn/start', { turn: 1 })
+    h.emit('turn/end', { turn: 1 })
+    await sleep(120)
+    assert.equal(h.followups.length, 1)
+    assert.equal(h.logs.some(line => /compression skipped: summarizer exploded/u.test(line)), true)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('a new turn that starts during the pre-push compaction abandons the push', async () => {
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const h = harness({
+    tasks: [running],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', keep: true, compressPercent: 35 } },
+    pushDelayMs: 15,
+    services: {
+      sessionProjections: projectionsAt(60_000),
+      compaction: { async compactNow() { await gate } },
+    },
+  })
+  try {
+    h.emit('turn/start', { turn: 1 })
+    h.emit('turn/end', { turn: 1 })
+    await sleep(80)
+    h.emit('turn/start', { turn: 2 })
+    release()
+    await sleep(80)
+    assert.equal(h.followups.length, 0)
+    assert.equal(h.logs.some(line => /abandoned: conversation resumed while compacting/u.test(line)), true)
   } finally {
     h.context.dispose()
   }

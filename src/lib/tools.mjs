@@ -13,9 +13,16 @@
  * @module @local/dsh-mesh/tools
  */
 
-import { FORCED_COMPACT_PERCENT, MemberTaskService, describeMemberTask, memberTaskProfile, memberTaskResultAlreadyDelivered, memberTaskWorkspace } from './member-tasks.mjs'
-import { createMemberContext, formatMemberScopeMissingHint } from './member-context.mjs'
-import { normalizeMemberScopePatch } from './service.mjs'
+import { DEFAULT_COMPRESS_PERCENT, MemberTaskService, describeMemberTask, memberTaskProfile, memberTaskResultAlreadyDelivered, memberTaskWorkspace } from './member-tasks.mjs'
+import { createMemberContext, formatMemberPushDelay, formatMemberScopeMissingHint } from './member-context.mjs'
+import {
+  DEFAULT_MEMBER_IDLE_PUSH_MS,
+  MEMBER_IDLE_PUSH_MAX_MS,
+  MEMBER_IDLE_PUSH_MIN_MS,
+  effectiveCompressPercent,
+  effectiveMemberIdlePushMs,
+  normalizeMemberScopePatch,
+} from './service.mjs'
 
 /**
  * Register the tools on an injected `tools` context.
@@ -191,8 +198,8 @@ export function registerTools(ctx, toolsCtx, service) {
       '目标对话正在运行时，消息用 steer 直接插入当前 turn，不等它结束；空闲时按普通 followup 开一轮。',
       '会话id（conversationId）是跨进程的继续投递凭据：重新启动后、或不是本机发起的对话，',
       '只要知道会话id，配上 member 就能继续；本机已跟踪该对话时 member 可以省略。',
-      '`compress: true`：继续投递前先在成员 B 上压缩该对话的上下文（要求对话当前空闲）；新建对话不适用。',
-      `不传 compress 时，如果目标对话的上下文占比已经超过 ${String(FORCED_COMPACT_PERCENT)}%，投递前会自动强制压缩（同样要求对话空闲）。`,
+      '继续已有对话时，投递前会按该会话的压缩阈值（`set_member_scope` 的 `compressPercent`，默认 35%）检查上下文占比：',
+      '超过阈值就先让成员压缩上下文再投递（要求对话空闲）；不超过就直接投递。压缩阈值只按会话设置，不接受每次调用单独指定。',
       '`force: true`：只在新建对话时生效。目标工作区目录存在 .git 且已有进行中的对话时，创建会返回',
       '409 workspace_busy_git（列出工作区、目录和进行中的会话id）；确认要在这个目录并发时加 force: true',
       '重新调用 call_member。换个工作区通常更安全。继续已有 conversationId 不会触发这个拦截。',
@@ -219,7 +226,6 @@ export function registerTools(ctx, toolsCtx, service) {
         prompt: { type: 'string', description: '发给成员的消息：新建对话时是初始任务，继续投递时是这一轮的内容。' },
         member: { type: 'string', description: '成员 id、名称、VPN IP 或 http(s) URL。新建对话时必填；继续投递且本机已跟踪该对话时可省略。' },
         conversationId: { type: 'string', description: '要继续的会话id（call_member / wait_member 返回）。省略就新建对话。' },
-        compress: { type: 'boolean', description: '继续已有对话时，投递前先让成员压缩该对话的上下文；要求对话空闲。省略时，上下文占比超过 30% 会自动压缩。' },
         cwd: { type: 'string', description: '新建对话：成员 B 上的工作目录（绝对路径，可空）。' },
         workspace: { type: 'string', description: '新建对话：成员 B 上的任务工作区名称；实际目录固定为成员本机的 ~/.dsh/workspaces/<name>。和 cwd 二选一。' },
         force: { type: 'boolean', description: '只新建对话：目标工作区目录有 .git 且已有进行中的对话时仍然创建（确认文件/git 竞争风险）。继续投递不接受。' },
@@ -242,9 +248,6 @@ export function registerTools(ctx, toolsCtx, service) {
       const conversationId = typeof args.conversationId === 'string' ? args.conversationId.trim() : ''
       const originSessionId = originSessionOf(exec.agent)
       if (conversationId === '') {
-        if (args.compress === true) {
-          throw new Error('compress only applies when continuing an existing conversation: a new conversation has no context to compress')
-        }
         if (typeof args.member !== 'string' || args.member.trim() === '') {
           throw new Error('member is required to start a new conversation')
         }
@@ -305,7 +308,6 @@ export function registerTools(ctx, toolsCtx, service) {
         conversationId,
         member: args.member,
         prompt: args.prompt,
-        compress: args.compress === true,
         identity: args.identity,
         scope: args.scope,
         agent: exec.agent,
@@ -313,19 +315,14 @@ export function registerTools(ctx, toolsCtx, service) {
       })
       const data = memberTaskData(task, memberTasks)
       const compaction = task.lastCompaction
-      const forced = compaction?.forced === true
-      const forcedLine = forced
+      const observedPercent = Number.isFinite(compaction?.observedPercent)
+        ? formatOneDecimal(compaction.observedPercent)
+        : Number.isFinite(compaction?.forcedPercent) ? formatOneDecimal(compaction.forcedPercent) : '?'
+      const forcedLine = compaction?.forced === true
         ? compaction.compacted === true
-          ? `上下文占比已超过 ${String(FORCED_COMPACT_PERCENT)}%（${formatOneDecimal(compaction.forcedPercent)}%），投递前已强制压缩：替换 ${String(compaction.shadowedCount)} 项历史（约 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens）。`
-          : `上下文占比已超过 ${String(FORCED_COMPACT_PERCENT)}%（${formatOneDecimal(compaction.forcedPercent)}%），投递前已尝试强制压缩，但没有可压缩的历史。`
+          ? `上下文占比 ${observedPercent}% 已超过压缩阈值 ${formatOneDecimal(compaction.forcedPercent)}%，投递前已自动压缩：替换 ${String(compaction.shadowedCount)} 项历史（约 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens）。`
+          : `上下文占比 ${observedPercent}% 已超过压缩阈值 ${formatOneDecimal(compaction.forcedPercent)}%，投递前已尝试自动压缩，但没有可压缩的历史。`
         : ''
-      const compactionLine = forcedLine !== ''
-        ? forcedLine
-        : args.compress === true
-          ? compaction?.compacted === true
-            ? `上下文压缩：已压缩，替换 ${String(compaction.shadowedCount)} 项历史（约 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens）。`
-            : '上下文压缩：没有可压缩的历史。'
-          : ''
       const inFlight = await memberTasks.inFlightForOrigin(originSessionId).catch(() => [])
       const parallelHint = formatParallelWaitHint(inFlight, task)
       const conversationBlock = await originConversationBlock(memberTasks, originSessionId, task.conversationId)
@@ -342,7 +339,7 @@ export function registerTools(ctx, toolsCtx, service) {
           formatTaskProfileMissingHint(task),
           `会话id：${task.conversationId}`,
           deliveryLine,
-          compactionLine,
+          forcedLine,
           formatContextLine(task.context),
           parallelHint !== '' ? parallelHint : formatWaitHint('等待回复', task.conversationId),
           '不再等待也没关系：完成后 3 秒内没有 wait_member 取走结果，插件只投递尚未取走的回复，已取走的不重复。',
@@ -361,14 +358,17 @@ export function registerTools(ctx, toolsCtx, service) {
   const setMemberScopeDefinition = {
     name: 'set_member_scope',
     description: [
-      '设置一个成员会话或当前主对话（自身）的身份和工作范围。',
+      '设置一个成员会话或当前主对话（自身）的身份、工作范围，以及状态推送和自动压缩参数。',
       '',
       '`conversationId` 省略、`self`、`local` 或等于当前会话 id 时设置“自身”；其他值作为成员会话 id。',
       '`identity` / `scope` 是可选的字符串，只传要改的字段；空字符串表示清除。',
-      'identity 最长 40 字符，scope 最长 120 字符；首次给自身设置且未传 keep 时 keep=true。',
-      '`keep` 默认 true，只对自身/主对话生效：turn 结束后若为 true，主对话空闲 30 秒时会主动收到成员状态快照；',
-      '设置成员会话时 keep 被忽略。',
-      '至少提供 identity、scope、keep 之一；设置成员会话时必须有 identity 或 scope 之一。',
+      'identity 最长 40 字符，scope 最长 120 字符。',
+      '`keep` 默认 true，只对自身/主对话生效：turn 结束后若为 true，主对话空闲时会主动收到成员状态快照。',
+      `\`idlePushMs\`：静默推送延迟（整数毫秒，${String(MEMBER_IDLE_PUSH_MIN_MS)}–${String(MEMBER_IDLE_PUSH_MAX_MS)}，默认 ${String(DEFAULT_MEMBER_IDLE_PUSH_MS)} 即 5 分钟），只对自身/主对话生效；设置成员会话时忽略。`,
+      `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；主对话和成员会话都生效：主对话推送快照前、或成员会话下一次投递前，上下文占比超过阈值就先压缩。`,
+      '首次给自身设置 identity/scope 且未传 keep 时 keep 默认开启；已有 keep=false 不会被重置。',
+      '设置成员会话时 keep 和 idlePushMs 被忽略，返回文字会说明。',
+      '至少提供 identity、scope、keep、idlePushMs、compressPercent 之一；设置成员会话时必须有 identity、scope 或 compressPercent 之一。',
       '成员会话可以未被本机跟踪，设置仍会保存，只是不会同步任务快照。',
       '这个工具只保存设置，不给成员会话发消息、不自动加投递前缀；随对话一起设置/更新用 call_member 的 identity/scope 参数。',
     ].join('\n'),
@@ -391,6 +391,18 @@ export function registerTools(ctx, toolsCtx, service) {
           type: 'boolean',
           description: '只对自身/主对话生效，默认 true；控制主对话空闲后是否主动推送成员状态快照。设置成员会话时忽略。',
         },
+        idlePushMs: {
+          type: 'integer',
+          minimum: MEMBER_IDLE_PUSH_MIN_MS,
+          maximum: MEMBER_IDLE_PUSH_MAX_MS,
+          description: '主对话静默推送延迟（毫秒，默认 300000 = 5 分钟）；只对自身/主对话生效，设置成员会话时忽略。',
+        },
+        compressPercent: {
+          type: 'number',
+          minimum: 1,
+          maximum: 100,
+          description: '自动压缩阈值（百分比，默认 35）；主对话和成员会话都生效，上下文占比超过该值才压缩。',
+        },
       },
       additionalProperties: false,
     },
@@ -409,23 +421,29 @@ export function registerTools(ctx, toolsCtx, service) {
       const hasIdentity = args.identity !== undefined
       const hasScope = args.scope !== undefined
       const hasKeep = args.keep !== undefined
-      if (!hasIdentity && !hasScope && !hasKeep) {
-        throw new Error('identity, scope, or keep is required')
+      const hasIdlePushMs = args.idlePushMs !== undefined
+      const hasCompressPercent = args.compressPercent !== undefined
+      if (!hasIdentity && !hasScope && !hasKeep && !hasIdlePushMs && !hasCompressPercent) {
+        throw new Error('identity, scope, keep, idlePushMs, or compressPercent is required')
       }
       if (isSelf && selfId === '') throw new Error('cannot set the current session scope: no current session')
-      if (!isSelf && !hasIdentity && !hasScope) {
-        throw new Error('keep only applies to the current session; set identity or scope for a member conversation')
+      if (!isSelf && !hasIdentity && !hasScope && !hasCompressPercent) {
+        throw new Error('keep and idlePushMs only apply to the current session; set identity, scope, or compressPercent for a member conversation')
       }
       const patch = {
         ...(hasIdentity ? { identity: args.identity } : {}),
         ...(hasScope ? { scope: args.scope } : {}),
         ...(isSelf && hasKeep ? { keep: args.keep } : {}),
+        ...(isSelf && hasIdlePushMs ? { idlePushMs: args.idlePushMs } : {}),
+        ...(hasCompressPercent ? { compressPercent: args.compressPercent } : {}),
       }
       // Validate before touching the store, then let the service normalise the
       // same raw patch (so an empty string still means "clear").
       normalizeMemberScopePatch(patch)
-      if (isSelf && !hasKeep) {
-        // First setting defaults keep on; an existing keep=false is preserved.
+      if (isSelf && !hasKeep && (hasIdentity || hasScope)) {
+        // First identity/scope setting defaults keep on; an existing
+        // keep=false is preserved and idlePushMs/compressPercent are not
+        // written implicitly (readers apply their defaults).
         const existing = await service.memberScope(selfId)
         if (existing === null || existing.keep === undefined) patch.keep = true
       }
@@ -433,12 +451,24 @@ export function registerTools(ctx, toolsCtx, service) {
       const saved = await service.setMemberScope(targetId, patch)
       const scope = saved.scope ?? null
       const tracked = isSelf ? false : await memberTasks.syncTaskScope(targetId, scope)
+      const idleDelay = effectiveMemberIdlePushMs(scope)
+      const compressThreshold = effectiveCompressPercent(scope)
       const lines = [
-        isSelf ? `已设置自身（会话 ${selfId}）的身份/工作范围。` : `已设置成员会话 ${targetId} 的身份/工作范围。`,
+        isSelf
+          ? `已设置自身（会话 ${selfId}）的身份/工作范围与推送配置。`
+          : `已设置成员会话 ${targetId} 的身份/工作范围与压缩阈值。`,
         `身份：${scope?.identity ?? '未设置'}`,
         `工作范围：${scope?.scope ?? '未设置'}`,
-        ...(isSelf ? [`保持目标：${scope?.keep === false ? '关闭' : '开启'}（只对主对话生效）`] : []),
-        ...(!isSelf && hasKeep ? ['keep 只对主对话自身生效，设置成员会话时已忽略。'] : []),
+        ...(isSelf
+          ? [
+              `保持目标：${scope?.keep === false ? '关闭' : '开启'}（只对主对话生效）`,
+              `静默推送：${formatMemberPushDelay(idleDelay)}（只对主对话生效）`,
+              `压缩阈值：${formatOneDecimal(compressThreshold)}%（主对话推送前和成员会话投递前生效）`,
+            ]
+          : [`压缩阈值：${formatOneDecimal(compressThreshold)}%（投递前超过该占比自动压缩）`]),
+        ...(!isSelf && (hasKeep || hasIdlePushMs)
+          ? ['keep / idlePushMs 只对主对话自身生效，设置成员会话时已忽略。']
+          : []),
         ...(!isSelf && !tracked ? ['本机未跟踪该会话，只保存设置。'] : []),
       ]
       return {
@@ -449,8 +479,11 @@ export function registerTools(ctx, toolsCtx, service) {
           conversationId: targetId,
           self: isSelf,
           scope,
+          idlePushMs: idleDelay,
+          compressPercent: compressThreshold,
           tracked,
           ignoredKeep: !isSelf && hasKeep,
+          ignoredIdlePushMs: !isSelf && hasIdlePushMs,
         },
       }
     },
@@ -475,7 +508,7 @@ export function registerTools(ctx, toolsCtx, service) {
       '插件只把尚未取走的回复投递回发起对话；已经取走的结果（包括本轮文本）不会重复投递。',
       '发起对话当时正在执行 turn 时，这条结果会直接插入当前 turn（不等 turn 结束）。',
       'state=done 时可以用返回的会话id继续投递：call_member { conversationId, prompt }；',
-      '上下文占用超过 20% 时会建议下次投递加 "compress": true，先压缩再投递。',
+      '结果里会显示目标对话的上下文占比；超过该会话的压缩阈值时，下次 call_member 投递前会自动压缩',
       '每次调用有上限（默认 30000，最大 300000 毫秒），不会无限阻塞；用户停止当前对话会中止本次等待。',
     ].join('\n'),
     parameters: {
@@ -562,7 +595,7 @@ export function registerTools(ctx, toolsCtx, service) {
         const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `第 ${String(task.turns)} 轮` : ''
         const where = `${task.member}（${task.memberIp}）`
         const contextLine = formatContextLine(task.context)
-        const advice = formatCompactionAdvice(task.context)
+        const advice = formatCompactionAdvice(task.context, await compressThresholdFor(service, task.conversationId))
         if (!result.done && result.state === 'progress') {
           return {
             ok: true,
@@ -686,7 +719,7 @@ export function registerTools(ctx, toolsCtx, service) {
             `会话id：${task.conversationId}`,
             `继续这个对话：call_member { "member": ${JSON.stringify(String(task.member))}, "conversationId": ${JSON.stringify(String(task.conversationId))}, "prompt": "..." }`,
             formatContextLine(task.context),
-            formatCompactionAdvice(task.context),
+            formatCompactionAdvice(task.context, await compressThresholdFor(service, task.conversationId)),
             '结果：',
             terminal.text !== ''
               ? terminal.text
@@ -959,15 +992,6 @@ function formatTaskProfileMissingHint(task) {
   if (memberTaskProfile(task) !== null) return ''
   return '该会话还没有身份/工作范围：下次 call_member 带 identity 和 scope 参数，或用 set_member_scope 设置。'
 }
-
-/**
- * Context occupancy above which the next delivery should compact first.
- *
- * The model sees the figure after every finished member turn. Twenty percent
- * is early enough that the next turn still fits comfortably and late enough
- * that a small exchange is not summarized for nothing.
- */
-const CONTEXT_COMPACT_THRESHOLD = 20
 
 /**
  * Hard limit on one fan-out `wait_member` / `status_member` call.
@@ -1340,15 +1364,31 @@ function truncateText(text, limit) {
 }
 
 /**
- * Recommend a pre-delivery compaction when the context is already loaded.
- * @param {{percent?: number|null}|null} context occupancy.
- * @returns {string} a line, or '' below the threshold.
+ * The compaction threshold stored for one conversation, or the default.
+ * @param {object} service mesh service.
+ * @param {string} conversationId member conversation id.
+ * @returns {Promise<number>} percentage threshold.
  */
-function formatCompactionAdvice(context) {
+async function compressThresholdFor(service, conversationId) {
+  if (typeof service?.memberScope !== 'function') return DEFAULT_COMPRESS_PERCENT
+  const scope = await service.memberScope(conversationId).catch(() => null)
+  return effectiveCompressPercent(scope)
+}
+
+/**
+ * Explain the automatic pre-delivery compaction when the context is loaded.
+ *
+ * This is informational only: the caller never passes a compression flag, the
+ * threshold is stored per conversation, and the next `call_member` decides.
+ * @param {{percent?: number|null}|null} context occupancy.
+ * @param {number} [threshold] the conversation's stored threshold.
+ * @returns {string} a line, or '' at/below the threshold.
+ */
+function formatCompactionAdvice(context, threshold = DEFAULT_COMPRESS_PERCENT) {
   if (context === null || typeof context !== 'object') return ''
   const percent = Number.isFinite(context.percent) ? context.percent : null
-  if (percent === null || percent <= CONTEXT_COMPACT_THRESHOLD) return ''
-  return `对话上下文已用 ${formatOneDecimal(percent)}%，超过 ${String(CONTEXT_COMPACT_THRESHOLD)}%：下次投递时建议加 "compress": true；超过 ${String(FORCED_COMPACT_PERCENT)}% 时投递前会自动强制压缩。`
+  if (percent === null || percent <= threshold) return ''
+  return `对话上下文已用 ${formatOneDecimal(percent)}%，超过本会话压缩阈值 ${formatOneDecimal(threshold)}%：下次 call_member 投递前会自动压缩。`
 }
 
 /**

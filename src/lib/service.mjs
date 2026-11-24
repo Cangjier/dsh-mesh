@@ -85,16 +85,26 @@ const PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 60_000
 export const MEMBER_IDENTITY_MAX = 40
 /** Longest accepted scope text in one session scope. */
 export const MEMBER_SCOPE_MAX = 120
+/** Default quiet time before a main conversation receives the idle status push. */
+export const DEFAULT_MEMBER_IDLE_PUSH_MS = 300_000
+/** Smallest accepted idle status push delay, in milliseconds. */
+export const MEMBER_IDLE_PUSH_MIN_MS = 1_000
+/** Largest accepted idle status push delay, in milliseconds. */
+export const MEMBER_IDLE_PUSH_MAX_MS = 86_400_000
+/** Default context occupancy percentage that triggers a pre-delivery compaction. */
+export const DEFAULT_COMPRESS_PERCENT = 35
 
 /**
  * Normalise one session-scope patch.
  *
  * `undefined` means "leave this field alone", an empty string means "clear
  * this field" and is reported as `null`, and a non-empty string is trimmed and
- * length-checked. `keep` is a boolean if present. The caller merges the result
- * into the stored record.
- * @param {{identity?: unknown, scope?: unknown, keep?: unknown}} [patch] raw patch.
- * @returns {{identity?: string|null, scope?: string|null, keep?: boolean}} normalised patch.
+ * length-checked. `keep` is a boolean if present. `idlePushMs` is an integer
+ * within {@link MEMBER_IDLE_PUSH_MIN_MS}..{@link MEMBER_IDLE_PUSH_MAX_MS} and
+ * `compressPercent` a number within 1..100. The caller merges the result into
+ * the stored record.
+ * @param {{identity?: unknown, scope?: unknown, keep?: unknown, idlePushMs?: unknown, compressPercent?: unknown}} [patch] raw patch.
+ * @returns {{identity?: string|null, scope?: string|null, keep?: boolean, idlePushMs?: number, compressPercent?: number}} normalised patch.
  */
 export function normalizeMemberScopePatch(patch = {}) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
@@ -121,7 +131,58 @@ export function normalizeMemberScopePatch(patch = {}) {
     if (typeof patch.keep !== 'boolean') throw new Error('keep must be a boolean')
     normalized.keep = patch.keep
   }
+  if (patch.idlePushMs !== undefined) {
+    const value = patch.idlePushMs
+    if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+      throw new Error('idlePushMs must be an integer number of milliseconds')
+    }
+    if (value < MEMBER_IDLE_PUSH_MIN_MS || value > MEMBER_IDLE_PUSH_MAX_MS) {
+      throw new Error(`idlePushMs is out of range: ${String(value)} (${String(MEMBER_IDLE_PUSH_MIN_MS)}-${String(MEMBER_IDLE_PUSH_MAX_MS)})`)
+    }
+    normalized.idlePushMs = value
+  }
+  if (patch.compressPercent !== undefined) {
+    const value = patch.compressPercent
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Error('compressPercent must be a number')
+    }
+    if (value < 1 || value > 100) {
+      throw new Error(`compressPercent is out of range: ${String(value)} (1-100)`)
+    }
+    normalized.compressPercent = value
+  }
   return normalized
+}
+
+/**
+ * The effective idle status push delay for one stored scope.
+ *
+ * A missing or unusable value falls back to {@link DEFAULT_MEMBER_IDLE_PUSH_MS};
+ * the delay is only meaningful for the main conversation itself.
+ * @param {{idlePushMs?: number}|null} scope stored scope.
+ * @returns {number} delay in milliseconds.
+ */
+export function effectiveMemberIdlePushMs(scope) {
+  const value = scope?.idlePushMs
+  return Number.isSafeInteger(value) && value >= MEMBER_IDLE_PUSH_MIN_MS && value <= MEMBER_IDLE_PUSH_MAX_MS
+    ? value
+    : DEFAULT_MEMBER_IDLE_PUSH_MS
+}
+
+/**
+ * The effective pre-delivery compaction threshold for one stored scope.
+ *
+ * Applies to the main conversation's status push and to a member
+ * conversation's next delivery; a missing value means
+ * {@link DEFAULT_COMPRESS_PERCENT}.
+ * @param {{compressPercent?: number}|null} scope stored scope.
+ * @returns {number} percentage.
+ */
+export function effectiveCompressPercent(scope) {
+  const value = scope?.compressPercent
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 100
+    ? value
+    : DEFAULT_COMPRESS_PERCENT
 }
 
 /**
@@ -138,6 +199,19 @@ function savedScopeText(value, max) {
   if (typeof value !== 'string') return null
   const text = value.trim()
   return text === '' || text.length > max ? null : text
+}
+
+/**
+ * Normalise one optional numeric scope field read from disk.
+ *
+ * An out-of-range or wrong-typed value is treated as unset, exactly like a
+ * field the setter would have refused.
+ * @param {unknown} value raw value.
+ * @param {(value: number) => boolean} valid range predicate.
+ * @returns {number|undefined} usable value, or undefined.
+ */
+function savedScopeNumber(value, valid) {
+  return typeof value === 'number' && Number.isFinite(value) && valid(value) ? value : undefined
 }
 
 /**
@@ -682,12 +756,14 @@ export class MeshService {
   }
 
   /**
-   * Identity, work scope and keep flag for conversations, keyed by conversation id.
+   * Identity, work scope, keep flag and push/compaction settings for
+   * conversations, keyed by conversation id.
    *
    * The file is only an optional hint book: a missing, unreadable, or damaged
    * file is the same as "nothing set yet", never a startup failure. Only the
-   * fields that were actually set are stored.
-   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean}>>} scopes.
+   * fields that were actually set are stored; defaults are applied by readers
+   * ({@link effectiveMemberIdlePushMs}, {@link effectiveCompressPercent}).
+   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean, idlePushMs?: number, compressPercent?: number}>>} scopes.
    */
   async memberScopes() {
     try {
@@ -700,11 +776,18 @@ export class MeshService {
         const identity = savedScopeText(value.identity, MEMBER_IDENTITY_MAX)
         const scope = savedScopeText(value.scope, MEMBER_SCOPE_MAX)
         const keep = typeof value.keep === 'boolean' ? value.keep : undefined
-        if (identity === null && scope === null && keep === undefined) continue
+        const idlePushMs = savedScopeNumber(
+          value.idlePushMs,
+          candidate => Number.isSafeInteger(candidate) && candidate >= MEMBER_IDLE_PUSH_MIN_MS && candidate <= MEMBER_IDLE_PUSH_MAX_MS,
+        )
+        const compressPercent = savedScopeNumber(value.compressPercent, candidate => candidate >= 1 && candidate <= 100)
+        if (identity === null && scope === null && keep === undefined && idlePushMs === undefined && compressPercent === undefined) continue
         scopes[rawId.trim()] = {
           ...(identity === null ? {} : { identity }),
           ...(scope === null ? {} : { scope }),
           ...(keep === undefined ? {} : { keep }),
+          ...(idlePushMs === undefined ? {} : { idlePushMs }),
+          ...(compressPercent === undefined ? {} : { compressPercent }),
         }
       }
       return scopes
@@ -716,7 +799,7 @@ export class MeshService {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean}|null>} scope.
+   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean, idlePushMs?: number, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? '').trim()
@@ -726,13 +809,15 @@ export class MeshService {
   }
 
   /**
-   * Merge and save one conversation's identity/work scope.
+   * Merge and save one conversation's identity/work scope and settings.
    *
    * Only the fields present in the patch change. An empty string clears that
-   * field (the record is dropped when nothing remains). `keep` is stored as
-   * given; only the self target is supposed to pass it.
+   * text field (the record is dropped when nothing remains). `keep` is stored
+   * as given; only the self target is supposed to pass it. `idlePushMs` is only
+   * meaningful for the self target; `compressPercent` applies to both self and
+   * member conversations.
    * @param {string} conversationId conversation or session id.
-   * @param {{identity?: unknown, scope?: unknown, keep?: unknown}} [patch] fields to change.
+   * @param {{identity?: unknown, scope?: unknown, keep?: unknown, idlePushMs?: unknown, compressPercent?: unknown}} [patch] fields to change.
    * @returns {Promise<{ok: boolean, scopes: Record<string, object>, scope: object|null}>} saved scopes.
    */
   async setMemberScope(conversationId, patch = {}) {
@@ -750,7 +835,9 @@ export class MeshService {
       else next.scope = normalized.scope
     }
     if (normalized.keep !== undefined) next.keep = normalized.keep
-    if (next.identity === undefined && next.scope === undefined && next.keep === undefined) delete scopes[id]
+    if (normalized.idlePushMs !== undefined) next.idlePushMs = normalized.idlePushMs
+    if (normalized.compressPercent !== undefined) next.compressPercent = normalized.compressPercent
+    if (Object.keys(next).length === 0) delete scopes[id]
     else scopes[id] = next
     await mkdir(this.dataDir, { recursive: true })
     await writeFile(this.memberScopesFile, `${JSON.stringify(scopes, null, 2)}\n`, 'utf8')

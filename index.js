@@ -13235,6 +13235,19 @@ import { mkdir as mkdir14, readFile as readFile17, readdir as readdir9, rename a
 import { existsSync as existsSync14, readFileSync as readFileSync5 } from "node:fs";
 import path26 from "node:path";
 var DEFAULT_INTEROP_PORT = 8765;
+var CONVERSATION_ID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+var CONNECTION_ERROR_CODES = /* @__PURE__ */ new Set(["ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "EPIPE"]);
+var CONNECT_RETRY_CODES = /* @__PURE__ */ new Set(["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"]);
+var CONNECTION_RETRY_MS = 3e4;
+function connectionFailureCode(error) {
+  let current = error;
+  for (let depth = 0; current !== null && current !== void 0 && depth < 4; depth++) {
+    const code = typeof current.code === "string" ? current.code : "";
+    if (CONNECTION_ERROR_CODES.has(code)) return code;
+    current = current.cause;
+  }
+  return "";
+}
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
 var DELIVERY_GRACE_MS = 3e3;
@@ -13585,6 +13598,9 @@ var MemberTaskService = class {
     };
     const all = [snapshot.local, ...Array.isArray(snapshot.members) ? snapshot.members : []].filter(Boolean);
     const match = all.find((member2) => String(member2.id) === raw || String(member2.name) === raw || String(member2.ip) === raw);
+    if (match === void 0 && CONVERSATION_ID_LIKE.test(raw)) {
+      throw new Error(`member "${raw}" is a conversation id, not a member: pass it as conversationId to continue that conversation, or name a member (id/name/ip) to start a new one`);
+    }
     const member = match ?? { id: raw, name: raw, ip: raw };
     let host = String(member.ip ?? member.id ?? raw);
     if (/^https?:\/\//i.test(host)) {
@@ -13604,7 +13620,11 @@ var MemberTaskService = class {
   }
   async #request(baseUrl, method, endpoint, body, timeoutMs = 3e4, signal) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error("timeout")), Math.max(1e3, timeoutMs));
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error("timeout"));
+    }, Math.max(1e3, timeoutMs));
     timer.unref?.();
     const forwardAbort = () => {
       controller.abort(signal?.reason instanceof Error ? signal.reason : new Error("aborted"));
@@ -13613,9 +13633,10 @@ var MemberTaskService = class {
       if (signal.aborted) forwardAbort();
       else signal.addEventListener("abort", forwardAbort, { once: true });
     }
+    const url = `${baseUrl}${endpoint}`;
     let response;
     try {
-      response = await fetch(`${baseUrl}${endpoint}`, {
+      response = await fetch(url, {
         method,
         headers: {
           authorization: `Bearer ${this.#token()}`,
@@ -13624,6 +13645,16 @@ var MemberTaskService = class {
         ...body === void 0 ? {} : { body: JSON.stringify(body) },
         signal: controller.signal
       });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const code = connectionFailureCode(error);
+      const cause = error?.cause;
+      const detail = timedOut ? `timed out after ${String(timeoutMs)}ms` : code !== "" ? code : typeof cause?.message === "string" ? cause.message : error instanceof Error ? error.message : String(error);
+      const failure = new Error(`request to ${url} failed: ${detail}`);
+      failure.code = code;
+      failure.url = url;
+      failure.cause = cause;
+      throw failure;
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener("abort", forwardAbort);
@@ -13682,6 +13713,7 @@ var MemberTaskService = class {
    */
   async #waitForRuntime(attempt, budgetMs = 9e4, signal) {
     const deadline = Date.now() + budgetMs;
+    const connectionDeadline = Math.min(deadline, Date.now() + CONNECTION_RETRY_MS);
     for (; ; ) {
       signal?.throwIfAborted();
       try {
@@ -13690,7 +13722,10 @@ var MemberTaskService = class {
         signal?.throwIfAborted();
         const message = error instanceof Error ? error.message : String(error);
         const starting = /SDK runtime is not ready|sdk_unavailable|SDK runtime is still starting/iu.test(message);
-        if (!starting || Date.now() >= deadline) throw error;
+        const connectionCode = connectionFailureCode(error);
+        const retryableConnection = CONNECT_RETRY_CODES.has(connectionCode);
+        const retryable2 = starting || retryableConnection;
+        if (!retryable2 || Date.now() >= (retryableConnection ? connectionDeadline : deadline)) throw error;
         await new Promise((resolve) => {
           const timer = setTimeout(done, 2e3);
           timer.unref?.();

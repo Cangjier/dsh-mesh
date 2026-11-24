@@ -489,6 +489,36 @@ test('wait_member and call_member expose the conversation id but no compress fla
   }
 })
 
+test('call_member rejects a conversation id put into member', async () => {
+  const member = await fakeMember({ usedTokens: 1_000 })
+  const { service, dataDir } = await buildService(member.port)
+  const tools = []
+  const ctx = {
+    logger: { info: () => {}, error: () => {} },
+    effect: () => () => {},
+    get: () => undefined,
+  }
+  try {
+    // registerTools installs the MemberTaskService on the service object.
+    registerTools(ctx, { tools: { register: tool => { tools.push(tool) } } }, service)
+    // A UUID is never a member; without this guard it becomes a hostname and
+    // the call fails with a bare "fetch failed" that looks like a broken member.
+    await assert.rejects(
+      () => service.memberTasks.start({
+        member: '4f4a674c-5671-4932-a0e2-9e2a823e932d',
+        prompt: '继续',
+        agent: {},
+        notify: false,
+      }),
+      /is a conversation id, not a member/u,
+    )
+  } finally {
+    await service.memberTasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
 test('wait_member says the next delivery will auto-compact over the conversation threshold', async () => {
   const member = await fakeMember({ usedTokens: 40_000 })
   const { service, dataDir } = await buildService(member.port)

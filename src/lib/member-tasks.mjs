@@ -18,6 +18,36 @@ import { DEFAULT_COMPRESS_PERCENT, effectiveCompressPercent, normalizeMemberScop
 export { DEFAULT_COMPRESS_PERCENT }
 
 const DEFAULT_INTEROP_PORT = 8765
+/**
+ * A conversation id is a UUID. Callers sometimes put one into `member` when
+ * they mean to continue an existing conversation; treating that as a hostname
+ * produces a bare DNS "fetch failed" that reads like a broken member.
+ */
+const CONVERSATION_ID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
+/** Transport failures named in the surfaced error. */
+const CONNECTION_ERROR_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE'])
+/**
+ * Failures retried before the member is reported unreachable. A reset can mean
+ * the request was already accepted, so a non-idempotent POST is not replayed
+ * on it; only a refused/host-unreachable connection proves nothing was sent.
+ */
+const CONNECT_RETRY_CODES = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH'])
+/** How long a member's interop may be down before a call reports the failure. */
+const CONNECTION_RETRY_MS = 30_000
+/**
+ * The transport code behind a failed `fetch`, walking the `cause` chain.
+ * @param {unknown} error thrown value.
+ * @returns {string} known connection code, or an empty string.
+ */
+function connectionFailureCode(error) {
+  let current = error
+  for (let depth = 0; current !== null && current !== undefined && depth < 4; depth++) {
+    const code = typeof current.code === 'string' ? current.code : ''
+    if (CONNECTION_ERROR_CODES.has(code)) return code
+    current = current.cause
+  }
+  return ''
+}
 const WAIT_TIMEOUT_MS = 60_000
 const MAX_ATTEMPTS = 30
 /**
@@ -594,6 +624,9 @@ export class MemberTaskService {
     }
     const all = [snapshot.local, ...(Array.isArray(snapshot.members) ? snapshot.members : [])].filter(Boolean)
     const match = all.find(member => String(member.id) === raw || String(member.name) === raw || String(member.ip) === raw)
+    if (match === undefined && CONVERSATION_ID_LIKE.test(raw)) {
+      throw new Error(`member "${raw}" is a conversation id, not a member: pass it as conversationId to continue that conversation, or name a member (id/name/ip) to start a new one`)
+    }
     const member = match ?? { id: raw, name: raw, ip: raw }
     let host = String(member.ip ?? member.id ?? raw)
     if (/^https?:\/\//i.test(host)) {
@@ -614,7 +647,11 @@ export class MemberTaskService {
 
   async #request(baseUrl, method, endpoint, body, timeoutMs = 30_000, signal) {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(new Error('timeout')), Math.max(1000, timeoutMs))
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      controller.abort(new Error('timeout'))
+    }, Math.max(1000, timeoutMs))
     timer.unref?.()
     const forwardAbort = () => {
       controller.abort(signal?.reason instanceof Error ? signal.reason : new Error('aborted'))
@@ -623,9 +660,10 @@ export class MemberTaskService {
       if (signal.aborted) forwardAbort()
       else signal.addEventListener('abort', forwardAbort, { once: true })
     }
+    const url = `${baseUrl}${endpoint}`
     let response
     try {
-      response = await fetch(`${baseUrl}${endpoint}`, {
+      response = await fetch(url, {
         method,
         headers: {
           authorization: `Bearer ${this.#token()}`,
@@ -634,6 +672,25 @@ export class MemberTaskService {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: controller.signal,
       })
+    } catch (error) {
+      // A bare `fetch failed` hides both the target and the transport reason,
+      // which makes a member restart look like a broken plugin. Keep the target
+      // and the code on the error so the tool result names the real problem.
+      if (signal?.aborted) throw error
+      const code = connectionFailureCode(error)
+      const cause = error?.cause
+      const detail = timedOut
+        ? `timed out after ${String(timeoutMs)}ms`
+        : code !== ''
+          ? code
+          : typeof cause?.message === 'string'
+            ? cause.message
+            : error instanceof Error ? error.message : String(error)
+      const failure = new Error(`request to ${url} failed: ${detail}`)
+      failure.code = code
+      failure.url = url
+      failure.cause = cause
+      throw failure
     } finally {
       clearTimeout(timer)
       signal?.removeEventListener('abort', forwardAbort)
@@ -702,6 +759,11 @@ export class MemberTaskService {
    */
   async #waitForRuntime(attempt, budgetMs = 90_000, signal) {
     const deadline = Date.now() + budgetMs
+    // A restart closes the member's listener for a few seconds; retrying a
+    // refused connection for the whole SDK-startup budget would make a truly
+    // offline member look slow, so connection failures get their own shorter
+    // window.
+    const connectionDeadline = Math.min(deadline, Date.now() + CONNECTION_RETRY_MS)
     for (;;) {
       signal?.throwIfAborted()
       try {
@@ -710,7 +772,10 @@ export class MemberTaskService {
         signal?.throwIfAborted()
         const message = error instanceof Error ? error.message : String(error)
         const starting = /SDK runtime is not ready|sdk_unavailable|SDK runtime is still starting/iu.test(message)
-        if (!starting || Date.now() >= deadline) throw error
+        const connectionCode = connectionFailureCode(error)
+        const retryableConnection = CONNECT_RETRY_CODES.has(connectionCode)
+        const retryable = starting || retryableConnection
+        if (!retryable || Date.now() >= (retryableConnection ? connectionDeadline : deadline)) throw error
         await new Promise((resolve) => {
           const timer = setTimeout(done, 2_000)
           timer.unref?.()

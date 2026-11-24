@@ -21,6 +21,9 @@ export const PREVIEW_LIMIT = 400
 /** Longest first prompt kept for the panel's message detail. */
 export const PROMPT_LIMIT = 8000
 
+/** Reasoning kept in the persisted record for a member that restarts. */
+export const REASONING_LIMIT = 4000
+
 /**
  * Collapse whitespace, trim, and fit a value into a fixed budget.
  * @param {unknown} value raw value.
@@ -123,6 +126,7 @@ export function conversationRecord(conversation) {
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     lastText: clip(conversation.lastText, PREVIEW_LIMIT),
+    lastReasoning: clip(conversation.lastReasoning, REASONING_LIMIT),
     // The failure a turn ended with must survive the restart that follows it;
     // otherwise the panel and the waiting member see a completed task with no
     // result.
@@ -170,6 +174,7 @@ export function restoredConversation(record, workdir) {
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date().toISOString(),
     lastText: typeof record.lastText === 'string' ? record.lastText : '',
+    lastReasoning: typeof record.lastReasoning === 'string' ? record.lastReasoning : '',
     error: abandoned
       ? INTERRUPTED_ERROR
       : typeof record.error === 'string' && record.error !== '' ? record.error : null,

@@ -1,18 +1,20 @@
 /**
  * Model-visible tools for the mesh plugin.
  *
- * Six tools:
- *   build        deterministic source build, waits for the final state
- *   deploy       SSH blue-green deployment, waits for the final state
- *   repack       refresh an existing offline package from this checkout
- *   members      read-only WireGuard member discovery
- *   call_member  start / continue a conversation on another member
- *   wait_member  bounded wait for one member task
+ * Seven tools:
+ *   build          deterministic source build, waits for the final state
+ *   deploy         SSH blue-green deployment, waits for the final state
+ *   repack         refresh an existing offline package from this checkout
+ *   members        read-only WireGuard member discovery
+ *   call_member    start / continue a conversation on another member
+ *   wait_member    bounded wait for one member task
+ *   status_member  live state and the last two delivered messages of a task
  *
  * @module @local/dsh-mesh/tools
  */
 
 import { FORCED_COMPACT_PERCENT, MemberTaskService } from './member-tasks.mjs'
+import { createTurnGuard } from './turn-guard.mjs'
 
 /**
  * Register the tools on an injected `tools` context.
@@ -164,6 +166,14 @@ export function registerTools(ctx, toolsCtx, service) {
   })
   try {
     ctx.effect(() => () => memberTasks.dispose(), 'mesh member tasks')
+  } catch { }
+  const turnGuard = createTurnGuard({
+    ctx,
+    memberTasks,
+    log: line => ctx.logger?.info?.(`mesh: ${line}`),
+  })
+  try {
+    ctx.effect(() => () => turnGuard.dispose(), 'mesh turn guard')
   } catch { }
 
   const callMemberDefinition = {
@@ -402,6 +412,76 @@ export function registerTools(ctx, toolsCtx, service) {
     },
   }
 
+  const statusMemberDefinition = {
+    name: 'status_member',
+    description: [
+      '查看一个成员会话的当前状态，以及这个目标对话最近两次的用户消息（就是 call_member 投递过去的消息）。',
+      '',
+      '`conversationId` 是 call_member / wait_member 返回的会话id。',
+      '状态优先取目标成员的最新投影：进行中 / 空闲 / 被异常中止 / 出错；目标不可达时退回本机任务状态。',
+      '最近两次用户消息来自本机任务记录，按投递时间从旧到新排列，最多两条；',
+      '最近一次思考是目标对话最新一轮的 reasoning；只跟踪本机发起或继续过的会话，没有跟踪的会话会明确报错。',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      properties: {
+        conversationId: { type: 'string', description: '要查看的成员会话id（call_member / wait_member 返回）。' },
+      },
+      required: ['conversationId'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{
+        type: 'text',
+        text: typeof value?.text === 'string' ? value.text : JSON.stringify(value, null, 2),
+      }],
+    },
+    isConcurrencySafe: () => true,
+    async execute(args) {
+      const conversationId = String(args.conversationId ?? '').trim()
+      if (conversationId === '') throw new Error('conversationId is required')
+      const found = await memberTasks.inspect(conversationId)
+      if (found === null) {
+        throw new Error(`本机没有跟踪会话 ${conversationId}；先用 call_member 发起或继续一次，再查状态。`)
+      }
+      const { task, live, liveError } = found
+      const liveStatus = typeof live?.status === 'string' ? live.status : ''
+      const label = memberStatusLabel(liveStatus, task)
+      const turns = Number.isSafeInteger(live?.turns) ? live.turns : (Number.isSafeInteger(task.turns) ? task.turns : null)
+      const context = live?.context ?? task.context ?? null
+      const messages = memberTasks.sentMessages(task)
+      const reasoning = typeof live?.lastReasoning === 'string' ? live.lastReasoning : ''
+      const lines = [
+        `成员会话 ${task.conversationId}（${task.member} ${task.memberIp}）`,
+        liveStatus === '' ? `状态：${label}（目标不可达：${liveError ?? 'unknown'}）` : `状态：${label}（目标实时）`,
+        `本机任务：${task.status}${turns === null ? '' : `，轮次 ${String(turns)}`}`,
+        formatContextLine(context),
+        messages.length === 0 ? '最近两次用户消息：(没有记录)' : '最近两次用户消息（旧→新）：',
+        ...messages.map((message, index) => `${String(index + 1)}. ${typeof message.at === 'string' && message.at !== '' ? `[${message.at}] ` : ''}${truncateText(message.text, 1200)}`),
+        reasoning === '' ? '最近一次思考：(目标没有报告思考)' : `最近一次思考：${truncateText(reasoning, 4000)}`,
+        typeof task.error === 'string' && task.error !== '' ? `错误：${task.error}` : '',
+      ].filter(line => line !== '')
+      return {
+        ok: true,
+        text: lines.join('\n'),
+        data: {
+          conversationId: task.conversationId,
+          member: task.member,
+          memberIp: task.memberIp,
+          status: liveStatus === '' ? task.status : liveStatus,
+          taskStatus: task.status,
+          turns,
+          context,
+          messages,
+          reasoning,
+          error: task.error ?? null,
+          liveError,
+        },
+      }
+    },
+  }
+
   const membersDefinition = {
     name: 'members',
     description: [
@@ -466,7 +546,7 @@ export function registerTools(ctx, toolsCtx, service) {
     },
   }
 
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, waitMemberDefinition, membersDefinition, repackDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, waitMemberDefinition, statusMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool)
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`)
@@ -536,6 +616,37 @@ function formatContextLine(context) {
   if (max === null) return `对话上下文：已用 ${formatTokens(used)} tokens${percentText}（成员未报告上限）`
   if (used === null) return `对话上下文：上限 ${formatTokens(max)} tokens（成员未报告已用）`
   return `对话上下文：${formatTokens(used)} / ${formatTokens(max)} tokens${percentText}`
+}
+
+/**
+ * Human label for one member conversation's status.
+ * @param {string} liveStatus the member's own projection status.
+ * @param {object} task local task record.
+ * @returns {string} status label.
+ */
+function memberStatusLabel(liveStatus, task) {
+  if (liveStatus === 'running') return '进行中'
+  if (liveStatus === 'idle') return '空闲'
+  if (liveStatus === 'interrupted') return '被异常中止'
+  if (liveStatus === 'error') return '出错'
+  if (liveStatus === 'blank') return '尚未开始'
+  if (liveStatus !== '') return liveStatus
+  if (task.status === 'running' || task.status === 'starting') return '进行中（本机）'
+  if (task.status === 'interrupted') return '被异常中止（本机）'
+  if (task.status === 'failed') return '失败（本机）'
+  if (task.status === 'completed') return '已完成（本机）'
+  return String(task.status)
+}
+
+/**
+ * Truncate text for one-line display without cutting a code point.
+ * @param {unknown} text raw text.
+ * @param {number} limit maximum length.
+ * @returns {string} text.
+ */
+function truncateText(text, limit) {
+  const value = String(text ?? '')
+  return value.length <= limit ? value : `${value.slice(0, limit)}…`
 }
 
 /**

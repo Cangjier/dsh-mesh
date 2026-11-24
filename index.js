@@ -13192,6 +13192,15 @@ var MemberTaskService = class {
         task.replySeq = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0;
         task.deliveredSeq = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0;
         task.terminalDelivered = task.terminalDelivered === true;
+        if (!Array.isArray(task.sentMessages)) {
+          task.sentMessages = typeof task.prompt === "string" && task.prompt !== "" ? [{ text: task.prompt, at: String(task.createdAt ?? "") }] : [];
+        }
+        if (typeof task.lastPrompt !== "string" || task.lastPrompt === "") {
+          task.lastPrompt = task.sentMessages.at(-1)?.text ?? "";
+        }
+        if (typeof task.lastSentAt !== "string" || task.lastSentAt === "") {
+          task.lastSentAt = task.sentMessages.at(-1)?.at ?? String(task.updatedAt ?? task.createdAt ?? "");
+        }
         this.tasks.set(task.id, task);
       } catch {
       }
@@ -13447,6 +13456,7 @@ var MemberTaskService = class {
       /** True for a task attached to a conversation this initiator did not start. */
       adopted: false
     };
+    this.#recordSent(task, prompt);
     this.controllers.set(task.id, new AbortController());
     this.tasks.set(task.id, task);
     await this.#save(task);
@@ -13525,6 +13535,83 @@ var MemberTaskService = class {
    */
   #taskOfConversation(conversationId) {
     return [...this.tasks.values()].filter((task) => task.conversationId === conversationId).sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))[0];
+  }
+  /**
+   * The messages this initiator delivered to one task, oldest first (at most two).
+   * @param {object} task task record.
+   * @returns {{text: string, at: string}[]} sent messages.
+   */
+  sentMessages(task) {
+    if (Array.isArray(task.sentMessages) && task.sentMessages.length > 0) return task.sentMessages.slice(-2);
+    return typeof task.prompt === "string" && task.prompt !== "" ? [{ text: task.prompt, at: String(task.createdAt ?? "") }] : [];
+  }
+  /**
+   * Find the tracked task for one member conversation.
+   * @param {string} conversationId member conversation id.
+   * @returns {Promise<object|undefined>} task record.
+   */
+  async find(conversationId) {
+    await this.#ensureLoaded();
+    return this.#taskOfConversation(String(conversationId ?? ""));
+  }
+  /**
+   * Newest task one origin session used, by its most recent delivery.
+   * @param {string} sessionId origin session id.
+   * @returns {Promise<object|undefined>} task record.
+   */
+  async latestForOrigin(sessionId) {
+    await this.#ensureLoaded();
+    const key = String(sessionId ?? "");
+    if (key === "") return void 0;
+    let newest;
+    let newestAt = -Infinity;
+    for (const task of this.tasks.values()) {
+      if (task.originSessionId !== key) continue;
+      const stamp = Date.parse(task.lastSentAt ?? task.updatedAt ?? task.createdAt ?? "");
+      if (Number.isFinite(stamp) && stamp > newestAt) {
+        newest = task;
+        newestAt = stamp;
+      }
+    }
+    return newest;
+  }
+  /**
+   * Live status of one tracked member conversation, for `status_member`.
+   *
+   * The member's own projection is the source of truth while it is reachable;
+   * a failed read keeps the local task so the tool can still report what the
+   * initiator knows instead of failing outright.
+   * @param {string} conversationId member conversation id.
+   * @returns {Promise<{task: object, live: object|null, liveError: string|null}|null>} inspection.
+   */
+  async inspect(conversationId) {
+    const task = await this.find(conversationId);
+    if (task === void 0) return null;
+    let live = null;
+    let liveError = null;
+    try {
+      const result = await this.#request(task.baseUrl, "GET", `/v1/conversations/${encodeURIComponent(task.conversationId)}`, void 0, 1e4);
+      live = result?.conversation ?? null;
+    } catch (error) {
+      liveError = error instanceof Error ? error.message : String(error);
+    }
+    return { task, live, liveError };
+  }
+  /**
+   * Remember one delivered message in the task's rolling two-message history.
+   * @param {object} task task record.
+   * @param {string} text delivered prompt.
+   * @returns {void}
+   */
+  #recordSent(task, text) {
+    const message = truncate(String(text ?? ""), 2e3);
+    if (message === "") return;
+    const at = (/* @__PURE__ */ new Date()).toISOString();
+    task.lastPrompt = message;
+    task.lastSentAt = at;
+    const history = Array.isArray(task.sentMessages) ? task.sentMessages.slice() : [];
+    history.push({ text: message, at });
+    task.sentMessages = history.slice(-2);
   }
   /** Replies this task received but no `wait` call has returned yet. */
   #pendingReplies(task) {
@@ -13705,6 +13792,7 @@ var MemberTaskService = class {
       9e4,
       signal
     );
+    this.#recordSent(task, prompt);
     if (fresh) {
       this.#adoptPosition(task, result?.conversation);
       task.prompt = truncate(prompt, 2e3);
@@ -14249,6 +14337,194 @@ var MemberTaskService = class {
   }
 };
 
+// src/lib/turn-guard.mjs
+import { randomUUID as randomUUID2 } from "node:crypto";
+var MAX_REMINDERS = 3;
+var JUDGE_TIMEOUT_MS = 15e3;
+var JUDGE_SYSTEM = [
+  "\u4F60\u662F\u4E00\u4E2A\u5224\u65AD\u5668\u3002\u53EA\u56DE\u7B54 YES \u6216 NO\u3002",
+  "\u7ED9\u5B9A\u4E00\u6BB5\u52A9\u624B\u56DE\u590D\uFF0C\u5224\u65AD\u5B83\u662F\u5426\u8868\u793A\uFF1A\u8BF4\u8BDD\u8005\u9884\u671F\u628A\u5DE5\u4F5C\u4EA4\u7ED9\u67D0\u4E2A\u6210\u5458\u5BF9\u8BDD\uFF08\u8C03\u7528 call_member\uFF09\u6216\u7B49\u5F85\u6210\u5458\u7ED3\u679C\uFF0C\u4F46\u6CA1\u6709\u5728\u8FD9\u4E00\u8F6E\u5B9E\u9645\u53D1\u8D77\u3002",
+  "\u5982\u679C\u56DE\u590D\u53EA\u662F\u666E\u901A\u8BF4\u660E\u3001\u63D0\u95EE\u3001\u5DF2\u7ECF\u5B8C\u6210\u3001\u6216\u4E0D\u9700\u8981\u6210\u5458\uFF0C\u56DE\u7B54 NO\u3002"
+].join("\n");
+function createTurnGuard({ ctx, memberTasks, log = () => {
+} }) {
+  const delegated = /* @__PURE__ */ new Map();
+  const reminders = /* @__PURE__ */ new Map();
+  const turns = /* @__PURE__ */ new Map();
+  const judging = /* @__PURE__ */ new Set();
+  const disposers = [];
+  let closed = false;
+  function stateOf(id) {
+    let state = turns.get(id);
+    if (state === void 0) {
+      state = { turn: null, called: false, text: "" };
+      turns.set(id, state);
+    }
+    return state;
+  }
+  function textOf(message) {
+    const content = message?.content;
+    if (!Array.isArray(content)) return "";
+    return content.filter((block) => block !== null && typeof block === "object" && block.type === "text" && typeof block.text === "string").map((block) => block.text).join("\n").trim();
+  }
+  async function judge(sessionId, agent, reply) {
+    const llm = typeof ctx.get === "function" ? ctx.get("llm") : void 0;
+    if (llm === void 0 || typeof llm.prepareCall !== "function") return false;
+    const provider = agent?.options?.provider;
+    const model = agent?.options?.model;
+    if (typeof provider !== "string" || provider === "" || typeof model !== "string" || model === "") return false;
+    const signal = AbortSignal.timeout(JUDGE_TIMEOUT_MS);
+    try {
+      const call = await llm.prepareCall({ provider, model, maxTokens: 8 }, signal);
+      let answer = "";
+      for await (const chunk of call.stream({
+        ...call.config,
+        system: JUDGE_SYSTEM,
+        messages: [{
+          id: randomUUID2(),
+          role: "user",
+          content: [{ type: "text", text: reply.slice(0, 6e3) }],
+          source: { kind: "user" }
+        }],
+        sessionId,
+        purpose: "mesh-turn-guard",
+        signal
+      })) {
+        if (chunk?.type === "text-delta" && typeof chunk.text === "string") answer += chunk.text;
+        if (answer.length > 64) break;
+      }
+      return /^\s*YES\b/iu.test(answer);
+    } catch (error) {
+      log(`turn guard judge failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+  async function consider(session, turn, reply) {
+    const sessionId = String(session?.id ?? "");
+    if (sessionId === "" || reply === "" || closed) return;
+    if (judging.has(sessionId)) return;
+    judging.add(sessionId);
+    try {
+      await considerTurn(session, sessionId, turn, reply);
+    } finally {
+      judging.delete(sessionId);
+    }
+  }
+  async function considerTurn(session, sessionId, turn, reply) {
+    const state = stateOf(sessionId);
+    if (state.turn !== turn || state.called) return;
+    let task;
+    if (delegated.get(sessionId) !== true) {
+      task = await memberTasks.latestForOrigin(sessionId);
+      if (task === void 0) {
+        delegated.set(sessionId, false);
+        return;
+      }
+      delegated.set(sessionId, true);
+    }
+    task = task ?? await memberTasks.latestForOrigin(sessionId);
+    if (task === void 0) return;
+    if (task.status === "running" || task.status === "starting") return;
+    if ((reminders.get(sessionId) ?? 0) >= MAX_REMINDERS) return;
+    const agents = typeof ctx.get === "function" ? ctx.get("agents") : void 0;
+    const agent = typeof agents?.get === "function" ? agents.get(sessionId) : void 0;
+    if (agent === void 0 || agent === null) return;
+    if (!await judge(sessionId, agent, reply)) return;
+    if (closed || state.turn !== turn || state.called) return;
+    if ((reminders.get(sessionId) ?? 0) >= MAX_REMINDERS) return;
+    if (agent.status !== "idle") return;
+    const count = (reminders.get(sessionId) ?? 0) + 1;
+    reminders.set(sessionId, count);
+    const lastPrompt = typeof task.lastPrompt === "string" && task.lastPrompt !== "" ? task.lastPrompt.replace(/\s+/gu, " ").slice(0, 300) : "";
+    const lines = [
+      "[\u6210\u5458\u4EFB\u52A1\u63D0\u9192] \u4F60\u4E0A\u4E00\u8F6E\u7684\u56DE\u590D\u770B\u8D77\u6765\u51C6\u5907\u628A\u5DE5\u4F5C\u4EA4\u7ED9\u6210\u5458\u6216\u7B49\u5F85\u6210\u5458\u7ED3\u679C\uFF0C\u4F46\u8FD9\u4E00\u8F6E\u6CA1\u6709\u5B9E\u9645\u8C03\u7528 call_member\u3002",
+      `\u6700\u8FD1\u4E00\u6B21\u6210\u5458\u5BF9\u8BDD\uFF1A${task.member}\uFF08${task.memberIp}\uFF09\uFF0C\u4F1A\u8BDDid\uFF1A${task.conversationId}`,
+      ...lastPrompt === "" ? [] : [`\u6700\u8FD1\u4E00\u6B21\u6295\u9012\uFF1A${lastPrompt}`],
+      "\u5982\u679C\u8FD8\u9700\u8981\u8FD9\u4E2A\u6210\u5458\u7EE7\u7EED\uFF0C\u8BF7\u8C03\u7528 call_member\uFF08\u5E26\u540C\u4E00\u4E2A conversationId\uFF09\uFF0C\u518D\u7528 wait_member \u53D6\u7ED3\u679C\uFF1B\u5982\u679C\u4E0D\u9700\u8981\uFF0C\u8BF7\u76F4\u63A5\u56DE\u7B54\u7528\u6237\u3002",
+      `\u8FD9\u662F\u7B2C ${String(count)}/${String(MAX_REMINDERS)} \u6B21\u8FDE\u7EED\u63D0\u9192\uFF0C\u8C03\u7528\u8FC7 call_member \u540E\u4F1A\u91CD\u7F6E\u3002`
+    ];
+    try {
+      agent.followup({
+        id: randomUUID2(),
+        role: "user",
+        content: [{ type: "text", text: lines.join("\n") }],
+        source: { kind: "user" }
+      });
+      log(`turn guard reminder ${String(count)}/${String(MAX_REMINDERS)} queued in ${sessionId}`);
+    } catch (error) {
+      reminders.set(sessionId, count - 1);
+      log(`turn guard reminder failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  function onEvent(session, event) {
+    if (closed || session === void 0 || event === void 0) return;
+    const id = String(session.id ?? "");
+    if (id === "") return;
+    if (event.type === "turn/start") {
+      const state = stateOf(id);
+      state.turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : null;
+      state.called = false;
+      state.text = "";
+      return;
+    }
+    if (event.type === "tool/call") {
+      if (event.data?.name !== "call_member") return;
+      const state = stateOf(id);
+      state.called = true;
+      delegated.set(id, true);
+      reminders.set(id, 0);
+      return;
+    }
+    if (event.type === "assistant/message") {
+      const text = textOf(event.data?.message);
+      if (text !== "") stateOf(id).text = text;
+      return;
+    }
+    if (event.type === "turn/end") {
+      const state = stateOf(id);
+      const turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : state.turn;
+      const called = state.called;
+      const reply = state.text;
+      state.turn = turn;
+      state.called = false;
+      state.text = "";
+      if (called) {
+        reminders.set(id, 0);
+        return;
+      }
+      void consider(session, turn, reply).catch((error) => {
+        log(`turn guard check failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+  }
+  if (typeof ctx.on === "function") {
+    disposers.push(ctx.on("session/event", onEvent));
+    disposers.push(ctx.on("session/disposed", (session) => {
+      const id = String(session?.id ?? "");
+      if (id !== "") {
+        turns.delete(id);
+        delegated.delete(id);
+        reminders.delete(id);
+      }
+    }));
+  }
+  return {
+    dispose() {
+      closed = true;
+      for (const dispose of disposers.splice(0)) {
+        try {
+          dispose?.();
+        } catch {
+        }
+      }
+      turns.clear();
+      delegated.clear();
+      reminders.clear();
+      judging.clear();
+    }
+  };
+}
+
 // src/lib/tools.mjs
 function registerTools(ctx, toolsCtx, service) {
   const buildDefinition = {
@@ -14387,6 +14663,15 @@ function registerTools(ctx, toolsCtx, service) {
   });
   try {
     ctx.effect(() => () => memberTasks.dispose(), "mesh member tasks");
+  } catch {
+  }
+  const turnGuard = createTurnGuard({
+    ctx,
+    memberTasks,
+    log: (line) => ctx.logger?.info?.(`mesh: ${line}`)
+  });
+  try {
+    ctx.effect(() => () => turnGuard.dispose(), "mesh turn guard");
   } catch {
   }
   const callMemberDefinition = {
@@ -14615,6 +14900,75 @@ ${replyText}` : "",
       };
     }
   };
+  const statusMemberDefinition = {
+    name: "status_member",
+    description: [
+      "\u67E5\u770B\u4E00\u4E2A\u6210\u5458\u4F1A\u8BDD\u7684\u5F53\u524D\u72B6\u6001\uFF0C\u4EE5\u53CA\u8FD9\u4E2A\u76EE\u6807\u5BF9\u8BDD\u6700\u8FD1\u4E24\u6B21\u7684\u7528\u6237\u6D88\u606F\uFF08\u5C31\u662F call_member \u6295\u9012\u8FC7\u53BB\u7684\u6D88\u606F\uFF09\u3002",
+      "",
+      "`conversationId` \u662F call_member / wait_member \u8FD4\u56DE\u7684\u4F1A\u8BDDid\u3002",
+      "\u72B6\u6001\u4F18\u5148\u53D6\u76EE\u6807\u6210\u5458\u7684\u6700\u65B0\u6295\u5F71\uFF1A\u8FDB\u884C\u4E2D / \u7A7A\u95F2 / \u88AB\u5F02\u5E38\u4E2D\u6B62 / \u51FA\u9519\uFF1B\u76EE\u6807\u4E0D\u53EF\u8FBE\u65F6\u9000\u56DE\u672C\u673A\u4EFB\u52A1\u72B6\u6001\u3002",
+      "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\u6765\u81EA\u672C\u673A\u4EFB\u52A1\u8BB0\u5F55\uFF0C\u6309\u6295\u9012\u65F6\u95F4\u4ECE\u65E7\u5230\u65B0\u6392\u5217\uFF0C\u6700\u591A\u4E24\u6761\uFF1B",
+      "\u6700\u8FD1\u4E00\u6B21\u601D\u8003\u662F\u76EE\u6807\u5BF9\u8BDD\u6700\u65B0\u4E00\u8F6E\u7684 reasoning\uFF1B\u53EA\u8DDF\u8E2A\u672C\u673A\u53D1\u8D77\u6216\u7EE7\u7EED\u8FC7\u7684\u4F1A\u8BDD\uFF0C\u6CA1\u6709\u8DDF\u8E2A\u7684\u4F1A\u8BDD\u4F1A\u660E\u786E\u62A5\u9519\u3002"
+    ].join("\n"),
+    parameters: {
+      type: "object",
+      properties: {
+        conversationId: { type: "string", description: "\u8981\u67E5\u770B\u7684\u6210\u5458\u4F1A\u8BDDid\uFF08call_member / wait_member \u8FD4\u56DE\uFF09\u3002" }
+      },
+      required: ["conversationId"],
+      additionalProperties: false
+    },
+    output: {
+      schema: { type: "object", additionalProperties: true },
+      render: (_args, value) => [{
+        type: "text",
+        text: typeof value?.text === "string" ? value.text : JSON.stringify(value, null, 2)
+      }]
+    },
+    isConcurrencySafe: () => true,
+    async execute(args) {
+      const conversationId = String(args.conversationId ?? "").trim();
+      if (conversationId === "") throw new Error("conversationId is required");
+      const found = await memberTasks.inspect(conversationId);
+      if (found === null) {
+        throw new Error(`\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u4F1A\u8BDD ${conversationId}\uFF1B\u5148\u7528 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u518D\u67E5\u72B6\u6001\u3002`);
+      }
+      const { task, live, liveError } = found;
+      const liveStatus = typeof live?.status === "string" ? live.status : "";
+      const label = memberStatusLabel(liveStatus, task);
+      const turns = Number.isSafeInteger(live?.turns) ? live.turns : Number.isSafeInteger(task.turns) ? task.turns : null;
+      const context = live?.context ?? task.context ?? null;
+      const messages = memberTasks.sentMessages(task);
+      const reasoning = typeof live?.lastReasoning === "string" ? live.lastReasoning : "";
+      const lines = [
+        `\u6210\u5458\u4F1A\u8BDD ${task.conversationId}\uFF08${task.member} ${task.memberIp}\uFF09`,
+        liveStatus === "" ? `\u72B6\u6001\uFF1A${label}\uFF08\u76EE\u6807\u4E0D\u53EF\u8FBE\uFF1A${liveError ?? "unknown"}\uFF09` : `\u72B6\u6001\uFF1A${label}\uFF08\u76EE\u6807\u5B9E\u65F6\uFF09`,
+        `\u672C\u673A\u4EFB\u52A1\uFF1A${task.status}${turns === null ? "" : `\uFF0C\u8F6E\u6B21 ${String(turns)}`}`,
+        formatContextLine(context),
+        messages.length === 0 ? "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\uFF1A(\u6CA1\u6709\u8BB0\u5F55)" : "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\uFF08\u65E7\u2192\u65B0\uFF09\uFF1A",
+        ...messages.map((message, index) => `${String(index + 1)}. ${typeof message.at === "string" && message.at !== "" ? `[${message.at}] ` : ""}${truncateText(message.text, 1200)}`),
+        reasoning === "" ? "\u6700\u8FD1\u4E00\u6B21\u601D\u8003\uFF1A(\u76EE\u6807\u6CA1\u6709\u62A5\u544A\u601D\u8003)" : `\u6700\u8FD1\u4E00\u6B21\u601D\u8003\uFF1A${truncateText(reasoning, 4e3)}`,
+        typeof task.error === "string" && task.error !== "" ? `\u9519\u8BEF\uFF1A${task.error}` : ""
+      ].filter((line) => line !== "");
+      return {
+        ok: true,
+        text: lines.join("\n"),
+        data: {
+          conversationId: task.conversationId,
+          member: task.member,
+          memberIp: task.memberIp,
+          status: liveStatus === "" ? task.status : liveStatus,
+          taskStatus: task.status,
+          turns,
+          context,
+          messages,
+          reasoning,
+          error: task.error ?? null,
+          liveError
+        }
+      };
+    }
+  };
   const membersDefinition = {
     name: "members",
     description: [
@@ -14680,7 +15034,7 @@ sha256 ${data.sha256}
       };
     }
   };
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, waitMemberDefinition, membersDefinition, repackDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, waitMemberDefinition, statusMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool);
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`);
@@ -14714,6 +15068,23 @@ function formatContextLine(context) {
   if (max === null) return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\uFF1A\u5DF2\u7528 ${formatTokens(used)} tokens${percentText}\uFF08\u6210\u5458\u672A\u62A5\u544A\u4E0A\u9650\uFF09`;
   if (used === null) return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\uFF1A\u4E0A\u9650 ${formatTokens(max)} tokens\uFF08\u6210\u5458\u672A\u62A5\u544A\u5DF2\u7528\uFF09`;
   return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\uFF1A${formatTokens(used)} / ${formatTokens(max)} tokens${percentText}`;
+}
+function memberStatusLabel(liveStatus, task) {
+  if (liveStatus === "running") return "\u8FDB\u884C\u4E2D";
+  if (liveStatus === "idle") return "\u7A7A\u95F2";
+  if (liveStatus === "interrupted") return "\u88AB\u5F02\u5E38\u4E2D\u6B62";
+  if (liveStatus === "error") return "\u51FA\u9519";
+  if (liveStatus === "blank") return "\u5C1A\u672A\u5F00\u59CB";
+  if (liveStatus !== "") return liveStatus;
+  if (task.status === "running" || task.status === "starting") return "\u8FDB\u884C\u4E2D\uFF08\u672C\u673A\uFF09";
+  if (task.status === "interrupted") return "\u88AB\u5F02\u5E38\u4E2D\u6B62\uFF08\u672C\u673A\uFF09";
+  if (task.status === "failed") return "\u5931\u8D25\uFF08\u672C\u673A\uFF09";
+  if (task.status === "completed") return "\u5DF2\u5B8C\u6210\uFF08\u672C\u673A\uFF09";
+  return String(task.status);
+}
+function truncateText(text, limit) {
+  const value = String(text ?? "");
+  return value.length <= limit ? value : `${value.slice(0, limit)}\u2026`;
 }
 function formatCompactionAdvice(context) {
   if (context === null || typeof context !== "object") return "";
@@ -14786,7 +15157,7 @@ function formatBytes3(value) {
 
 // src/lib/interop-service.mjs
 import { execFile as execFile4 } from "node:child_process";
-import { createHash as createHash9, randomBytes as randomBytes3, randomUUID as randomUUID2, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createHash as createHash9, randomBytes as randomBytes3, randomUUID as randomUUID3, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 import { existsSync as existsSync15, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, statSync, writeFileSync } from "node:fs";
 import http3 from "node:http";
 import { homedir as homedir3 } from "node:os";
@@ -14798,6 +15169,7 @@ var TITLE_LIMIT = 80;
 var INITIATOR_LIMIT = 64;
 var PREVIEW_LIMIT = 400;
 var PROMPT_LIMIT = 8e3;
+var REASONING_LIMIT = 4e3;
 function clip(value, limit) {
   if (typeof value !== "string") return "";
   const text = value.replace(/\s+/gu, " ").trim();
@@ -14858,6 +15230,7 @@ function conversationRecord(conversation) {
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     lastText: clip(conversation.lastText, PREVIEW_LIMIT),
+    lastReasoning: clip(conversation.lastReasoning, REASONING_LIMIT),
     // The failure a turn ended with must survive the restart that follows it;
     // otherwise the panel and the waiting member see a completed task with no
     // result.
@@ -14887,6 +15260,7 @@ function restoredConversation(record, workdir) {
     createdAt: typeof record.createdAt === "string" ? record.createdAt : (/* @__PURE__ */ new Date()).toISOString(),
     updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : (/* @__PURE__ */ new Date()).toISOString(),
     lastText: typeof record.lastText === "string" ? record.lastText : "",
+    lastReasoning: typeof record.lastReasoning === "string" ? record.lastReasoning : "",
     error: abandoned ? INTERRUPTED_ERROR : typeof record.error === "string" && record.error !== "" ? record.error : null,
     turns: Number.isSafeInteger(record.turns) ? record.turns : 0,
     // Reply texts stay in memory, but the cursor is a durable contract with
@@ -14897,6 +15271,12 @@ function restoredConversation(record, workdir) {
 
 // code/shared/conversation-replies.mjs
 var MAX_REPLIES = 50;
+function assistantReasoning(event) {
+  if (event?.type !== "assistant/message") return "";
+  const blocks = event?.data?.message?.content;
+  if (!Array.isArray(blocks)) return "";
+  return blocks.filter((block) => block?.type === "reasoning" && typeof block.text === "string").map((block) => block.text).join("\n").trim();
+}
 function assistantText(event) {
   if (event?.type !== "assistant/message") return "";
   const blocks = event?.data?.message?.content;
@@ -14906,6 +15286,8 @@ function assistantText(event) {
 function applySessionEvent(conversation, event) {
   const type = event?.type;
   if (type === "assistant/message") {
+    const reasoning = assistantReasoning(event);
+    if (reasoning !== "") conversation.lastReasoning = reasoning;
     const text2 = assistantText(event);
     if (text2 === "") return null;
     conversation.lastText = text2;
@@ -14914,6 +15296,7 @@ function applySessionEvent(conversation, event) {
   }
   if (type === "turn/start") {
     conversation.turnText = "";
+    conversation.lastReasoning = "";
     conversation.error = null;
     return null;
   }
@@ -14961,7 +15344,11 @@ var MEMBER_INTERACTION_RULE = [
   "\u672C\u4F1A\u8BDD\u7981\u7528\u4E86 ask_user_question\uFF1A\u6CA1\u6709\u53EF\u4EE5\u5E94\u7B54\u7684\u7528\u6237\uFF0C\u63D0\u95EE\u4E0D\u4F1A\u5F97\u5230\u56DE\u7B54\u3002",
   "\u9700\u8981\u989D\u5916\u4FE1\u606F\u6216\u51B3\u7B56\u65F6\uFF0C\u5728\u56DE\u590D\u91CC\u628A\u95EE\u9898\u5199\u6E05\u695A\u5E76\u7ED3\u675F\u8FD9\u4E00\u8F6E\uFF1B\u59D4\u6D3E\u65B9\u4F1A\u7528\u540C\u4E00\u4F1A\u8BDD\u7EE7\u7EED\u56DE\u7B54\u3002"
 ].join("\n");
+var MEMBER_SUBAGENT_RULE = [
+  "\u8C03\u7528\u5B50\u4EE3\u7406\u65F6\u63A7\u5236\u5B83\u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\uFF1B\u5982\u679C\u67D0\u4E2A\u5B50\u4EE3\u7406\u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7 35%\uFF0C\u5C3D\u91CF\u6539\u7528\u65B0\u7684\u5B50\u4EE3\u7406\uFF08\u628A\u5DF2\u6709\u7ED3\u8BBA\u4EA4\u63A5\u7ED9\u65B0\u5B50\u4EE3\u7406\uFF09\uFF0C\u4E0D\u8981\u7EE7\u7EED\u7528\u8FD9\u4E2A\u5B50\u4EE3\u7406\u3002"
+].join("\n");
 var INTERACTION_CONTEXT_ORDER = 125;
+var SUBAGENT_CONTEXT_ORDER = 128;
 var ENVIRONMENT_CONTEXT_ORDER = 130;
 var MAX_EVENTS = 5e3;
 var DEFAULT_WORKSPACE2 = "default-workspace";
@@ -15195,7 +15582,7 @@ function contentBlocks(value) {
   return blocks;
 }
 function userMessage(blocks) {
-  return { id: randomUUID2(), role: "user", content: blocks, source: { kind: "user" } };
+  return { id: randomUUID3(), role: "user", content: blocks, source: { kind: "user" } };
 }
 function nonNegativeOrNull(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
@@ -15250,6 +15637,7 @@ function createInteropService(options) {
       createdAt: conversation.createdAt,
       updatedAt: conversation.updatedAt,
       lastText: conversation.lastText,
+      lastReasoning: typeof conversation.lastReasoning === "string" ? conversation.lastReasoning : "",
       error: conversation.error,
       eventCount: conversation.events.length,
       cwd: conversation.cwd,
@@ -15547,6 +15935,12 @@ data: ${JSON.stringify(payload)}
           interpolate: false,
           text: MEMBER_INTERACTION_RULE
         });
+        systemPrompt.context({
+          name: "mesh:subagent",
+          order: SUBAGENT_CONTEXT_ORDER,
+          interpolate: false,
+          text: MEMBER_SUBAGENT_RULE
+        });
         if (text !== "") {
           systemPrompt.context({
             name: "mesh:environment",
@@ -15595,7 +15989,7 @@ data: ${JSON.stringify(payload)}
     if (typeof ctx.agents?.create !== "function") {
       throw httpError(503, "sdk_unavailable", "DSH agent runtime is not available");
     }
-    const id = randomUUID2();
+    const id = randomUUID3();
     const registry = typeof ctx.get === "function" ? ctx.get("workspaceRegistry") : ctx.workspaceRegistry;
     const requested = normalizeWorkspaceName(request.workspace);
     const explicitCwd = typeof request.cwd === "string" && request.cwd !== "" ? path27.resolve(request.cwd) : "";

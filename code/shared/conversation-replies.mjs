@@ -18,6 +18,26 @@
 export const MAX_REPLIES = 50
 
 /**
+ * Extract the reasoning blocks of one `assistant/message` event.
+ *
+ * The session log keeps the model's visible reasoning as `reasoning` content
+ * blocks beside the text and tool-call blocks, so the last turn's thinking can
+ * be read without replaying the raw stream.
+ * @param {any} event session event.
+ * @returns {string} joined reasoning blocks, or '' for any other event.
+ */
+export function assistantReasoning(event) {
+  if (event?.type !== 'assistant/message') return ''
+  const blocks = event?.data?.message?.content
+  if (!Array.isArray(blocks)) return ''
+  return blocks
+    .filter(block => block?.type === 'reasoning' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join('\n')
+    .trim()
+}
+
+/**
  * Extract the assistant text of one `assistant/message` event.
  * @param {any} event session event.
  * @returns {string} joined text blocks, or '' for any other event.
@@ -44,6 +64,8 @@ export function applySessionEvent(conversation, event) {
   const type = event?.type
 
   if (type === 'assistant/message') {
+    const reasoning = assistantReasoning(event)
+    if (reasoning !== '') conversation.lastReasoning = reasoning
     const text = assistantText(event)
     if (text === '') return null
     conversation.lastText = text
@@ -55,6 +77,8 @@ export function applySessionEvent(conversation, event) {
     // A new turn owns a fresh text buffer, and a previous turn's failure is no
     // longer this conversation's current state: the agent kept going.
     conversation.turnText = ''
+    // "Latest thinking" means the current turn's, not the previous turn's.
+    conversation.lastReasoning = ''
     conversation.error = null
     return null
   }

@@ -53,10 +53,23 @@ const MEMBER_INTERACTION_RULE = [
 ].join('\n')
 
 /**
+ * Prompt context that keeps delegated child agents inside a context budget.
+ *
+ * A settled child cannot be measured or compacted from its parent (DSH
+ * unloads it when its turn ends), so the only reliable lever is to start a
+ * fresh child instead of piling more work onto a loaded one.
+ */
+const MEMBER_SUBAGENT_RULE = [
+  '调用子代理时控制它的上下文占比；如果某个子代理的上下文占比超过 35%，尽量改用新的子代理（把已有结论交接给新子代理），不要继续用这个子代理。',
+].join('\n')
+
+/**
  * Prompt-context order for the interaction rule and the mesh environment.
  * Both sit between the delegation note (120) and the harness facts (200).
  */
 const INTERACTION_CONTEXT_ORDER = 125
+/** Sits between the interaction rule and the measured mesh facts. */
+const SUBAGENT_CONTEXT_ORDER = 128
 const ENVIRONMENT_CONTEXT_ORDER = 130
 
 /** How many events one conversation keeps for late `/events` readers. */
@@ -511,6 +524,7 @@ export function createInteropService(options) {
       createdAt: conversation.createdAt,
       updatedAt: conversation.updatedAt,
       lastText: conversation.lastText,
+      lastReasoning: typeof conversation.lastReasoning === 'string' ? conversation.lastReasoning : '',
       error: conversation.error,
       eventCount: conversation.events.length,
       cwd: conversation.cwd,
@@ -930,6 +944,12 @@ export function createInteropService(options) {
           order: INTERACTION_CONTEXT_ORDER,
           interpolate: false,
           text: MEMBER_INTERACTION_RULE,
+        })
+        systemPrompt.context({
+          name: 'mesh:subagent',
+          order: SUBAGENT_CONTEXT_ORDER,
+          interpolate: false,
+          text: MEMBER_SUBAGENT_RULE,
         })
         if (text !== '') {
           systemPrompt.context({

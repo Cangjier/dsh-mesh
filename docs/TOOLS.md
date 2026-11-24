@@ -2,7 +2,7 @@
 
 - 插件：`@local/dsh-mesh`
 - 工具注册：`src/lib/tools.mjs` → `registerTools()`
-- 当前共 6 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`wait_member`
+- 当前共 7 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`wait_member`、`status_member`；另有一个 turn 结束后的自动提醒 hook
 - 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续，`wait_member` 只做有界等待。
 - 所有工具统一返回 `{ ok, text, data }`。`text` 是给人看的摘要，`data` 是结构化结果。
 - 同步执行的工具会在 `text` 和 `data` 里都返回日志文件地址，便于调用结束后继续读取完整日志。
@@ -17,6 +17,7 @@
 | `members` | 只读成员发现 | 无 | `true` |
 | `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `compress` / `cwd` / `workspace` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回 | `conversationId` `timeoutMs` | `true` |
+| `status_member` | 目标会话状态 + 最近两次用户消息 + 最近一次思考 | `conversationId` | `true` |
 
 ## 2. 共享基础
 
@@ -408,6 +409,10 @@ Gitee token: ...
 需要信息或决策时，在回复里写清问题并结束这一轮；发起方用 `call_member` 带同一个
 `conversationId` 回答即可。恢复会话时这条规则会重新应用。
 
+同时还会注入一条固定的子代理规则：调用子代理时控制它的上下文占比；某个子代理的上下文占比
+超过 35% 时，尽量改用新的子代理（把已有结论交接过去），不要继续用旧子代理。DSH 在子代理
+一轮结束时就把它卸载了，父对话既量不到也压不了它的上下文，所以只能换新的。
+
 ### 6.4 继续对话
 
 ```text
@@ -524,7 +529,40 @@ interrupted    插件停止或重启时，未完成任务被标记
 
 ---
 
-## 7. 典型组合
+### 6.7 `status_member`
+
+```text
+status_member { "conversationId": "<会话id>" }
+  → 按本机任务记录找到目标成员和 baseUrl
+  → GET /v1/conversations/<会话id> 取目标最新投影（含 lastReasoning）
+  → 返回状态、最近两次用户消息、最近一次思考
+```
+
+- 状态优先用目标实时投影：进行中 / 空闲 / 被异常中止 / 出错；目标不可达时退回本机任务状态，
+  并在 text 里说明。
+- 最近两次用户消息取自本机任务记录，最多两条，旧→新；重启后从任务文件恢复。
+- 最近一次思考来自目标会话最新一轮的 reasoning（`lastReasoning`），成员升级后才有；
+  持久化时保留最近 4000 字符。
+- 只跟踪本机发起/继续过的会话；没有记录时明确报错，不猜成员。
+
+## 7. turn 结束后的自动提醒
+
+插件在每个会话的 `turn/end` 之后检查一次，只在该会话曾用过 `call_member` 时才继续：
+
+1. 这一轮调用过 `call_member`：清零连续提醒次数，结束。
+2. 否则取该会话最近一次 `call_member` 的成员会话（按最近投递时间）；本机会话缓存为 false 时
+   按任务表再确认一次。
+3. 成员会话仍在进行（本机任务 running/starting）：结束。
+4. 连续提醒已达 3 次：结束；中间调用过 `call_member` 会重置。
+5. 用一个小 LLM 调用判断这一轮最后的 assistant 文本是否表示“预期交给成员/等成员结果，
+   但没有实际调用”。
+6. 判定为是：把一条 user 消息投回**刚结束 turn 的调用方会话**，提示带同一个
+   `conversationId` 调用 `call_member`；判定为否：结束。
+
+判定输入只有这一轮最后的 assistant 回复文本，模型路由复用该会话 agent 的 provider/model。
+提醒最多连续 3 次，调用过 `call_member` 重置。
+
+## 8. 典型组合
 
 ### 7.1 发现 → 部署
 
@@ -570,7 +608,7 @@ build
 
 ---
 
-## 8. 行为边界
+## 9. 行为边界
 
 1. `build` / `deploy` 是同步调用，耗时期间会一直等待；日志只在结束后通过 `data.logFile` 读取。
 2. `build` 的 `needs-fix` 不会自己发明修复；DSH 修好工作树后，必须再调用 `build { jobId }` 才会自动固化并继续。

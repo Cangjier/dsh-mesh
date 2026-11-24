@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { applySessionEvent, assistantText, repliesSince, summarizeReplies } from '../code/shared/conversation-replies.mjs'
+import { applySessionEvent, assistantReasoning, assistantText, repliesSince, summarizeReplies } from '../code/shared/conversation-replies.mjs'
 
 /**
  * Minimal conversation record the shared helpers mutate.
@@ -20,10 +20,14 @@ function record() {
 /**
  * Build an assistant message event.
  * @param {string} text message text.
+ * @param {string} [reasoning] reasoning text.
  * @returns {object} event.
  */
-function assistant(text) {
-  return { type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } }
+function assistant(text, reasoning) {
+  const content = reasoning === undefined
+    ? [{ type: 'text', text }]
+    : [{ type: 'reasoning', text: reasoning }, { type: 'text', text }]
+  return { type: 'assistant/message', data: { message: { content } } }
 }
 
 test('one reply per turn joins every assistant message of that turn', () => {
@@ -44,6 +48,26 @@ test('one reply per turn joins every assistant message of that turn', () => {
   assert.equal(conversation.replies.length, 1)
   assert.equal(conversation.lastText, '再看日志。')
   assert.equal(conversation.turnText, '')
+})
+
+test('the latest reasoning survives its turn and is cleared by the next one', () => {
+  const conversation = record()
+  applySessionEvent(conversation, { type: 'turn/start', data: { turn: 1 } })
+  applySessionEvent(conversation, assistant('先看文件，', '思考一'))
+  applySessionEvent(conversation, assistant('再看日志。', '思考二'))
+  applySessionEvent(conversation, { type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
+  assert.equal(conversation.lastReasoning, '思考二')
+
+  applySessionEvent(conversation, { type: 'turn/start', data: { turn: 2 } })
+  assert.equal(conversation.lastReasoning, '')
+  applySessionEvent(conversation, assistant('第二轮', '新的思考'))
+  assert.equal(conversation.lastReasoning, '新的思考')
+})
+
+test('assistantReasoning reads only reasoning blocks', () => {
+  assert.equal(assistantReasoning(assistant('正文', '想法')), '想法')
+  assert.equal(assistantReasoning(assistant('正文')), '')
+  assert.equal(assistantReasoning({ type: 'turn/end' }), '')
 })
 
 test('a text-less turn counts but produces no reply', () => {

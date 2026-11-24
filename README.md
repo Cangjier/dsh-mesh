@@ -4,7 +4,7 @@
 
 这个仓库现在同时是：
 
-- **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` 工具。
+- **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` / `status_member` 工具。
 - **可观察的部署**：点「部署」后按钮变为「正在部署」，随时点开查看获取安装包（Release 下载或网关上传）的进度（字节、速度、剩余时间）、获取/解压准备/切换重启三步状态与远端脚本日志尾部，结束后直接给出成功或失败原因。进度与日志走 **SSE 推送**（`/api/dsh-mesh/events`、`/__gate/hysteria/events`），面板里没有定时轮询。
 - **网关**：`code/gate/`，负责密码门、反向代理、成员 cluster 认证、目标 cookie。
 - **构建引擎**：`code/build/`，从 DSH GitHub 源码确定性地应用覆盖层、构建 Web 前端、按目标系统和架构打包。
@@ -150,6 +150,9 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.7z \
 - `conversationId` 是唯一对外的继续投递凭据（内部 task id 不再出现在工具参数里）；`compress: true` 会让成员先压缩上下文再投递。**不传 `compress` 时，如果目标对话的上下文占比已经超过 30%，投递前也会自动强制压缩**（压缩要求对话空闲，目标还在跑时拒绝投递）。`wait_member` 在 `state=done` 时返回会话id和上下文占用，超过 20% 时建议下次投递先压缩。
 - A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话；后台轮询 B 的 `/wait`，`wait_member` 按轮取回。
 - **重启不丢结果**：插件停止前仍在跑的任务会被重新接回监控（24 小时内），成员完成后照常投递；原对话当时不在线会重试几次。
+- **子代理上下文预算**：注入给成员会话的规则要求控制子代理的上下文占比——某个子代理超过 35% 时尽量改用新的子代理（交接已有结论），不再继续用旧的；DSH 在子代理一轮结束时就会卸载它，父对话既量不到也压不了。
+- **`status_member`**：按会话id 返回目标会话状态（进行中/空闲/被异常中止/出错）、最近两次用户消息（本机 `call_member` 投递记录）和最近一次思考（目标会话的 reasoning）。
+- **turn 结束后的自动提醒**：会话用过 `call_member` 后，每轮结束检查这一轮有没有调用；没有的话取最近一次成员会话，仍在进行就不管，否则用一个小 LLM 判断最后的回复是否“预期交给成员但没实际调用”，命中就把提醒投回**调用方会话**，最多连续 3 次，调用过 `call_member` 重置。
 - **没人继续等待时的兜底投递**：模型拿到 `progress` 后可能就不再 `wait_member`。对话完成（或失败/中断）后，插件先等 3 秒，让正在等待或紧接着发起的 `wait_member` 取走结果；3 秒内没人取走，才把结果（失败时是原因和会话id）作为一条用户消息投递回调用 `call_member` 的那个对话。已经被 `wait_member` 取走的结果不会重复投递。
 - 不需要 B 主动访问 A；A 长轮询（阻塞式等待）B 的 `/wait`，避免回调端口/NAT 问题。
 
@@ -343,7 +346,8 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
-| `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` 工具 |
+| `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` / `status_member` 工具 |
+| `src/lib/turn-guard.mjs` | turn 结束后的自动提醒：判断这一轮是否漏了 `call_member`，命中则投回调用方会话（最多 3 次） |
 | `src/client/index.tsx` | 侧边栏「DSH 成员」面板 |
 | `code/gate/server.mjs` | 网关：密码门、目标路由、反向代理、WebSocket |
 | `code/gate/members.mjs` | 成员发现、`/__gate/select`、cluster 代理、cookie 隔离 |
@@ -371,6 +375,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `members` | WireGuard 成员发现 |
 | `call_member` | 在成员上新建/继续对话，返回会话id |
 | `wait_member` | 有界等待成员会话：有新回复立刻返回（`state=progress`），完成返回 `done`；超时返回继续等待提示 |
+| `status_member` | 目标会话状态、最近两次用户消息、最近一次思考 |
 
 ## 约定与限制
 

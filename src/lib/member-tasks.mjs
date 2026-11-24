@@ -278,6 +278,17 @@ export class MemberTaskService {
         task.replySeq = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0
         task.deliveredSeq = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0
         task.terminalDelivered = task.terminalDelivered === true
+        if (!Array.isArray(task.sentMessages)) {
+          task.sentMessages = typeof task.prompt === 'string' && task.prompt !== ''
+            ? [{ text: task.prompt, at: String(task.createdAt ?? '') }]
+            : []
+        }
+        if (typeof task.lastPrompt !== 'string' || task.lastPrompt === '') {
+          task.lastPrompt = task.sentMessages.at(-1)?.text ?? ''
+        }
+        if (typeof task.lastSentAt !== 'string' || task.lastSentAt === '') {
+          task.lastSentAt = task.sentMessages.at(-1)?.at ?? String(task.updatedAt ?? task.createdAt ?? '')
+        }
         this.tasks.set(task.id, task)
       } catch { }
     }
@@ -546,6 +557,7 @@ export class MemberTaskService {
       /** True for a task attached to a conversation this initiator did not start. */
       adopted: false,
     }
+    this.#recordSent(task, prompt)
     this.controllers.set(task.id, new AbortController())
     this.tasks.set(task.id, task)
     await this.#save(task)
@@ -632,6 +644,90 @@ export class MemberTaskService {
     return [...this.tasks.values()]
       .filter(task => task.conversationId === conversationId)
       .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))[0]
+  }
+
+  /**
+   * The messages this initiator delivered to one task, oldest first (at most two).
+   * @param {object} task task record.
+   * @returns {{text: string, at: string}[]} sent messages.
+   */
+  sentMessages(task) {
+    if (Array.isArray(task.sentMessages) && task.sentMessages.length > 0) return task.sentMessages.slice(-2)
+    return typeof task.prompt === 'string' && task.prompt !== ''
+      ? [{ text: task.prompt, at: String(task.createdAt ?? '') }]
+      : []
+  }
+
+  /**
+   * Find the tracked task for one member conversation.
+   * @param {string} conversationId member conversation id.
+   * @returns {Promise<object|undefined>} task record.
+   */
+  async find(conversationId) {
+    await this.#ensureLoaded()
+    return this.#taskOfConversation(String(conversationId ?? ''))
+  }
+
+  /**
+   * Newest task one origin session used, by its most recent delivery.
+   * @param {string} sessionId origin session id.
+   * @returns {Promise<object|undefined>} task record.
+   */
+  async latestForOrigin(sessionId) {
+    await this.#ensureLoaded()
+    const key = String(sessionId ?? '')
+    if (key === '') return undefined
+    let newest
+    let newestAt = -Infinity
+    for (const task of this.tasks.values()) {
+      if (task.originSessionId !== key) continue
+      const stamp = Date.parse(task.lastSentAt ?? task.updatedAt ?? task.createdAt ?? '')
+      if (Number.isFinite(stamp) && stamp > newestAt) {
+        newest = task
+        newestAt = stamp
+      }
+    }
+    return newest
+  }
+
+  /**
+   * Live status of one tracked member conversation, for `status_member`.
+   *
+   * The member's own projection is the source of truth while it is reachable;
+   * a failed read keeps the local task so the tool can still report what the
+   * initiator knows instead of failing outright.
+   * @param {string} conversationId member conversation id.
+   * @returns {Promise<{task: object, live: object|null, liveError: string|null}|null>} inspection.
+   */
+  async inspect(conversationId) {
+    const task = await this.find(conversationId)
+    if (task === undefined) return null
+    let live = null
+    let liveError = null
+    try {
+      const result = await this.#request(task.baseUrl, 'GET', `/v1/conversations/${encodeURIComponent(task.conversationId)}`, undefined, 10_000)
+      live = result?.conversation ?? null
+    } catch (error) {
+      liveError = error instanceof Error ? error.message : String(error)
+    }
+    return { task, live, liveError }
+  }
+
+  /**
+   * Remember one delivered message in the task's rolling two-message history.
+   * @param {object} task task record.
+   * @param {string} text delivered prompt.
+   * @returns {void}
+   */
+  #recordSent(task, text) {
+    const message = truncate(String(text ?? ''), 2000)
+    if (message === '') return
+    const at = new Date().toISOString()
+    task.lastPrompt = message
+    task.lastSentAt = at
+    const history = Array.isArray(task.sentMessages) ? task.sentMessages.slice() : []
+    history.push({ text: message, at })
+    task.sentMessages = history.slice(-2)
   }
 
   /** Replies this task received but no `wait` call has returned yet. */
@@ -816,6 +912,7 @@ export class MemberTaskService {
       90_000,
       signal,
     )
+    this.#recordSent(task, prompt)
     if (fresh) {
       // A conversation this initiator never tracked already has a reply
       // history. Start the cursor where the member is now, or the first wait

@@ -67,6 +67,7 @@ test('the persisted record drops events, sockets and receipts', () => {
     createdAt: '2026-11-12T06:00:00.000Z',
     updatedAt: '2026-11-12T06:01:00.000Z',
     lastText: 'y'.repeat(900),
+    lastReasoning: 'z'.repeat(5000),
     turns: 3,
     replySeq: 7,
     events: [{ type: 'x' }],
@@ -74,7 +75,7 @@ test('the persisted record drops events, sockets and receipts', () => {
     lastReceipt: { big: true },
   })
   assert.deepEqual(Object.keys(record).sort(), [
-    'createdAt', 'cwd', 'error', 'id', 'initiator', 'lastText', 'prompt', 'replySeq', 'sessionId', 'status', 'title', 'turns', 'updatedAt', 'workspace',
+    'createdAt', 'cwd', 'error', 'id', 'initiator', 'lastReasoning', 'lastText', 'prompt', 'replySeq', 'sessionId', 'status', 'title', 'turns', 'updatedAt', 'workspace',
   ])
   assert.equal(record.error, null)
   assert.equal(record.turns, 3)
@@ -82,6 +83,7 @@ test('the persisted record drops events, sockets and receipts', () => {
   assert.equal(record.workspace, 'demo')
   assert.equal(record.prompt, '# 任务\n\n做点事')
   assert.ok(record.lastText.length <= 400)
+  assert.ok(record.lastReasoning.length <= 4000)
   assert.equal(record.events, undefined)
 })
 

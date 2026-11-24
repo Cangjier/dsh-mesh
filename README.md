@@ -150,6 +150,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.7z \
 - `conversationId` 是唯一对外的继续投递凭据（内部 task id 不再出现在工具参数里）；`compress: true` 会让成员先压缩上下文再投递。**不传 `compress` 时，如果目标对话的上下文占比已经超过 30%，投递前也会自动强制压缩**（压缩要求对话空闲，目标还在跑时拒绝投递）。`wait_member` 在 `state=done` 时返回会话id和上下文占用，超过 20% 时建议下次投递先压缩。
 - A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话；后台轮询 B 的 `/wait`，`wait_member` 按轮取回。
 - **重启不丢结果**：插件停止前仍在跑的任务会被重新接回监控（24 小时内），成员完成后照常投递；原对话当时不在线会重试几次。
+- **子代理上下文预算**：注入给成员会话的规则要求它控制子代理上下文占比——子代理每轮结束、回到主对话并通知后，用 `compact_subagent` 检查一次，严格超过 35% 必须压缩；运行中的子代理不能压缩，所以长任务要拆成多轮。`compact_subagent` 在成员本机按名字解析子代理，读与会话状态栏同一口径的占比，超过阈值后调用该子代理 preset 的 `compaction.compactNow()`，返回压缩前后占比。
 - **没人继续等待时的兜底投递**：模型拿到 `progress` 后可能就不再 `wait_member`。对话完成（或失败/中断）后，插件先等 3 秒，让正在等待或紧接着发起的 `wait_member` 取走结果；3 秒内没人取走，才把结果（失败时是原因和会话id）作为一条用户消息投递回调用 `call_member` 的那个对话。已经被 `wait_member` 取走的结果不会重复投递。
 - 不需要 B 主动访问 A；A 长轮询（阻塞式等待）B 的 `/wait`，避免回调端口/NAT 问题。
 
@@ -343,7 +344,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
-| `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` 工具 |
+| `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `wait_member` / `compact_subagent` 工具 |
 | `src/client/index.tsx` | 侧边栏「DSH 成员」面板 |
 | `code/gate/server.mjs` | 网关：密码门、目标路由、反向代理、WebSocket |
 | `code/gate/members.mjs` | 成员发现、`/__gate/select`、cluster 代理、cookie 隔离 |
@@ -371,6 +372,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `members` | WireGuard 成员发现 |
 | `call_member` | 在成员上新建/继续对话，返回会话id |
 | `wait_member` | 有界等待成员会话：有新回复立刻返回（`state=progress`），完成返回 `done`；超时返回继续等待提示 |
+| `compact_subagent` | 子代理空闲且上下文严格超过 35% 时压缩，返回压缩前后占比 |
 
 ## 约定与限制
 

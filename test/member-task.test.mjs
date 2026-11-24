@@ -535,7 +535,7 @@ test('build tool returns the final job and its log path', async () => {
   }
 })
 
-test('registerTools exposes build, deploy, members, call_member and repack', async () => {
+test('registerTools exposes build, deploy, members, call_member, wait_member, repack and compact_subagent', async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-tools-'))
   const names = []
   const tools = []
@@ -553,7 +553,7 @@ test('registerTools exposes build, deploy, members, call_member and repack', asy
   const toolsCtx = { tools: { register: tool => { names.push(tool.name); tools.push(tool) } } }
   try {
     registerTools(ctx, toolsCtx, service)
-    assert.deepEqual(names.sort(), ['build', 'call_member', 'deploy', 'members', 'repack', 'wait_member'].sort())
+    assert.deepEqual(names.sort(), ['build', 'call_member', 'compact_subagent', 'deploy', 'members', 'repack', 'wait_member'].sort())
     for (const name of ['build', 'deploy', 'members']) {
       const tool = tools.find(candidate => candidate.name === name)
       assert.equal(tool.parameters.properties.action, undefined)

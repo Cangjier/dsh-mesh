@@ -481,11 +481,14 @@ test('a new conversation denies the question tool and carries the measured mesh 
     // The question tool has no answerer in a task conversation, so the preset's
     // contribution is filtered out for this agent only.
     assert.deepEqual(restricted, [{ deny: ['ask_user_question'] }])
-    assert.deepEqual(contexts.map(entry => entry.name), ['mesh:interaction', 'mesh:environment'])
+    assert.deepEqual(contexts.map(entry => entry.name), ['mesh:interaction', 'mesh:subagent', 'mesh:environment'])
     assert.match(contexts[0].text, /禁用了 ask_user_question/u)
+    assert.match(contexts[1].text, /compact_subagent/u)
+    assert.match(contexts[1].text, /35%/u)
     assert.equal(contexts[0].interpolate, false)
-    assert.equal(contexts[1].text, '本机代理端口 8080；经代理出网实测：延迟 118 ms，下行 42.3 Mbps。\nGitHub token: ghp_test_token')
     assert.equal(contexts[1].interpolate, false)
+    assert.equal(contexts[2].text, '本机代理端口 8080；经代理出网实测：延迟 118 ms，下行 42.3 Mbps。\nGitHub token: ghp_test_token')
+    assert.equal(contexts[2].interpolate, false)
   } finally {
     await service.dispose()
     await rm(dir, { recursive: true, force: true })
@@ -502,7 +505,7 @@ test('a conversation without mesh facts still gets the interaction rule', async 
   try {
     const created = await call('POST', '/v1/conversations', { prompt: '照常执行' })
     assert.equal(created.status, 201)
-    assert.deepEqual(contexts.map(entry => entry.name), ['mesh:interaction'])
+    assert.deepEqual(contexts.map(entry => entry.name), ['mesh:interaction', 'mesh:subagent'])
   } finally {
     await service.dispose()
     await rm(dir, { recursive: true, force: true })
@@ -567,7 +570,7 @@ test('a resumed conversation re-applies the question-tool restriction', async ()
     const sent = await call(port, 'POST', `/v1/conversations/${id}/messages`, { content: '继续' })
     assert.equal(sent.status, 202)
     assert.deepEqual(restricted, [{ deny: ['ask_user_question'] }])
-    assert.deepEqual(contexts.map(entry => entry.name), ['mesh:interaction'])
+    assert.deepEqual(contexts.map(entry => entry.name), ['mesh:interaction', 'mesh:subagent'])
   } finally {
     await service.dispose()
     await rm(dir, { recursive: true, force: true })

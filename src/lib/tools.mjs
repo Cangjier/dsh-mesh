@@ -13,9 +13,9 @@
  * @module @local/dsh-mesh/tools
  */
 
-import { FORCED_COMPACT_PERCENT, MemberTaskService, describeMemberTask, memberTaskResultAlreadyDelivered, memberTaskWorkspace } from './member-tasks.mjs'
-import { createTurnGuard } from './turn-guard.mjs'
-import { createMemberContext } from './member-context.mjs'
+import { FORCED_COMPACT_PERCENT, MemberTaskService, describeMemberTask, memberTaskProfile, memberTaskResultAlreadyDelivered, memberTaskWorkspace } from './member-tasks.mjs'
+import { createMemberContext, formatMemberScopeMissingHint } from './member-context.mjs'
+import { normalizeMemberScopePatch } from './service.mjs'
 
 /**
  * Register the tools on an injected `tools` context.
@@ -168,20 +168,13 @@ export function registerTools(ctx, toolsCtx, service) {
   try {
     ctx.effect(() => () => memberTasks.dispose(), 'mesh member tasks')
   } catch { }
-  const turnGuard = createTurnGuard({
-    ctx,
-    memberTasks,
-    log: line => ctx.logger?.info?.(`mesh: ${line}`),
-  })
-  try {
-    ctx.effect(() => () => turnGuard.dispose(), 'mesh turn guard')
-  } catch { }
   // Once this conversation has running member conversations, every eligible
   // step carries a status snapshot (id, state, workspace) and the `all: true`
   // wait hint. It is request-only context: no new turn, no user message.
   const memberContext = createMemberContext({
     ctx,
     memberTasks,
+    service,
     log: line => ctx.logger?.info?.(`mesh: ${line}`),
   })
   try {
@@ -213,6 +206,9 @@ export function registerTools(ctx, toolsCtx, service) {
       '新建对话前会按组网直连配置找到目标成员的本地代理端口，用 SSH 在目标成员上跑 mjs 探针实测其延迟和下行带宽，',
       '把一行结果、代理端口和 hub 的 git token 注入目标会话（没有直连配置就不报出网）；并禁用该会话的 ask_user_question：',
       '成员需要信息时会在回复里提问并停下，用 call_member 带 conversationId 回答。',
+      '`identity` / `scope` 可选：这个会话的身份/角色和负责的工作范围，按会话id 持久化到 member-scopes.json；',
+      '新建对话时随 mesh.profile 注入成员的系统上下文，继续已有对话时会合并该会话的设置并在消息前加一行【成员身份】说明。',
+      '也可以在任何时候用 set_member_scope 单独设置任意会话或自身的身份/工作范围。',
       '返回值带 data.logFile，指向该任务的日志文件；会话id在 text 和 data.conversationId 中。',
       '',
       '成员通过 WireGuard 成员发现解析（id/name/IP 均可）；目标 B 的 8765 interop 服务必须可达，token 默认复用网关密码。',
@@ -227,6 +223,8 @@ export function registerTools(ctx, toolsCtx, service) {
         cwd: { type: 'string', description: '新建对话：成员 B 上的工作目录（绝对路径，可空）。' },
         workspace: { type: 'string', description: '新建对话：成员 B 上的任务工作区名称；实际目录固定为成员本机的 ~/.dsh/workspaces/<name>。和 cwd 二选一。' },
         force: { type: 'boolean', description: '只新建对话：目标工作区目录有 .git 且已有进行中的对话时仍然创建（确认文件/git 竞争风险）。继续投递不接受。' },
+        identity: { type: 'string', description: '这个会话的身份/角色（例如 开发、测试、网关、客户 A），最长 40 字符；与已有设置合并，空字符串表示清除。' },
+        scope: { type: 'string', description: '这个会话负责的工作范围（例如 dsh-mesh 插件开发与构建、跨平台验收），最长 120 字符；与已有设置合并，空字符串表示清除。' },
       },
       required: ['prompt'],
       additionalProperties: false,
@@ -257,6 +255,8 @@ export function registerTools(ctx, toolsCtx, service) {
             prompt: args.prompt,
             cwd: args.cwd,
             workspace: args.workspace,
+            identity: args.identity,
+            scope: args.scope,
             force: args.force === true,
             agent: exec.agent,
             notify: true,
@@ -278,6 +278,8 @@ export function registerTools(ctx, toolsCtx, service) {
           ok: task.status !== 'failed',
           text: [
             `已发起成员任务：${task.member}（${task.memberIp}），会话 ${task.conversationId}。`,
+            formatTaskProfileLine(task),
+            formatTaskProfileMissingHint(task),
             typeof task.egressLine === 'string' && task.egressLine !== '' ? `出网实测：${task.egressLine}` : '',
             `会话id：${task.conversationId}`,
             parallelHint !== '' ? parallelHint : formatWaitHint('等待结果', task.conversationId),
@@ -304,6 +306,8 @@ export function registerTools(ctx, toolsCtx, service) {
         member: args.member,
         prompt: args.prompt,
         compress: args.compress === true,
+        identity: args.identity,
+        scope: args.scope,
         agent: exec.agent,
         signal: exec.signal,
       })
@@ -334,6 +338,8 @@ export function registerTools(ctx, toolsCtx, service) {
         ok: true,
         text: [
           `已发送到 ${task.member}（${task.memberIp}）的对话 ${task.conversationId}。`,
+          formatTaskProfileLine(task),
+          formatTaskProfileMissingHint(task),
           `会话id：${task.conversationId}`,
           deliveryLine,
           compactionLine,
@@ -347,6 +353,104 @@ export function registerTools(ctx, toolsCtx, service) {
           ...data,
           currentConversationId: task.conversationId,
           conversations: conversationBlock.conversations,
+        },
+      }
+    },
+  }
+
+  const setMemberScopeDefinition = {
+    name: 'set_member_scope',
+    description: [
+      '设置一个成员会话或当前主对话（自身）的身份和工作范围。',
+      '',
+      '`conversationId` 省略、`self`、`local` 或等于当前会话 id 时设置“自身”；其他值作为成员会话 id。',
+      '`identity` / `scope` 是可选的字符串，只传要改的字段；空字符串表示清除。',
+      'identity 最长 40 字符，scope 最长 120 字符；首次给自身设置且未传 keep 时 keep=true。',
+      '`keep` 默认 true，只对自身/主对话生效：turn 结束后若为 true，主对话空闲 30 秒时会主动收到成员状态快照；',
+      '设置成员会话时 keep 被忽略。',
+      '至少提供 identity、scope、keep 之一；设置成员会话时必须有 identity 或 scope 之一。',
+      '成员会话可以未被本机跟踪，设置仍会保存，只是不会同步任务快照。',
+      '这个工具只保存设置，不给成员会话发消息、不自动加投递前缀；随对话一起设置/更新用 call_member 的 identity/scope 参数。',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      properties: {
+        conversationId: {
+          type: 'string',
+          description: '要设置的会话id；省略、self、local 或当前会话id 表示自身。',
+        },
+        identity: {
+          type: 'string',
+          description: '身份/角色（例如 开发、测试、网关、客户 A），最长 40 字符；空字符串清除。',
+        },
+        scope: {
+          type: 'string',
+          description: '负责/工作范围（例如 dsh-mesh 插件开发与构建、跨平台验收），最长 120 字符；空字符串清除。',
+        },
+        keep: {
+          type: 'boolean',
+          description: '只对自身/主对话生效，默认 true；控制主对话空闲后是否主动推送成员状态快照。设置成员会话时忽略。',
+        },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{
+        type: 'text',
+        text: typeof value?.text === 'string' ? value.text : JSON.stringify(value, null, 2),
+      }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const selfId = originSessionOf(exec?.agent)
+      const rawId = typeof args.conversationId === 'string' ? args.conversationId.trim() : ''
+      const isSelf = rawId === '' || rawId === 'self' || rawId === 'local' || (selfId !== '' && rawId === selfId)
+      const hasIdentity = args.identity !== undefined
+      const hasScope = args.scope !== undefined
+      const hasKeep = args.keep !== undefined
+      if (!hasIdentity && !hasScope && !hasKeep) {
+        throw new Error('identity, scope, or keep is required')
+      }
+      if (isSelf && selfId === '') throw new Error('cannot set the current session scope: no current session')
+      if (!isSelf && !hasIdentity && !hasScope) {
+        throw new Error('keep only applies to the current session; set identity or scope for a member conversation')
+      }
+      const patch = {
+        ...(hasIdentity ? { identity: args.identity } : {}),
+        ...(hasScope ? { scope: args.scope } : {}),
+        ...(isSelf && hasKeep ? { keep: args.keep } : {}),
+      }
+      // Validate before touching the store, then let the service normalise the
+      // same raw patch (so an empty string still means "clear").
+      normalizeMemberScopePatch(patch)
+      if (isSelf && !hasKeep) {
+        // First setting defaults keep on; an existing keep=false is preserved.
+        const existing = await service.memberScope(selfId)
+        if (existing === null || existing.keep === undefined) patch.keep = true
+      }
+      const targetId = isSelf ? selfId : rawId
+      const saved = await service.setMemberScope(targetId, patch)
+      const scope = saved.scope ?? null
+      const tracked = isSelf ? false : await memberTasks.syncTaskScope(targetId, scope)
+      const lines = [
+        isSelf ? `已设置自身（会话 ${selfId}）的身份/工作范围。` : `已设置成员会话 ${targetId} 的身份/工作范围。`,
+        `身份：${scope?.identity ?? '未设置'}`,
+        `工作范围：${scope?.scope ?? '未设置'}`,
+        ...(isSelf ? [`保持目标：${scope?.keep === false ? '关闭' : '开启'}（只对主对话生效）`] : []),
+        ...(!isSelf && hasKeep ? ['keep 只对主对话自身生效，设置成员会话时已忽略。'] : []),
+        ...(!isSelf && !tracked ? ['本机未跟踪该会话，只保存设置。'] : []),
+      ]
+      return {
+        ok: true,
+        text: lines.join('\n'),
+        data: {
+          target: isSelf ? 'self' : 'conversation',
+          conversationId: targetId,
+          self: isSelf,
+          scope,
+          tracked,
+          ignoredKeep: !isSelf && hasKeep,
         },
       }
     },
@@ -636,7 +740,8 @@ export function registerTools(ctx, toolsCtx, service) {
       '查看一个或多个成员会话的当前状态，以及这些目标对话最近两次的用户消息（就是 call_member 投递过去的消息）。',
       '',
       '`conversationId` 查一个，`conversationIds` 一次查多个（返回按会话分块列出，并带一行汇总）。',
-      '返回值同时列出本对话跟踪的**所有**成员会话：每个会话的id、状态（进行中 / 空闲 / 异常中止）和工作区名称。',
+      '返回值同时列出本对话跟踪的**所有**成员会话：每个会话的id、状态（进行中 / 空闲 / 异常中止）、工作区名称、身份和工作范围。',
+      '身份/工作范围缺失（包括升级前创建、没有 profile 快照的老会话）会标成「未设置」，并在末尾提示下次 call_member 用 identity 和 scope 参数补齐。',
       '状态优先取目标成员的最新投影：进行中 / 空闲 / 异常中止 / 出错；目标不可达时退回本机任务状态。',
       '最近两次用户消息来自本机任务记录，按投递时间从旧到新排列，最多两条；',
       '最近一次思考是目标对话最新一轮的 reasoning；只跟踪本机发起或继续过的会话，没有跟踪的会话会明确报错。',
@@ -672,9 +777,12 @@ export function registerTools(ctx, toolsCtx, service) {
         }
       }))
       const missing = inspected.filter(entry => entry.found === null).map(entry => entry.id)
+      const scopes = typeof service.memberScopes === 'function'
+        ? await service.memberScopes().catch(() => ({}))
+        : {}
       const entries = inspected
         .filter(entry => entry.found !== null)
-        .map(entry => describeStatus(entry.found, memberTasks))
+        .map(entry => describeStatus(entry.found, memberTasks, scopes))
       if (entries.length === 0) {
         throw new Error(`本机没有跟踪会话 ${missing.join('、')}；先用 call_member 发起或继续一次，再查状态。`)
       }
@@ -684,14 +792,19 @@ export function registerTools(ctx, toolsCtx, service) {
       // caller's origin; fall back to its own origin so the list is not empty.
       const requestedOrigin = inspected.find(entry => entry.found !== null)?.found?.task?.originSessionId ?? ''
       let originId = originSessionOf(exec?.agent) || requestedOrigin
-      let allBlock = await originConversationBlock(memberTasks, originId, ids[0])
+      let allBlock = await originConversationBlock(memberTasks, originId, ids[0], { withProfile: true, scopes })
       if (allBlock.conversations.length === 0 && requestedOrigin !== '' && requestedOrigin !== originId) {
         originId = requestedOrigin
-        allBlock = await originConversationBlock(memberTasks, originId, ids[0])
+        allBlock = await originConversationBlock(memberTasks, originId, ids[0], { withProfile: true, scopes })
       }
+      const missingProfileHint = formatMemberScopeMissingHint(allBlock.conversations, scopes)
       const allLines = allBlock.conversations.length === 0
         ? ['（本对话任务表里没有可列出的会话。）']
-        : [...allBlock.lines, '（全量列表的状态/工作区来自本机任务记录；被查会话详情优先实时。）']
+        : [
+            ...allBlock.lines,
+            '（全量列表的状态/工作区来自本机任务记录；被查会话详情优先实时。）',
+            ...(missingProfileHint === '' ? [] : [missingProfileHint]),
+          ]
       if (entries.length === 1 && missing.length === 0) {
         return {
           ok: true,
@@ -796,7 +909,7 @@ export function registerTools(ctx, toolsCtx, service) {
     },
   }
 
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, waitMemberDefinition, statusMemberDefinition, membersDefinition, repackDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, waitMemberDefinition, statusMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool)
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`)
@@ -818,6 +931,33 @@ export function registerTools(ctx, toolsCtx, service) {
 function memberTaskData(task, memberTasks) {
   const { id: taskId, ...fields } = task
   return { ...fields, logFile: memberTasks.logPath(taskId) }
+}
+
+/**
+ * The identity/scope line of one `call_member` result.
+ *
+ * Only fields that are actually set are shown; a partial profile is still
+ * useful and must not invent the other half.
+ * @param {object} task task record.
+ * @returns {string} line, or '' when the task has no profile.
+ */
+function formatTaskProfileLine(task) {
+  const profile = memberTaskProfile(task)
+  if (profile === null) return ''
+  const parts = []
+  if (profile.identity !== null) parts.push(`身份：${profile.identity}`)
+  if (profile.scope !== null) parts.push(`负责范围：${profile.scope}`)
+  return parts.join('；')
+}
+
+/**
+ * The prompt that asks the caller to complete a completely missing profile.
+ * @param {object} task task record.
+ * @returns {string} hint line, or '' when the task already has a profile.
+ */
+function formatTaskProfileMissingHint(task) {
+  if (memberTaskProfile(task) !== null) return ''
+  return '该会话还没有身份/工作范围：下次 call_member 带 identity 和 scope 参数，或用 set_member_scope 设置。'
 }
 
 /**
@@ -950,20 +1090,34 @@ function originSessionOf(agent) {
  * record; `current` marks the conversation the call was about.
  * @param {object[]} tasks tracked tasks, oldest first.
  * @param {string|undefined} currentConversationId conversation this call is about.
+ * @param {{withProfile?: boolean, scopes?: Record<string, object>}} [options] `status_member` asks for scope fields.
  * @returns {{lines: string[], conversations: object[]}} rendered lines and data.
  */
-function conversationListBlock(tasks, currentConversationId) {
+function conversationListBlock(tasks, currentConversationId, options = {}) {
   const list = Array.isArray(tasks) ? tasks : []
-  const conversations = list.map(task => describeMemberTask(task, currentConversationId))
+  const withProfile = options.withProfile === true
+  const scopes = options.scopes ?? {}
+  const conversations = withProfile
+    ? list.map((task) => {
+        const entry = describeMemberTask(task, currentConversationId)
+        const stored = scopes[String(task.conversationId ?? '')]
+        const profile = stored !== undefined ? memberTaskProfile({ profile: stored }) : memberTaskProfile(task)
+        return { ...entry, profile, identity: profile?.identity ?? null, scope: profile?.scope ?? null }
+      })
+    : list.map(task => describeMemberTask(task, currentConversationId))
   if (conversations.length === 0) {
     return { lines: ['本对话还没有跟踪任何成员会话。'], conversations }
   }
+  const profileSuffix = withProfile
+    ? entry => `身份：${entry.identity ?? '未设置'}；工作范围：${entry.scope ?? '未设置'}`
+    : () => ''
   return {
     lines: [
       `本对话跟踪的成员会话（共 ${String(conversations.length)} 个，* 为当前会话）：`,
       ...conversations.map((entry) => {
         const turn = entry.turns !== null && entry.turns > 0 ? `，第 ${String(entry.turns)} 轮` : ''
-        return `- ${entry.current ? '* ' : ''}${entry.conversationId}（${entry.member} ${entry.memberIp}，工作区 ${entry.workspace}，${entry.statusLabel}${turn}）`
+        const profile = profileSuffix(entry)
+        return `- ${entry.current ? '* ' : ''}${entry.conversationId}（${entry.member} ${entry.memberIp}，工作区 ${entry.workspace}，${entry.statusLabel}${turn}）${profile === '' ? '' : ` ${profile}`}`
       }),
     ],
     conversations,
@@ -975,11 +1129,12 @@ function conversationListBlock(tasks, currentConversationId) {
  * @param {{listForOrigin: (sessionId: string) => Promise<object[]>}} memberTasks task service.
  * @param {string} sessionId origin session id.
  * @param {string|undefined} currentConversationId conversation this call is about.
+ * @param {{withProfile?: boolean, scopes?: Record<string, object>}} [options] include identity/scope on each line.
  * @returns {Promise<{lines: string[], conversations: object[]}>} block.
  */
-async function originConversationBlock(memberTasks, sessionId, currentConversationId) {
+async function originConversationBlock(memberTasks, sessionId, currentConversationId, options = {}) {
   const tasks = await memberTasks.listForOrigin(sessionId).catch(() => [])
-  return conversationListBlock(tasks, currentConversationId)
+  return conversationListBlock(tasks, currentConversationId, options)
 }
 
 /**
@@ -1093,16 +1248,21 @@ function remainingStatusLabel(entry) {
  * @param {{sentMessages: (task: object) => object[]}} memberTasks task service.
  * @returns {object} status entry.
  */
-function describeStatus(found, memberTasks) {
+function describeStatus(found, memberTasks, scopes = {}) {
   const { task, live, liveError } = found
   const liveStatus = typeof live?.status === 'string' ? live.status : ''
   const turns = Number.isSafeInteger(live?.turns) ? live.turns : (Number.isSafeInteger(task.turns) ? task.turns : null)
   const liveWorkspace = typeof live?.workspace === 'string' ? live.workspace.trim() : ''
+  const stored = scopes[String(task.conversationId ?? '')]
+  const profile = stored !== undefined ? memberTaskProfile({ profile: stored }) : memberTaskProfile(task)
   return {
     conversationId: task.conversationId,
     member: task.member,
     memberIp: task.memberIp,
     workspace: liveWorkspace !== '' ? liveWorkspace : memberTaskWorkspace(task),
+    profile,
+    identity: profile?.identity ?? null,
+    scope: profile?.scope ?? null,
     status: liveStatus === '' ? task.status : liveStatus,
     liveStatus,
     statusLabel: memberStatusLabel(liveStatus, task),
@@ -1138,6 +1298,7 @@ function formatStatusBlock(entry) {
       : `状态：${entry.statusLabel}（目标实时）`,
     `本机任务：${entry.taskStatus}${entry.turns === null ? '' : `，轮次 ${String(entry.turns)}`}`,
     `工作区：${entry.workspace ?? 'unknown'}`,
+    `身份：${entry.identity ?? '未设置'}；工作范围：${entry.scope ?? '未设置'}`,
     formatContextLine(entry.context),
     entry.messages.length === 0 ? '最近两次用户消息：(没有记录)' : '最近两次用户消息（旧→新）：',
     ...entry.messages.map((message, index) => `${String(index + 1)}. ${typeof message.at === 'string' && message.at !== '' ? `[${message.at}] ` : ''}${truncateText(message.text, 1200)}`),

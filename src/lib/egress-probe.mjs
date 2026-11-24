@@ -121,14 +121,28 @@ export function formatEgressLine(mesh) {
 }
 
 /**
- * Build the runtime context a target conversation receives: one egress line
- * and the git tokens, nothing else.
- * @param {{link?: boolean, proxyPort?: number|null, egress?: object, tokens?: {github?: string|null, gitee?: string|null}}} [mesh] mesh facts from the initiator.
+ * Build the runtime context a target conversation receives: its identity and
+ * work scope (when set), one egress line, and the git tokens. An older caller
+ * sends no `profile` field, and must read exactly as before.
+ * @param {{link?: boolean, proxyPort?: number|null, egress?: object, tokens?: {github?: string|null, gitee?: string|null}, profile?: {name?: string|null, identity?: string|null, scope?: string|null}|null}} [mesh] mesh facts from the initiator.
  * @returns {string} context text, or '' when there is nothing to say.
  */
 export function formatMemberMesh(mesh) {
   if (mesh === null || typeof mesh !== 'object') return ''
   const lines = []
+  const profile = mesh.profile !== null && typeof mesh.profile === 'object' ? mesh.profile : null
+  if (profile !== null) {
+    const identity = typeof profile.identity === 'string' && profile.identity.trim() !== '' ? profile.identity.trim() : null
+    const scope = typeof profile.scope === 'string' && profile.scope.trim() !== '' ? profile.scope.trim() : null
+    if (identity !== null || scope !== null) {
+      const name = typeof profile.name === 'string' ? profile.name.trim() : ''
+      const parts = []
+      if (name !== '') parts.push(`你是成员 ${name}`)
+      if (identity !== null) parts.push(`身份：${identity}`)
+      if (scope !== null) parts.push(`负责范围：${scope}`)
+      lines.push(`${parts.join('；')}。`)
+    }
+  }
   // No direct link in the mesh networking config means there is no proxy to
   // report: say nothing about egress rather than inventing a route.
   if (mesh.link === true && Number.isInteger(mesh.proxyPort)) lines.push(formatEgressLine(mesh))

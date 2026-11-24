@@ -175,3 +175,48 @@ test('status_member refuses a conversation this host does not track', async () =
     await cleanup()
   }
 })
+
+test('status_member shows identity and scope and asks for missing ones once', async () => {
+  const { tool, service, cleanup } = await harness()
+  try {
+    const result = await tool.execute({ conversationId: 'conv-1' }, {})
+    assert.match(result.text, /身份：未设置；工作范围：未设置/u)
+    assert.match(result.text, /conv-1（build-2 10\.66\.66\.2，工作区 dsh-mesh，空闲，第 2 轮） 身份：未设置；工作范围：未设置/u)
+    assert.match(result.text, /还有成员会话没有身份\/工作范围：conv-1（build-2）/u)
+    assert.equal(result.text.match(/下次 call_member 带 identity 和 scope 参数/gu)?.length, 1)
+    assert.equal(result.data.identity, null)
+    assert.equal(result.data.scope, null)
+    assert.equal(result.data.conversations[0].identity, null)
+
+    service.memberTasks.tasks.get('member-test').profile = {
+      name: 'build-2',
+      identity: '测试',
+      scope: '跨平台验收',
+    }
+    const profiled = await tool.execute({ conversationId: 'conv-1' }, {})
+    assert.match(profiled.text, /身份：测试；工作范围：跨平台验收/u)
+    assert.match(profiled.text, /conv-1（build-2 10\.66\.66\.2，工作区 dsh-mesh，空闲，第 2 轮） 身份：测试；工作范围：跨平台验收/u)
+    assert.doesNotMatch(profiled.text, /下次 call_member 带 identity 和 scope 参数/u)
+    assert.equal(profiled.data.conversations[0].identity, '测试')
+    assert.equal(profiled.data.conversations[0].scope, '跨平台验收')
+  } finally {
+    await cleanup()
+  }
+})
+
+
+test('status_member prefers member-scopes.json over the task profile snapshot', async () => {
+  const { tool, service, cleanup } = await harness()
+  try {
+    const task = service.memberTasks.tasks.get('member-test')
+    task.profile = { name: 'build-2', identity: '旧身份', scope: '旧范围' }
+    service.memberScopes = async () => ({ 'conv-1': { identity: '新身份', scope: '新范围' } })
+    const result = await tool.execute({ conversationId: 'conv-1' }, {})
+    assert.match(result.text, /身份：新身份；工作范围：新范围/u)
+    assert.doesNotMatch(result.text, /下次 call_member 带 identity 和 scope 参数/u)
+    assert.equal(result.data.identity, '新身份')
+    assert.equal(result.data.conversations[0].identity, '新身份')
+  } finally {
+    await cleanup()
+  }
+})

@@ -81,6 +81,64 @@ const PROBE_TIMEOUT_MS = 4_500
 const PROBE_RETRY_MS = 4_500
 /** How long a result saved on disk keeps counting after a restart. */
 const PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 60_000
+/** Longest accepted identity text in one session scope. */
+export const MEMBER_IDENTITY_MAX = 40
+/** Longest accepted scope text in one session scope. */
+export const MEMBER_SCOPE_MAX = 120
+
+/**
+ * Normalise one session-scope patch.
+ *
+ * `undefined` means "leave this field alone", an empty string means "clear
+ * this field" and is reported as `null`, and a non-empty string is trimmed and
+ * length-checked. `keep` is a boolean if present. The caller merges the result
+ * into the stored record.
+ * @param {{identity?: unknown, scope?: unknown, keep?: unknown}} [patch] raw patch.
+ * @returns {{identity?: string|null, scope?: string|null, keep?: boolean}} normalised patch.
+ */
+export function normalizeMemberScopePatch(patch = {}) {
+  if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new Error('member scope must be an object')
+  }
+  const normalized = {}
+  if (patch.identity !== undefined) {
+    if (typeof patch.identity !== 'string') throw new Error('identity must be a string')
+    const text = patch.identity.trim()
+    if (text.length > MEMBER_IDENTITY_MAX) {
+      throw new Error(`identity is too long: ${String(text.length)} > ${String(MEMBER_IDENTITY_MAX)} characters`)
+    }
+    normalized.identity = text === '' ? null : text
+  }
+  if (patch.scope !== undefined) {
+    if (typeof patch.scope !== 'string') throw new Error('scope must be a string')
+    const text = patch.scope.trim()
+    if (text.length > MEMBER_SCOPE_MAX) {
+      throw new Error(`scope is too long: ${String(text.length)} > ${String(MEMBER_SCOPE_MAX)} characters`)
+    }
+    normalized.scope = text === '' ? null : text
+  }
+  if (patch.keep !== undefined) {
+    if (typeof patch.keep !== 'boolean') throw new Error('keep must be a boolean')
+    normalized.keep = patch.keep
+  }
+  return normalized
+}
+
+/**
+ * Normalise one optional scope field read from disk.
+ *
+ * A non-string, empty, or over-long value is not a usable setting and is
+ * dropped; readers then show that field as unset instead of a value the setter
+ * would have refused.
+ * @param {unknown} value raw value.
+ * @param {number} max maximum length.
+ * @returns {string|null} trimmed value, or null.
+ */
+function savedScopeText(value, max) {
+  if (typeof value !== 'string') return null
+  const text = value.trim()
+  return text === '' || text.length > max ? null : text
+}
 
 /**
  * Find the package root both when this module runs from `src/lib` and when it
@@ -208,6 +266,7 @@ export class MeshService {
     this.home = path.dirname(this.dataDir)
     this.deployRoot = path.join(this.dataDir, 'deploy')
     this.memberTagsFile = path.join(this.dataDir, 'member-tags.json')
+    this.memberScopesFile = path.join(this.dataDir, 'member-scopes.json')
     this.packagesDir = path.join(os.homedir(), '.dsh', 'packages')
     this.releaseConfigFile = path.join(this.dataDir, 'release.json')
     /**
@@ -620,6 +679,82 @@ export class MeshService {
     await mkdir(this.dataDir, { recursive: true })
     await writeFile(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}\n`, 'utf8')
     return { ok: true, tags }
+  }
+
+  /**
+   * Identity, work scope and keep flag for conversations, keyed by conversation id.
+   *
+   * The file is only an optional hint book: a missing, unreadable, or damaged
+   * file is the same as "nothing set yet", never a startup failure. Only the
+   * fields that were actually set are stored.
+   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean}>>} scopes.
+   */
+  async memberScopes() {
+    try {
+      const parsed = JSON.parse(await readFile(this.memberScopesFile, 'utf8'))
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+      const scopes = {}
+      for (const [rawId, value] of Object.entries(parsed)) {
+        if (rawId.trim() === '') continue
+        if (value === null || typeof value !== 'object' || Array.isArray(value)) continue
+        const identity = savedScopeText(value.identity, MEMBER_IDENTITY_MAX)
+        const scope = savedScopeText(value.scope, MEMBER_SCOPE_MAX)
+        const keep = typeof value.keep === 'boolean' ? value.keep : undefined
+        if (identity === null && scope === null && keep === undefined) continue
+        scopes[rawId.trim()] = {
+          ...(identity === null ? {} : { identity }),
+          ...(scope === null ? {} : { scope }),
+          ...(keep === undefined ? {} : { keep }),
+        }
+      }
+      return scopes
+    } catch {
+      return {}
+    }
+  }
+
+  /**
+   * One conversation's scope, or null.
+   * @param {string} conversationId conversation or session id.
+   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean}|null>} scope.
+   */
+  async memberScope(conversationId) {
+    const id = String(conversationId ?? '').trim()
+    if (id === '') return null
+    const scopes = await this.memberScopes()
+    return scopes[id] ?? null
+  }
+
+  /**
+   * Merge and save one conversation's identity/work scope.
+   *
+   * Only the fields present in the patch change. An empty string clears that
+   * field (the record is dropped when nothing remains). `keep` is stored as
+   * given; only the self target is supposed to pass it.
+   * @param {string} conversationId conversation or session id.
+   * @param {{identity?: unknown, scope?: unknown, keep?: unknown}} [patch] fields to change.
+   * @returns {Promise<{ok: boolean, scopes: Record<string, object>, scope: object|null}>} saved scopes.
+   */
+  async setMemberScope(conversationId, patch = {}) {
+    const id = String(conversationId ?? '').trim()
+    if (id === '') throw new Error('conversation id is required')
+    const normalized = normalizeMemberScopePatch(patch)
+    const scopes = await this.memberScopes()
+    const next = { ...(scopes[id] ?? {}) }
+    if (normalized.identity !== undefined) {
+      if (normalized.identity === null) delete next.identity
+      else next.identity = normalized.identity
+    }
+    if (normalized.scope !== undefined) {
+      if (normalized.scope === null) delete next.scope
+      else next.scope = normalized.scope
+    }
+    if (normalized.keep !== undefined) next.keep = normalized.keep
+    if (next.identity === undefined && next.scope === undefined && next.keep === undefined) delete scopes[id]
+    else scopes[id] = next
+    await mkdir(this.dataDir, { recursive: true })
+    await writeFile(this.memberScopesFile, `${JSON.stringify(scopes, null, 2)}\n`, 'utf8')
+    return { ok: true, scopes, scope: scopes[id] ?? null }
   }
 
   /**

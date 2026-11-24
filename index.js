@@ -9687,6 +9687,19 @@ function formatEgressLine(mesh) {
 function formatMemberMesh(mesh) {
   if (mesh === null || typeof mesh !== "object") return "";
   const lines = [];
+  const profile = mesh.profile !== null && typeof mesh.profile === "object" ? mesh.profile : null;
+  if (profile !== null) {
+    const identity = typeof profile.identity === "string" && profile.identity.trim() !== "" ? profile.identity.trim() : null;
+    const scope = typeof profile.scope === "string" && profile.scope.trim() !== "" ? profile.scope.trim() : null;
+    if (identity !== null || scope !== null) {
+      const name = typeof profile.name === "string" ? profile.name.trim() : "";
+      const parts = [];
+      if (name !== "") parts.push(`\u4F60\u662F\u6210\u5458 ${name}`);
+      if (identity !== null) parts.push(`\u8EAB\u4EFD\uFF1A${identity}`);
+      if (scope !== null) parts.push(`\u8D1F\u8D23\u8303\u56F4\uFF1A${scope}`);
+      lines.push(`${parts.join("\uFF1B")}\u3002`);
+    }
+  }
   if (mesh.link === true && Number.isInteger(mesh.proxyPort)) lines.push(formatEgressLine(mesh));
   const tokens = mesh.tokens !== null && typeof mesh.tokens === "object" ? mesh.tokens : {};
   if (typeof tokens.github === "string" && tokens.github.trim() !== "") lines.push(`GitHub token: ${tokens.github.trim()}`);
@@ -9857,6 +9870,40 @@ var PROBE_GRACE_MS = 10 * 6e4;
 var PROBE_TIMEOUT_MS = 4500;
 var PROBE_RETRY_MS = 4500;
 var PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 6e4;
+var MEMBER_IDENTITY_MAX = 40;
+var MEMBER_SCOPE_MAX = 120;
+function normalizeMemberScopePatch(patch = {}) {
+  if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
+    throw new Error("member scope must be an object");
+  }
+  const normalized = {};
+  if (patch.identity !== void 0) {
+    if (typeof patch.identity !== "string") throw new Error("identity must be a string");
+    const text = patch.identity.trim();
+    if (text.length > MEMBER_IDENTITY_MAX) {
+      throw new Error(`identity is too long: ${String(text.length)} > ${String(MEMBER_IDENTITY_MAX)} characters`);
+    }
+    normalized.identity = text === "" ? null : text;
+  }
+  if (patch.scope !== void 0) {
+    if (typeof patch.scope !== "string") throw new Error("scope must be a string");
+    const text = patch.scope.trim();
+    if (text.length > MEMBER_SCOPE_MAX) {
+      throw new Error(`scope is too long: ${String(text.length)} > ${String(MEMBER_SCOPE_MAX)} characters`);
+    }
+    normalized.scope = text === "" ? null : text;
+  }
+  if (patch.keep !== void 0) {
+    if (typeof patch.keep !== "boolean") throw new Error("keep must be a boolean");
+    normalized.keep = patch.keep;
+  }
+  return normalized;
+}
+function savedScopeText(value, max) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text === "" || text.length > max ? null : text;
+}
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
@@ -9951,6 +9998,7 @@ var MeshService = class {
     this.home = path22.dirname(this.dataDir);
     this.deployRoot = path22.join(this.dataDir, "deploy");
     this.memberTagsFile = path22.join(this.dataDir, "member-tags.json");
+    this.memberScopesFile = path22.join(this.dataDir, "member-scopes.json");
     this.packagesDir = path22.join(os10.homedir(), ".dsh", "packages");
     this.releaseConfigFile = path22.join(this.dataDir, "release.json");
     this.latestReleaseCache = null;
@@ -10319,6 +10367,80 @@ var MeshService = class {
     await writeFile12(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
 `, "utf8");
     return { ok: true, tags };
+  }
+  /**
+   * Identity, work scope and keep flag for conversations, keyed by conversation id.
+   *
+   * The file is only an optional hint book: a missing, unreadable, or damaged
+   * file is the same as "nothing set yet", never a startup failure. Only the
+   * fields that were actually set are stored.
+   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean}>>} scopes.
+   */
+  async memberScopes() {
+    try {
+      const parsed = JSON.parse(await readFile15(this.memberScopesFile, "utf8"));
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      const scopes = {};
+      for (const [rawId, value] of Object.entries(parsed)) {
+        if (rawId.trim() === "") continue;
+        if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+        const identity = savedScopeText(value.identity, MEMBER_IDENTITY_MAX);
+        const scope = savedScopeText(value.scope, MEMBER_SCOPE_MAX);
+        const keep = typeof value.keep === "boolean" ? value.keep : void 0;
+        if (identity === null && scope === null && keep === void 0) continue;
+        scopes[rawId.trim()] = {
+          ...identity === null ? {} : { identity },
+          ...scope === null ? {} : { scope },
+          ...keep === void 0 ? {} : { keep }
+        };
+      }
+      return scopes;
+    } catch {
+      return {};
+    }
+  }
+  /**
+   * One conversation's scope, or null.
+   * @param {string} conversationId conversation or session id.
+   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean}|null>} scope.
+   */
+  async memberScope(conversationId) {
+    const id = String(conversationId ?? "").trim();
+    if (id === "") return null;
+    const scopes = await this.memberScopes();
+    return scopes[id] ?? null;
+  }
+  /**
+   * Merge and save one conversation's identity/work scope.
+   *
+   * Only the fields present in the patch change. An empty string clears that
+   * field (the record is dropped when nothing remains). `keep` is stored as
+   * given; only the self target is supposed to pass it.
+   * @param {string} conversationId conversation or session id.
+   * @param {{identity?: unknown, scope?: unknown, keep?: unknown}} [patch] fields to change.
+   * @returns {Promise<{ok: boolean, scopes: Record<string, object>, scope: object|null}>} saved scopes.
+   */
+  async setMemberScope(conversationId, patch = {}) {
+    const id = String(conversationId ?? "").trim();
+    if (id === "") throw new Error("conversation id is required");
+    const normalized = normalizeMemberScopePatch(patch);
+    const scopes = await this.memberScopes();
+    const next = { ...scopes[id] ?? {} };
+    if (normalized.identity !== void 0) {
+      if (normalized.identity === null) delete next.identity;
+      else next.identity = normalized.identity;
+    }
+    if (normalized.scope !== void 0) {
+      if (normalized.scope === null) delete next.scope;
+      else next.scope = normalized.scope;
+    }
+    if (normalized.keep !== void 0) next.keep = normalized.keep;
+    if (next.identity === void 0 && next.scope === void 0 && next.keep === void 0) delete scopes[id];
+    else scopes[id] = next;
+    await mkdir12(this.dataDir, { recursive: true });
+    await writeFile12(this.memberScopesFile, `${JSON.stringify(scopes, null, 2)}
+`, "utf8");
+    return { ok: true, scopes, scope: scopes[id] ?? null };
   }
   /**
    * Remove the temporary files a build leaves behind.
@@ -13094,6 +13216,35 @@ function memberTaskStatusLabel(task) {
 function memberTaskWorkspace(task) {
   return typeof task?.workspace === "string" && task.workspace.trim() !== "" ? task.workspace.trim() : "unknown";
 }
+function memberTaskProfile(task) {
+  const profile = task?.profile;
+  if (profile === null || typeof profile !== "object" || Array.isArray(profile)) return null;
+  const identity = typeof profile.identity === "string" && profile.identity.trim() !== "" ? profile.identity.trim() : null;
+  const scope = typeof profile.scope === "string" && profile.scope.trim() !== "" ? profile.scope.trim() : null;
+  if (identity === null && scope === null) return null;
+  const name = typeof profile.name === "string" && profile.name.trim() !== "" ? profile.name.trim() : null;
+  return { name, identity, scope };
+}
+function profileFromScope(scope, name) {
+  const identity = typeof scope?.identity === "string" && scope.identity.trim() !== "" ? scope.identity.trim() : null;
+  const scopeText = typeof scope?.scope === "string" && scope.scope.trim() !== "" ? scope.scope.trim() : null;
+  if (identity === null && scopeText === null) return null;
+  const member = typeof name === "string" && name.trim() !== "" ? name.trim() : null;
+  return { name: member, identity, scope: scopeText };
+}
+function profileFromPatch(patch, name) {
+  return profileFromScope({
+    ...typeof patch.identity === "string" ? { identity: patch.identity } : {},
+    ...typeof patch.scope === "string" ? { scope: patch.scope } : {}
+  }, name);
+}
+function profilePromptPrefix(profile) {
+  if (profile === null) return "";
+  const parts = [];
+  if (profile.identity !== null) parts.push(`\u4F60\u7684\u8EAB\u4EFD\uFF1A${profile.identity}`);
+  if (profile.scope !== null) parts.push(`\u8D1F\u8D23\u8303\u56F4\uFF1A${profile.scope}`);
+  return parts.length === 0 ? "" : `\u3010\u6210\u5458\u8EAB\u4EFD\u3011${parts.join("\uFF1B")}\u3002`;
+}
 function describeMemberTask(task, currentConversationId) {
   return {
     conversationId: String(task.conversationId ?? ""),
@@ -13233,6 +13384,7 @@ var MemberTaskService = class {
         task.deliveredSeq = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0;
         task.terminalDelivered = task.terminalDelivered === true;
         if (typeof task.workspace !== "string" || task.workspace.trim() === "") task.workspace = "unknown";
+        task.profile = memberTaskProfile(task);
         if (!Array.isArray(task.sentMessages)) {
           task.sentMessages = typeof task.prompt === "string" && task.prompt !== "" ? [{ text: task.prompt, at: String(task.createdAt ?? "") }] : [];
         }
@@ -13314,7 +13466,7 @@ var MemberTaskService = class {
     const raw = String(input ?? "").trim();
     if (raw === "") throw new Error("member is required");
     if (/^https?:\/\//i.test(raw)) {
-      return { name: raw, ip: raw, baseUrl: raw.replace(/\/+$/, "") };
+      return { id: raw, name: raw, ip: raw, baseUrl: raw.replace(/\/+$/, "") };
     }
     const snapshot = await this.service.members();
     this.identity = this.identity ?? {
@@ -13326,8 +13478,16 @@ var MemberTaskService = class {
     const match = all.find((member2) => String(member2.id) === raw || String(member2.name) === raw || String(member2.ip) === raw);
     const member = match ?? { id: raw, name: raw, ip: raw };
     let host = String(member.ip ?? member.id ?? raw);
-    if (/^https?:\/\//i.test(host)) return { name: member.name ?? raw, ip: host, baseUrl: host.replace(/\/+$/, "") };
+    if (/^https?:\/\//i.test(host)) {
+      return {
+        id: String(member.id ?? raw),
+        name: member.name ?? raw,
+        ip: host,
+        baseUrl: host.replace(/\/+$/, "")
+      };
+    }
     return {
+      id: String(member.id ?? raw),
       name: member.name ?? member.id ?? raw,
       ip: String(member.ip ?? member.id ?? raw),
       baseUrl: this.#baseUrl(host)
@@ -13438,12 +13598,16 @@ var MemberTaskService = class {
       }
     }
   }
-  async start({ member, prompt, cwd, workspace, force = false, agent, notify = true, signal }) {
+  async start({ member, prompt, cwd, workspace, identity, scope, force = false, agent, notify = true, signal }) {
     await this.#ensureLoaded();
     if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("prompt is required");
     if (agent === void 0 || agent === null) throw new Error("delegation must be called from a DSH conversation");
+    const scopePatch = normalizeMemberScopePatch({ identity, scope });
+    const hasScopePatch = Object.keys(scopePatch).length > 0;
     const target = await this.#resolveMember(member);
+    const initialProfile = profileFromPatch(scopePatch, target.name);
     const mesh = await this.#meshFor(target);
+    if (initialProfile !== null) mesh.profile = initialProfile;
     const egressLine = mesh.link === true ? formatEgressLine(mesh) : "";
     const explicitWorkspace = typeof workspace === "string" && workspace.trim() !== "";
     const explicitCwd = typeof cwd === "string" && cwd !== "";
@@ -13468,6 +13632,12 @@ var MemberTaskService = class {
     );
     const conversation = created.conversation;
     if (conversation === void 0 || typeof conversation.id !== "string") throw new Error("member interop did not return a conversation id");
+    let profile = null;
+    if (hasScopePatch) {
+      if (typeof this.service.setMemberScope !== "function") throw new Error("member scopes are not available");
+      const saved = await this.service.setMemberScope(conversation.id, { identity, scope });
+      profile = profileFromScope(saved?.scope ?? null, target.name);
+    }
     const reportedWorkspace = typeof conversation.workspace === "string" && conversation.workspace.trim() !== "" ? conversation.workspace.trim() : taskWorkspace;
     const task = {
       id: `member-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
@@ -13502,6 +13672,8 @@ var MemberTaskService = class {
       originSessionId: String(agent.session?.id ?? ""),
       /** One-line egress report the target received, or ''. */
       egressLine,
+      /** Identity/scope snapshot this conversation was started with. */
+      profile,
       /** Context occupancy last reported by the member, or null. */
       context: null,
       /** Last pre-delivery compaction, when the caller asked for one. */
@@ -13767,6 +13939,24 @@ var MemberTaskService = class {
     return this.#taskOfConversation(String(conversationId ?? ""));
   }
   /**
+   * Update one tracked conversation's profile snapshot from a stored scope.
+   *
+   * `set_member_scope` writes the scope file; a tracking task keeps its own
+   * snapshot so status lists and restarts see the same value. No message is
+   * delivered and no prompt prefix is added here.
+   * @param {string} conversationId member conversation id.
+   * @param {{identity?: string, scope?: string}|null} scope stored scope.
+   * @returns {Promise<boolean>} whether a tracked task was updated.
+   */
+  async syncTaskScope(conversationId, scope) {
+    await this.#ensureLoaded();
+    const task = this.#taskOfConversation(String(conversationId ?? ""));
+    if (task === void 0) return false;
+    task.profile = profileFromScope(scope, task.member);
+    await this.#save(task);
+    return true;
+  }
+  /**
    * Newest task one origin session used, by its most recent delivery.
    * @param {string} sessionId origin session id.
    * @returns {Promise<object|undefined>} task record.
@@ -14021,15 +14211,33 @@ var MemberTaskService = class {
    * occupancy is already above {@link FORCED_COMPACT_PERCENT} is compacted
    * anyway before the message is delivered.
    *
-   * @param {{conversationId: string, member?: string, prompt: string, compress?: boolean, agent?: any, signal?: AbortSignal}} request send request.
+   * Passing `identity` / `scope` merges the conversation's stored scope and
+   * prefixes this delivery with a one-line identity note, so a conversation
+   * created before the setting existed can complete it in place.
+   *
+   * @param {{conversationId: string, member?: string, prompt: string, compress?: boolean, identity?: unknown, scope?: unknown, agent?: any, signal?: AbortSignal}} request send request.
    * @returns {Promise<object>} the tracked task.
    */
   async send(request) {
     await this.#ensureLoaded();
     const prompt = request.prompt;
     if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("prompt is required");
+    const scopePatch = normalizeMemberScopePatch({ identity: request.identity, scope: request.scope });
+    const hasScopePatch = Object.keys(scopePatch).length > 0;
     const signal = request.signal;
-    const { task, fresh } = await this.#sendTarget(request);
+    const { task, fresh, target } = await this.#sendTarget(request);
+    let deliveredPrompt = prompt;
+    if (hasScopePatch) {
+      if (typeof this.service.setMemberScope !== "function") throw new Error("member scopes are not available");
+      const saved = await this.service.setMemberScope(task.conversationId, { identity: request.identity, scope: request.scope });
+      task.profile = profileFromScope(saved?.scope ?? null, target?.name ?? task.member);
+      const prefix = profilePromptPrefix(task.profile);
+      if (prefix !== "") deliveredPrompt = `${prefix}
+${prompt}`;
+    } else if (typeof this.service.memberScope === "function") {
+      const stored = await this.service.memberScope(task.conversationId).catch(() => null);
+      if (stored !== null) task.profile = profileFromScope(stored, target?.name ?? task.member);
+    }
     task.lastCompaction = null;
     await this.#refreshContext(task, signal);
     if (request.compress === true) {
@@ -14038,14 +14246,14 @@ var MemberTaskService = class {
       await this.#compactIfCrowded(task, signal);
     }
     const result = await this.#waitForRuntime(
-      () => this.#request(task.baseUrl, "POST", `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content: prompt }, 3e4, signal),
+      () => this.#request(task.baseUrl, "POST", `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content: deliveredPrompt }, 3e4, signal),
       9e4,
       signal
     );
-    this.#recordSent(task, prompt);
+    this.#recordSent(task, deliveredPrompt);
     if (fresh) {
       this.#adoptPosition(task, result?.conversation);
-      task.prompt = truncate(prompt, 2e3);
+      task.prompt = truncate(deliveredPrompt, 2e3);
       this.tasks.set(task.id, task);
     }
     this.#rememberContext(task, result?.context ?? result?.conversation?.context);
@@ -14099,13 +14307,14 @@ var MemberTaskService = class {
     const tracked = this.#taskOfConversation(conversationId);
     if (tracked !== void 0) {
       const named2 = typeof request.member === "string" ? request.member.trim() : "";
+      let target2;
       if (named2 !== "") {
-        const target2 = await this.#resolveMember(named2);
+        target2 = await this.#resolveMember(named2);
         if (target2.baseUrl !== tracked.baseUrl) {
           throw new Error(`conversation ${conversationId} belongs to ${tracked.member} (${tracked.baseUrl}), not ${target2.baseUrl}`);
         }
       }
-      return { task: tracked, fresh: false };
+      return { task: tracked, fresh: false, target: target2 };
     }
     const named = typeof request.member === "string" ? request.member.trim() : "";
     if (named === "") {
@@ -14144,11 +14353,14 @@ var MemberTaskService = class {
         notifyError: null,
         originAgentId: String(request.agent?.id ?? ""),
         originSessionId: String(request.agent?.session?.id ?? ""),
+        /** Filled when this delivery sets or inherits a member profile. */
+        profile: null,
         context: null,
         lastCompaction: null,
         adopted: true
       },
-      fresh: true
+      fresh: true,
+      target
     };
   }
   /**
@@ -14701,224 +14913,128 @@ var MemberTaskService = class {
   }
 };
 
-// src/lib/turn-guard.mjs
+// src/lib/member-context.mjs
 import { randomUUID as randomUUID2 } from "node:crypto";
-var MAX_REMINDERS = 3;
-var JUDGE_TIMEOUT_MS = 15e3;
-var JUDGE_SYSTEM = [
-  "\u4F60\u5728\u68C0\u67E5\u4E00\u4E2A\u7F16\u7801 agent \u7684\u4E00\u8F6E\u56DE\u590D\u662F\u5426\u6F0F\u6389\u4E86 call_member \u8C03\u7528\u3002\u8FD9\u4E00\u8F6E\u6CA1\u6709\u8C03\u7528 call_member\u3002",
-  "\u5982\u679C\u56DE\u590D\u8868\u793A\u5B83\u8981\u628A\u5DE5\u4F5C\u4EA4\u7ED9\u6210\u5458\u3001\u8BA9\u6210\u5458\u53BB\u505A\u3001\u7B49\u6210\u5458\u7ED3\u679C\u3001\u6216\u5DF2\u7ECF\u5B89\u6392\u6210\u5458\u5904\u7406\uFF0C\u56DE\u7B54 YES\u3002",
-  "\u5982\u679C\u53EA\u662F\u56DE\u7B54\u7528\u6237\u3001\u8BF4\u660E\u81EA\u5DF1\u5DF2\u7ECF\u505A\u5B8C\u3001\u63D0\u95EE\u3001\u6216\u660E\u786E\u4E0D\u9700\u8981\u6210\u5458\uFF0C\u56DE\u7B54 NO\u3002",
-  "\u53EA\u56DE\u7B54 YES \u6216 NO\u3002"
-].join("\n");
-function createTurnGuard({ ctx, memberTasks, log = () => {
-} }) {
-  const delegated = /* @__PURE__ */ new Map();
-  const reminders = /* @__PURE__ */ new Map();
-  const turns = /* @__PURE__ */ new Map();
-  const judging = /* @__PURE__ */ new Set();
-  const disposers = [];
-  let closed = false;
-  function stateOf(id) {
-    let state = turns.get(id);
-    if (state === void 0) {
-      state = { turn: null, called: false, text: "" };
-      turns.set(id, state);
-    }
-    return state;
-  }
-  function textOf(message) {
-    const content = message?.content;
-    if (!Array.isArray(content)) return "";
-    return content.filter((block) => block !== null && typeof block === "object" && block.type === "text" && typeof block.text === "string").map((block) => block.text).join("\n").trim();
-  }
-  async function judge(sessionId, agent, reply) {
-    const llm = typeof ctx.get === "function" ? ctx.get("llm") : void 0;
-    if (llm === void 0 || typeof llm.prepareCall !== "function") return false;
-    const provider = agent?.options?.provider;
-    const model = agent?.options?.model;
-    if (typeof provider !== "string" || provider === "" || typeof model !== "string" || model === "") return false;
-    const signal = AbortSignal.timeout(JUDGE_TIMEOUT_MS);
-    try {
-      const call = await llm.prepareCall({ provider, model, maxTokens: 256 }, signal);
-      let answer = "";
-      for await (const chunk of call.stream({
-        ...call.config,
-        system: JUDGE_SYSTEM,
-        messages: [{
-          id: randomUUID2(),
-          role: "user",
-          content: [{ type: "text", text: `\u8FD9\u4E00\u8F6E\u7684\u56DE\u590D\uFF1A
-${reply.slice(0, 6e3)}` }],
-          source: { kind: "user" }
-        }],
-        sessionId,
-        purpose: "mesh-turn-guard",
-        signal
-      })) {
-        if (chunk?.type === "text-delta" && typeof chunk.text === "string") answer += chunk.text;
-        if (answer.length > 64) break;
-      }
-      return /^\s*YES\b/iu.test(answer);
-    } catch (error) {
-      log(`turn guard judge failed: ${error instanceof Error ? error.message : String(error)}`);
-      return false;
-    }
-  }
-  async function consider(session, turn, reply) {
-    const sessionId = String(session?.id ?? "");
-    if (sessionId === "" || reply === "" || closed) return;
-    if (judging.has(sessionId)) return;
-    judging.add(sessionId);
-    try {
-      await considerTurn(session, sessionId, turn, reply);
-    } finally {
-      judging.delete(sessionId);
-    }
-  }
-  async function considerTurn(session, sessionId, turn, reply) {
-    const state = stateOf(sessionId);
-    if (state.turn !== turn || state.called) return;
-    let task;
-    if (delegated.get(sessionId) !== true) {
-      task = await memberTasks.latestForOrigin(sessionId);
-      if (task === void 0) {
-        delegated.set(sessionId, false);
-        return;
-      }
-      delegated.set(sessionId, true);
-    }
-    task = task ?? await memberTasks.latestForOrigin(sessionId);
-    if (task === void 0) return;
-    if (task.status === "running" || task.status === "starting") return;
-    if ((reminders.get(sessionId) ?? 0) >= MAX_REMINDERS) return;
-    const agents = typeof ctx.get === "function" ? ctx.get("agents") : void 0;
-    const agent = typeof agents?.get === "function" ? agents.get(sessionId) : void 0;
-    if (agent === void 0 || agent === null) return;
-    if (!await judge(sessionId, agent, reply)) return;
-    if (closed || state.turn !== turn || state.called) return;
-    if ((reminders.get(sessionId) ?? 0) >= MAX_REMINDERS) return;
-    if (agent.status !== "idle") return;
-    const count = (reminders.get(sessionId) ?? 0) + 1;
-    reminders.set(sessionId, count);
-    const lastPrompt = typeof task.lastPrompt === "string" && task.lastPrompt !== "" ? task.lastPrompt.replace(/\s+/gu, " ").slice(0, 300) : "";
-    const lines = [
-      "[\u6210\u5458\u4EFB\u52A1\u63D0\u9192] \u4F60\u4E0A\u4E00\u8F6E\u7684\u56DE\u590D\u770B\u8D77\u6765\u51C6\u5907\u628A\u5DE5\u4F5C\u4EA4\u7ED9\u6210\u5458\u6216\u7B49\u5F85\u6210\u5458\u7ED3\u679C\uFF0C\u4F46\u8FD9\u4E00\u8F6E\u6CA1\u6709\u5B9E\u9645\u8C03\u7528 call_member\u3002",
-      `\u6700\u8FD1\u4E00\u6B21\u6210\u5458\u5BF9\u8BDD\uFF1A${task.member}\uFF08${task.memberIp}\uFF09\uFF0C\u4F1A\u8BDDid\uFF1A${task.conversationId}`,
-      ...lastPrompt === "" ? [] : [`\u6700\u8FD1\u4E00\u6B21\u6295\u9012\uFF1A${lastPrompt}`],
-      '\u5982\u679C\u8FD8\u9700\u8981\u8FD9\u4E2A\u6210\u5458\u7EE7\u7EED\uFF0C\u8BF7\u8C03\u7528 call_member\uFF08\u5E26\u540C\u4E00\u4E2A conversationId\uFF09\uFF0C\u518D\u7528 wait_member { "all": true } \u53D6\u7ED3\u679C\uFF1B\u5982\u679C\u4E0D\u9700\u8981\uFF0C\u8BF7\u76F4\u63A5\u56DE\u7B54\u7528\u6237\u3002',
-      `\u8FD9\u662F\u7B2C ${String(count)}/${String(MAX_REMINDERS)} \u6B21\u8FDE\u7EED\u63D0\u9192\uFF0C\u8C03\u7528\u8FC7 call_member \u540E\u4F1A\u91CD\u7F6E\u3002`
-    ];
-    try {
-      agent.followup({
-        id: randomUUID2(),
-        role: "user",
-        content: [{ type: "text", text: lines.join("\n") }],
-        source: { kind: "user" }
-      });
-      log(`turn guard reminder ${String(count)}/${String(MAX_REMINDERS)} queued in ${sessionId}`);
-    } catch (error) {
-      reminders.set(sessionId, count - 1);
-      log(`turn guard reminder failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  function onEvent(session, event) {
-    if (closed || session === void 0 || event === void 0) return;
-    const id = String(session.id ?? "");
-    if (id === "") return;
-    if (event.type === "turn/start") {
-      const state = stateOf(id);
-      state.turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : null;
-      state.called = false;
-      state.text = "";
-      return;
-    }
-    if (event.type === "tool/call") {
-      if (event.data?.name !== "call_member") return;
-      const state = stateOf(id);
-      state.called = true;
-      delegated.set(id, true);
-      reminders.set(id, 0);
-      return;
-    }
-    if (event.type === "assistant/message") {
-      const text = textOf(event.data?.message);
-      if (text !== "") stateOf(id).text = text;
-      return;
-    }
-    if (event.type === "turn/end") {
-      const state = stateOf(id);
-      const turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : state.turn;
-      const called = state.called;
-      const reply = state.text;
-      state.turn = turn;
-      state.called = false;
-      state.text = "";
-      if (called) {
-        reminders.set(id, 0);
-        return;
-      }
-      void consider(session, turn, reply).catch((error) => {
-        log(`turn guard check failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
-    }
-  }
-  if (typeof ctx.on === "function") {
-    disposers.push(ctx.on("session/event", onEvent));
-    disposers.push(ctx.on("session/disposed", (session) => {
-      const id = String(session?.id ?? "");
-      if (id !== "") {
-        turns.delete(id);
-        delegated.delete(id);
-        reminders.delete(id);
-      }
-    }));
-  }
-  return {
-    dispose() {
-      closed = true;
-      for (const dispose of disposers.splice(0)) {
-        try {
-          dispose?.();
-        } catch {
-        }
-      }
-      turns.clear();
-      delegated.clear();
-      reminders.clear();
-      judging.clear();
-    }
-  };
+
+// src/lib/member-sessions.mjs
+var memberSessions = /* @__PURE__ */ new Set();
+function markMemberSession(sessionId) {
+  const id = String(sessionId ?? "").trim();
+  if (id !== "") memberSessions.add(id);
+}
+function unmarkMemberSession(sessionId) {
+  memberSessions.delete(String(sessionId ?? "").trim());
+}
+function isMemberSession(sessionId) {
+  return memberSessions.has(String(sessionId ?? "").trim());
+}
+function clearMemberSessions() {
+  memberSessions.clear();
 }
 
 // src/lib/member-context.mjs
-import { randomUUID as randomUUID3 } from "node:crypto";
-var MEMBER_STATUS_INTERVAL_MS = 3e4;
+var MEMBER_STATUS_INTERVAL_MS = 6e4;
+var MEMBER_PUSH_DELAY_MS = 3e4;
 var MEMBER_STATUS_SOURCE = "mesh-member-status";
+function scopeForTask(task, scopes = {}) {
+  const stored = scopes[String(task?.conversationId ?? "")];
+  return stored !== void 0 ? memberTaskProfile({ profile: stored }) : memberTaskProfile(task);
+}
+function formatMemberScopeMissingHint(tasks, scopes = {}) {
+  const missing = [];
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    if (task === null || typeof task !== "object") continue;
+    const profile = scopeForTask(task, scopes);
+    if (profile !== null && profile.identity !== null && profile.scope !== null) continue;
+    const conversationId = String(task.conversationId ?? "");
+    const member = String(task.member ?? "");
+    const label = conversationId === "" ? member : member === "" ? conversationId : `${conversationId}\uFF08${member}\uFF09`;
+    if (label !== "" && !missing.includes(label)) missing.push(label);
+  }
+  if (missing.length === 0) return "";
+  return `\u8FD8\u6709\u6210\u5458\u4F1A\u8BDD\u6CA1\u6709\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\uFF1A${missing.join("\u3001")}\uFF1B\u4E0B\u6B21 call_member \u5E26 identity \u548C scope \u53C2\u6570\uFF0C\u6216\u7528 set_member_scope \u8BBE\u7F6E\u3002`;
+}
+function formatSelfScopeMissingHint(selfScope) {
+  if (typeof selfScope?.identity === "string" && selfScope.identity.trim() !== "" && typeof selfScope?.scope === "string" && selfScope.scope.trim() !== "") return "";
+  return "\u81EA\u8EAB\u8FD8\u6CA1\u6709\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\uFF1A\u7528 set_member_scope\uFF08\u7701\u7565 conversationId \u6216\u4F20 self\uFF09\u8BBE\u7F6E\u81EA\u8EAB\u8EAB\u4EFD\u548C\u5DE5\u4F5C\u8303\u56F4\u3002";
+}
 function formatMemberStatusSnapshot(tasks, options = {}) {
   const list = Array.isArray(tasks) ? tasks : [];
   const running = list.filter((task) => task?.status === "running" || task?.status === "starting");
   const at = Number.isFinite(options.now) ? options.now : Date.now();
+  const selfId = String(options.selfId ?? "");
+  const selfScope = options.selfScope ?? null;
+  const scopes = options.scopes ?? {};
   const lines = [
-    `[\u6210\u5458\u4EFB\u52A1\u72B6\u6001] \u672C\u5BF9\u8BDD\u8DDF\u8E2A ${String(list.length)} \u4E2A\u6210\u5458\u4F1A\u8BDD\uFF0C\u5176\u4E2D ${String(running.length)} \u4E2A\u8FDB\u884C\u4E2D\uFF08\u5FEB\u7167 ${new Date(at).toISOString()}\uFF09\u3002`
+    `[\u6210\u5458\u4EFB\u52A1\u72B6\u6001] \u672C\u5BF9\u8BDD\u8DDF\u8E2A ${String(list.length)} \u4E2A\u6210\u5458\u4F1A\u8BDD\uFF0C\u5176\u4E2D ${String(running.length)} \u4E2A\u8FDB\u884C\u4E2D\uFF08\u5FEB\u7167 ${new Date(at).toISOString()}\uFF09\u3002`,
+    `- \u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1A\u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${selfScope?.keep === false ? "\u5173\u95ED" : "\u5F00\u542F"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`
   ];
   for (const task of list) {
     const entry = describeMemberTask(task);
+    const profile = scopeForTask(task, scopes);
     const turn = entry.turns !== null && entry.turns > 0 ? `\u7B2C ${String(entry.turns)} \u8F6E` : "";
     lines.push(
-      `- ${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${entry.workspace}\uFF0C${entry.statusLabel}${turn === "" ? "" : `\uFF0C${turn}`}\uFF09`
+      `- ${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${entry.workspace}\uFF0C${entry.statusLabel}${turn === "" ? "" : `\uFF0C${turn}`}\uFF09\u8EAB\u4EFD\uFF1A${profile?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${profile?.scope ?? "\u672A\u8BBE\u7F6E"}`
     );
   }
   lines.push(
     '\u7EE7\u7EED\u7528 wait_member { "all": true } \u7B49\u6240\u6709\u8FDB\u884C\u4E2D\u7684\u4F1A\u8BDD\uFF1A\u4EFB\u610F\u4E00\u4E2A\u5148\u8FD4\u56DE\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF1B\u4E5F\u53EF\u4EE5\u53EA\u7B49\u6307\u5B9A\u7684\u4F1A\u8BDD\uFF1Await_member { "conversationIds": [...] }\u3002'
   );
+  const memberHint = formatMemberScopeMissingHint(list, scopes);
+  if (memberHint !== "") lines.push(memberHint);
+  const selfHint = formatSelfScopeMissingHint(selfScope);
+  if (selfHint !== "") lines.push(selfHint);
   return lines.join("\n");
 }
-function createMemberContext({ ctx, memberTasks, log = () => {
-}, intervalMs = MEMBER_STATUS_INTERVAL_MS, now = () => Date.now() }) {
+function formatMemberStatusSignature(state = {}) {
+  const tasks = Array.isArray(state.tasks) ? state.tasks : [];
+  const scopes = state.scopes ?? {};
+  return JSON.stringify({
+    selfId: String(state.selfId ?? ""),
+    self: {
+      identity: state.selfScope?.identity ?? null,
+      scope: state.selfScope?.scope ?? null,
+      keep: state.selfScope?.keep !== false
+    },
+    tasks: tasks.map((task) => {
+      const profile = scopeForTask(task, scopes);
+      return {
+        conversationId: String(task?.conversationId ?? ""),
+        member: String(task?.member ?? ""),
+        status: String(task?.status ?? ""),
+        turns: Number.isSafeInteger(task?.turns) ? task.turns : null,
+        profile: profile === null ? null : { name: profile.name, identity: profile.identity, scope: profile.scope }
+      };
+    })
+  });
+}
+function createMemberContext({
+  ctx,
+  memberTasks,
+  service,
+  log = () => {
+  },
+  intervalMs = MEMBER_STATUS_INTERVAL_MS,
+  pushDelayMs = MEMBER_PUSH_DELAY_MS,
+  now = () => Date.now()
+}) {
   const lastInjection = /* @__PURE__ */ new Map();
+  const pushTimers = /* @__PURE__ */ new Map();
+  const lastPushSignature = /* @__PURE__ */ new Map();
+  const turns = /* @__PURE__ */ new Map();
+  const generations = /* @__PURE__ */ new Map();
   const disposers = [];
   let closed = false;
+  async function readScopes() {
+    if (typeof service?.memberScopes !== "function") return {};
+    return await service.memberScopes().catch(() => ({}));
+  }
+  function cancelPush(sessionId) {
+    const timer = pushTimers.get(sessionId);
+    if (timer === void 0) return;
+    clearTimeout(timer);
+    pushTimers.delete(sessionId);
+  }
   async function snapshotFor(agent) {
     const sessionId = String(agent?.session?.id ?? agent?.id ?? "");
     if (sessionId === "") return null;
@@ -14927,8 +15043,14 @@ function createMemberContext({ ctx, memberTasks, log = () => {
     const at = now();
     const last = lastInjection.get(sessionId);
     if (typeof last === "number" && Number.isFinite(last) && at >= last && at - last < intervalMs) return null;
-    const tasks = await memberTasks.listForOrigin(sessionId);
-    return { text: formatMemberStatusSnapshot(tasks, { now: at }), at };
+    const [tasks, scopes] = await Promise.all([
+      memberTasks.listForOrigin(sessionId),
+      readScopes()
+    ]);
+    return {
+      text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope: scopes[sessionId] ?? null, scopes }),
+      at
+    };
   }
   async function handler(payload, next) {
     const decision = await next();
@@ -14937,7 +15059,7 @@ function createMemberContext({ ctx, memberTasks, log = () => {
       const snapshot = await snapshotFor(payload?.agent);
       if (snapshot === null) return decision;
       const message = {
-        id: randomUUID3(),
+        id: randomUUID2(),
         role: "user",
         content: [{ type: "text", text: snapshot.text }],
         // Deliberately not `user`: this is injected context, not input the
@@ -14955,16 +15077,99 @@ function createMemberContext({ ctx, memberTasks, log = () => {
       return decision;
     }
   }
+  async function schedulePush(sessionId, turn, generation) {
+    if (closed) return;
+    const [tasks, scopes] = await Promise.all([
+      memberTasks.listForOrigin(sessionId).catch(() => []),
+      readScopes()
+    ]);
+    if (closed || generations.get(sessionId) !== generation) return;
+    if (!turns.has(sessionId) || turns.get(sessionId) !== turn) return;
+    const selfScope = scopes[sessionId] ?? null;
+    if (tasks.length === 0 && selfScope === null) return;
+    if (selfScope?.keep === false) return;
+    cancelPush(sessionId);
+    const timer = setTimeout(() => {
+      pushTimers.delete(sessionId);
+      void pushSnapshot(sessionId, turn).catch((error) => {
+        log(`member status push failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }, pushDelayMs);
+    timer.unref?.();
+    pushTimers.set(sessionId, timer);
+  }
+  async function pushSnapshot(sessionId, turn) {
+    if (closed) return;
+    if (turns.get(sessionId) !== turn) return;
+    const agent = typeof ctx?.get === "function" ? ctx.get("agents")?.get(sessionId) : void 0;
+    if (agent === void 0 || agent === null || agent.status !== "idle") return;
+    const [tasks, scopes] = await Promise.all([
+      memberTasks.listForOrigin(sessionId).catch(() => []),
+      readScopes()
+    ]);
+    if (closed || turns.get(sessionId) !== turn) return;
+    const selfScope = scopes[sessionId] ?? null;
+    if (tasks.length === 0 && selfScope === null) return;
+    if (selfScope?.keep === false) return;
+    if (agent.status !== "idle") return;
+    const at = now();
+    const signature = formatMemberStatusSignature({ selfId: sessionId, selfScope, tasks, scopes });
+    if (lastPushSignature.get(sessionId) === signature) return;
+    const text = formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes });
+    try {
+      agent.followup({
+        id: randomUUID2(),
+        role: "user",
+        content: [{ type: "text", text }],
+        source: { kind: MEMBER_STATUS_SOURCE, form: "push" }
+      });
+      lastPushSignature.set(sessionId, signature);
+      lastInjection.set(sessionId, at);
+      log(`member status pushed to ${sessionId}`);
+    } catch (error) {
+      log(`member status push failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  function onEvent(session, event) {
+    if (closed || session === void 0 || event === void 0) return;
+    const sessionId = String(session.id ?? "");
+    if (sessionId === "" || isMemberSession(sessionId)) return;
+    if (event.type === "turn/start") {
+      turns.set(sessionId, Number.isSafeInteger(event.data?.turn) ? event.data.turn : null);
+      generations.set(sessionId, (generations.get(sessionId) ?? 0) + 1);
+      cancelPush(sessionId);
+      return;
+    }
+    if (event.type !== "turn/end") return;
+    const turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : turns.get(sessionId) ?? null;
+    turns.set(sessionId, turn);
+    const generation = (generations.get(sessionId) ?? 0) + 1;
+    generations.set(sessionId, generation);
+    cancelPush(sessionId);
+    void schedulePush(sessionId, turn, generation).catch((error) => {
+      log(`member status push scheduling failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
   if (typeof ctx?.on === "function") {
     disposers.push(ctx.on("agent/pre-step", handler, { prepend: true }));
+    disposers.push(ctx.on("session/event", onEvent));
     disposers.push(ctx.on("session/disposed", (session) => {
       const id = String(session?.id ?? "");
-      if (id !== "") lastInjection.delete(id);
+      if (id === "") return;
+      cancelPush(id);
+      lastInjection.delete(id);
+      lastPushSignature.delete(id);
+      turns.delete(id);
+      generations.delete(id);
     }));
   }
   return {
     handler,
+    onEvent,
     lastInjection,
+    pushTimers,
+    lastPushSignature,
+    turns,
     dispose() {
       closed = true;
       for (const dispose of disposers.splice(0)) {
@@ -14973,7 +15178,12 @@ function createMemberContext({ ctx, memberTasks, log = () => {
         } catch {
         }
       }
+      for (const timer of pushTimers.values()) clearTimeout(timer);
+      pushTimers.clear();
       lastInjection.clear();
+      lastPushSignature.clear();
+      turns.clear();
+      generations.clear();
     }
   };
 }
@@ -15118,18 +15328,10 @@ function registerTools(ctx, toolsCtx, service) {
     ctx.effect(() => () => memberTasks.dispose(), "mesh member tasks");
   } catch {
   }
-  const turnGuard = createTurnGuard({
-    ctx,
-    memberTasks,
-    log: (line) => ctx.logger?.info?.(`mesh: ${line}`)
-  });
-  try {
-    ctx.effect(() => () => turnGuard.dispose(), "mesh turn guard");
-  } catch {
-  }
   const memberContext = createMemberContext({
     ctx,
     memberTasks,
+    service,
     log: (line) => ctx.logger?.info?.(`mesh: ${line}`)
   });
   try {
@@ -15161,6 +15363,9 @@ function registerTools(ctx, toolsCtx, service) {
       "\u65B0\u5EFA\u5BF9\u8BDD\u524D\u4F1A\u6309\u7EC4\u7F51\u76F4\u8FDE\u914D\u7F6E\u627E\u5230\u76EE\u6807\u6210\u5458\u7684\u672C\u5730\u4EE3\u7406\u7AEF\u53E3\uFF0C\u7528 SSH \u5728\u76EE\u6807\u6210\u5458\u4E0A\u8DD1 mjs \u63A2\u9488\u5B9E\u6D4B\u5176\u5EF6\u8FDF\u548C\u4E0B\u884C\u5E26\u5BBD\uFF0C",
       "\u628A\u4E00\u884C\u7ED3\u679C\u3001\u4EE3\u7406\u7AEF\u53E3\u548C hub \u7684 git token \u6CE8\u5165\u76EE\u6807\u4F1A\u8BDD\uFF08\u6CA1\u6709\u76F4\u8FDE\u914D\u7F6E\u5C31\u4E0D\u62A5\u51FA\u7F51\uFF09\uFF1B\u5E76\u7981\u7528\u8BE5\u4F1A\u8BDD\u7684 ask_user_question\uFF1A",
       "\u6210\u5458\u9700\u8981\u4FE1\u606F\u65F6\u4F1A\u5728\u56DE\u590D\u91CC\u63D0\u95EE\u5E76\u505C\u4E0B\uFF0C\u7528 call_member \u5E26 conversationId \u56DE\u7B54\u3002",
+      "`identity` / `scope` \u53EF\u9009\uFF1A\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8EAB\u4EFD/\u89D2\u8272\u548C\u8D1F\u8D23\u7684\u5DE5\u4F5C\u8303\u56F4\uFF0C\u6309\u4F1A\u8BDDid \u6301\u4E45\u5316\u5230 member-scopes.json\uFF1B",
+      "\u65B0\u5EFA\u5BF9\u8BDD\u65F6\u968F mesh.profile \u6CE8\u5165\u6210\u5458\u7684\u7CFB\u7EDF\u4E0A\u4E0B\u6587\uFF0C\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u65F6\u4F1A\u5408\u5E76\u8BE5\u4F1A\u8BDD\u7684\u8BBE\u7F6E\u5E76\u5728\u6D88\u606F\u524D\u52A0\u4E00\u884C\u3010\u6210\u5458\u8EAB\u4EFD\u3011\u8BF4\u660E\u3002",
+      "\u4E5F\u53EF\u4EE5\u5728\u4EFB\u4F55\u65F6\u5019\u7528 set_member_scope \u5355\u72EC\u8BBE\u7F6E\u4EFB\u610F\u4F1A\u8BDD\u6216\u81EA\u8EAB\u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u3002",
       "\u8FD4\u56DE\u503C\u5E26 data.logFile\uFF0C\u6307\u5411\u8BE5\u4EFB\u52A1\u7684\u65E5\u5FD7\u6587\u4EF6\uFF1B\u4F1A\u8BDDid\u5728 text \u548C data.conversationId \u4E2D\u3002",
       "",
       "\u6210\u5458\u901A\u8FC7 WireGuard \u6210\u5458\u53D1\u73B0\u89E3\u6790\uFF08id/name/IP \u5747\u53EF\uFF09\uFF1B\u76EE\u6807 B \u7684 8765 interop \u670D\u52A1\u5FC5\u987B\u53EF\u8FBE\uFF0Ctoken \u9ED8\u8BA4\u590D\u7528\u7F51\u5173\u5BC6\u7801\u3002"
@@ -15174,7 +15379,9 @@ function registerTools(ctx, toolsCtx, service) {
         compress: { type: "boolean", description: "\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u65F6\uFF0C\u6295\u9012\u524D\u5148\u8BA9\u6210\u5458\u538B\u7F29\u8BE5\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\uFF1B\u8981\u6C42\u5BF9\u8BDD\u7A7A\u95F2\u3002\u7701\u7565\u65F6\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7 30% \u4F1A\u81EA\u52A8\u538B\u7F29\u3002" },
         cwd: { type: "string", description: "\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u6210\u5458 B \u4E0A\u7684\u5DE5\u4F5C\u76EE\u5F55\uFF08\u7EDD\u5BF9\u8DEF\u5F84\uFF0C\u53EF\u7A7A\uFF09\u3002" },
         workspace: { type: "string", description: "\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u6210\u5458 B \u4E0A\u7684\u4EFB\u52A1\u5DE5\u4F5C\u533A\u540D\u79F0\uFF1B\u5B9E\u9645\u76EE\u5F55\u56FA\u5B9A\u4E3A\u6210\u5458\u672C\u673A\u7684 ~/.dsh/workspaces/<name>\u3002\u548C cwd \u4E8C\u9009\u4E00\u3002" },
-        force: { type: "boolean", description: "\u53EA\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u76EE\u6807\u5DE5\u4F5C\u533A\u76EE\u5F55\u6709 .git \u4E14\u5DF2\u6709\u8FDB\u884C\u4E2D\u7684\u5BF9\u8BDD\u65F6\u4ECD\u7136\u521B\u5EFA\uFF08\u786E\u8BA4\u6587\u4EF6/git \u7ADE\u4E89\u98CE\u9669\uFF09\u3002\u7EE7\u7EED\u6295\u9012\u4E0D\u63A5\u53D7\u3002" }
+        force: { type: "boolean", description: "\u53EA\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u76EE\u6807\u5DE5\u4F5C\u533A\u76EE\u5F55\u6709 .git \u4E14\u5DF2\u6709\u8FDB\u884C\u4E2D\u7684\u5BF9\u8BDD\u65F6\u4ECD\u7136\u521B\u5EFA\uFF08\u786E\u8BA4\u6587\u4EF6/git \u7ADE\u4E89\u98CE\u9669\uFF09\u3002\u7EE7\u7EED\u6295\u9012\u4E0D\u63A5\u53D7\u3002" },
+        identity: { type: "string", description: "\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8EAB\u4EFD/\u89D2\u8272\uFF08\u4F8B\u5982 \u5F00\u53D1\u3001\u6D4B\u8BD5\u3001\u7F51\u5173\u3001\u5BA2\u6237 A\uFF09\uFF0C\u6700\u957F 40 \u5B57\u7B26\uFF1B\u4E0E\u5DF2\u6709\u8BBE\u7F6E\u5408\u5E76\uFF0C\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002" },
+        scope: { type: "string", description: "\u8FD9\u4E2A\u4F1A\u8BDD\u8D1F\u8D23\u7684\u5DE5\u4F5C\u8303\u56F4\uFF08\u4F8B\u5982 dsh-mesh \u63D2\u4EF6\u5F00\u53D1\u4E0E\u6784\u5EFA\u3001\u8DE8\u5E73\u53F0\u9A8C\u6536\uFF09\uFF0C\u6700\u957F 120 \u5B57\u7B26\uFF1B\u4E0E\u5DF2\u6709\u8BBE\u7F6E\u5408\u5E76\uFF0C\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002" }
       },
       required: ["prompt"],
       additionalProperties: false
@@ -15205,6 +15412,8 @@ function registerTools(ctx, toolsCtx, service) {
             prompt: args.prompt,
             cwd: args.cwd,
             workspace: args.workspace,
+            identity: args.identity,
+            scope: args.scope,
             force: args.force === true,
             agent: exec.agent,
             notify: true,
@@ -15222,6 +15431,8 @@ function registerTools(ctx, toolsCtx, service) {
           ok: task2.status !== "failed",
           text: [
             `\u5DF2\u53D1\u8D77\u6210\u5458\u4EFB\u52A1\uFF1A${task2.member}\uFF08${task2.memberIp}\uFF09\uFF0C\u4F1A\u8BDD ${task2.conversationId}\u3002`,
+            formatTaskProfileLine(task2),
+            formatTaskProfileMissingHint(task2),
             typeof task2.egressLine === "string" && task2.egressLine !== "" ? `\u51FA\u7F51\u5B9E\u6D4B\uFF1A${task2.egressLine}` : "",
             `\u4F1A\u8BDDid\uFF1A${task2.conversationId}`,
             parallelHint2 !== "" ? parallelHint2 : formatWaitHint("\u7B49\u5F85\u7ED3\u679C", task2.conversationId),
@@ -15248,6 +15459,8 @@ function registerTools(ctx, toolsCtx, service) {
         member: args.member,
         prompt: args.prompt,
         compress: args.compress === true,
+        identity: args.identity,
+        scope: args.scope,
         agent: exec.agent,
         signal: exec.signal
       });
@@ -15264,6 +15477,8 @@ function registerTools(ctx, toolsCtx, service) {
         ok: true,
         text: [
           `\u5DF2\u53D1\u9001\u5230 ${task.member}\uFF08${task.memberIp}\uFF09\u7684\u5BF9\u8BDD ${task.conversationId}\u3002`,
+          formatTaskProfileLine(task),
+          formatTaskProfileMissingHint(task),
           `\u4F1A\u8BDDid\uFF1A${task.conversationId}`,
           deliveryLine,
           compactionLine,
@@ -15277,6 +15492,100 @@ function registerTools(ctx, toolsCtx, service) {
           ...data,
           currentConversationId: task.conversationId,
           conversations: conversationBlock.conversations
+        }
+      };
+    }
+  };
+  const setMemberScopeDefinition = {
+    name: "set_member_scope",
+    description: [
+      "\u8BBE\u7F6E\u4E00\u4E2A\u6210\u5458\u4F1A\u8BDD\u6216\u5F53\u524D\u4E3B\u5BF9\u8BDD\uFF08\u81EA\u8EAB\uFF09\u7684\u8EAB\u4EFD\u548C\u5DE5\u4F5C\u8303\u56F4\u3002",
+      "",
+      "`conversationId` \u7701\u7565\u3001`self`\u3001`local` \u6216\u7B49\u4E8E\u5F53\u524D\u4F1A\u8BDD id \u65F6\u8BBE\u7F6E\u201C\u81EA\u8EAB\u201D\uFF1B\u5176\u4ED6\u503C\u4F5C\u4E3A\u6210\u5458\u4F1A\u8BDD id\u3002",
+      "`identity` / `scope` \u662F\u53EF\u9009\u7684\u5B57\u7B26\u4E32\uFF0C\u53EA\u4F20\u8981\u6539\u7684\u5B57\u6BB5\uFF1B\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002",
+      "identity \u6700\u957F 40 \u5B57\u7B26\uFF0Cscope \u6700\u957F 120 \u5B57\u7B26\uFF1B\u9996\u6B21\u7ED9\u81EA\u8EAB\u8BBE\u7F6E\u4E14\u672A\u4F20 keep \u65F6 keep=true\u3002",
+      "`keep` \u9ED8\u8BA4 true\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1Aturn \u7ED3\u675F\u540E\u82E5\u4E3A true\uFF0C\u4E3B\u5BF9\u8BDD\u7A7A\u95F2 30 \u79D2\u65F6\u4F1A\u4E3B\u52A8\u6536\u5230\u6210\u5458\u72B6\u6001\u5FEB\u7167\uFF1B",
+      "\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6 keep \u88AB\u5FFD\u7565\u3002",
+      "\u81F3\u5C11\u63D0\u4F9B identity\u3001scope\u3001keep \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity \u6216 scope \u4E4B\u4E00\u3002",
+      "\u6210\u5458\u4F1A\u8BDD\u53EF\u4EE5\u672A\u88AB\u672C\u673A\u8DDF\u8E2A\uFF0C\u8BBE\u7F6E\u4ECD\u4F1A\u4FDD\u5B58\uFF0C\u53EA\u662F\u4E0D\u4F1A\u540C\u6B65\u4EFB\u52A1\u5FEB\u7167\u3002",
+      "\u8FD9\u4E2A\u5DE5\u5177\u53EA\u4FDD\u5B58\u8BBE\u7F6E\uFF0C\u4E0D\u7ED9\u6210\u5458\u4F1A\u8BDD\u53D1\u6D88\u606F\u3001\u4E0D\u81EA\u52A8\u52A0\u6295\u9012\u524D\u7F00\uFF1B\u968F\u5BF9\u8BDD\u4E00\u8D77\u8BBE\u7F6E/\u66F4\u65B0\u7528 call_member \u7684 identity/scope \u53C2\u6570\u3002"
+    ].join("\n"),
+    parameters: {
+      type: "object",
+      properties: {
+        conversationId: {
+          type: "string",
+          description: "\u8981\u8BBE\u7F6E\u7684\u4F1A\u8BDDid\uFF1B\u7701\u7565\u3001self\u3001local \u6216\u5F53\u524D\u4F1A\u8BDDid \u8868\u793A\u81EA\u8EAB\u3002"
+        },
+        identity: {
+          type: "string",
+          description: "\u8EAB\u4EFD/\u89D2\u8272\uFF08\u4F8B\u5982 \u5F00\u53D1\u3001\u6D4B\u8BD5\u3001\u7F51\u5173\u3001\u5BA2\u6237 A\uFF09\uFF0C\u6700\u957F 40 \u5B57\u7B26\uFF1B\u7A7A\u5B57\u7B26\u4E32\u6E05\u9664\u3002"
+        },
+        scope: {
+          type: "string",
+          description: "\u8D1F\u8D23/\u5DE5\u4F5C\u8303\u56F4\uFF08\u4F8B\u5982 dsh-mesh \u63D2\u4EF6\u5F00\u53D1\u4E0E\u6784\u5EFA\u3001\u8DE8\u5E73\u53F0\u9A8C\u6536\uFF09\uFF0C\u6700\u957F 120 \u5B57\u7B26\uFF1B\u7A7A\u5B57\u7B26\u4E32\u6E05\u9664\u3002"
+        },
+        keep: {
+          type: "boolean",
+          description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 true\uFF1B\u63A7\u5236\u4E3B\u5BF9\u8BDD\u7A7A\u95F2\u540E\u662F\u5426\u4E3B\u52A8\u63A8\u9001\u6210\u5458\u72B6\u6001\u5FEB\u7167\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
+        }
+      },
+      additionalProperties: false
+    },
+    output: {
+      schema: { type: "object", additionalProperties: true },
+      render: (_args, value) => [{
+        type: "text",
+        text: typeof value?.text === "string" ? value.text : JSON.stringify(value, null, 2)
+      }]
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const selfId = originSessionOf(exec?.agent);
+      const rawId = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
+      const isSelf = rawId === "" || rawId === "self" || rawId === "local" || selfId !== "" && rawId === selfId;
+      const hasIdentity = args.identity !== void 0;
+      const hasScope = args.scope !== void 0;
+      const hasKeep = args.keep !== void 0;
+      if (!hasIdentity && !hasScope && !hasKeep) {
+        throw new Error("identity, scope, or keep is required");
+      }
+      if (isSelf && selfId === "") throw new Error("cannot set the current session scope: no current session");
+      if (!isSelf && !hasIdentity && !hasScope) {
+        throw new Error("keep only applies to the current session; set identity or scope for a member conversation");
+      }
+      const patch = {
+        ...hasIdentity ? { identity: args.identity } : {},
+        ...hasScope ? { scope: args.scope } : {},
+        ...isSelf && hasKeep ? { keep: args.keep } : {}
+      };
+      normalizeMemberScopePatch(patch);
+      if (isSelf && !hasKeep) {
+        const existing = await service.memberScope(selfId);
+        if (existing === null || existing.keep === void 0) patch.keep = true;
+      }
+      const targetId = isSelf ? selfId : rawId;
+      const saved = await service.setMemberScope(targetId, patch);
+      const scope = saved.scope ?? null;
+      const tracked = isSelf ? false : await memberTasks.syncTaskScope(targetId, scope);
+      const lines = [
+        isSelf ? `\u5DF2\u8BBE\u7F6E\u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId}\uFF09\u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u3002` : `\u5DF2\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD ${targetId} \u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u3002`,
+        `\u8EAB\u4EFD\uFF1A${scope?.identity ?? "\u672A\u8BBE\u7F6E"}`,
+        `\u5DE5\u4F5C\u8303\u56F4\uFF1A${scope?.scope ?? "\u672A\u8BBE\u7F6E"}`,
+        ...isSelf ? [`\u4FDD\u6301\u76EE\u6807\uFF1A${scope?.keep === false ? "\u5173\u95ED" : "\u5F00\u542F"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`] : [],
+        ...!isSelf && hasKeep ? ["keep \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
+        ...!isSelf && !tracked ? ["\u672C\u673A\u672A\u8DDF\u8E2A\u8BE5\u4F1A\u8BDD\uFF0C\u53EA\u4FDD\u5B58\u8BBE\u7F6E\u3002"] : []
+      ];
+      return {
+        ok: true,
+        text: lines.join("\n"),
+        data: {
+          target: isSelf ? "self" : "conversation",
+          conversationId: targetId,
+          self: isSelf,
+          scope,
+          tracked,
+          ignoredKeep: !isSelf && hasKeep
         }
       };
     }
@@ -15549,7 +15858,8 @@ ${replyText}` : "",
       "\u67E5\u770B\u4E00\u4E2A\u6216\u591A\u4E2A\u6210\u5458\u4F1A\u8BDD\u7684\u5F53\u524D\u72B6\u6001\uFF0C\u4EE5\u53CA\u8FD9\u4E9B\u76EE\u6807\u5BF9\u8BDD\u6700\u8FD1\u4E24\u6B21\u7684\u7528\u6237\u6D88\u606F\uFF08\u5C31\u662F call_member \u6295\u9012\u8FC7\u53BB\u7684\u6D88\u606F\uFF09\u3002",
       "",
       "`conversationId` \u67E5\u4E00\u4E2A\uFF0C`conversationIds` \u4E00\u6B21\u67E5\u591A\u4E2A\uFF08\u8FD4\u56DE\u6309\u4F1A\u8BDD\u5206\u5757\u5217\u51FA\uFF0C\u5E76\u5E26\u4E00\u884C\u6C47\u603B\uFF09\u3002",
-      "\u8FD4\u56DE\u503C\u540C\u65F6\u5217\u51FA\u672C\u5BF9\u8BDD\u8DDF\u8E2A\u7684**\u6240\u6709**\u6210\u5458\u4F1A\u8BDD\uFF1A\u6BCF\u4E2A\u4F1A\u8BDD\u7684id\u3001\u72B6\u6001\uFF08\u8FDB\u884C\u4E2D / \u7A7A\u95F2 / \u5F02\u5E38\u4E2D\u6B62\uFF09\u548C\u5DE5\u4F5C\u533A\u540D\u79F0\u3002",
+      "\u8FD4\u56DE\u503C\u540C\u65F6\u5217\u51FA\u672C\u5BF9\u8BDD\u8DDF\u8E2A\u7684**\u6240\u6709**\u6210\u5458\u4F1A\u8BDD\uFF1A\u6BCF\u4E2A\u4F1A\u8BDD\u7684id\u3001\u72B6\u6001\uFF08\u8FDB\u884C\u4E2D / \u7A7A\u95F2 / \u5F02\u5E38\u4E2D\u6B62\uFF09\u3001\u5DE5\u4F5C\u533A\u540D\u79F0\u3001\u8EAB\u4EFD\u548C\u5DE5\u4F5C\u8303\u56F4\u3002",
+      "\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u7F3A\u5931\uFF08\u5305\u62EC\u5347\u7EA7\u524D\u521B\u5EFA\u3001\u6CA1\u6709 profile \u5FEB\u7167\u7684\u8001\u4F1A\u8BDD\uFF09\u4F1A\u6807\u6210\u300C\u672A\u8BBE\u7F6E\u300D\uFF0C\u5E76\u5728\u672B\u5C3E\u63D0\u793A\u4E0B\u6B21 call_member \u7528 identity \u548C scope \u53C2\u6570\u8865\u9F50\u3002",
       "\u72B6\u6001\u4F18\u5148\u53D6\u76EE\u6807\u6210\u5458\u7684\u6700\u65B0\u6295\u5F71\uFF1A\u8FDB\u884C\u4E2D / \u7A7A\u95F2 / \u5F02\u5E38\u4E2D\u6B62 / \u51FA\u9519\uFF1B\u76EE\u6807\u4E0D\u53EF\u8FBE\u65F6\u9000\u56DE\u672C\u673A\u4EFB\u52A1\u72B6\u6001\u3002",
       "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\u6765\u81EA\u672C\u673A\u4EFB\u52A1\u8BB0\u5F55\uFF0C\u6309\u6295\u9012\u65F6\u95F4\u4ECE\u65E7\u5230\u65B0\u6392\u5217\uFF0C\u6700\u591A\u4E24\u6761\uFF1B",
       "\u6700\u8FD1\u4E00\u6B21\u601D\u8003\u662F\u76EE\u6807\u5BF9\u8BDD\u6700\u65B0\u4E00\u8F6E\u7684 reasoning\uFF1B\u53EA\u8DDF\u8E2A\u672C\u673A\u53D1\u8D77\u6216\u7EE7\u7EED\u8FC7\u7684\u4F1A\u8BDD\uFF0C\u6CA1\u6709\u8DDF\u8E2A\u7684\u4F1A\u8BDD\u4F1A\u660E\u786E\u62A5\u9519\u3002"
@@ -15585,18 +15895,24 @@ ${replyText}` : "",
         }
       }));
       const missing = inspected.filter((entry) => entry.found === null).map((entry) => entry.id);
-      const entries = inspected.filter((entry) => entry.found !== null).map((entry) => describeStatus(entry.found, memberTasks));
+      const scopes = typeof service.memberScopes === "function" ? await service.memberScopes().catch(() => ({})) : {};
+      const entries = inspected.filter((entry) => entry.found !== null).map((entry) => describeStatus(entry.found, memberTasks, scopes));
       if (entries.length === 0) {
         throw new Error(`\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u4F1A\u8BDD ${missing.join("\u3001")}\uFF1B\u5148\u7528 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u518D\u67E5\u72B6\u6001\u3002`);
       }
       const requestedOrigin = inspected.find((entry) => entry.found !== null)?.found?.task?.originSessionId ?? "";
       let originId = originSessionOf(exec?.agent) || requestedOrigin;
-      let allBlock = await originConversationBlock(memberTasks, originId, ids[0]);
+      let allBlock = await originConversationBlock(memberTasks, originId, ids[0], { withProfile: true, scopes });
       if (allBlock.conversations.length === 0 && requestedOrigin !== "" && requestedOrigin !== originId) {
         originId = requestedOrigin;
-        allBlock = await originConversationBlock(memberTasks, originId, ids[0]);
+        allBlock = await originConversationBlock(memberTasks, originId, ids[0], { withProfile: true, scopes });
       }
-      const allLines = allBlock.conversations.length === 0 ? ["\uFF08\u672C\u5BF9\u8BDD\u4EFB\u52A1\u8868\u91CC\u6CA1\u6709\u53EF\u5217\u51FA\u7684\u4F1A\u8BDD\u3002\uFF09"] : [...allBlock.lines, "\uFF08\u5168\u91CF\u5217\u8868\u7684\u72B6\u6001/\u5DE5\u4F5C\u533A\u6765\u81EA\u672C\u673A\u4EFB\u52A1\u8BB0\u5F55\uFF1B\u88AB\u67E5\u4F1A\u8BDD\u8BE6\u60C5\u4F18\u5148\u5B9E\u65F6\u3002\uFF09"];
+      const missingProfileHint = formatMemberScopeMissingHint(allBlock.conversations, scopes);
+      const allLines = allBlock.conversations.length === 0 ? ["\uFF08\u672C\u5BF9\u8BDD\u4EFB\u52A1\u8868\u91CC\u6CA1\u6709\u53EF\u5217\u51FA\u7684\u4F1A\u8BDD\u3002\uFF09"] : [
+        ...allBlock.lines,
+        "\uFF08\u5168\u91CF\u5217\u8868\u7684\u72B6\u6001/\u5DE5\u4F5C\u533A\u6765\u81EA\u672C\u673A\u4EFB\u52A1\u8BB0\u5F55\uFF1B\u88AB\u67E5\u4F1A\u8BDD\u8BE6\u60C5\u4F18\u5148\u5B9E\u65F6\u3002\uFF09",
+        ...missingProfileHint === "" ? [] : [missingProfileHint]
+      ];
       if (entries.length === 1 && missing.length === 0) {
         return {
           ok: true,
@@ -15701,7 +16017,7 @@ sha256 ${data.sha256}
       };
     }
   };
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, waitMemberDefinition, statusMemberDefinition, membersDefinition, repackDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, waitMemberDefinition, statusMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool);
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`);
@@ -15713,6 +16029,18 @@ sha256 ${data.sha256}
 function memberTaskData(task, memberTasks) {
   const { id: taskId, ...fields } = task;
   return { ...fields, logFile: memberTasks.logPath(taskId) };
+}
+function formatTaskProfileLine(task) {
+  const profile = memberTaskProfile(task);
+  if (profile === null) return "";
+  const parts = [];
+  if (profile.identity !== null) parts.push(`\u8EAB\u4EFD\uFF1A${profile.identity}`);
+  if (profile.scope !== null) parts.push(`\u8D1F\u8D23\u8303\u56F4\uFF1A${profile.scope}`);
+  return parts.join("\uFF1B");
+}
+function formatTaskProfileMissingHint(task) {
+  if (memberTaskProfile(task) !== null) return "";
+  return "\u8BE5\u4F1A\u8BDD\u8FD8\u6CA1\u6709\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\uFF1A\u4E0B\u6B21 call_member \u5E26 identity \u548C scope \u53C2\u6570\uFF0C\u6216\u7528 set_member_scope \u8BBE\u7F6E\u3002";
 }
 var CONTEXT_COMPACT_THRESHOLD = 20;
 var MAX_FANOUT_CONVERSATIONS = 20;
@@ -15764,26 +16092,35 @@ function originSessionOf(agent) {
   if (typeof sessionId === "string" && sessionId !== "") return sessionId;
   return typeof agent?.id === "string" ? agent.id : "";
 }
-function conversationListBlock(tasks, currentConversationId) {
+function conversationListBlock(tasks, currentConversationId, options = {}) {
   const list = Array.isArray(tasks) ? tasks : [];
-  const conversations = list.map((task) => describeMemberTask(task, currentConversationId));
+  const withProfile = options.withProfile === true;
+  const scopes = options.scopes ?? {};
+  const conversations = withProfile ? list.map((task) => {
+    const entry = describeMemberTask(task, currentConversationId);
+    const stored = scopes[String(task.conversationId ?? "")];
+    const profile = stored !== void 0 ? memberTaskProfile({ profile: stored }) : memberTaskProfile(task);
+    return { ...entry, profile, identity: profile?.identity ?? null, scope: profile?.scope ?? null };
+  }) : list.map((task) => describeMemberTask(task, currentConversationId));
   if (conversations.length === 0) {
     return { lines: ["\u672C\u5BF9\u8BDD\u8FD8\u6CA1\u6709\u8DDF\u8E2A\u4EFB\u4F55\u6210\u5458\u4F1A\u8BDD\u3002"], conversations };
   }
+  const profileSuffix = withProfile ? (entry) => `\u8EAB\u4EFD\uFF1A${entry.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${entry.scope ?? "\u672A\u8BBE\u7F6E"}` : () => "";
   return {
     lines: [
       `\u672C\u5BF9\u8BDD\u8DDF\u8E2A\u7684\u6210\u5458\u4F1A\u8BDD\uFF08\u5171 ${String(conversations.length)} \u4E2A\uFF0C* \u4E3A\u5F53\u524D\u4F1A\u8BDD\uFF09\uFF1A`,
       ...conversations.map((entry) => {
         const turn = entry.turns !== null && entry.turns > 0 ? `\uFF0C\u7B2C ${String(entry.turns)} \u8F6E` : "";
-        return `- ${entry.current ? "* " : ""}${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${entry.workspace}\uFF0C${entry.statusLabel}${turn}\uFF09`;
+        const profile = profileSuffix(entry);
+        return `- ${entry.current ? "* " : ""}${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${entry.workspace}\uFF0C${entry.statusLabel}${turn}\uFF09${profile === "" ? "" : ` ${profile}`}`;
       })
     ],
     conversations
   };
 }
-async function originConversationBlock(memberTasks, sessionId, currentConversationId) {
+async function originConversationBlock(memberTasks, sessionId, currentConversationId, options = {}) {
   const tasks = await memberTasks.listForOrigin(sessionId).catch(() => []);
-  return conversationListBlock(tasks, currentConversationId);
+  return conversationListBlock(tasks, currentConversationId, options);
 }
 function formatWaitHint(action, conversationId) {
   return `\u7528 wait_member ${action}\uFF08\u63A8\u8350 all: true\uFF09\uFF1Await_member { "all": true }\uFF0C\u4EFB\u610F\u4E00\u4E2A\u5148\u8FD4\u56DE\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF1B\u4E5F\u53EF\u4EE5\u53EA\u7B49\u8FD9\u4E2A\uFF1Await_member { "conversationIds": [${JSON.stringify(String(conversationId))}] }\u3002`;
@@ -15848,16 +16185,21 @@ function remainingStatusLabel(entry) {
   if (entry.status === "interrupted") return "\u5F02\u5E38\u4E2D\u6B62";
   return String(entry.status);
 }
-function describeStatus(found, memberTasks) {
+function describeStatus(found, memberTasks, scopes = {}) {
   const { task, live, liveError } = found;
   const liveStatus = typeof live?.status === "string" ? live.status : "";
   const turns = Number.isSafeInteger(live?.turns) ? live.turns : Number.isSafeInteger(task.turns) ? task.turns : null;
   const liveWorkspace = typeof live?.workspace === "string" ? live.workspace.trim() : "";
+  const stored = scopes[String(task.conversationId ?? "")];
+  const profile = stored !== void 0 ? memberTaskProfile({ profile: stored }) : memberTaskProfile(task);
   return {
     conversationId: task.conversationId,
     member: task.member,
     memberIp: task.memberIp,
     workspace: liveWorkspace !== "" ? liveWorkspace : memberTaskWorkspace(task),
+    profile,
+    identity: profile?.identity ?? null,
+    scope: profile?.scope ?? null,
     status: liveStatus === "" ? task.status : liveStatus,
     liveStatus,
     statusLabel: memberStatusLabel(liveStatus, task),
@@ -15879,6 +16221,7 @@ function formatStatusBlock(entry) {
     entry.liveStatus === "" ? `\u72B6\u6001\uFF1A${entry.statusLabel}\uFF08\u76EE\u6807\u4E0D\u53EF\u8FBE\uFF1A${entry.liveError ?? "unknown"}\uFF09` : `\u72B6\u6001\uFF1A${entry.statusLabel}\uFF08\u76EE\u6807\u5B9E\u65F6\uFF09`,
     `\u672C\u673A\u4EFB\u52A1\uFF1A${entry.taskStatus}${entry.turns === null ? "" : `\uFF0C\u8F6E\u6B21 ${String(entry.turns)}`}`,
     `\u5DE5\u4F5C\u533A\uFF1A${entry.workspace ?? "unknown"}`,
+    `\u8EAB\u4EFD\uFF1A${entry.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${entry.scope ?? "\u672A\u8BBE\u7F6E"}`,
     formatContextLine(entry.context),
     entry.messages.length === 0 ? "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\uFF1A(\u6CA1\u6709\u8BB0\u5F55)" : "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\uFF08\u65E7\u2192\u65B0\uFF09\uFF1A",
     ...entry.messages.map((message, index) => `${String(index + 1)}. ${typeof message.at === "string" && message.at !== "" ? `[${message.at}] ` : ""}${truncateText(message.text, 1200)}`),
@@ -15975,7 +16318,7 @@ function formatBytes3(value) {
 
 // src/lib/interop-service.mjs
 import { execFile as execFile4 } from "node:child_process";
-import { createHash as createHash9, randomBytes as randomBytes3, randomUUID as randomUUID4, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createHash as createHash9, randomBytes as randomBytes3, randomUUID as randomUUID3, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 import { existsSync as existsSync15, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, statSync, writeFileSync } from "node:fs";
 import http3 from "node:http";
 import { homedir as homedir3 } from "node:os";
@@ -16418,7 +16761,7 @@ function contentBlocks(value) {
   return blocks;
 }
 function userMessage(blocks) {
-  return { id: randomUUID4(), role: "user", content: blocks, source: { kind: "user" } };
+  return { id: randomUUID3(), role: "user", content: blocks, source: { kind: "user" } };
 }
 function nonNegativeOrNull(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
@@ -16598,6 +16941,7 @@ data: ${JSON.stringify(payload)}
         };
         conversations.set(conversation.id, conversation);
         bySession.set(conversation.sessionId, conversation);
+        markMemberSession(conversation.sessionId);
       }
       if (conversations.size > 0) log(`restored ${String(conversations.size)} conversation(s) from ${settings.stateFile}`);
     } catch (error) {
@@ -16825,7 +17169,7 @@ data: ${JSON.stringify(payload)}
     if (typeof ctx.agents?.create !== "function") {
       throw httpError(503, "sdk_unavailable", "DSH agent runtime is not available");
     }
-    const id = randomUUID4();
+    const id = randomUUID3();
     const registry = typeof ctx.get === "function" ? ctx.get("workspaceRegistry") : ctx.workspaceRegistry;
     const requested = normalizeWorkspaceName(request.workspace);
     const explicitCwd = typeof request.cwd === "string" && request.cwd !== "" ? path27.resolve(request.cwd) : "";
@@ -16881,6 +17225,7 @@ data: ${JSON.stringify(payload)}
     };
     conversations.set(id, conversation);
     bySession.set(id, conversation);
+    markMemberSession(id);
     const composition = await resolveAgentPreset();
     const environment = formatMemberMesh(request.mesh);
     conversation.meshContext = environment;
@@ -16924,6 +17269,7 @@ data: ${JSON.stringify(payload)}
         await Promise.resolve(handle2.dispose()).catch(() => {
         });
       }
+      unmarkMemberSession(id);
       throw error;
     }
   }
@@ -17106,6 +17452,7 @@ data: ${JSON.stringify(payload)}
       handles.delete(id);
       if (handle2 !== void 0) await Promise.resolve(handle2.dispose()).catch(() => {
       });
+      unmarkMemberSession(conversation.sessionId);
       removed += 1;
     }
     saveState();
@@ -17355,6 +17702,7 @@ data: ${JSON.stringify(event)}
       await Promise.resolve(handle2.dispose()).catch(() => {
       });
     }
+    clearMemberSessions();
     await new Promise((resolve) => {
       if (server === null) {
         resolve();

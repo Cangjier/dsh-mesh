@@ -2,8 +2,8 @@
 
 - 插件：`@local/dsh-mesh`
 - 工具注册：`src/lib/tools.mjs` → `registerTools()`
-- 当前共 7 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`wait_member`、`status_member`；另有一个 turn 结束后的自动提醒 hook
-- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）。
+- 当前共 8 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`set_member_scope`、`wait_member`、`status_member`
+- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续，`set_member_scope` 单独设置任意会话或自身的身份/工作范围，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）。
 - 所有工具统一返回 `{ ok, text, data }`。`text` 是给人看的摘要，`data` 是结构化结果。
 - 同步执行的工具会在 `text` 和 `data` 里都返回日志文件地址，便于调用结束后继续读取完整日志。
 
@@ -15,9 +15,10 @@
 | `deploy` | SSH 部署/升级，等待结束 | `host` `package` | `false` |
 | `repack` | 用当前仓库刷新已有离线包 | `package` | `false` |
 | `members` | 只读成员发现 | 无 | `true` |
-| `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `compress` / `cwd` / `workspace` / `force` | `false` |
+| `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `compress` / `cwd` / `workspace` / `force` / `identity` / `scope` | `false` |
+| `set_member_scope` | 单独设置成员会话或自身的身份/工作范围 | `conversationId` / `identity` / `scope` / `keep` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
-| `status_member` | 目标会话状态 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
+| `status_member` | 目标会话状态 + 身份/工作范围 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区/身份/工作范围）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
 
 ## 2. 共享基础
 
@@ -31,6 +32,7 @@ $DSH_HOME/mesh/
   deploy/                  部署 job
   member-tasks/            成员任务
   member-tags.json         成员标签
+  member-scopes.json       按会话存的身份 / 工作范围 / keep
   schedule.json            自动编译 / 每成员自动升级设置与上次结果
   cache/sources/           源码 tarball 缓存
 ```
@@ -311,6 +313,8 @@ deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-lin
 - 取得成员的 `id` / `ip` / `tag` / `system`；
 - 给 `deploy` 提供 `host`，给 `call_member` 提供 `member`。
 
+身份/工作范围属于**会话**，不属于成员机器；用 `set_member_scope` 或 `call_member` 查看/设置。
+
 ---
 
 ## 6. `call_member`
@@ -330,7 +334,11 @@ deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-lin
 cwd / workspace  仅新建：成员 B 上的工作目录，或 ~/.dsh/workspaces/<name>
 compress         仅继续：投递前先在成员 B 上压缩该对话上下文（要求对话空闲）
 force            仅新建：目标工作区目录有 .git 且已有进行中的对话时仍然创建（确认并发风险）
+identity         身份/角色（例如 开发、测试、网关、客户 A），≤40 字符，按会话合并
+scope            负责的工作范围（例如 dsh-mesh 插件开发与构建、跨平台验收），≤120 字符
 ```
+
+`identity` / `scope` 可新建或继续时传入，空字符串表示清除；非字符串或超长会报错。
 
 `force` 只对新建对话生效，透传成成员侧的 `forceWorkspace`；继续已有
 `conversationId` 不会触发工作区并发拦截，传了会报错。
@@ -392,6 +400,15 @@ call_member { "member": "10.66.66.3", "prompt": "检查磁盘" }
 
 返回值还包含 `currentConversationId` 和 `conversations`：本对话跟踪的所有成员会话
 （会话id、`进行中` / `空闲` / `异常中止`、工作区、轮次），当前会话 `current: true`。
+
+**身份与工作范围**：两个值按**会话 id** 合并保存到 `$DSH_HOME/mesh/member-scopes.json`
+（`{ "<conversationId>": { identity, scope, keep } }`；自身用当前主对话 session id，`keep`
+只对自身有意义）。新建对话时本次有效 scope 随 `mesh.profile = { name, identity, scope }`
+进入成员的系统上下文；继续已有对话时合并该会话的 scope，并在投递的 prompt 前加一行
+`【成员身份】你的身份：…；负责范围：…。`（只写已设置的部分）。返回的 `text` 显示
+`身份：…；负责范围：…`；完全没有设置时提示用 `call_member` 的 `identity`/`scope` 或
+`set_member_scope` 补齐，`data.profile` 是本次有效 profile（缺失为 `null`）。
+仓库不再有“成员机器档案/继承”的概念。
 
 **工作区并发保护**：成员在真正 create 之前检查目标目录。目录存在 `.git`（目录或
 linked worktree 的 `.git` 文件）且该目录已有 `status=running` 的会话时返回：
@@ -582,12 +599,13 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 
 ### 6.6 成员会话状态快照（`agent/pre-step` 注入）
 
-本对话有进行中的成员会话时，插件每 30 秒最多把一份状态快照附加到当前 step 的请求：
+本对话有进行中的成员会话时，插件每 60 秒最多把一份状态快照附加到当前 step 的请求：
 
 ```text
 [成员任务状态] 本对话跟踪 2 个成员会话，其中 1 个进行中（快照 ...）。
-- conv-a（B 10.66.66.2，工作区 dsh-mesh，进行中，第 2 轮）
-- conv-b（B 10.66.66.2，工作区 unknown，空闲，第 1 轮）
+- 自身（会话 <selfId>）：身份：…；工作范围：…；保持目标：开启/关闭（只对主对话生效）
+- conv-a（B 10.66.66.2，工作区 dsh-mesh，进行中，第 2 轮）身份：…；工作范围：…
+- conv-b（B 10.66.66.2，工作区 unknown，空闲，第 1 轮）身份：未设置；工作范围：未设置
 继续用 wait_member { "all": true } 等所有进行中的会话：任意一个先返回就立刻返回；
 也可以只等指定的会话：wait_member { "conversationIds": [...] }。
 ```
@@ -596,9 +614,26 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 - **不新开 turn**，不调用 `followup` / `steer`，不是用户输入；
 - 注入消息的 `source.kind` 是 `mesh-member-status`（不是 `user`），带
   `form: "snapshot"` 和 `sections`；
-- 没有进行中的会话、或距上次注入不足 30 秒时不注入；
+- 没有进行中的会话、或距上次注入不足 60 秒时不注入；
+- 身份/工作范围优先取 `member-scopes.json`（按 conversationId），回退任务 profile 快照；
+- 缺成员会话身份/工作范围时聚合提示 `call_member` / `set_member_scope`；自身缺失时提示
+  `set_member_scope`（省略 conversationId 或传 `self`）；全齐时不提示；
 - 读取任务表失败只记日志并吞掉，step 的 decision 原样返回，不影响 agent loop；
 - 每个会话的注入时钟在 `session/disposed` 时清掉。
+
+### 6.6.1 主对话空闲主动推送
+
+主对话 `turn/end` 后，若该会话不是 interop 创建的成员会话、`keep !== false`、且有被跟踪的
+成员任务或自身 scope，插件在 30 秒静默后检查：主 agent 仍 idle、没有新 turn、会话未 dispose。
+满足时用 `agent.followup(...)` 投递**与快照完全相同**的内容；`turn/start` 取消计时，
+dispose 清理全部 timer。
+
+- 消息 `role: "user"`，`source: { kind: "mesh-member-status", form: "push" }`，不是普通用户输入；
+- 用不含时间戳的内容签名去重（自身 scope/keep + 各任务 conversationId/member/status/turns/profile），
+  相同签名不再推送；任务进展/完成或 scope 变化才再次推送；
+- 推送成功后更新注入时钟，避免紧接着的 pre-step 再注入同一内容；
+- 成员会话由 `src/lib/member-sessions.mjs` 标记，永不主动推送；
+- 推送失败只记日志，不影响会话。
 
 ### 6.7 任务文件
 
@@ -640,8 +675,9 @@ status_member { "conversationId": "<会话id>" }
 status_member { "conversationIds": ["<会话id1>", "<会话id2>"] }
   → 按本机任务记录找到目标成员和 baseUrl
   → GET /v1/conversations/<会话id> 取目标最新投影（含 lastReasoning）
-  → 返回状态、工作区、最近两次用户消息、最近一次思考
-  → 末尾列出本对话跟踪的全部成员会话（id/状态/工作区）
+  → 返回状态、工作区、身份/工作范围、最近两次用户消息、最近一次思考
+  → 末尾列出本对话跟踪的全部成员会话（id/状态/工作区/身份/工作范围）
+  → 缺 identity 或 scope 的会话会在末尾聚合提示 call_member / set_member_scope 补齐
 ```
 
 传 `conversationIds` 时按会话分块输出，第一行是汇总（例如
@@ -653,29 +689,33 @@ status_member { "conversationIds": ["<会话id1>", "<会话id2>"] }
 - 最近一次思考来自目标会话最新一轮的 reasoning（`lastReasoning`），成员升级后才有；
   持久化时保留最近 4000 字符。
 - 只跟踪本机发起/继续过的会话；没有记录时明确报错，不猜成员。
-- 每个被查会话带 `workspace` 和「工作区：…」行；返回值另附全量会话列表，
-  `data.conversations` 是全量摘要（id、状态标签、工作区），`data.requested` 才是
-  本次被查会话的详情，`data.count` 是全量数量。状态标签统一为
-  进行中 / 空闲 / 异常中止；实时状态优先。
+- 每个被查会话带 `workspace` 和「工作区：…」行，以及「身份：…；工作范围：…」行（缺失标
+  `未设置`）；身份/工作范围优先取 `member-scopes.json`，回退任务 profile 快照。
+- 返回值另附全量会话列表，`data.conversations` 是全量摘要（id、状态标签、工作区、identity、
+  scope），`data.requested` 才是本次被查会话的详情，`data.count` 是全量数量。状态标签统一为
+  进行中 / 空闲 / 异常中止；实时状态优先。只要有会话缺 identity 或 scope，就在全量列表末尾
+  给一条“下次 call_member 带 identity 和 scope 参数，或用 set_member_scope 设置”的提示，
+  同一条只出现一次。
 
-## 7. turn 结束后的自动提醒
+### 6.9 `set_member_scope`
 
-插件在每个会话的 `turn/end` 之后检查一次，只在该会话曾用过 `call_member` 时才继续：
+```text
+set_member_scope { "identity": "开发", "scope": "插件开发" }
+set_member_scope { "conversationId": "self", "keep": false }
+set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "scope": "跨平台验收" }
+```
 
-1. 这一轮调用过 `call_member`：清零连续提醒次数，结束。
-2. 否则取该会话最近一次 `call_member` 的成员会话（按最近投递时间）；本机会话缓存为 false 时
-   按任务表再确认一次。
-3. 成员会话仍在进行（本机任务 running/starting）：结束。
-4. 连续提醒已达 3 次：结束；中间调用过 `call_member` 会重置。
-5. 用一个小 LLM 调用判断这一轮最后的 assistant 文本是否表示“预期交给成员/等成员结果，
-   但没有实际调用”。
-6. 判定为是：把一条 user 消息投回**刚结束 turn 的调用方会话**，提示带同一个
-   `conversationId` 调用 `call_member`；判定为否：结束。
+- `conversationId` 省略、`self`、`local` 或等于当前会话 id → 设置“自身”；其他值作为成员会话 id。
+- `identity` / `scope` 只传要改的字段，空字符串清除；identity ≤40 字符，scope ≤120 字符。
+- `keep` 默认 true，只对自身生效：首次给自身设置且未传 keep 时写入 true；已有 keep=false 时
+  只传 identity/scope 不会重置。设置成员会话时忽略，返回文字会说明。
+- 至少提供 `identity` / `scope` / `keep` 之一；成员会话必须有 identity 或 scope 之一。
+- “自身”写入当前 session id；成员会话写入 conversationId，并同步本机跟踪任务的 profile
+  快照。未跟踪的 conversationId 仍保存，返回注明“本机未跟踪该会话，只保存设置”。
+- 不给成员会话投递消息，也不自动在下次投递加前缀；随对话设置/更新仍用 `call_member` 的
+  `identity` / `scope`。
 
-判定输入只有这一轮最后的 assistant 回复文本，模型路由复用该会话 agent 的 provider/model。
-提醒最多连续 3 次，调用过 `call_member` 重置。
-
-## 8. 典型组合
+## 7. 典型组合
 
 ### 7.1 发现 → 部署
 
@@ -721,7 +761,7 @@ build
 
 ---
 
-## 9. 行为边界
+## 8. 行为边界
 
 1. `build` / `deploy` 是同步调用，耗时期间会一直等待；日志只在结束后通过 `data.logFile` 读取。
 2. `build` 的 `needs-fix` 不会自己发明修复；DSH 修好工作树后，必须再调用 `build { jobId }` 才会自动固化并继续。

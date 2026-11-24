@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { createInteropService, resolveInteropSettings } from '../src/lib/interop-service.mjs'
+import { isMemberSession } from '../src/lib/member-sessions.mjs'
 
 /**
  * One fake host context plus its agent registry.
@@ -949,6 +950,31 @@ test('a .git file (linked worktree) also blocks, while a non-git directory stays
     const two = await call('POST', '/v1/conversations', { prompt: '非 git 二', workspace: 'scratch' })
     assert.equal(one.status, 201)
     assert.equal(two.status, 201, 'a directory without .git may host concurrent conversations')
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+
+test('interop marks created sessions as member sessions and clears them when removed', async () => {
+  const { service, fake, call, dir } = await serviceOf()
+  try {
+    const created = await call('POST', '/v1/conversations', { prompt: '成员会话' })
+    assert.equal(created.status, 201)
+    const id = created.body.conversation.id
+    assert.equal(isMemberSession(id), true)
+    const agent = fake.agents.get(id)
+    fake.emit('session/event', agent.session, {
+      type: 'turn/end',
+      seq: 1,
+      time: Date.now(),
+      data: { turn: 1, reason: { kind: 'completed' } },
+    })
+    fake.emit('agent/status', { agent, status: 'idle' })
+    const cleared = await call('DELETE', '/v1/conversations')
+    assert.equal(cleared.body.removed, 1)
+    assert.equal(isMemberSession(id), false)
   } finally {
     await service.dispose()
     await rm(dir, { recursive: true, force: true })

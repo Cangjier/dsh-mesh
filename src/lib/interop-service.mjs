@@ -31,6 +31,7 @@ import {
 } from '../../code/shared/conversation-meta.mjs'
 import { applySessionEvent, repliesSince, summarizeReplies } from '../../code/shared/conversation-replies.mjs'
 import { formatMemberMesh } from './egress-probe.mjs'
+import { clearMemberSessions, markMemberSession, unmarkMemberSession } from './member-sessions.mjs'
 import { collectSystemInfo } from '../../code/shared/system-info.mjs'
 
 const execFileAsync = promisify(execFile)
@@ -723,6 +724,7 @@ export function createInteropService(options) {
         }
         conversations.set(conversation.id, conversation)
         bySession.set(conversation.sessionId, conversation)
+        markMemberSession(conversation.sessionId)
       }
       if (conversations.size > 0) log(`restored ${String(conversations.size)} conversation(s) from ${settings.stateFile}`)
     } catch (error) {
@@ -1146,6 +1148,7 @@ export function createInteropService(options) {
     }
     conversations.set(id, conversation)
     bySession.set(id, conversation)
+    markMemberSession(id)
     const composition = await resolveAgentPreset()
     const environment = formatMemberMesh(request.mesh)
     conversation.meshContext = environment
@@ -1190,6 +1193,7 @@ export function createInteropService(options) {
         handles.delete(id)
         await Promise.resolve(handle.dispose()).catch(() => {})
       }
+      unmarkMemberSession(id)
       throw error
     }
   }
@@ -1442,6 +1446,7 @@ export function createInteropService(options) {
       const handle = handles.get(id)
       handles.delete(id)
       if (handle !== undefined) await Promise.resolve(handle.dispose()).catch(() => {})
+      unmarkMemberSession(conversation.sessionId)
       removed += 1
     }
     saveState()
@@ -1696,6 +1701,7 @@ export function createInteropService(options) {
       handles.delete(id)
       await Promise.resolve(handle.dispose()).catch(() => {})
     }
+    clearMemberSessions()
     await new Promise((resolve) => {
       if (server === null) { resolve(); return }
       try { server.close(() => resolve()) } catch { resolve() }

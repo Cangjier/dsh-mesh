@@ -538,7 +538,7 @@ test('build tool returns the final job and its log path', async () => {
   }
 })
 
-test('registerTools exposes build, deploy, members, call_member, wait_member, status_member and repack', async () => {
+test('registerTools exposes build, deploy, members, call_member, set_member_scope, wait_member, status_member and repack', async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-tools-'))
   const names = []
   const tools = []
@@ -556,7 +556,7 @@ test('registerTools exposes build, deploy, members, call_member, wait_member, st
   const toolsCtx = { tools: { register: tool => { names.push(tool.name); tools.push(tool) } } }
   try {
     registerTools(ctx, toolsCtx, service)
-    assert.deepEqual(names.sort(), ['build', 'call_member', 'deploy', 'members', 'repack', 'status_member', 'wait_member'].sort())
+    assert.deepEqual(names.sort(), ['build', 'call_member', 'deploy', 'members', 'repack', 'set_member_scope', 'status_member', 'wait_member'].sort())
     for (const name of ['build', 'deploy', 'members']) {
       const tool = tools.find(candidate => candidate.name === name)
       assert.equal(tool.parameters.properties.action, undefined)
@@ -568,7 +568,13 @@ test('registerTools exposes build, deploy, members, call_member, wait_member, st
     assert.deepEqual(call.parameters.required, ['prompt'])
     assert.deepEqual(
       Object.keys(call.parameters.properties).sort(),
-      ['compress', 'conversationId', 'cwd', 'force', 'member', 'prompt', 'workspace'].sort(),
+      ['compress', 'conversationId', 'cwd', 'force', 'identity', 'member', 'prompt', 'scope', 'workspace'].sort(),
+    )
+    const setScope = tools.find(candidate => candidate.name === 'set_member_scope')
+    assert.equal(setScope.parameters.properties.action, undefined)
+    assert.deepEqual(
+      Object.keys(setScope.parameters.properties).sort(),
+      ['conversationId', 'identity', 'keep', 'scope'].sort(),
     )
     const repack = tools.find(candidate => candidate.name === 'repack')
     assert.deepEqual(repack.parameters.required, ['package'])

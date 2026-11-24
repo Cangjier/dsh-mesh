@@ -58,3 +58,26 @@ test('the probe module is a self-contained ES module', () => {
   // It must not depend on repository files: it is piped to the target's Node.
   assert.doesNotMatch(EGRESS_PROBE_SOURCE, /@local\/|dsh-mesh\/shared/u)
 })
+
+test('the member profile line comes before egress and tokens', () => {
+  assert.equal(
+    formatMemberMesh({
+      link: true,
+      proxyPort: 8080,
+      egress: { ok: true, latencyMs: 118, downMbps: 42.3 },
+      tokens: { github: 'ghp_example', gitee: null },
+      profile: { name: 'B', identity: '开发', scope: 'dsh-mesh 插件开发与构建' },
+    }),
+    [
+      '你是成员 B；身份：开发；负责范围：dsh-mesh 插件开发与构建。',
+      '本机代理端口 8080；经代理出网实测：延迟 118 ms，下行 42.3 Mbps。',
+      'GitHub token: ghp_example',
+    ].join('\n'),
+  )
+  assert.equal(
+    formatMemberMesh({ link: false, proxyPort: null, egress: null, tokens: {}, profile: { name: 'B', identity: '测试', scope: null } }),
+    '你是成员 B；身份：测试。',
+  )
+  // A profile with neither field says nothing, exactly like no profile at all.
+  assert.equal(formatMemberMesh({ link: false, tokens: {}, profile: { name: 'B', identity: null, scope: null } }), '')
+})

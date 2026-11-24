@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
@@ -295,6 +295,161 @@ test('a wait_member that takes the result suppresses the delayed delivery', asyn
   } finally {
     await tasks.dispose()
     await new Promise(resolve => server.close(resolve))
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Fake member that answers a wait with one finished reply.
+ * @param {string} text reply text.
+ * @param {string} conversationId conversation id.
+ * @returns {Promise<{server: import('node:http').Server, port: number}>} endpoint.
+ */
+async function memberWithResult(text, conversationId) {
+  const server = http.createServer(async (request, response) => {
+    let body = ''
+    for await (const chunk of request) body += String(chunk)
+    void body
+    if (request.method === 'POST' && request.url === `/v1/conversations/${conversationId}/wait`) {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({
+        ok: true,
+        timedOut: false,
+        state: 'done',
+        settled: true,
+        text,
+        turn: 1,
+        seq: 1,
+        replies: [{ seq: 1, turn: 1, text }],
+        conversation: { id: conversationId, status: 'idle', turns: 1, lastText: text, replySeq: 1 },
+      }))
+      return
+    }
+    response.writeHead(404, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ ok: false, error: { code: 'not_found', message: 'unknown' } }))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  return { server, port: server.address().port }
+}
+
+/**
+ * One persisted task record, as a previous plugin process would have left it.
+ * @param {object} overrides fields to override.
+ * @returns {object} record.
+ */
+function persistedTask(overrides = {}) {
+  const now = new Date().toISOString()
+  return {
+    id: 'member-resume-test',
+    member: 'member-b',
+    memberIp: '127.0.0.1',
+    baseUrl: 'http://127.0.0.1:1',
+    conversationId: 'conv-recover',
+    prompt: 'recover this task',
+    status: 'running',
+    createdAt: now,
+    updatedAt: now,
+    lastText: '',
+    error: null,
+    interrupted: false,
+    attempts: 0,
+    turns: 0,
+    replies: [],
+    replySeq: 0,
+    deliveredSeq: 0,
+    terminalDelivered: false,
+    notify: true,
+    notified: false,
+    notifiedAt: null,
+    notifyError: null,
+    originAgentId: 'session-A',
+    originSessionId: 'session-A',
+    context: null,
+    lastCompaction: null,
+    adopted: false,
+    ...overrides,
+  }
+}
+
+/**
+ * Boot one service against a persisted task record and wait for its delivery.
+ * @param {object} record persisted task record.
+ * @param {string} text expected reply text.
+ * @returns {Promise<{task: object, messages: object[]}>} final task and followups.
+ */
+async function recoverPersisted(record, text) {
+  const { server, port } = await memberWithResult(text, record.conversationId)
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-resume-'))
+  const taskRoot = path.join(dataDir, 'member-tasks')
+  await mkdir(taskRoot, { recursive: true })
+  await writeFile(path.join(taskRoot, `${record.id}.json`), `${JSON.stringify({ ...record, baseUrl: `http://127.0.0.1:${port}` }, null, 2)}\n`)
+  const messages = []
+  const agent = { id: 'session-A', session: { id: 'session-A' }, followup: message => { messages.push(message) } }
+  const service = {
+    config: { interopPort: port, interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
+  }
+  const ctx = { get: name => name === 'agents' ? { get: id => id === 'session-A' ? agent : undefined } : undefined }
+  const tasks = new MemberTaskService({ ctx, service, dataDir, log: () => {} })
+  try {
+    await tasks.init()
+    const deadline = Date.now() + 12_000
+    while (messages.length === 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    const task = await tasks.status(record.id)
+    return { task, messages }
+  } finally {
+    await tasks.dispose()
+    await new Promise(resolve => server.close(resolve))
+    await rm(dataDir, { recursive: true, force: true })
+  }
+}
+
+test('a running task is re-attached after a plugin restart and its result delivered', async () => {
+  const { task, messages } = await recoverPersisted(persistedTask(), 'RECOVERED RESULT')
+  assert.equal(task.status, 'completed')
+  assert.equal(task.lastText, 'RECOVERED RESULT')
+  assert.equal(task.notified, true)
+  assert.equal(messages.length, 1)
+  assert.match(messages[0].content[0].text, /成员任务完成/u)
+  assert.match(messages[0].content[0].text, /RECOVERED RESULT/u)
+})
+
+test('a task a graceful stop marked resumable is re-attached on the next start', async () => {
+  const { task, messages } = await recoverPersisted(
+    persistedTask({
+      status: 'interrupted',
+      error: 'the plugin stopped before the member conversation completed',
+      resumable: true,
+    }),
+    'RESUMED RESULT',
+  )
+  assert.equal(task.status, 'completed')
+  assert.equal(task.lastText, 'RESUMED RESULT')
+  assert.equal(task.notified, true)
+  assert.equal(messages.length, 1)
+  assert.match(messages[0].content[0].text, /RESUMED RESULT/u)
+})
+
+test('a graceful stop leaves its running task marked resumable', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-stop-'))
+  const service = {
+    config: { interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
+  }
+  const tasks = new MemberTaskService({ ctx: { get: () => undefined }, service, dataDir, log: () => {} })
+  try {
+    tasks.tasks.set('member-stop-test', persistedTask({ id: 'member-stop-test', status: 'running' }))
+    await tasks.dispose()
+    const saved = JSON.parse(await readFile(path.join(dataDir, 'member-tasks', 'member-stop-test.json'), 'utf8'))
+    assert.equal(saved.status, 'interrupted')
+    assert.equal(saved.resumable, true)
+  } finally {
     await rm(dataDir, { recursive: true, force: true })
   }
 })

@@ -36,6 +36,18 @@ const DELIVERY_GRACE_MS = 3_000
  * forgot the flag. "超过" is strict: exactly 30.0% still delivers directly.
  */
 export const FORCED_COMPACT_PERCENT = 30
+/** Error a graceful stop writes; a later start resumes watching that task. */
+const STOPPED_ERROR = 'the plugin stopped before the member conversation completed'
+/**
+ * How recently a task must have stopped for a restart to resume it.
+ *
+ * A member conversation can outlive this plugin, but a task from days ago is
+ * history: resuming it would fetch an answer nobody is waiting for. One day
+ * keeps an overnight stop recoverable without waking ancient records.
+ */
+const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000
+/** How many times an unavailable origin conversation is retried for delivery. */
+const NOTIFY_RETRY_LIMIT = 5
 /**
  * How long one pre-delivery compaction may take.
  *
@@ -195,6 +207,8 @@ export class MemberTaskService {
     this.waiters = new Map()
     /** @type {Map<string, ReturnType<typeof setTimeout>>} pending post-completion deliveries */
     this.deliveryTimers = new Map()
+    /** @type {Map<string, ReturnType<typeof setTimeout>>} retries for a cold origin conversation */
+    this.notifyTimers = new Map()
     /** Cached `{ id, name, ip }` of this machine, filled by the first member lookup. */
     this.identity = null
     this.loaded = false
@@ -205,17 +219,29 @@ export class MemberTaskService {
     this.disposed = true
     for (const timer of this.deliveryTimers.values()) clearTimeout(timer)
     this.deliveryTimers.clear()
+    for (const timer of this.notifyTimers.values()) clearTimeout(timer)
+    this.notifyTimers.clear()
     for (const controller of this.controllers.values()) {
       try { controller.abort(new Error('the plugin stopped')) } catch { }
     }
     for (const task of this.tasks.values()) {
       if (task.status === 'running' || task.status === 'starting') {
         task.status = 'interrupted'
-        task.error = 'the plugin stopped before the member conversation completed'
+        task.error = STOPPED_ERROR
+        // The member conversation keeps running; the next start re-attaches it.
+        task.resumable = true
         await this.#save(task).catch(() => {})
       }
       this.#notifyWaiters(task)
     }
+  }
+
+  /**
+   * Load persisted tasks and re-attach the conversations that outlived a stop.
+   * @returns {Promise<void>} resolution after the load and monitor start.
+   */
+  async init() {
+    await this.#ensureLoaded()
   }
 
   async #ensureLoaded() {
@@ -224,14 +250,26 @@ export class MemberTaskService {
     await mkdir(this.taskRoot, { recursive: true })
     let files = []
     try { files = await readdir(this.taskRoot) } catch { }
+    /** @type {object[]} tasks whose member conversation outlived the plugin */
+    const resumable = []
     for (const file of files) {
       if (!file.endsWith('.json')) continue
       try {
         const task = JSON.parse(await readFile(path.join(this.taskRoot, file), 'utf8'))
         if (task?.id === undefined) continue
-        if (task.status === 'running' || task.status === 'starting') {
-          task.status = 'interrupted'
-          task.error = 'the plugin restarted before the member conversation completed'
+        const stoppedAt = Date.parse(task.updatedAt)
+        const recent = Number.isFinite(stoppedAt) && Date.now() - stoppedAt <= RESUME_WINDOW_MS
+        const interruptedByStop = task.status === 'interrupted' && recent &&
+          (task.resumable === true || task.error === STOPPED_ERROR)
+        if (recent && (task.status === 'running' || task.status === 'starting' || interruptedByStop)) {
+          // The member kept the conversation while this plugin was down. Resume
+          // watching instead of dropping the result: a member that died too
+          // reports interrupted on the next wait, and the task fails then.
+          task.status = 'running'
+          task.error = null
+          task.interrupted = false
+          task.resumable = false
+          resumable.push(task)
           await this.#save(task)
         }
         // Older records predate per-turn replies; start them at zero so a
@@ -242,6 +280,13 @@ export class MemberTaskService {
         task.terminalDelivered = task.terminalDelivered === true
         this.tasks.set(task.id, task)
       } catch { }
+    }
+    for (const task of resumable) {
+      this.controllers.set(task.id, new AbortController())
+      await this.#log(task, 'resuming after the plugin restart')
+      const monitor = this.#monitor(task)
+      this.monitors.set(task.id, monitor)
+      void monitor.finally(() => this.monitors.delete(task.id)).catch(() => {})
     }
   }
 
@@ -790,12 +835,18 @@ export class MemberTaskService {
     task.notifiedAt = null
     task.notifyError = null
     task.notify = true
-    // A pending delivery from the previous completion belongs to that turn;
-    // this new message starts a new one.
+    task.notifyRetries = 0
+    // A pending delivery (or its origin-unavailable retry) belongs to the
+    // previous completion; this new message starts a new one.
     const pendingDelivery = this.deliveryTimers.get(task.id)
     if (pendingDelivery !== undefined) {
       clearTimeout(pendingDelivery)
       this.deliveryTimers.delete(task.id)
+    }
+    const pendingNotify = this.notifyTimers.get(task.id)
+    if (pendingNotify !== undefined) {
+      clearTimeout(pendingNotify)
+      this.notifyTimers.delete(task.id)
     }
     if (!this.controllers.has(task.id)) this.controllers.set(task.id, new AbortController())
     await this.#save(task)
@@ -1245,13 +1296,41 @@ export class MemberTaskService {
     await this.#notify(task)
   }
 
+  /**
+   * Retry a delivery whose origin conversation is not live yet.
+   *
+   * A plugin restart can finish the notification before the Web client
+   * reopens its session. The backoff keeps trying while the user may still be
+   * coming back, then leaves the result recorded as a notifyError.
+   * @param {object} task terminal task.
+   * @returns {void}
+   */
+  #scheduleNotifyRetry(task) {
+    const previous = this.notifyTimers.get(task.id)
+    if (previous !== undefined) clearTimeout(previous)
+    const retry = Number.isSafeInteger(task.notifyRetries) ? task.notifyRetries : 1
+    const delay = Math.min(10_000 * 2 ** (retry - 1), 300_000)
+    const timer = setTimeout(() => {
+      this.notifyTimers.delete(task.id)
+      if (this.disposed || task.notified) return
+      void this.#notify(task).catch(() => {})
+    }, delay)
+    timer.unref?.()
+    this.notifyTimers.set(task.id, timer)
+  }
+
   async #notify(task) {
     const agents = typeof this.ctx.get === 'function' ? this.ctx.get('agents') : this.ctx.agents
     const agent = agents?.get?.(task.originAgentId)
     if (agent === undefined || agent === null) {
       task.notifyError = 'the originating conversation is no longer live'
+      task.notifyRetries = Number.isSafeInteger(task.notifyRetries) ? task.notifyRetries : 0
+      if (task.notifyRetries < NOTIFY_RETRY_LIMIT) {
+        task.notifyRetries += 1
+        this.#scheduleNotifyRetry(task)
+      }
       await this.#save(task)
-      await this.#log(task, 'notification skipped: origin agent unavailable')
+      await this.#log(task, `notification deferred: origin agent unavailable (retry ${String(task.notifyRetries)})`)
       return
     }
     const text = task.status === 'completed'
@@ -1280,9 +1359,15 @@ export class MemberTaskService {
         content: [{ type: 'text', text }],
         source: { kind: 'user' },
       })
+      const pending = this.notifyTimers.get(task.id)
+      if (pending !== undefined) {
+        clearTimeout(pending)
+        this.notifyTimers.delete(task.id)
+      }
       task.notified = true
       task.notifiedAt = new Date().toISOString()
       task.notifyError = null
+      task.notifyRetries = 0
       await this.#save(task)
       await this.#log(task, `notification queued into ${task.originSessionId}`)
     } catch (error) {

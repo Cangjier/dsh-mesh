@@ -157,6 +157,11 @@ export function registerTools(ctx, toolsCtx, service) {
 
   // Exposed on the service so tests can inspect the in-flight task table.
   service.memberTasks = memberTasks
+  // Re-attach conversations that outlived a previous plugin process before the
+  // first tool call arrives, so a restart cannot silently drop a result.
+  void memberTasks.init().catch((error) => {
+    ctx.logger?.warn?.(`mesh: member task recovery skipped: ${error instanceof Error ? error.message : String(error)}`)
+  })
   try {
     ctx.effect(() => () => memberTasks.dispose(), 'mesh member tasks')
   } catch { }

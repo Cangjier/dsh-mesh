@@ -13049,6 +13049,9 @@ var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
 var DELIVERY_GRACE_MS = 3e3;
 var FORCED_COMPACT_PERCENT = 30;
+var STOPPED_ERROR = "the plugin stopped before the member conversation completed";
+var RESUME_WINDOW_MS = 24 * 60 * 60 * 1e3;
+var NOTIFY_RETRY_LIMIT = 5;
 var COMPACT_TIMEOUT_MS = 18e4;
 var LOST_CONVERSATION = /conversation not found|unknown SDK session|session "?[\w-]+"? already exists|SDK session is already open or opening|session agent was disposed/iu;
 var EMPTY_TURN = "\u76EE\u6807\u7684 DSH \u5728\u4EFB\u52A1\u6267\u884C\u671F\u95F4\u91CD\u542F\u4E86\uFF1A\u5BF9\u8BDD\u6CA1\u6709\u4EA7\u751F\u4EFB\u4F55\u8F93\u51FA\uFF0C\u8FD9\u4E00\u8F6E\u5DF2\u4E2D\u65AD";
@@ -13124,6 +13127,7 @@ var MemberTaskService = class {
     this.controllers = /* @__PURE__ */ new Map();
     this.waiters = /* @__PURE__ */ new Map();
     this.deliveryTimers = /* @__PURE__ */ new Map();
+    this.notifyTimers = /* @__PURE__ */ new Map();
     this.identity = null;
     this.loaded = false;
     this.disposed = false;
@@ -13132,6 +13136,8 @@ var MemberTaskService = class {
     this.disposed = true;
     for (const timer of this.deliveryTimers.values()) clearTimeout(timer);
     this.deliveryTimers.clear();
+    for (const timer of this.notifyTimers.values()) clearTimeout(timer);
+    this.notifyTimers.clear();
     for (const controller of this.controllers.values()) {
       try {
         controller.abort(new Error("the plugin stopped"));
@@ -13141,12 +13147,20 @@ var MemberTaskService = class {
     for (const task of this.tasks.values()) {
       if (task.status === "running" || task.status === "starting") {
         task.status = "interrupted";
-        task.error = "the plugin stopped before the member conversation completed";
+        task.error = STOPPED_ERROR;
+        task.resumable = true;
         await this.#save(task).catch(() => {
         });
       }
       this.#notifyWaiters(task);
     }
+  }
+  /**
+   * Load persisted tasks and re-attach the conversations that outlived a stop.
+   * @returns {Promise<void>} resolution after the load and monitor start.
+   */
+  async init() {
+    await this.#ensureLoaded();
   }
   async #ensureLoaded() {
     if (this.loaded) return;
@@ -13157,14 +13171,21 @@ var MemberTaskService = class {
       files = await readdir9(this.taskRoot);
     } catch {
     }
+    const resumable = [];
     for (const file of files) {
       if (!file.endsWith(".json")) continue;
       try {
         const task = JSON.parse(await readFile17(path26.join(this.taskRoot, file), "utf8"));
         if (task?.id === void 0) continue;
-        if (task.status === "running" || task.status === "starting") {
-          task.status = "interrupted";
-          task.error = "the plugin restarted before the member conversation completed";
+        const stoppedAt = Date.parse(task.updatedAt);
+        const recent = Number.isFinite(stoppedAt) && Date.now() - stoppedAt <= RESUME_WINDOW_MS;
+        const interruptedByStop = task.status === "interrupted" && recent && (task.resumable === true || task.error === STOPPED_ERROR);
+        if (recent && (task.status === "running" || task.status === "starting" || interruptedByStop)) {
+          task.status = "running";
+          task.error = null;
+          task.interrupted = false;
+          task.resumable = false;
+          resumable.push(task);
           await this.#save(task);
         }
         task.replies = Array.isArray(task.replies) ? task.replies : [];
@@ -13174,6 +13195,14 @@ var MemberTaskService = class {
         this.tasks.set(task.id, task);
       } catch {
       }
+    }
+    for (const task of resumable) {
+      this.controllers.set(task.id, new AbortController());
+      await this.#log(task, "resuming after the plugin restart");
+      const monitor = this.#monitor(task);
+      this.monitors.set(task.id, monitor);
+      void monitor.finally(() => this.monitors.delete(task.id)).catch(() => {
+      });
     }
   }
   async #save(task) {
@@ -13692,10 +13721,16 @@ var MemberTaskService = class {
     task.notifiedAt = null;
     task.notifyError = null;
     task.notify = true;
+    task.notifyRetries = 0;
     const pendingDelivery = this.deliveryTimers.get(task.id);
     if (pendingDelivery !== void 0) {
       clearTimeout(pendingDelivery);
       this.deliveryTimers.delete(task.id);
+    }
+    const pendingNotify = this.notifyTimers.get(task.id);
+    if (pendingNotify !== void 0) {
+      clearTimeout(pendingNotify);
+      this.notifyTimers.delete(task.id);
     }
     if (!this.controllers.has(task.id)) this.controllers.set(task.id, new AbortController());
     await this.#save(task);
@@ -14094,13 +14129,41 @@ var MemberTaskService = class {
     }
     await this.#notify(task);
   }
+  /**
+   * Retry a delivery whose origin conversation is not live yet.
+   *
+   * A plugin restart can finish the notification before the Web client
+   * reopens its session. The backoff keeps trying while the user may still be
+   * coming back, then leaves the result recorded as a notifyError.
+   * @param {object} task terminal task.
+   * @returns {void}
+   */
+  #scheduleNotifyRetry(task) {
+    const previous = this.notifyTimers.get(task.id);
+    if (previous !== void 0) clearTimeout(previous);
+    const retry = Number.isSafeInteger(task.notifyRetries) ? task.notifyRetries : 1;
+    const delay2 = Math.min(1e4 * 2 ** (retry - 1), 3e5);
+    const timer = setTimeout(() => {
+      this.notifyTimers.delete(task.id);
+      if (this.disposed || task.notified) return;
+      void this.#notify(task).catch(() => {
+      });
+    }, delay2);
+    timer.unref?.();
+    this.notifyTimers.set(task.id, timer);
+  }
   async #notify(task) {
     const agents = typeof this.ctx.get === "function" ? this.ctx.get("agents") : this.ctx.agents;
     const agent = agents?.get?.(task.originAgentId);
     if (agent === void 0 || agent === null) {
       task.notifyError = "the originating conversation is no longer live";
+      task.notifyRetries = Number.isSafeInteger(task.notifyRetries) ? task.notifyRetries : 0;
+      if (task.notifyRetries < NOTIFY_RETRY_LIMIT) {
+        task.notifyRetries += 1;
+        this.#scheduleNotifyRetry(task);
+      }
       await this.#save(task);
-      await this.#log(task, "notification skipped: origin agent unavailable");
+      await this.#log(task, `notification deferred: origin agent unavailable (retry ${String(task.notifyRetries)})`);
       return;
     }
     const text = task.status === "completed" ? [
@@ -14125,9 +14188,15 @@ var MemberTaskService = class {
         content: [{ type: "text", text }],
         source: { kind: "user" }
       });
+      const pending = this.notifyTimers.get(task.id);
+      if (pending !== void 0) {
+        clearTimeout(pending);
+        this.notifyTimers.delete(task.id);
+      }
       task.notified = true;
       task.notifiedAt = (/* @__PURE__ */ new Date()).toISOString();
       task.notifyError = null;
+      task.notifyRetries = 0;
       await this.#save(task);
       await this.#log(task, `notification queued into ${task.originSessionId}`);
     } catch (error) {
@@ -14313,6 +14382,9 @@ function registerTools(ctx, toolsCtx, service) {
     log: (line) => ctx.logger?.info?.(`mesh: ${line}`)
   });
   service.memberTasks = memberTasks;
+  void memberTasks.init().catch((error) => {
+    ctx.logger?.warn?.(`mesh: member task recovery skipped: ${error instanceof Error ? error.message : String(error)}`);
+  });
   try {
     ctx.effect(() => () => memberTasks.dispose(), "mesh member tasks");
   } catch {

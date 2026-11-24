@@ -162,7 +162,7 @@ wait_member(progress, seq=1, 文本 T)   → deliveredSeq = 1
 | `call_member` 参数 | 新增 `force: boolean`（仅新建） |
 | `call_member` 返回 | 新增 `currentConversationId`、`conversations[]`；send 的 text 带 steer/followup |
 | `wait_member` 参数 | 移除 `conversationId`；保留 `conversationIds`，新增 `all`；二者互斥 |
-| `wait_member` 返回 | 新增 `conversations[]`、`currentConversationId`、`all`、`held`；`remaining[]` 带工作区和状态标签 |
+| `wait_member` 返回 | 新增 `conversations[]`、`currentConversationId`、`all`；`remaining[]` 带工作区和状态标签 |
 | `POST /v1/conversations` | 接受 `forceWorkspace: true`；`.git` + running 会话冲突返回 409 `workspace_busy_git`（带 `detail`） |
 | `POST /v1/conversations/<id>/messages` | 回执新增 `steered` / `delivery`；running 时 `agent.steer` |
 | 任务记录 | 新增 `workspace`、`deliveryReplies`、`lastDelivery`；`terminalDelivered` 语义收紧为「wait 已消费终态」 |
@@ -184,6 +184,15 @@ wait_member(progress, seq=1, 文本 T)   → deliveredSeq = 1
 - steer 依赖成员 DSH 的 `agent.steer`；旧成员没有该方法时自然回退 `followup`。
 - 兜底短完成提示仍然是一条用户消息（`source.kind = 'user'`），这是回调既有语义；它
   不含回复正文，因此不会和已取结果重复。
+- 目标 running 且上下文已超过 30% 时，投递前的自动压缩仍要求空闲：会在到达成员侧
+  steer 之前拒绝这次投递（既有、已文档化的行为）。需要 steer 时先等对话空闲、
+  压缩后再投递，或去掉自动压缩条件。
+- 工作区拦截只拦「新建」，不清理陈旧状态：成员崩溃后若会话残留 `running`，该 git
+  工作区会被一直拦住，只能 `force` 绕过或等状态恢复。
+- 兜底与 wait 的窄竞态：兜底先认领未读回复时，同时进入的 `wait_member` 可能返回
+  `done` 但没有正文，正文随后以完成消息到达。结果不重复，但这一次 wait 会显得
+  「没有结果」；这是「不重复」优先于「这次一定拿到」的取舍。
+
 
 ## 验证
 
@@ -210,7 +219,8 @@ PATH="/root/.dsh/runtime/node/bin:$PATH" ~/.dsh/runtime/node/bin/corepack pnpm b
   拒绝时不注册会话、继续投递不经过拦截。
 - `test/member-task.test.mjs`：`force` 透传、显式 workspace/cwd 的工作区记录、
   `call_member` 对 409 的 `ok:false` 返回和带 `force` 重试、继续投递拒绝 `force`。
-- `test/member-send.test.mjs`：继续投递从成员 projection 刷新工作区。
+- `test/member-send.test.mjs`：继续投递从成员 projection 刷新工作区；`call_member`
+  的 steer / followup 回执文案。
 - `test/member-delivery.test.mjs`（回归）：progress 已取后终态不再重复正文、终态被
   wait 消费时取消失败投递、兜底只送未读回复且认领后 wait 不再读到。
 

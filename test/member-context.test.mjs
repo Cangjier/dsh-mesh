@@ -161,6 +161,23 @@ test('a rejected step is returned untouched', async () => {
   }
 })
 
+test('an aborted step is returned untouched', async () => {
+  let looked = 0
+  const memberTasks = {
+    async inFlightForOrigin() { looked += 1; return [running] },
+    async listForOrigin() { return [running] },
+  }
+  const h = harness({ memberTasks })
+  try {
+    const aborted = { ...h.payload, signal: { aborted: true } }
+    const decision = await h.preStep(aborted, h.next)
+    assert.deepEqual(decision.messages, [])
+    assert.equal(looked, 0, 'a cancelled turn must not read the member task table')
+  } finally {
+    h.context.dispose()
+  }
+})
+
 test('disposing a session forgets its injection clock', async () => {
   let now = 1_000_000
   const h = harness({ tasks: [running], now: () => now })

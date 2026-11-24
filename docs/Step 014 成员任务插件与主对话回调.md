@@ -1,7 +1,7 @@
 # Step 014 成员任务插件：A 操作 B 的对话并回调主对话
 
 > 工具名已收敛：当前模型工具是 `call_member` 和 `wait_member`，都没有 `action`。
-> `call_member` 没有 `conversationId` 就新建对话，有就继续；`wait_member` 也按 `conversationId` 等待。
+> `call_member` 没有 `conversationId` 就新建对话，有就继续；`wait_member` 用 `all: true`（推荐）或 `conversationIds` 等待。
 > 内部 task id 只用于任务记录和日志文件名，不对外。本文保留当时的设计记录。
 
 `dsh-mesh` 新增模型工具 `dsh_member_task`。成员 A 的 DSH 可以把任务交给成员 B 的独立 DSH 交互服务，并在 B 完成后自动把结果写回 A 的 **原对话**，就像子代理完成通知。
@@ -80,7 +80,8 @@ call_member { "conversationId": "<会话id>", "prompt": "继续", "compress": tr
 ### wait_member：分轮等待
 
 ```text
-wait_member { "conversationId": "<会话id>", "timeoutMs": 30000 }
+wait_member { "all": true, "timeoutMs": 30000 }        # 推荐
+wait_member { "conversationIds": ["<会话id>"] }
 ```
 
 B 的对话**每结束一轮回答就立刻返回**，不等整段任务结束；返回值里的 `state` 说明后续：

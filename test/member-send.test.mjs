@@ -25,6 +25,8 @@ async function fakeMember(options = {}) {
     liveContext: options.liveContext ?? null,
     // Workspace name the member's projection reports for this conversation.
     workspace: options.workspace ?? '',
+    // How the member took the message; the tool surfaces it in the receipt line.
+    delivery: options.delivery ?? 'followup',
     // Live conversation position. `reset` simulates a member restart, where
     // the reply counter begins a new epoch at zero.
     turns: 5,
@@ -103,7 +105,7 @@ async function fakeMember(options = {}) {
       messages.push(body.content)
       reply(202, {
         ok: true,
-        receipt: { messageId: 'm1' },
+        receipt: { messageId: 'm1', steered: members.delivery === 'steer', delivery: members.delivery },
         conversation: { id: use, status: 'running', turns: 5, replySeq: 5 },
         context: { usedTokens: 2000, maxTokens: 128_000, percent: 1.6 },
       })
@@ -492,5 +494,38 @@ test('a continued conversation records the workspace the member reports', async 
     await tasks.dispose()
     await member.close()
     await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('call_member reports whether the message was steered or queued', async () => {
+  for (const delivery of ['steer', 'followup']) {
+    const member = await fakeMember({ delivery })
+    const { service, dataDir } = await buildService(member.port)
+    const tools = []
+    const ctx = {
+      logger: { info: () => {}, error: () => {} },
+      effect: () => () => {},
+      get: () => undefined,
+    }
+    try {
+      registerTools(ctx, { tools: { register: tool => { tools.push(tool) } } }, service)
+      const call = tools.find(tool => tool.name === 'call_member')
+      const result = await call.execute(
+        { member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' },
+        { agent: { id: 'session-a', session: { id: 'session-a' } } },
+      )
+      assert.equal(result.ok, true)
+      if (delivery === 'steer') {
+        assert.match(result.text, /已用 steer 插入当前 turn/u)
+        assert.equal(result.data.lastDelivery, 'steer')
+      } else {
+        assert.match(result.text, /按 followup 排入下一轮/u)
+        assert.equal(result.data.lastDelivery, 'followup')
+      }
+    } finally {
+      await service.memberTasks.dispose()
+      await member.close()
+      await rm(dataDir, { recursive: true, force: true })
+    }
   }
 })

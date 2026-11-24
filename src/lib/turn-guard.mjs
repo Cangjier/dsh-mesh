@@ -27,9 +27,10 @@ const JUDGE_TIMEOUT_MS = 15_000
 
 /** Instructions for the one-shot classifier. */
 const JUDGE_SYSTEM = [
-  '你是一个判断器。只回答 YES 或 NO。',
-  '给定一段助手回复，判断它是否表示：说话者预期把工作交给某个成员对话（调用 call_member）或等待成员结果，但没有在这一轮实际发起。',
-  '如果回复只是普通说明、提问、已经完成、或不需要成员，回答 NO。',
+  '你在检查一个编码 agent 的一轮回复是否漏掉了 call_member 调用。这一轮没有调用 call_member。',
+  '如果回复表示它要把工作交给成员、让成员去做、等成员结果、或已经安排成员处理，回答 YES。',
+  '如果只是回答用户、说明自己已经做完、提问、或明确不需要成员，回答 NO。',
+  '只回答 YES 或 NO。',
 ].join('\n')
 
 /**
@@ -93,7 +94,7 @@ export function createTurnGuard({ ctx, memberTasks, log = () => {} }) {
     if (typeof provider !== 'string' || provider === '' || typeof model !== 'string' || model === '') return false
     const signal = AbortSignal.timeout(JUDGE_TIMEOUT_MS)
     try {
-      const call = await llm.prepareCall({ provider, model, maxTokens: 8 }, signal)
+      const call = await llm.prepareCall({ provider, model, maxTokens: 256 }, signal)
       let answer = ''
       for await (const chunk of call.stream({
         ...call.config,
@@ -101,7 +102,7 @@ export function createTurnGuard({ ctx, memberTasks, log = () => {} }) {
         messages: [{
           id: randomUUID(),
           role: 'user',
-          content: [{ type: 'text', text: reply.slice(0, 6000) }],
+          content: [{ type: 'text', text: `这一轮的回复：\n${reply.slice(0, 6000)}` }],
           source: { kind: 'user' },
         }],
         sessionId,

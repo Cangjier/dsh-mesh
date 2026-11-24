@@ -14342,9 +14342,10 @@ import { randomUUID as randomUUID2 } from "node:crypto";
 var MAX_REMINDERS = 3;
 var JUDGE_TIMEOUT_MS = 15e3;
 var JUDGE_SYSTEM = [
-  "\u4F60\u662F\u4E00\u4E2A\u5224\u65AD\u5668\u3002\u53EA\u56DE\u7B54 YES \u6216 NO\u3002",
-  "\u7ED9\u5B9A\u4E00\u6BB5\u52A9\u624B\u56DE\u590D\uFF0C\u5224\u65AD\u5B83\u662F\u5426\u8868\u793A\uFF1A\u8BF4\u8BDD\u8005\u9884\u671F\u628A\u5DE5\u4F5C\u4EA4\u7ED9\u67D0\u4E2A\u6210\u5458\u5BF9\u8BDD\uFF08\u8C03\u7528 call_member\uFF09\u6216\u7B49\u5F85\u6210\u5458\u7ED3\u679C\uFF0C\u4F46\u6CA1\u6709\u5728\u8FD9\u4E00\u8F6E\u5B9E\u9645\u53D1\u8D77\u3002",
-  "\u5982\u679C\u56DE\u590D\u53EA\u662F\u666E\u901A\u8BF4\u660E\u3001\u63D0\u95EE\u3001\u5DF2\u7ECF\u5B8C\u6210\u3001\u6216\u4E0D\u9700\u8981\u6210\u5458\uFF0C\u56DE\u7B54 NO\u3002"
+  "\u4F60\u5728\u68C0\u67E5\u4E00\u4E2A\u7F16\u7801 agent \u7684\u4E00\u8F6E\u56DE\u590D\u662F\u5426\u6F0F\u6389\u4E86 call_member \u8C03\u7528\u3002\u8FD9\u4E00\u8F6E\u6CA1\u6709\u8C03\u7528 call_member\u3002",
+  "\u5982\u679C\u56DE\u590D\u8868\u793A\u5B83\u8981\u628A\u5DE5\u4F5C\u4EA4\u7ED9\u6210\u5458\u3001\u8BA9\u6210\u5458\u53BB\u505A\u3001\u7B49\u6210\u5458\u7ED3\u679C\u3001\u6216\u5DF2\u7ECF\u5B89\u6392\u6210\u5458\u5904\u7406\uFF0C\u56DE\u7B54 YES\u3002",
+  "\u5982\u679C\u53EA\u662F\u56DE\u7B54\u7528\u6237\u3001\u8BF4\u660E\u81EA\u5DF1\u5DF2\u7ECF\u505A\u5B8C\u3001\u63D0\u95EE\u3001\u6216\u660E\u786E\u4E0D\u9700\u8981\u6210\u5458\uFF0C\u56DE\u7B54 NO\u3002",
+  "\u53EA\u56DE\u7B54 YES \u6216 NO\u3002"
 ].join("\n");
 function createTurnGuard({ ctx, memberTasks, log = () => {
 } }) {
@@ -14375,7 +14376,7 @@ function createTurnGuard({ ctx, memberTasks, log = () => {
     if (typeof provider !== "string" || provider === "" || typeof model !== "string" || model === "") return false;
     const signal = AbortSignal.timeout(JUDGE_TIMEOUT_MS);
     try {
-      const call = await llm.prepareCall({ provider, model, maxTokens: 8 }, signal);
+      const call = await llm.prepareCall({ provider, model, maxTokens: 256 }, signal);
       let answer = "";
       for await (const chunk of call.stream({
         ...call.config,
@@ -14383,7 +14384,8 @@ function createTurnGuard({ ctx, memberTasks, log = () => {
         messages: [{
           id: randomUUID2(),
           role: "user",
-          content: [{ type: "text", text: reply.slice(0, 6e3) }],
+          content: [{ type: "text", text: `\u8FD9\u4E00\u8F6E\u7684\u56DE\u590D\uFF1A
+${reply.slice(0, 6e3)}` }],
           source: { kind: "user" }
         }],
         sessionId,

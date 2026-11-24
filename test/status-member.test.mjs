@@ -75,6 +75,7 @@ async function harness(options = {}) {
     lastText: '已完成',
     error: null,
     turns: 2,
+    workspace: 'dsh-mesh',
     originSessionId: 'session-1',
     originAgentId: 'session-1',
     sentMessages: [
@@ -110,6 +111,45 @@ test('status_member reports live status and the last two user messages', async (
     assert.equal(result.data.taskStatus, 'completed')
     assert.deepEqual(result.data.messages.map(message => message.text), ['第一条消息', '第二条消息'])
     assert.equal(result.data.reasoning, '先检查磁盘，再看日志。')
+    assert.equal(result.data.workspace, 'dsh-mesh')
+    assert.match(result.text, /工作区：dsh-mesh/u)
+    assert.match(result.text, /本对话跟踪的成员会话（共 1 个/u)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('status_member lists every tracked conversation with its state and workspace', async () => {
+  const { tool, service, cleanup } = await harness()
+  try {
+    service.memberTasks.tasks.set('member-two', {
+      id: 'member-two',
+      conversationId: 'conv-2',
+      member: 'build-3',
+      memberIp: '10.66.66.3',
+      baseUrl: 'http://127.0.0.1:1',
+      prompt: '另一个任务',
+      status: 'running',
+      createdAt: '2026-11-24T00:01:00.000Z',
+      updatedAt: '2026-11-24T00:11:00.000Z',
+      lastText: '',
+      error: null,
+      turns: 1,
+      workspace: 'other-workspace',
+      originSessionId: 'session-1',
+      originAgentId: 'session-1',
+      sentMessages: [{ text: '另一个任务', at: '2026-11-24T00:01:00.000Z' }],
+    })
+    const result = await tool.execute({ conversationId: 'conv-1' }, {})
+    assert.equal(result.ok, true)
+    assert.match(result.text, /本对话跟踪的成员会话（共 2 个/u)
+    assert.match(result.text, /conv-2（build-3 10\.66\.66\.3，工作区 other-workspace，进行中，第 1 轮）/u)
+    assert.deepEqual(result.data.conversations.map(entry => entry.conversationId), ['conv-1', 'conv-2'])
+    assert.deepEqual(result.data.conversations.map(entry => entry.workspace), ['dsh-mesh', 'other-workspace'])
+    assert.deepEqual(result.data.conversations.map(entry => entry.statusLabel), ['空闲', '进行中'])
+    assert.equal(result.data.requested.length, 1)
+    assert.equal(result.data.requested[0].conversationId, 'conv-1')
+    assert.equal(result.data.count, 2)
   } finally {
     await cleanup()
   }

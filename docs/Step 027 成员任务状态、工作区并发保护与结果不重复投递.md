@@ -155,6 +155,17 @@ wait_member(progress, seq=1, 文本 T)   → deliveredSeq = 1
 - `send` 开始新一轮时清掉 `terminalDelivered` / `deliveryReplies` 和旧 timer；
 - 原对话不在线时，已认领的回复存进 `deliveryReplies`，重试仍能送达唯一副本。
 
+**终态竞态（真机复现后补）**：wait 在任务结束时被唤醒，但它的终态复读要发两个
+HTTP 请求（conversation GET + 短 `/wait`），成员短暂变慢时可能超过 3 秒。此时兜底先
+把 `lastText` 认领并投递，随后 wait 仍可能从 `lastText` 再返回同一段正文。修复分两层：
+
+- 任务结束时如果确实有 `wait_member` 停在任务上，兜底改用
+  `WAIT_DELIVERY_GRACE_MS`（15 秒）而不是 3 秒，让这个 wait 先完成复读并
+  `#consumeTerminal` 取消 timer；
+- 兜底已经认领回复（`deliveryReplies`）或已成功投递（`notified`）时，后到的 wait
+  只报完成，不再从 `lastText` 取正文；text/data 带「这条回复已由完成消息投递…不重复」
+  与 `fallbackDelivered: true`。因此即使 15 秒也不够，正文也只会到达一次。
+
 ### 7. 接口变化汇总
 
 | 位置 | 变化 |
@@ -163,6 +174,8 @@ wait_member(progress, seq=1, 文本 T)   → deliveredSeq = 1
 | `call_member` 返回 | 新增 `currentConversationId`、`conversations[]`；send 的 text 带 steer/followup |
 | `wait_member` 参数 | 移除 `conversationId`；保留 `conversationIds`，新增 `all`；二者互斥 |
 | `wait_member` 返回 | 新增 `conversations[]`、`currentConversationId`、`all`；`remaining[]` 带工作区和状态标签 |
+| `status_member` 返回 | 每个被查会话新增 `workspace` 与「工作区」行；新增全量 `conversations[]`（id/状态/工作区），被查详情移到 `requested[]`，`count` 改为全量数量 |
+| 兜底投递 | 有 wait 停在任务上时用 15 秒窗口；wait 后到时不再重复兜底已认领的正文 |
 | `POST /v1/conversations` | 接受 `forceWorkspace: true`；`.git` + running 会话冲突返回 409 `workspace_busy_git`（带 `detail`） |
 | `POST /v1/conversations/<id>/messages` | 回执新增 `steered` / `delivery`；running 时 `agent.steer` |
 | 任务记录 | 新增 `workspace`、`deliveryReplies`、`lastDelivery`；`terminalDelivered` 语义收紧为「wait 已消费终态」 |
@@ -189,9 +202,10 @@ wait_member(progress, seq=1, 文本 T)   → deliveredSeq = 1
   压缩后再投递，或去掉自动压缩条件。
 - 工作区拦截只拦「新建」，不清理陈旧状态：成员崩溃后若会话残留 `running`，该 git
   工作区会被一直拦住，只能 `force` 绕过或等状态恢复。
-- 兜底与 wait 的窄竞态：兜底先认领未读回复时，同时进入的 `wait_member` 可能返回
-  `done` 但没有正文，正文随后以完成消息到达。结果不重复，但这一次 wait 会显得
-  「没有结果」；这是「不重复」优先于「这次一定拿到」的取舍。
+- 兜底与 wait 的终态竞态：兜底先认领未读回复时，同时进入的 `wait_member` 会返回
+  `done` 但不带正文，并说明正文已由完成消息投递；正文随后以完成消息到达。结果不
+  重复，但这一次 wait 不携带正文，这是「不重复」优先于「这次一定拿到」的取舍。
+  有 wait 停在任务上时，15 秒窗口通常能让它先拿到正文。
 
 
 ## 验证
@@ -232,5 +246,8 @@ PATH="/root/.dsh/runtime/node/bin:$PATH" ~/.dsh/runtime/node/bin/corepack pnpm b
    下一步就能看到消息。
 3. 并行发起两个会话，任意一个 `wait_member { "all": true }`：返回先有消息的那个，
    列表里两个会话的工作区和状态都在。
-4. 让 `wait_member` 先拿一次 `progress`，之后不再 wait：终态后主对话只应收到一条
+4. `status_member` 查一个会话：除该会话详情外，text 应列出本对话跟踪的全部会话
+   （id、进行中/空闲/被异常中止、工作区名），`data.conversations` 是全量、
+   `data.requested` 是被查详情。
+5. 让 `wait_member` 先拿一次 `progress`，之后不再 wait：终态后主对话只应收到一条
    不含该轮正文的完成提示（或未读的下一轮结果），不得重复 `progress` 文本。

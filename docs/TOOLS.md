@@ -17,7 +17,7 @@
 | `members` | 只读成员发现 | 无 | `true` |
 | `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `compress` / `cwd` / `workspace` / `force` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
-| `status_member` | 目标会话状态 + 最近两次用户消息 + 最近一次思考；可一次查多个 | `conversationId` / `conversationIds` | `true` |
+| `status_member` | 目标会话状态 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
 
 ## 2. 共享基础
 
@@ -640,7 +640,8 @@ status_member { "conversationId": "<会话id>" }
 status_member { "conversationIds": ["<会话id1>", "<会话id2>"] }
   → 按本机任务记录找到目标成员和 baseUrl
   → GET /v1/conversations/<会话id> 取目标最新投影（含 lastReasoning）
-  → 返回状态、最近两次用户消息、最近一次思考
+  → 返回状态、工作区、最近两次用户消息、最近一次思考
+  → 末尾列出本对话跟踪的全部成员会话（id/状态/工作区）
 ```
 
 传 `conversationIds` 时按会话分块输出，第一行是汇总（例如
@@ -652,6 +653,10 @@ status_member { "conversationIds": ["<会话id1>", "<会话id2>"] }
 - 最近一次思考来自目标会话最新一轮的 reasoning（`lastReasoning`），成员升级后才有；
   持久化时保留最近 4000 字符。
 - 只跟踪本机发起/继续过的会话；没有记录时明确报错，不猜成员。
+- 每个被查会话带 `workspace` 和「工作区：…」行；返回值另附全量会话列表，
+  `data.conversations` 是全量摘要（id、状态标签、工作区），`data.requested` 才是
+  本次被查会话的详情，`data.count` 是全量数量。状态标签统一为
+  进行中 / 空闲 / 被异常中止；实时状态优先。
 
 ## 7. turn 结束后的自动提醒
 

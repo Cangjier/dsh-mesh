@@ -28,6 +28,19 @@ const MAX_ATTEMPTS = 30
  */
 const DELIVERY_GRACE_MS = 3_000
 /**
+ * How long a terminal task whose wait was already parked waits for that wait
+ * to finish its terminal re-read before the fallback delivery may take over.
+ *
+ * The plain grace is enough to let a parked wait wake up, but its terminal
+ * re-read is two HTTP round trips (the conversation GET and a short /wait).
+ * A loaded or briefly slow member can push that past three seconds, and then
+ * the fallback used to deliver the same final text that the wait was about to
+ * return — the ai-cad duplicate in its original race. A wait that was actually
+ * parked at completion now gets this longer window instead; if the wait is
+ * cancelled meanwhile, the fallback still fires once the window expires.
+ */
+const WAIT_DELIVERY_GRACE_MS = 15_000
+/**
  * Context occupancy above which a delivery compacts before sending.
  *
  * `compress: true` always compacts; this threshold makes the same compaction
@@ -165,6 +178,22 @@ export function describeMemberTask(task, currentConversationId) {
 }
 
 /**
+ * Whether a fallback completion delivery already owns this task's final text.
+ *
+ * The fallback claims the unread replies before its first await, and clears
+ * `deliveryReplies` only after the message was handed to the origin agent.
+ * Either state means the text is on its way (or already there) as a completion
+ * message, so a `wait_member` that arrives later must not repeat it from
+ * `lastText`.
+ * @param {object} task task record.
+ * @returns {boolean} true when the reply text was claimed by the fallback.
+ */
+export function memberTaskResultAlreadyDelivered(task) {
+  if (task?.notified === true) return true
+  return Array.isArray(task?.deliveryReplies) && task.deliveryReplies.length > 0
+}
+
+/**
  * Clean one workspace title into a name the member's interop accepts.
  *
  * The member rejects a name longer than 120 characters or one containing a
@@ -281,6 +310,14 @@ export class MemberTaskService {
     this.deliveryGraceMs = Number.isSafeInteger(options.deliveryGraceMs) && options.deliveryGraceMs >= 0
       ? options.deliveryGraceMs
       : DELIVERY_GRACE_MS
+    /**
+     * Grace used instead when a `wait_member` was parked on the task when it
+     * finished: that wait is mid-re-read and must be allowed to take the
+     * terminal outcome, or it and the fallback would hand over the same text.
+     */
+    this.waitDeliveryGraceMs = Number.isSafeInteger(options.waitDeliveryGraceMs) && options.waitDeliveryGraceMs >= 0
+      ? options.waitDeliveryGraceMs
+      : WAIT_DELIVERY_GRACE_MS
     /** @type {Map<string, AbortController>} per-task cancellation for the in-flight wait */
     this.controllers = new Map()
     /** @type {Map<string, Set<() => void>>} `wait_member` calls parked on a task */
@@ -1182,14 +1219,20 @@ export class MemberTaskService {
     })
   }
 
-  /** Wake every `wait_member` call parked on this task. */
+  /**
+   * Wake every `wait_member` call parked on this task.
+   * @param {object} task member task.
+   * @returns {number} how many waiters were woken; the monitor uses this to
+   *   give a parked wait its longer terminal-consumption window.
+   */
   #notifyWaiters(task) {
     const parked = this.waiters.get(task.id)
-    if (parked === undefined) return
+    if (parked === undefined) return 0
     this.waiters.delete(task.id)
     for (const waiter of [...parked]) {
       try { waiter() } catch { }
     }
+    return parked.size
   }
 
   /**
@@ -1638,13 +1681,15 @@ export class MemberTaskService {
     }
     // A parked `wait_member` must hear about a terminal state (or an
     // interruption) without waiting for its own timeout. Waking it first lets
-    // it take the result before the delivery grace window starts.
-    this.#notifyWaiters(task)
+    // it take the result before the delivery grace window starts; a wait that
+    // was actually parked gets the longer window because its terminal re-read
+    // is two HTTP round trips and can outlast the plain grace.
+    const wokenWaiters = this.#notifyWaiters(task)
     // The model may have stopped waiting after a `progress` reply. Unless a
     // `wait_member` call takes the result within the grace window, write it
     // back into the conversation that called `call_member`.
     if (task.notify && (task.status === 'completed' || task.status === 'failed')) {
-      this.#scheduleDelivery(task)
+      this.#scheduleDelivery(task, wokenWaiters > 0)
     }
     return task
   }
@@ -1728,19 +1773,25 @@ export class MemberTaskService {
    *
    * A parked `wait_member` is woken before this runs, and the model's next step
    * may still issue one; the window is what lets either of them consume the
-   * terminal outcome first. The timer is unref'd so a pending delivery never
-   * holds the process open on its own.
+   * terminal outcome first. A wait that was parked at completion is given
+   * {@link WAIT_DELIVERY_GRACE_MS} because its terminal re-read is slower than
+   * one event-loop hop. The timer is unref'd so a pending delivery never holds
+   * the process open on its own.
    * @param {object} task terminal task.
+   * @param {boolean} [parkedWait] whether a wait was parked when it finished.
    * @returns {void}
    */
-  #scheduleDelivery(task) {
+  #scheduleDelivery(task, parkedWait = false) {
     if (task.terminalDelivered === true) return
     const previous = this.deliveryTimers.get(task.id)
     if (previous !== undefined) clearTimeout(previous)
+    const graceMs = parkedWait
+      ? Math.max(this.deliveryGraceMs, this.waitDeliveryGraceMs)
+      : this.deliveryGraceMs
     const timer = setTimeout(() => {
       this.deliveryTimers.delete(task.id)
       void this.#deliverIfUnconsumed(task).catch(() => {})
-    }, this.deliveryGraceMs)
+    }, graceMs)
     timer.unref?.()
     this.deliveryTimers.set(task.id, timer)
   }

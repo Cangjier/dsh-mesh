@@ -13,7 +13,7 @@
  * @module @local/dsh-mesh/tools
  */
 
-import { FORCED_COMPACT_PERCENT, MemberTaskService, describeMemberTask } from './member-tasks.mjs'
+import { FORCED_COMPACT_PERCENT, MemberTaskService, describeMemberTask, memberTaskResultAlreadyDelivered, memberTaskWorkspace } from './member-tasks.mjs'
 import { createTurnGuard } from './turn-guard.mjs'
 import { createMemberContext } from './member-context.mjs'
 
@@ -475,7 +475,7 @@ export function registerTools(ctx, toolsCtx, service) {
           }
         }
         if (result.done && task.status === 'completed') {
-          const finalText = replyText !== '' ? replyText : (typeof task.lastText === 'string' ? task.lastText : '')
+          const terminal = terminalResultText(task, replyText)
           return {
             ok: true,
             text: [
@@ -486,11 +486,15 @@ export function registerTools(ctx, toolsCtx, service) {
               contextLine,
               advice,
               '结果：',
-              finalText !== '' ? finalText : '(成员没有返回文本结果)',
+              terminal.text !== ''
+                ? terminal.text
+                : terminal.alreadyDelivered
+                  ? '（这条回复已由完成消息投递到本对话，这里不再重复正文。）'
+                  : '(成员没有返回文本结果)',
               ...conversationBlock.lines,
               `日志：${data.logFile}`,
             ].filter(line => line !== '').join('\n'),
-            data,
+            data: { ...data, fallbackDelivered: terminal.alreadyDelivered },
           }
         }
         if (!result.done) {
@@ -567,7 +571,7 @@ export function registerTools(ctx, toolsCtx, service) {
         }
       }
       if (result.done && task.status === 'completed') {
-        const finalText = replyText !== '' ? replyText : (typeof task.lastText === 'string' ? task.lastText : '')
+        const terminal = terminalResultText(task, replyText)
         return {
           ok: true,
           text: [
@@ -578,12 +582,16 @@ export function registerTools(ctx, toolsCtx, service) {
             formatContextLine(task.context),
             formatCompactionAdvice(task.context),
             '结果：',
-            finalText !== '' ? finalText : '(成员没有返回文本结果)',
+            terminal.text !== ''
+              ? terminal.text
+              : terminal.alreadyDelivered
+                ? '（这条回复已由完成消息投递到本对话，这里不再重复正文。）'
+                : '(成员没有返回文本结果)',
             ...remainingHint,
             ...conversationBlock.lines,
             `日志：${data.logFile}`,
           ].filter(line => line !== '').join('\n'),
-          data,
+          data: { ...data, fallbackDelivered: terminal.alreadyDelivered },
         }
       }
       if (result.timedOut) {
@@ -624,6 +632,7 @@ export function registerTools(ctx, toolsCtx, service) {
       '查看一个或多个成员会话的当前状态，以及这些目标对话最近两次的用户消息（就是 call_member 投递过去的消息）。',
       '',
       '`conversationId` 查一个，`conversationIds` 一次查多个（返回按会话分块列出，并带一行汇总）。',
+      '返回值同时列出本对话跟踪的**所有**成员会话：每个会话的id、状态（进行中 / 空闲 / 被异常中止）和工作区名称。',
       '状态优先取目标成员的最新投影：进行中 / 空闲 / 被异常中止 / 出错；目标不可达时退回本机任务状态。',
       '最近两次用户消息来自本机任务记录，按投递时间从旧到新排列，最多两条；',
       '最近一次思考是目标对话最新一轮的 reasoning；只跟踪本机发起或继续过的会话，没有跟踪的会话会明确报错。',
@@ -648,7 +657,7 @@ export function registerTools(ctx, toolsCtx, service) {
       }],
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       const ids = requestedConversationIds(args)
       if (ids.length === 0) throw new Error('conversationId is required')
       const inspected = await Promise.all(ids.map(async (id) => {
@@ -665,11 +674,21 @@ export function registerTools(ctx, toolsCtx, service) {
       if (entries.length === 0) {
         throw new Error(`本机没有跟踪会话 ${missing.join('、')}；先用 call_member 发起或继续一次，再查状态。`)
       }
+      // Every tracked conversation of this origin, not just the ids asked for:
+      // the model should see the whole member fan-out and each workspace here.
+      const originId = originSessionOf(exec?.agent)
+        || (inspected.find(entry => entry.found !== null)?.found?.task?.originSessionId ?? '')
+      const allBlock = await originConversationBlock(memberTasks, originId, ids[0])
       if (entries.length === 1 && missing.length === 0) {
         return {
           ok: true,
-          text: formatStatusBlock(entries[0]),
-          data: { ...statusData(entries[0]), conversations: entries.map(statusData) },
+          text: [formatStatusBlock(entries[0]), '', ...allBlock.lines].join('\n'),
+          data: {
+            ...statusData(entries[0]),
+            count: allBlock.conversations.length,
+            conversations: allBlock.conversations,
+            requested: entries.map(statusData),
+          },
         }
       }
       const counts = new Map()
@@ -684,10 +703,17 @@ export function registerTools(ctx, toolsCtx, service) {
       if (missing.length > 0) {
         parts.push('', `本机没有跟踪这些会话：${missing.join('、')}；先用 call_member 发起或继续一次，再查状态。`)
       }
+      parts.push('', ...allBlock.lines)
       return {
         ok: true,
         text: parts.join('\n'),
-        data: { count: entries.length, conversations: entries.map(statusData), missing },
+        data: {
+          count: allBlock.conversations.length,
+          requestedCount: entries.length,
+          conversations: allBlock.conversations,
+          requested: entries.map(statusData),
+          missing,
+        },
       }
     },
   }
@@ -834,6 +860,27 @@ function formatContextLine(context) {
   if (max === null) return `对话上下文：已用 ${formatTokens(used)} tokens${percentText}（成员未报告上限）`
   if (used === null) return `对话上下文：上限 ${formatTokens(max)} tokens（成员未报告已用）`
   return `对话上下文：${formatTokens(used)} / ${formatTokens(max)} tokens${percentText}`
+}
+
+/**
+ * The text a terminal wait result should show, and whether the fallback
+ * already owns that text.
+ *
+ * A wait that arrives after the fallback claimed the final reply must not
+ * repeat `lastText`: the reply is either already in the conversation as a
+ * completion message or on its way as the retried one. Only a task whose text
+ * no fallback ever claimed can still be recovered from `lastText` (an older
+ * member that reports no per-turn replies).
+ * @param {object} task terminal task.
+ * @param {string} replyText text carried by this wait response, if any.
+ * @returns {{text: string, alreadyDelivered: boolean}} text to show.
+ */
+function terminalResultText(task, replyText) {
+  const alreadyDelivered = memberTaskResultAlreadyDelivered(task)
+  const text = replyText !== ''
+    ? replyText
+    : alreadyDelivered ? '' : (typeof task.lastText === 'string' ? task.lastText : '')
+  return { text, alreadyDelivered }
 }
 
 /**
@@ -1031,10 +1078,12 @@ function describeStatus(found, memberTasks) {
   const { task, live, liveError } = found
   const liveStatus = typeof live?.status === 'string' ? live.status : ''
   const turns = Number.isSafeInteger(live?.turns) ? live.turns : (Number.isSafeInteger(task.turns) ? task.turns : null)
+  const liveWorkspace = typeof live?.workspace === 'string' ? live.workspace.trim() : ''
   return {
     conversationId: task.conversationId,
     member: task.member,
     memberIp: task.memberIp,
+    workspace: liveWorkspace !== '' ? liveWorkspace : memberTaskWorkspace(task),
     status: liveStatus === '' ? task.status : liveStatus,
     liveStatus,
     statusLabel: memberStatusLabel(liveStatus, task),
@@ -1069,6 +1118,7 @@ function formatStatusBlock(entry) {
       ? `状态：${entry.statusLabel}（目标不可达：${entry.liveError ?? 'unknown'}）`
       : `状态：${entry.statusLabel}（目标实时）`,
     `本机任务：${entry.taskStatus}${entry.turns === null ? '' : `，轮次 ${String(entry.turns)}`}`,
+    `工作区：${entry.workspace ?? 'unknown'}`,
     formatContextLine(entry.context),
     entry.messages.length === 0 ? '最近两次用户消息：(没有记录)' : '最近两次用户消息（旧→新）：',
     ...entry.messages.map((message, index) => `${String(index + 1)}. ${typeof message.at === 'string' && message.at !== '' ? `[${message.at}] ` : ''}${truncateText(message.text, 1200)}`),

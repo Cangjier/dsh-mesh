@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { MemberTaskService } from '../src/lib/member-tasks.mjs'
+import { registerTools } from '../src/lib/tools.mjs'
 
 /**
  * A member interop that can answer a progress turn and then hold the terminal
@@ -18,6 +19,7 @@ import { MemberTaskService } from '../src/lib/member-tasks.mjs'
 async function fakeMember(options = {}) {
   const progressText = options.progressText === undefined ? '第一轮进展' : options.progressText
   const finalText = options.finalText ?? '最终结果'
+  const getDelayMs = Number.isSafeInteger(options.getDelayMs) ? options.getDelayMs : 0
   let waits = 0
   const live = { id: 'conv-d', status: 'running', turns: 0, replySeq: 0, lastText: '', workspace: 'dsh-mesh' }
   let release = null
@@ -43,6 +45,7 @@ async function fakeMember(options = {}) {
       return
     }
     if (request.method === 'GET' && request.url.startsWith('/v1/conversations/conv-d')) {
+      if (getDelayMs > 0) await sleep(getDelayMs)
       reply(200, {
         ok: true,
         conversation: { ...live },
@@ -137,7 +140,7 @@ async function fakeMember(options = {}) {
  * @param {object} agent origin agent that records delivery.
  * @returns {Promise<{tasks: MemberTaskService, dataDir: string}>} harness.
  */
-async function buildService(port, agent) {
+async function buildService(port, agent, options = {}) {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'mesh-delivery-'))
   const ctx = {
     logger: { info: () => {}, warn: () => {}, error: () => {} },
@@ -152,7 +155,13 @@ async function buildService(port, agent) {
       return { local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }
     },
   }
-  const tasks = new MemberTaskService({ ctx, service, dataDir, deliveryGraceMs: 100 })
+  const tasks = new MemberTaskService({
+    ctx,
+    service,
+    dataDir,
+    deliveryGraceMs: options.deliveryGraceMs ?? 100,
+    ...(options.waitDeliveryGraceMs === undefined ? {} : { waitDeliveryGraceMs: options.waitDeliveryGraceMs }),
+  })
   return { tasks, dataDir }
 }
 
@@ -275,6 +284,96 @@ test('the fallback delivers only the replies wait_member has not taken', async (
     assert.deepEqual(again.replies, [])
   } finally {
     await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a parked wait gets the terminal reply even when its sync outlasts the plain grace', async () => {
+  // The completion arrives while a wait is parked, but the wait's terminal
+  // re-read is slower than the three-second-style grace. Without the longer
+  // parked-wait window the fallback would deliver the final text first and the
+  // wait would then repeat it from lastText — the original ai-cad duplicate.
+  const member = await fakeMember({ progressText: '第一轮进展', finalText: '最终结果', getDelayMs: 400 })
+  const agent = recordingAgent()
+  const { tasks, dataDir } = await buildService(member.port, agent, {
+    deliveryGraceMs: 60,
+    waitDeliveryGraceMs: 2_000,
+  })
+  try {
+    const task = await tasks.start({ member: '127.0.0.1', prompt: '检查磁盘', agent, notify: true })
+    await waitFor(() => task.replySeq === 1)
+    const progress = await tasks.wait(task.conversationId, { timeoutMs: 3_000 })
+    assert.equal(progress.state, 'progress')
+
+    // Park on the task while the member still holds its terminal turn.
+    const parked = tasks.wait(task.conversationId, { timeoutMs: 5_000 })
+    await sleep(50)
+    member.release()
+    const terminal = await parked
+    assert.equal(terminal.done, true)
+    assert.deepEqual(terminal.replies.map(reply => reply.text), ['最终结果'])
+    await sleep(200)
+    assert.equal(agent.messages.length, 0, 'the parked wait consumed the result; no fallback may repeat it')
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('wait_member does not repeat text the fallback already delivered', async () => {
+  const member = await fakeMember({ progressText: '第一轮进展', finalText: '最终结果' })
+  const agent = recordingAgent()
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'mesh-delivery-tool-'))
+  const service = {
+    dataDir,
+    repositoryRoot: '/nonexistent',
+    config: { interopPort: member.port, interopToken: 'test-token', interopUseGatePassword: false },
+    async members() {
+      return { local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }
+    },
+  }
+  const definitions = new Map()
+  registerTools(
+    {
+      logger: {},
+      effect(fn) { fn() },
+      get: name => name === 'agents' ? { get: id => (id === agent.id ? agent : undefined) } : undefined,
+    },
+    { tools: { register: definition => definitions.set(definition.name, definition) } },
+    service,
+  )
+  service.memberTasks.deliveryGraceMs = 60
+  service.memberTasks.waitDeliveryGraceMs = 60
+  try {
+    const call = definitions.get('call_member')
+    const wait = definitions.get('wait_member')
+    const start = await call.execute({ member: '127.0.0.1', prompt: '检查磁盘' }, { agent })
+    assert.equal(start.ok, true)
+    const task = [...service.memberTasks.tasks.values()].find(entry => entry.conversationId === start.data.conversationId)
+    assert.ok(task, 'the created conversation is tracked')
+
+    await waitFor(() => task.replySeq === 1)
+    const progress = await wait.execute({ conversationIds: [task.conversationId] }, { agent })
+    assert.equal(progress.data.state, 'progress')
+
+    member.release()
+    await waitFor(() => agent.messages.length === 1)
+    const delivered = agent.messages[0].content[0].text
+    assert.match(delivered, /最终结果/u)
+
+    // The fallback owns the final text now; a wait arriving afterwards must
+    // report completion without printing the same reply again.
+    const late = await wait.execute({ conversationIds: [task.conversationId] }, { agent })
+    assert.equal(late.ok, true)
+    assert.equal(late.data.state, 'done')
+    assert.equal(late.data.fallbackDelivered, true)
+    assert.doesNotMatch(late.text, /最终结果/u)
+    assert.match(late.text, /不再重复正文/u)
+    assert.equal(agent.messages.length, 1)
+  } finally {
+    await service.memberTasks.dispose()
     await member.close()
     await rm(dataDir, { recursive: true, force: true })
   }

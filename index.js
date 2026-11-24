@@ -13048,6 +13048,7 @@ var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
 var DELIVERY_GRACE_MS = 3e3;
+var WAIT_DELIVERY_GRACE_MS = 15e3;
 var FORCED_COMPACT_PERCENT = 30;
 var STOPPED_ERROR = "the plugin stopped before the member conversation completed";
 var RESUME_WINDOW_MS = 24 * 60 * 60 * 1e3;
@@ -13105,6 +13106,10 @@ function describeMemberTask(task, currentConversationId) {
     current: typeof currentConversationId === "string" && task.conversationId === currentConversationId
   };
 }
+function memberTaskResultAlreadyDelivered(task) {
+  if (task?.notified === true) return true;
+  return Array.isArray(task?.deliveryReplies) && task.deliveryReplies.length > 0;
+}
 function workspaceNameFromTitle(value) {
   const name = typeof value === "string" ? value.trim() : "";
   if (name === "" || name === "." || name === ".." || name.length > 120) return "";
@@ -13157,6 +13162,7 @@ var MemberTaskService = class {
     this.tasks = /* @__PURE__ */ new Map();
     this.monitors = /* @__PURE__ */ new Map();
     this.deliveryGraceMs = Number.isSafeInteger(options.deliveryGraceMs) && options.deliveryGraceMs >= 0 ? options.deliveryGraceMs : DELIVERY_GRACE_MS;
+    this.waitDeliveryGraceMs = Number.isSafeInteger(options.waitDeliveryGraceMs) && options.waitDeliveryGraceMs >= 0 ? options.waitDeliveryGraceMs : WAIT_DELIVERY_GRACE_MS;
     this.controllers = /* @__PURE__ */ new Map();
     this.waiters = /* @__PURE__ */ new Map();
     this.deliveryTimers = /* @__PURE__ */ new Map();
@@ -13982,10 +13988,15 @@ var MemberTaskService = class {
       }
     });
   }
-  /** Wake every `wait_member` call parked on this task. */
+  /**
+   * Wake every `wait_member` call parked on this task.
+   * @param {object} task member task.
+   * @returns {number} how many waiters were woken; the monitor uses this to
+   *   give a parked wait its longer terminal-consumption window.
+   */
   #notifyWaiters(task) {
     const parked = this.waiters.get(task.id);
-    if (parked === void 0) return;
+    if (parked === void 0) return 0;
     this.waiters.delete(task.id);
     for (const waiter of [...parked]) {
       try {
@@ -13993,6 +14004,7 @@ var MemberTaskService = class {
       } catch {
       }
     }
+    return parked.size;
   }
   /**
    * Send one message into an existing member conversation.
@@ -14387,9 +14399,9 @@ var MemberTaskService = class {
       await this.#save(task);
       await this.#log(task, `${task.status}: ${truncate(task.lastText || task.error || "", 500)}`);
     }
-    this.#notifyWaiters(task);
+    const wokenWaiters = this.#notifyWaiters(task);
     if (task.notify && (task.status === "completed" || task.status === "failed")) {
-      this.#scheduleDelivery(task);
+      this.#scheduleDelivery(task, wokenWaiters > 0);
     }
     return task;
   }
@@ -14465,20 +14477,24 @@ var MemberTaskService = class {
    *
    * A parked `wait_member` is woken before this runs, and the model's next step
    * may still issue one; the window is what lets either of them consume the
-   * terminal outcome first. The timer is unref'd so a pending delivery never
-   * holds the process open on its own.
+   * terminal outcome first. A wait that was parked at completion is given
+   * {@link WAIT_DELIVERY_GRACE_MS} because its terminal re-read is slower than
+   * one event-loop hop. The timer is unref'd so a pending delivery never holds
+   * the process open on its own.
    * @param {object} task terminal task.
+   * @param {boolean} [parkedWait] whether a wait was parked when it finished.
    * @returns {void}
    */
-  #scheduleDelivery(task) {
+  #scheduleDelivery(task, parkedWait = false) {
     if (task.terminalDelivered === true) return;
     const previous = this.deliveryTimers.get(task.id);
     if (previous !== void 0) clearTimeout(previous);
+    const graceMs = parkedWait ? Math.max(this.deliveryGraceMs, this.waitDeliveryGraceMs) : this.deliveryGraceMs;
     const timer = setTimeout(() => {
       this.deliveryTimers.delete(task.id);
       void this.#deliverIfUnconsumed(task).catch(() => {
       });
-    }, this.deliveryGraceMs);
+    }, graceMs);
     timer.unref?.();
     this.deliveryTimers.set(task.id, timer);
   }
@@ -15361,7 +15377,7 @@ ${replyText2}` : "",
           };
         }
         if (result2.done && task2.status === "completed") {
-          const finalText = replyText2 !== "" ? replyText2 : typeof task2.lastText === "string" ? task2.lastText : "";
+          const terminal = terminalResultText(task2, replyText2);
           return {
             ok: true,
             text: [
@@ -15372,11 +15388,11 @@ ${replyText2}` : "",
               contextLine,
               advice,
               "\u7ED3\u679C\uFF1A",
-              finalText !== "" ? finalText : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
+              terminal.text !== "" ? terminal.text : terminal.alreadyDelivered ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7531\u5B8C\u6210\u6D88\u606F\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
               ...conversationBlock2.lines,
               `\u65E5\u5FD7\uFF1A${data2.logFile}`
             ].filter((line) => line !== "").join("\n"),
-            data: data2
+            data: { ...data2, fallbackDelivered: terminal.alreadyDelivered }
           };
         }
         if (!result2.done) {
@@ -15452,7 +15468,7 @@ ${replyText}` : "",
         };
       }
       if (result.done && task.status === "completed") {
-        const finalText = replyText !== "" ? replyText : typeof task.lastText === "string" ? task.lastText : "";
+        const terminal = terminalResultText(task, replyText);
         return {
           ok: true,
           text: [
@@ -15463,12 +15479,12 @@ ${replyText}` : "",
             formatContextLine(task.context),
             formatCompactionAdvice(task.context),
             "\u7ED3\u679C\uFF1A",
-            finalText !== "" ? finalText : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
+            terminal.text !== "" ? terminal.text : terminal.alreadyDelivered ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7531\u5B8C\u6210\u6D88\u606F\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
             ...remainingHint,
             ...conversationBlock.lines,
             `\u65E5\u5FD7\uFF1A${data.logFile}`
           ].filter((line) => line !== "").join("\n"),
-          data
+          data: { ...data, fallbackDelivered: terminal.alreadyDelivered }
         };
       }
       if (result.timedOut) {
@@ -15509,6 +15525,7 @@ ${replyText}` : "",
       "\u67E5\u770B\u4E00\u4E2A\u6216\u591A\u4E2A\u6210\u5458\u4F1A\u8BDD\u7684\u5F53\u524D\u72B6\u6001\uFF0C\u4EE5\u53CA\u8FD9\u4E9B\u76EE\u6807\u5BF9\u8BDD\u6700\u8FD1\u4E24\u6B21\u7684\u7528\u6237\u6D88\u606F\uFF08\u5C31\u662F call_member \u6295\u9012\u8FC7\u53BB\u7684\u6D88\u606F\uFF09\u3002",
       "",
       "`conversationId` \u67E5\u4E00\u4E2A\uFF0C`conversationIds` \u4E00\u6B21\u67E5\u591A\u4E2A\uFF08\u8FD4\u56DE\u6309\u4F1A\u8BDD\u5206\u5757\u5217\u51FA\uFF0C\u5E76\u5E26\u4E00\u884C\u6C47\u603B\uFF09\u3002",
+      "\u8FD4\u56DE\u503C\u540C\u65F6\u5217\u51FA\u672C\u5BF9\u8BDD\u8DDF\u8E2A\u7684**\u6240\u6709**\u6210\u5458\u4F1A\u8BDD\uFF1A\u6BCF\u4E2A\u4F1A\u8BDD\u7684id\u3001\u72B6\u6001\uFF08\u8FDB\u884C\u4E2D / \u7A7A\u95F2 / \u88AB\u5F02\u5E38\u4E2D\u6B62\uFF09\u548C\u5DE5\u4F5C\u533A\u540D\u79F0\u3002",
       "\u72B6\u6001\u4F18\u5148\u53D6\u76EE\u6807\u6210\u5458\u7684\u6700\u65B0\u6295\u5F71\uFF1A\u8FDB\u884C\u4E2D / \u7A7A\u95F2 / \u88AB\u5F02\u5E38\u4E2D\u6B62 / \u51FA\u9519\uFF1B\u76EE\u6807\u4E0D\u53EF\u8FBE\u65F6\u9000\u56DE\u672C\u673A\u4EFB\u52A1\u72B6\u6001\u3002",
       "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\u6765\u81EA\u672C\u673A\u4EFB\u52A1\u8BB0\u5F55\uFF0C\u6309\u6295\u9012\u65F6\u95F4\u4ECE\u65E7\u5230\u65B0\u6392\u5217\uFF0C\u6700\u591A\u4E24\u6761\uFF1B",
       "\u6700\u8FD1\u4E00\u6B21\u601D\u8003\u662F\u76EE\u6807\u5BF9\u8BDD\u6700\u65B0\u4E00\u8F6E\u7684 reasoning\uFF1B\u53EA\u8DDF\u8E2A\u672C\u673A\u53D1\u8D77\u6216\u7EE7\u7EED\u8FC7\u7684\u4F1A\u8BDD\uFF0C\u6CA1\u6709\u8DDF\u8E2A\u7684\u4F1A\u8BDD\u4F1A\u660E\u786E\u62A5\u9519\u3002"
@@ -15533,7 +15550,7 @@ ${replyText}` : "",
       }]
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       const ids = requestedConversationIds(args);
       if (ids.length === 0) throw new Error("conversationId is required");
       const inspected = await Promise.all(ids.map(async (id) => {
@@ -15548,11 +15565,18 @@ ${replyText}` : "",
       if (entries.length === 0) {
         throw new Error(`\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u4F1A\u8BDD ${missing.join("\u3001")}\uFF1B\u5148\u7528 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u518D\u67E5\u72B6\u6001\u3002`);
       }
+      const originId = originSessionOf(exec?.agent) || (inspected.find((entry) => entry.found !== null)?.found?.task?.originSessionId ?? "");
+      const allBlock = await originConversationBlock(memberTasks, originId, ids[0]);
       if (entries.length === 1 && missing.length === 0) {
         return {
           ok: true,
-          text: formatStatusBlock(entries[0]),
-          data: { ...statusData(entries[0]), conversations: entries.map(statusData) }
+          text: [formatStatusBlock(entries[0]), "", ...allBlock.lines].join("\n"),
+          data: {
+            ...statusData(entries[0]),
+            count: allBlock.conversations.length,
+            conversations: allBlock.conversations,
+            requested: entries.map(statusData)
+          }
         };
       }
       const counts = /* @__PURE__ */ new Map();
@@ -15567,10 +15591,17 @@ ${replyText}` : "",
       if (missing.length > 0) {
         parts.push("", `\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u8FD9\u4E9B\u4F1A\u8BDD\uFF1A${missing.join("\u3001")}\uFF1B\u5148\u7528 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u518D\u67E5\u72B6\u6001\u3002`);
       }
+      parts.push("", ...allBlock.lines);
       return {
         ok: true,
         text: parts.join("\n"),
-        data: { count: entries.length, conversations: entries.map(statusData), missing }
+        data: {
+          count: allBlock.conversations.length,
+          requestedCount: entries.length,
+          conversations: allBlock.conversations,
+          requested: entries.map(statusData),
+          missing
+        }
       };
     }
   };
@@ -15674,6 +15705,11 @@ function formatContextLine(context) {
   if (max === null) return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\uFF1A\u5DF2\u7528 ${formatTokens(used)} tokens${percentText}\uFF08\u6210\u5458\u672A\u62A5\u544A\u4E0A\u9650\uFF09`;
   if (used === null) return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\uFF1A\u4E0A\u9650 ${formatTokens(max)} tokens\uFF08\u6210\u5458\u672A\u62A5\u544A\u5DF2\u7528\uFF09`;
   return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\uFF1A${formatTokens(used)} / ${formatTokens(max)} tokens${percentText}`;
+}
+function terminalResultText(task, replyText) {
+  const alreadyDelivered = memberTaskResultAlreadyDelivered(task);
+  const text = replyText !== "" ? replyText : alreadyDelivered ? "" : typeof task.lastText === "string" ? task.lastText : "";
+  return { text, alreadyDelivered };
 }
 function requestedConversationIds(args) {
   const ids = [];
@@ -15784,10 +15820,12 @@ function describeStatus(found, memberTasks) {
   const { task, live, liveError } = found;
   const liveStatus = typeof live?.status === "string" ? live.status : "";
   const turns = Number.isSafeInteger(live?.turns) ? live.turns : Number.isSafeInteger(task.turns) ? task.turns : null;
+  const liveWorkspace = typeof live?.workspace === "string" ? live.workspace.trim() : "";
   return {
     conversationId: task.conversationId,
     member: task.member,
     memberIp: task.memberIp,
+    workspace: liveWorkspace !== "" ? liveWorkspace : memberTaskWorkspace(task),
     status: liveStatus === "" ? task.status : liveStatus,
     liveStatus,
     statusLabel: memberStatusLabel(liveStatus, task),
@@ -15808,6 +15846,7 @@ function formatStatusBlock(entry) {
     `\u6210\u5458\u4F1A\u8BDD ${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF09`,
     entry.liveStatus === "" ? `\u72B6\u6001\uFF1A${entry.statusLabel}\uFF08\u76EE\u6807\u4E0D\u53EF\u8FBE\uFF1A${entry.liveError ?? "unknown"}\uFF09` : `\u72B6\u6001\uFF1A${entry.statusLabel}\uFF08\u76EE\u6807\u5B9E\u65F6\uFF09`,
     `\u672C\u673A\u4EFB\u52A1\uFF1A${entry.taskStatus}${entry.turns === null ? "" : `\uFF0C\u8F6E\u6B21 ${String(entry.turns)}`}`,
+    `\u5DE5\u4F5C\u533A\uFF1A${entry.workspace ?? "unknown"}`,
     formatContextLine(entry.context),
     entry.messages.length === 0 ? "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\uFF1A(\u6CA1\u6709\u8BB0\u5F55)" : "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\uFF08\u65E7\u2192\u65B0\uFF09\uFF1A",
     ...entry.messages.map((message, index) => `${String(index + 1)}. ${typeof message.at === "string" && message.at !== "" ? `[${message.at}] ` : ""}${truncateText(message.text, 1200)}`),

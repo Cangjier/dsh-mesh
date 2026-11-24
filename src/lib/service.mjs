@@ -62,6 +62,7 @@ import {
   isAllowedPackagePath,
   listPackagesScript,
   normalizeLatestManifest,
+  packagePlatformFromName,
   packageTargetFromName,
   parseTargetPackageList,
   powershellQuote,
@@ -1715,6 +1716,13 @@ export class MeshService {
 
   /**
    * Local deployment packages. The fixed directory is `~/.dsh/packages`.
+   *
+   * Only archives that name a `dsh-mesh` deployment target are offered. The
+   * directory is a plain cache that other flows write to as well (a plugin
+   * bundle, for instance, is a `.tgz` too), and an archive without a platform
+   * cannot be deployed: extracted on a member it has no runtime to start.
+   * Filtering here keeps such a file out of the panel list and out of the
+   * scheduled upgrade candidates.
    * @returns {Promise<object>} package list.
    */
   async packages() {
@@ -1722,7 +1730,8 @@ export class MeshService {
     const packages = []
     for (const entry of entries) {
       if (!entry.isFile()) continue
-      if (!/\.(?:7z|zip|tar\.gz|tgz)$/iu.test(entry.name)) continue
+      const parsed = packagePlatformFromName(entry.name)
+      if (parsed === null) continue
       const file = path.join(this.packagesDir, entry.name)
       const info = await stat(file).catch(() => null)
       if (info === null) continue
@@ -1731,7 +1740,7 @@ export class MeshService {
         path: file,
         bytes: info.size,
         mtime: info.mtime.toISOString(),
-        target: /win(?:dows)?/iu.test(entry.name) ? 'windows' : 'linux',
+        target: parsed.os,
       })
     }
     packages.sort((left, right) => right.mtime.localeCompare(left.mtime))
@@ -2201,9 +2210,13 @@ export class MeshService {
         : member?.system?.platform?.toLowerCase().startsWith('win') ? 'windows' : 'linux'
     } else {
       packagePath = await this.resolvePackage(request.package)
-      os = /win(?:dows)?/iu.test(path.basename(packagePath))
-        ? 'windows'
-        : member?.system?.platform?.toLowerCase().startsWith('win') ? 'windows' : 'linux'
+      // A package picked by name must still be a deployment archive. Without
+      // this check a `.tgz` that is not a `dsh-mesh` release (a plugin bundle
+      // lives in the same cache) would be uploaded and only fail on the
+      // target, after the transfer, with "the package has no usable node".
+      const parsed = packagePlatformFromName(path.basename(packagePath))
+      if (parsed === null) throw new Error(`不是 dsh-mesh 部署包：${path.basename(packagePath)}`)
+      os = parsed.os
     }
 
     if (member !== undefined) {

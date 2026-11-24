@@ -9348,18 +9348,15 @@ function latestPackagesByOs(packages) {
   const latest = {};
   for (const item of Array.isArray(packages) ? packages : []) {
     const parsed = packageInfo(item.name);
-    const os11 = parsed?.os ?? (item.target === "windows" ? "windows" : item.target === "linux" ? "linux" : null);
-    if (os11 === null) continue;
-    const current = latest[os11];
+    if (parsed === null) continue;
+    const current = latest[parsed.os];
     if (current === void 0) {
-      latest[os11] = item;
+      latest[parsed.os] = item;
       continue;
     }
     const currentInfo = packageInfo(current.name);
-    if (parsed !== null && currentInfo !== null) {
-      if (compareBuildStamps(parsed.buildStamp, currentInfo.buildStamp) > 0) latest[os11] = item;
-    } else if (String(item.mtime ?? "") > String(current.mtime ?? "")) {
-      latest[os11] = item;
+    if (currentInfo !== null && compareBuildStamps(parsed.buildStamp, currentInfo.buildStamp) > 0) {
+      latest[parsed.os] = item;
     }
   }
   return latest;
@@ -9372,7 +9369,7 @@ function memberDeployment(member) {
 }
 function shouldUpgrade(deployment, candidate) {
   const parsed = packageInfo(candidate?.name);
-  if (parsed === null) return { needed: true, reason: "\u90E8\u7F72\u5305\u540D\u79F0\u65E0\u6CD5\u89E3\u6790\u7248\u672C\uFF0C\u6309\u9700\u8981\u5347\u7EA7\u5904\u7406" };
+  if (parsed === null) return { needed: false, reason: "\u4E0D\u662F\u53EF\u8BC6\u522B\u7684\u90E8\u7F72\u5305\uFF0C\u8DF3\u8FC7" };
   const currentStamp = typeof deployment?.buildStamp === "string" ? deployment.buildStamp : "";
   if (currentStamp !== "") {
     const order = compareBuildStamps(parsed.buildStamp, currentStamp);
@@ -9710,7 +9707,20 @@ function formatMemberMesh(mesh) {
 // src/lib/package-sources.mjs
 import path21 from "node:path";
 var PACKAGE_ARCHIVE_RE = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u;
+var DEPLOYABLE_ARCHIVE_RE = /^dsh-mesh-(?!plugin[-.])(.+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u;
 var RELEASE_TARGET_RE = /^(linux|win)-(x64|arm64)$/u;
+function packagePlatformFromName(name) {
+  const match = DEPLOYABLE_ARCHIVE_RE.exec(String(name ?? ""));
+  if (match === null) return null;
+  const os11 = match[2].startsWith("win") ? "windows" : "linux";
+  const arch = match[3];
+  return {
+    version: match[1],
+    os: os11,
+    arch,
+    target: `${os11 === "windows" ? "win" : "linux"}-${arch}`
+  };
+}
 function packageTargetFromName(name) {
   const match = PACKAGE_ARCHIVE_RE.exec(String(name ?? ""));
   if (match === null) return null;
@@ -11304,6 +11314,13 @@ var MeshService = class {
   }
   /**
    * Local deployment packages. The fixed directory is `~/.dsh/packages`.
+   *
+   * Only archives that name a `dsh-mesh` deployment target are offered. The
+   * directory is a plain cache that other flows write to as well (a plugin
+   * bundle, for instance, is a `.tgz` too), and an archive without a platform
+   * cannot be deployed: extracted on a member it has no runtime to start.
+   * Filtering here keeps such a file out of the panel list and out of the
+   * scheduled upgrade candidates.
    * @returns {Promise<object>} package list.
    */
   async packages() {
@@ -11311,7 +11328,8 @@ var MeshService = class {
     const packages = [];
     for (const entry of entries) {
       if (!entry.isFile()) continue;
-      if (!/\.(?:7z|zip|tar\.gz|tgz)$/iu.test(entry.name)) continue;
+      const parsed = packagePlatformFromName(entry.name);
+      if (parsed === null) continue;
       const file = path22.join(this.packagesDir, entry.name);
       const info = await stat13(file).catch(() => null);
       if (info === null) continue;
@@ -11320,7 +11338,7 @@ var MeshService = class {
         path: file,
         bytes: info.size,
         mtime: info.mtime.toISOString(),
-        target: /win(?:dows)?/iu.test(entry.name) ? "windows" : "linux"
+        target: parsed.os
       });
     }
     packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
@@ -11736,7 +11754,9 @@ var MeshService = class {
       os11 = /win(?:dows)?/iu.test(path22.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
     } else {
       packagePath = await this.resolvePackage(request.package);
-      os11 = /win(?:dows)?/iu.test(path22.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+      const parsed = packagePlatformFromName(path22.basename(packagePath));
+      if (parsed === null) throw new Error(`\u4E0D\u662F dsh-mesh \u90E8\u7F72\u5305\uFF1A${path22.basename(packagePath)}`);
+      os11 = parsed.os;
     }
     if (member !== void 0) {
       const identity = { id: member.id, name: member.name, ip: member.ip };

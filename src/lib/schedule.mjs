@@ -198,7 +198,10 @@ export function compareBuildStamps(left, right) {
  * Choose the newest package for each OS.
  *
  * Build stamps are the ordering key because a copied archive can have a newer
- * mtime without being a newer build. Unparseable names fall back to mtime.
+ * mtime without being a newer build. A name that does not spell out a release
+ * (version, build stamp, OS, arch) is not a deployment package at all and is
+ * ignored: another flow may drop a `.tgz` into the same cache (a plugin
+ * bundle, for instance), and deploying that would only fail on the target.
  * @param {{name: string, mtime?: string, target?: string}[]} packages package list.
  * @returns {{linux?: object, windows?: object}} newest package per OS.
  */
@@ -206,18 +209,15 @@ export function latestPackagesByOs(packages) {
   const latest = {}
   for (const item of Array.isArray(packages) ? packages : []) {
     const parsed = packageInfo(item.name)
-    const os = parsed?.os ?? (item.target === 'windows' ? 'windows' : item.target === 'linux' ? 'linux' : null)
-    if (os === null) continue
-    const current = latest[os]
+    if (parsed === null) continue
+    const current = latest[parsed.os]
     if (current === undefined) {
-      latest[os] = item
+      latest[parsed.os] = item
       continue
     }
     const currentInfo = packageInfo(current.name)
-    if (parsed !== null && currentInfo !== null) {
-      if (compareBuildStamps(parsed.buildStamp, currentInfo.buildStamp) > 0) latest[os] = item
-    } else if (String(item.mtime ?? '') > String(current.mtime ?? '')) {
-      latest[os] = item
+    if (currentInfo !== null && compareBuildStamps(parsed.buildStamp, currentInfo.buildStamp) > 0) {
+      latest[parsed.os] = item
     }
   }
   return latest
@@ -239,7 +239,7 @@ export function memberDeployment(member) {
  */
 export function shouldUpgrade(deployment, candidate) {
   const parsed = packageInfo(candidate?.name)
-  if (parsed === null) return { needed: true, reason: '部署包名称无法解析版本，按需要升级处理' }
+  if (parsed === null) return { needed: false, reason: '不是可识别的部署包，跳过' }
   const currentStamp = typeof deployment?.buildStamp === 'string' ? deployment.buildStamp : ''
   if (currentStamp !== '') {
     const order = compareBuildStamps(parsed.buildStamp, currentStamp)

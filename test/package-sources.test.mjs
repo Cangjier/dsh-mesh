@@ -4,6 +4,7 @@ import {
   isAllowedPackagePath,
   listPackagesScript,
   normalizeLatestManifest,
+  packagePlatformFromName,
   packageTargetFromName,
   parseTargetPackageList,
   selectLatestAsset,
@@ -57,6 +58,19 @@ test('archive names carry version, build stamp, OS and target', () => {
   })
   assert.equal(packageTargetFromName('dsh-mesh-unknown.zip'), null)
   assert.equal(packageTargetFromName('dsh-mesh-0.2.2-20261119F-linux-arm64.tgz')?.target, 'linux-arm64')
+})
+
+test('a platform suffix marks a deployment archive; a plugin bundle is not one', () => {
+  assert.deepEqual(packagePlatformFromName('dsh-mesh-0.2.2-linux-x64.tar.gz'), {
+    version: '0.2.2',
+    os: 'linux',
+    arch: 'x64',
+    target: 'linux-x64',
+  })
+  assert.equal(packagePlatformFromName('dsh-mesh-0.2.2-rc.5-20261119F-win-x64.7z')?.os, 'windows')
+  assert.equal(packagePlatformFromName('dsh-mesh-plugin-0.2.0-20261123-1735.tgz'), null)
+  assert.equal(packagePlatformFromName('dsh-mesh-plugin-linux-x64.tgz'), null)
+  assert.equal(packagePlatformFromName('notes.txt'), null)
 })
 
 test('latest.json normalization keeps valid targets and provider availability', () => {

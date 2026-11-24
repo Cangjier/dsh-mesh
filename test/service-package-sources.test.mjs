@@ -127,6 +127,29 @@ test('the local member lists its package cache and build staging', async () => {
   }
 })
 
+test('only deployable dsh-mesh archives are listed and accepted by name', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-service-packages-'))
+  try {
+    const service = fixtureService(dir)
+    const packagesDir = path.join(dir, 'packages')
+    await mkdir(packagesDir, { recursive: true })
+    const plugin = 'dsh-mesh-plugin-0.2.0-20261123-1735.tgz'
+    await writeFile(path.join(packagesDir, ARCHIVE), 'archive')
+    await writeFile(path.join(packagesDir, plugin), 'plugin bytes')
+    await writeFile(path.join(packagesDir, 'notes.txt'), 'text')
+    service.packagesDir = packagesDir
+    const listed = await service.packages()
+    assert.deepEqual(listed.packages.map(item => item.name), [ARCHIVE])
+    assert.equal(listed.packages[0].target, 'linux')
+    await assert.rejects(
+      service.startDeploy({ member: 'b', package: plugin, mode: 'upgrade' }),
+      /不是 dsh-mesh 部署包/u,
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('removePackage accepts a 7z archive and refuses other files', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-service-remove-package-'))
   try {

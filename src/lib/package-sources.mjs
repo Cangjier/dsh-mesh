@@ -18,8 +18,38 @@ import path from 'node:path'
 /** Archive names the deploy engine and the release publisher both produce. */
 export const PACKAGE_ARCHIVE_RE = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u
 
+/**
+ * Looser archive-name pattern: platform and architecture, build stamp optional.
+ *
+ * Old archives were published as `dsh-mesh-<version>-<os>-<arch>.<ext>`, and
+ * the deploy engine still accepts them. A plugin bundle is published as
+ * `dsh-mesh-plugin-<version>-<stamp>.tgz`; the `plugin-` guard also keeps a
+ * bundle that happens to carry a platform suffix from being mistaken for a
+ * deployment archive.
+ */
+export const DEPLOYABLE_ARCHIVE_RE = /^dsh-mesh-(?!plugin[-.])(.+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u
+
 /** Release asset keys the publisher uses. */
 export const RELEASE_TARGET_RE = /^(linux|win)-(x64|arm64)$/u
+
+/**
+ * Parse version, OS and architecture out of an archive name without requiring
+ * a build stamp.
+ * @param {string} name archive file name.
+ * @returns {{version: string, os: 'linux'|'windows', arch: 'x64'|'arm64', target: string}|null} parsed name.
+ */
+export function packagePlatformFromName(name) {
+  const match = DEPLOYABLE_ARCHIVE_RE.exec(String(name ?? ''))
+  if (match === null) return null
+  const os = match[2].startsWith('win') ? 'windows' : 'linux'
+  const arch = match[3]
+  return {
+    version: match[1],
+    os,
+    arch,
+    target: `${os === 'windows' ? 'win' : 'linux'}-${arch}`,
+  }
+}
 
 /**
  * Parse version, build stamp, OS and architecture out of an archive name.

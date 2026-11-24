@@ -141,6 +141,16 @@ test('shouldUpgrade skips the same stamp and refuses a downgrade', () => {
   assert.equal(shouldUpgrade({ version: '0.2.2-rc.3' }, { name: 'dsh-mesh-0.2.2-rc.3-20261116D-linux-x64.tar.gz' }).needed, false)
 })
 
+test('a plugin bundle is never an upgrade candidate', () => {
+  const plugin = { name: 'dsh-mesh-plugin-0.2.0-20261123-1735.tgz', mtime: '2026-11-23T09:25:00Z', target: 'linux' }
+  assert.equal(packageInfo(plugin.name), null)
+  assert.deepEqual(latestPackagesByOs([plugin]), {})
+  assert.equal(shouldUpgrade({ version: '0.2.2-rc.5', buildStamp: '20261122B' }, plugin).needed, false)
+  const plan = planUpgrades([member('10.66.66.3')], [plugin])
+  assert.equal(plan.upgrades.length, 0)
+  assert.equal(plan.skipped[0].reason, '没有 Linux 部署包')
+})
+
 test('upgrade planning puts peers first, skips current members, and matches the OS', () => {
   const packages = [
     { name: 'dsh-mesh-0.2.2-rc.3-20261117A-linux-x64.tar.gz', mtime: '2026-11-17T04:30:00Z', target: 'linux' },

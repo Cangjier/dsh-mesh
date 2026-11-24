@@ -13108,6 +13108,7 @@ function describeMemberTask(task, currentConversationId) {
 }
 function memberTaskResultAlreadyDelivered(task) {
   if (task?.notified === true) return true;
+  if (task?.deliveryFailed === true) return false;
   return Array.isArray(task?.deliveryReplies) && task.deliveryReplies.length > 0;
 }
 function workspaceNameFromTitle(value) {
@@ -14056,6 +14057,8 @@ var MemberTaskService = class {
     task.emptyWaits = 0;
     task.terminalDelivered = false;
     task.deliveryReplies = null;
+    task.deliveryClaimedFrom = null;
+    task.deliveryFailed = false;
     task.notified = false;
     task.notifiedAt = null;
     task.notifyError = null;
@@ -14528,6 +14531,7 @@ var MemberTaskService = class {
       return;
     }
     if (pending.length > 0) {
+      task.deliveryClaimedFrom = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0;
       task.deliveredSeq = pending[pending.length - 1].seq;
       task.deliveryReplies = pending;
       await this.#save(task).catch(() => {
@@ -14535,6 +14539,21 @@ var MemberTaskService = class {
       await this.#log(task, `fallback delivers ${String(pending.length)} unread reply(ies)`);
     }
     await this.#notify(task, pending);
+  }
+  /**
+   * Release a fallback's claim after it could not deliver.
+   *
+   * The claim advanced `deliveredSeq` before its first await. Putting the old
+   * cursor back makes those replies unread again, so a later `wait_member`
+   * returns the text rather than suppressing it with a delivery note.
+   * @param {object} task terminal task.
+   * @returns {void}
+   */
+  #releaseDeliveryClaim(task) {
+    if (Number.isSafeInteger(task.deliveryClaimedFrom)) task.deliveredSeq = task.deliveryClaimedFrom;
+    task.deliveryClaimedFrom = null;
+    task.deliveryReplies = null;
+    task.deliveryFailed = true;
   }
   /**
    * Retry a delivery whose origin conversation is not live yet.
@@ -14576,6 +14595,8 @@ var MemberTaskService = class {
       if (task.notifyRetries < NOTIFY_RETRY_LIMIT) {
         task.notifyRetries += 1;
         this.#scheduleNotifyRetry(task);
+      } else {
+        this.#releaseDeliveryClaim(task);
       }
       await this.#save(task);
       await this.#log(task, `notification deferred: origin agent unavailable (retry ${String(task.notifyRetries)})`);
@@ -14625,10 +14646,13 @@ var MemberTaskService = class {
       task.notifyError = null;
       task.notifyRetries = 0;
       task.deliveryReplies = null;
+      task.deliveryClaimedFrom = null;
+      task.deliveryFailed = false;
       await this.#save(task);
       await this.#log(task, `notification ${steered ? "steered into" : "queued into"} ${task.originSessionId}`);
     } catch (error) {
       task.notifyError = error instanceof Error ? error.message : String(error);
+      this.#releaseDeliveryClaim(task);
       await this.#save(task);
       await this.#log(task, `notification failed: ${task.notifyError}`);
     }
@@ -15388,11 +15412,11 @@ ${replyText2}` : "",
               contextLine,
               advice,
               "\u7ED3\u679C\uFF1A",
-              terminal.text !== "" ? terminal.text : terminal.alreadyDelivered ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7531\u5B8C\u6210\u6D88\u606F\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
+              terminal.text !== "" ? terminal.text : terminal.alreadyDelivered ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7531\u5B8C\u6210\u6D88\u606F\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : terminal.alreadyReturned ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7ECF\u7531\u5148\u524D\u7684 wait_member \u8FD4\u56DE\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
               ...conversationBlock2.lines,
               `\u65E5\u5FD7\uFF1A${data2.logFile}`
             ].filter((line) => line !== "").join("\n"),
-            data: { ...data2, fallbackDelivered: terminal.alreadyDelivered }
+            data: { ...data2, fallbackDelivered: terminal.alreadyDelivered, textAlreadyReturned: terminal.alreadyReturned }
           };
         }
         if (!result2.done) {
@@ -15479,12 +15503,12 @@ ${replyText}` : "",
             formatContextLine(task.context),
             formatCompactionAdvice(task.context),
             "\u7ED3\u679C\uFF1A",
-            terminal.text !== "" ? terminal.text : terminal.alreadyDelivered ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7531\u5B8C\u6210\u6D88\u606F\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
+            terminal.text !== "" ? terminal.text : terminal.alreadyDelivered ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7531\u5B8C\u6210\u6D88\u606F\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : terminal.alreadyReturned ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7ECF\u7531\u5148\u524D\u7684 wait_member \u8FD4\u56DE\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
             ...remainingHint,
             ...conversationBlock.lines,
             `\u65E5\u5FD7\uFF1A${data.logFile}`
           ].filter((line) => line !== "").join("\n"),
-          data: { ...data, fallbackDelivered: terminal.alreadyDelivered }
+          data: { ...data, fallbackDelivered: terminal.alreadyDelivered, textAlreadyReturned: terminal.alreadyReturned }
         };
       }
       if (result.timedOut) {
@@ -15525,8 +15549,8 @@ ${replyText}` : "",
       "\u67E5\u770B\u4E00\u4E2A\u6216\u591A\u4E2A\u6210\u5458\u4F1A\u8BDD\u7684\u5F53\u524D\u72B6\u6001\uFF0C\u4EE5\u53CA\u8FD9\u4E9B\u76EE\u6807\u5BF9\u8BDD\u6700\u8FD1\u4E24\u6B21\u7684\u7528\u6237\u6D88\u606F\uFF08\u5C31\u662F call_member \u6295\u9012\u8FC7\u53BB\u7684\u6D88\u606F\uFF09\u3002",
       "",
       "`conversationId` \u67E5\u4E00\u4E2A\uFF0C`conversationIds` \u4E00\u6B21\u67E5\u591A\u4E2A\uFF08\u8FD4\u56DE\u6309\u4F1A\u8BDD\u5206\u5757\u5217\u51FA\uFF0C\u5E76\u5E26\u4E00\u884C\u6C47\u603B\uFF09\u3002",
-      "\u8FD4\u56DE\u503C\u540C\u65F6\u5217\u51FA\u672C\u5BF9\u8BDD\u8DDF\u8E2A\u7684**\u6240\u6709**\u6210\u5458\u4F1A\u8BDD\uFF1A\u6BCF\u4E2A\u4F1A\u8BDD\u7684id\u3001\u72B6\u6001\uFF08\u8FDB\u884C\u4E2D / \u7A7A\u95F2 / \u88AB\u5F02\u5E38\u4E2D\u6B62\uFF09\u548C\u5DE5\u4F5C\u533A\u540D\u79F0\u3002",
-      "\u72B6\u6001\u4F18\u5148\u53D6\u76EE\u6807\u6210\u5458\u7684\u6700\u65B0\u6295\u5F71\uFF1A\u8FDB\u884C\u4E2D / \u7A7A\u95F2 / \u88AB\u5F02\u5E38\u4E2D\u6B62 / \u51FA\u9519\uFF1B\u76EE\u6807\u4E0D\u53EF\u8FBE\u65F6\u9000\u56DE\u672C\u673A\u4EFB\u52A1\u72B6\u6001\u3002",
+      "\u8FD4\u56DE\u503C\u540C\u65F6\u5217\u51FA\u672C\u5BF9\u8BDD\u8DDF\u8E2A\u7684**\u6240\u6709**\u6210\u5458\u4F1A\u8BDD\uFF1A\u6BCF\u4E2A\u4F1A\u8BDD\u7684id\u3001\u72B6\u6001\uFF08\u8FDB\u884C\u4E2D / \u7A7A\u95F2 / \u5F02\u5E38\u4E2D\u6B62\uFF09\u548C\u5DE5\u4F5C\u533A\u540D\u79F0\u3002",
+      "\u72B6\u6001\u4F18\u5148\u53D6\u76EE\u6807\u6210\u5458\u7684\u6700\u65B0\u6295\u5F71\uFF1A\u8FDB\u884C\u4E2D / \u7A7A\u95F2 / \u5F02\u5E38\u4E2D\u6B62 / \u51FA\u9519\uFF1B\u76EE\u6807\u4E0D\u53EF\u8FBE\u65F6\u9000\u56DE\u672C\u673A\u4EFB\u52A1\u72B6\u6001\u3002",
       "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\u6765\u81EA\u672C\u673A\u4EFB\u52A1\u8BB0\u5F55\uFF0C\u6309\u6295\u9012\u65F6\u95F4\u4ECE\u65E7\u5230\u65B0\u6392\u5217\uFF0C\u6700\u591A\u4E24\u6761\uFF1B",
       "\u6700\u8FD1\u4E00\u6B21\u601D\u8003\u662F\u76EE\u6807\u5BF9\u8BDD\u6700\u65B0\u4E00\u8F6E\u7684 reasoning\uFF1B\u53EA\u8DDF\u8E2A\u672C\u673A\u53D1\u8D77\u6216\u7EE7\u7EED\u8FC7\u7684\u4F1A\u8BDD\uFF0C\u6CA1\u6709\u8DDF\u8E2A\u7684\u4F1A\u8BDD\u4F1A\u660E\u786E\u62A5\u9519\u3002"
     ].join("\n"),
@@ -15565,15 +15589,22 @@ ${replyText}` : "",
       if (entries.length === 0) {
         throw new Error(`\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u4F1A\u8BDD ${missing.join("\u3001")}\uFF1B\u5148\u7528 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u518D\u67E5\u72B6\u6001\u3002`);
       }
-      const originId = originSessionOf(exec?.agent) || (inspected.find((entry) => entry.found !== null)?.found?.task?.originSessionId ?? "");
-      const allBlock = await originConversationBlock(memberTasks, originId, ids[0]);
+      const requestedOrigin = inspected.find((entry) => entry.found !== null)?.found?.task?.originSessionId ?? "";
+      let originId = originSessionOf(exec?.agent) || requestedOrigin;
+      let allBlock = await originConversationBlock(memberTasks, originId, ids[0]);
+      if (allBlock.conversations.length === 0 && requestedOrigin !== "" && requestedOrigin !== originId) {
+        originId = requestedOrigin;
+        allBlock = await originConversationBlock(memberTasks, originId, ids[0]);
+      }
+      const allLines = allBlock.conversations.length === 0 ? ["\uFF08\u672C\u5BF9\u8BDD\u4EFB\u52A1\u8868\u91CC\u6CA1\u6709\u53EF\u5217\u51FA\u7684\u4F1A\u8BDD\u3002\uFF09"] : [...allBlock.lines, "\uFF08\u5168\u91CF\u5217\u8868\u7684\u72B6\u6001/\u5DE5\u4F5C\u533A\u6765\u81EA\u672C\u673A\u4EFB\u52A1\u8BB0\u5F55\uFF1B\u88AB\u67E5\u4F1A\u8BDD\u8BE6\u60C5\u4F18\u5148\u5B9E\u65F6\u3002\uFF09"];
       if (entries.length === 1 && missing.length === 0) {
         return {
           ok: true,
-          text: [formatStatusBlock(entries[0]), "", ...allBlock.lines].join("\n"),
+          text: [formatStatusBlock(entries[0]), "", ...allLines].join("\n"),
           data: {
             ...statusData(entries[0]),
             count: allBlock.conversations.length,
+            requestedCount: 1,
             conversations: allBlock.conversations,
             requested: entries.map(statusData)
           }
@@ -15591,7 +15622,7 @@ ${replyText}` : "",
       if (missing.length > 0) {
         parts.push("", `\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u8FD9\u4E9B\u4F1A\u8BDD\uFF1A${missing.join("\u3001")}\uFF1B\u5148\u7528 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u518D\u67E5\u72B6\u6001\u3002`);
       }
-      parts.push("", ...allBlock.lines);
+      parts.push("", ...allLines);
       return {
         ok: true,
         text: parts.join("\n"),
@@ -15708,8 +15739,9 @@ function formatContextLine(context) {
 }
 function terminalResultText(task, replyText) {
   const alreadyDelivered = memberTaskResultAlreadyDelivered(task);
-  const text = replyText !== "" ? replyText : alreadyDelivered ? "" : typeof task.lastText === "string" ? task.lastText : "";
-  return { text, alreadyDelivered };
+  const consumedByWait = Number.isSafeInteger(task.replySeq) && task.replySeq > 0 && Number.isSafeInteger(task.deliveredSeq) && task.deliveredSeq >= task.replySeq;
+  const text = replyText !== "" ? replyText : alreadyDelivered || consumedByWait ? "" : typeof task.lastText === "string" ? task.lastText : "";
+  return { text, alreadyDelivered, alreadyReturned: !alreadyDelivered && consumedByWait };
 }
 function requestedConversationIds(args) {
   const ids = [];
@@ -15813,7 +15845,7 @@ function remainingStatusLabel(entry) {
   if (entry?.settled !== true) return "\u8FDB\u884C\u4E2D";
   if (entry.status === "completed") return "\u5DF2\u5B8C\u6210\uFF0C\u7ED3\u679C\u8FD8\u6CA1\u53D6\u8D70";
   if (entry.status === "failed") return "\u5DF2\u5931\u8D25";
-  if (entry.status === "interrupted") return "\u88AB\u5F02\u5E38\u4E2D\u6B62";
+  if (entry.status === "interrupted") return "\u5F02\u5E38\u4E2D\u6B62";
   return String(entry.status);
 }
 function describeStatus(found, memberTasks) {
@@ -15858,12 +15890,12 @@ function formatStatusBlock(entry) {
 function memberStatusLabel(liveStatus, task) {
   if (liveStatus === "running") return "\u8FDB\u884C\u4E2D";
   if (liveStatus === "idle") return "\u7A7A\u95F2";
-  if (liveStatus === "interrupted") return "\u88AB\u5F02\u5E38\u4E2D\u6B62";
+  if (liveStatus === "interrupted") return "\u5F02\u5E38\u4E2D\u6B62";
   if (liveStatus === "error") return "\u51FA\u9519";
   if (liveStatus === "blank") return "\u5C1A\u672A\u5F00\u59CB";
   if (liveStatus !== "") return liveStatus;
   if (task.status === "running" || task.status === "starting") return "\u8FDB\u884C\u4E2D\uFF08\u672C\u673A\uFF09";
-  if (task.status === "interrupted") return "\u88AB\u5F02\u5E38\u4E2D\u6B62\uFF08\u672C\u673A\uFF09";
+  if (task.status === "interrupted") return "\u5F02\u5E38\u4E2D\u6B62\uFF08\u672C\u673A\uFF09";
   if (task.status === "failed") return "\u5931\u8D25\uFF08\u672C\u673A\uFF09";
   if (task.status === "completed") return "\u5DF2\u5B8C\u6210\uFF08\u672C\u673A\uFF09";
   return String(task.status);

@@ -490,11 +490,13 @@ export function registerTools(ctx, toolsCtx, service) {
                 ? terminal.text
                 : terminal.alreadyDelivered
                   ? '（这条回复已由完成消息投递到本对话，这里不再重复正文。）'
-                  : '(成员没有返回文本结果)',
+                  : terminal.alreadyReturned
+                    ? '（这条回复已经由先前的 wait_member 返回，这里不再重复正文。）'
+                    : '(成员没有返回文本结果)',
               ...conversationBlock.lines,
               `日志：${data.logFile}`,
             ].filter(line => line !== '').join('\n'),
-            data: { ...data, fallbackDelivered: terminal.alreadyDelivered },
+            data: { ...data, fallbackDelivered: terminal.alreadyDelivered, textAlreadyReturned: terminal.alreadyReturned },
           }
         }
         if (!result.done) {
@@ -586,12 +588,14 @@ export function registerTools(ctx, toolsCtx, service) {
               ? terminal.text
               : terminal.alreadyDelivered
                 ? '（这条回复已由完成消息投递到本对话，这里不再重复正文。）'
-                : '(成员没有返回文本结果)',
+                : terminal.alreadyReturned
+                  ? '（这条回复已经由先前的 wait_member 返回，这里不再重复正文。）'
+                  : '(成员没有返回文本结果)',
             ...remainingHint,
             ...conversationBlock.lines,
             `日志：${data.logFile}`,
           ].filter(line => line !== '').join('\n'),
-          data: { ...data, fallbackDelivered: terminal.alreadyDelivered },
+          data: { ...data, fallbackDelivered: terminal.alreadyDelivered, textAlreadyReturned: terminal.alreadyReturned },
         }
       }
       if (result.timedOut) {
@@ -632,8 +636,8 @@ export function registerTools(ctx, toolsCtx, service) {
       '查看一个或多个成员会话的当前状态，以及这些目标对话最近两次的用户消息（就是 call_member 投递过去的消息）。',
       '',
       '`conversationId` 查一个，`conversationIds` 一次查多个（返回按会话分块列出，并带一行汇总）。',
-      '返回值同时列出本对话跟踪的**所有**成员会话：每个会话的id、状态（进行中 / 空闲 / 被异常中止）和工作区名称。',
-      '状态优先取目标成员的最新投影：进行中 / 空闲 / 被异常中止 / 出错；目标不可达时退回本机任务状态。',
+      '返回值同时列出本对话跟踪的**所有**成员会话：每个会话的id、状态（进行中 / 空闲 / 异常中止）和工作区名称。',
+      '状态优先取目标成员的最新投影：进行中 / 空闲 / 异常中止 / 出错；目标不可达时退回本机任务状态。',
       '最近两次用户消息来自本机任务记录，按投递时间从旧到新排列，最多两条；',
       '最近一次思考是目标对话最新一轮的 reasoning；只跟踪本机发起或继续过的会话，没有跟踪的会话会明确报错。',
     ].join('\n'),
@@ -676,16 +680,26 @@ export function registerTools(ctx, toolsCtx, service) {
       }
       // Every tracked conversation of this origin, not just the ids asked for:
       // the model should see the whole member fan-out and each workspace here.
-      const originId = originSessionOf(exec?.agent)
-        || (inspected.find(entry => entry.found !== null)?.found?.task?.originSessionId ?? '')
-      const allBlock = await originConversationBlock(memberTasks, originId, ids[0])
+      // A conversation adopted from another session has no entry under the
+      // caller's origin; fall back to its own origin so the list is not empty.
+      const requestedOrigin = inspected.find(entry => entry.found !== null)?.found?.task?.originSessionId ?? ''
+      let originId = originSessionOf(exec?.agent) || requestedOrigin
+      let allBlock = await originConversationBlock(memberTasks, originId, ids[0])
+      if (allBlock.conversations.length === 0 && requestedOrigin !== '' && requestedOrigin !== originId) {
+        originId = requestedOrigin
+        allBlock = await originConversationBlock(memberTasks, originId, ids[0])
+      }
+      const allLines = allBlock.conversations.length === 0
+        ? ['（本对话任务表里没有可列出的会话。）']
+        : [...allBlock.lines, '（全量列表的状态/工作区来自本机任务记录；被查会话详情优先实时。）']
       if (entries.length === 1 && missing.length === 0) {
         return {
           ok: true,
-          text: [formatStatusBlock(entries[0]), '', ...allBlock.lines].join('\n'),
+          text: [formatStatusBlock(entries[0]), '', ...allLines].join('\n'),
           data: {
             ...statusData(entries[0]),
             count: allBlock.conversations.length,
+            requestedCount: 1,
             conversations: allBlock.conversations,
             requested: entries.map(statusData),
           },
@@ -703,7 +717,7 @@ export function registerTools(ctx, toolsCtx, service) {
       if (missing.length > 0) {
         parts.push('', `本机没有跟踪这些会话：${missing.join('、')}；先用 call_member 发起或继续一次，再查状态。`)
       }
-      parts.push('', ...allBlock.lines)
+      parts.push('', ...allLines)
       return {
         ok: true,
         text: parts.join('\n'),
@@ -877,10 +891,15 @@ function formatContextLine(context) {
  */
 function terminalResultText(task, replyText) {
   const alreadyDelivered = memberTaskResultAlreadyDelivered(task)
+  // A second wait that reaches the same finished task must not reprint the
+  // text a previous wait already returned (legacy members only expose it as
+  // `lastText`). Only a never-consumed, never-claimed text falls back.
+  const consumedByWait = Number.isSafeInteger(task.replySeq) && task.replySeq > 0
+    && Number.isSafeInteger(task.deliveredSeq) && task.deliveredSeq >= task.replySeq
   const text = replyText !== ''
     ? replyText
-    : alreadyDelivered ? '' : (typeof task.lastText === 'string' ? task.lastText : '')
-  return { text, alreadyDelivered }
+    : alreadyDelivered || consumedByWait ? '' : (typeof task.lastText === 'string' ? task.lastText : '')
+  return { text, alreadyDelivered, alreadyReturned: !alreadyDelivered && consumedByWait }
 }
 
 /**
@@ -1064,7 +1083,7 @@ function remainingStatusLabel(entry) {
   if (entry?.settled !== true) return '进行中'
   if (entry.status === 'completed') return '已完成，结果还没取走'
   if (entry.status === 'failed') return '已失败'
-  if (entry.status === 'interrupted') return '被异常中止'
+  if (entry.status === 'interrupted') return '异常中止'
   return String(entry.status)
 }
 
@@ -1137,12 +1156,12 @@ function formatStatusBlock(entry) {
 function memberStatusLabel(liveStatus, task) {
   if (liveStatus === 'running') return '进行中'
   if (liveStatus === 'idle') return '空闲'
-  if (liveStatus === 'interrupted') return '被异常中止'
+  if (liveStatus === 'interrupted') return '异常中止'
   if (liveStatus === 'error') return '出错'
   if (liveStatus === 'blank') return '尚未开始'
   if (liveStatus !== '') return liveStatus
   if (task.status === 'running' || task.status === 'starting') return '进行中（本机）'
-  if (task.status === 'interrupted') return '被异常中止（本机）'
+  if (task.status === 'interrupted') return '异常中止（本机）'
   if (task.status === 'failed') return '失败（本机）'
   if (task.status === 'completed') return '已完成（本机）'
   return String(task.status)

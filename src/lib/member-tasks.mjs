@@ -190,6 +190,7 @@ export function describeMemberTask(task, currentConversationId) {
  */
 export function memberTaskResultAlreadyDelivered(task) {
   if (task?.notified === true) return true
+  if (task?.deliveryFailed === true) return false
   return Array.isArray(task?.deliveryReplies) && task.deliveryReplies.length > 0
 }
 
@@ -1291,6 +1292,8 @@ export class MemberTaskService {
     task.emptyWaits = 0
     task.terminalDelivered = false
     task.deliveryReplies = null
+    task.deliveryClaimedFrom = null
+    task.deliveryFailed = false
     task.notified = false
     task.notifiedAt = null
     task.notifyError = null
@@ -1834,13 +1837,31 @@ export class MemberTaskService {
     if (pending.length > 0) {
       // Claim before the first await: this assignment and the wait call's own
       // cursor advance cannot interleave, so the same text is never handed out
-      // twice even when both paths wake at the same moment.
+      // twice even when both paths wake at the same moment. Keep the old
+      // cursor so a failed delivery can release the claim again.
+      task.deliveryClaimedFrom = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0
       task.deliveredSeq = pending[pending.length - 1].seq
       task.deliveryReplies = pending
       await this.#save(task).catch(() => {})
       await this.#log(task, `fallback delivers ${String(pending.length)} unread reply(ies)`)
     }
     await this.#notify(task, pending)
+  }
+
+  /**
+   * Release a fallback's claim after it could not deliver.
+   *
+   * The claim advanced `deliveredSeq` before its first await. Putting the old
+   * cursor back makes those replies unread again, so a later `wait_member`
+   * returns the text rather than suppressing it with a delivery note.
+   * @param {object} task terminal task.
+   * @returns {void}
+   */
+  #releaseDeliveryClaim(task) {
+    if (Number.isSafeInteger(task.deliveryClaimedFrom)) task.deliveredSeq = task.deliveryClaimedFrom
+    task.deliveryClaimedFrom = null
+    task.deliveryReplies = null
+    task.deliveryFailed = true
   }
 
   /**
@@ -1885,6 +1906,11 @@ export class MemberTaskService {
       if (task.notifyRetries < NOTIFY_RETRY_LIMIT) {
         task.notifyRetries += 1
         this.#scheduleNotifyRetry(task)
+      } else {
+        // Giving up must not leave a stale claim: restoring the cursor makes
+        // the unread replies readable again, so a later wait returns the text
+        // instead of claiming a delivery that will never happen.
+        this.#releaseDeliveryClaim(task)
       }
       await this.#save(task)
       await this.#log(task, `notification deferred: origin agent unavailable (retry ${String(task.notifyRetries)})`)
@@ -1950,10 +1976,15 @@ export class MemberTaskService {
       task.notifyError = null
       task.notifyRetries = 0
       task.deliveryReplies = null
+      task.deliveryClaimedFrom = null
+      task.deliveryFailed = false
       await this.#save(task)
       await this.#log(task, `notification ${steered ? 'steered into' : 'queued into'} ${task.originSessionId}`)
     } catch (error) {
       task.notifyError = error instanceof Error ? error.message : String(error)
+      // The message never reached the agent: release the claim so a later
+      // `wait_member` can still return the text instead of suppressing it.
+      this.#releaseDeliveryClaim(task)
       await this.#save(task)
       await this.#log(task, `notification failed: ${task.notifyError}`)
     }

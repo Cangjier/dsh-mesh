@@ -165,6 +165,13 @@ HTTP 请求（conversation GET + 短 `/wait`），成员短暂变慢时可能超
 - 兜底已经认领回复（`deliveryReplies`）或已成功投递（`notified`）时，后到的 wait
   只报完成，不再从 `lastText` 取正文；text/data 带「这条回复已由完成消息投递…不重复」
   与 `fallbackDelivered: true`。因此即使 15 秒也不够，正文也只会到达一次。
+- 同一段正文已经由**先前的 wait** 取走（`deliveredSeq >= replySeq`）时，后到的 wait
+  也不再从 `lastText` 重印，而是提示「已经由先前的 wait_member 返回」，data 带
+  `textAlreadyReturned: true`；这修掉了两个并发 wait 停在同一个任务上时正文出现两份
+  的问题。
+- 兜底认领后如果投递失败（`agent.followup/steer` 抛出，或原对话不在线且重试耗尽），
+  `#releaseDeliveryClaim` 把 `deliveredSeq` 还原并清空认领、置 `deliveryFailed`；
+  后到的 wait 仍能返回正文，不会宣称「已投递」而实际零副本。
 
 ### 7. 接口变化汇总
 
@@ -178,7 +185,7 @@ HTTP 请求（conversation GET + 短 `/wait`），成员短暂变慢时可能超
 | 兜底投递 | 有 wait 停在任务上时用 15 秒窗口；wait 后到时不再重复兜底已认领的正文 |
 | `POST /v1/conversations` | 接受 `forceWorkspace: true`；`.git` + running 会话冲突返回 409 `workspace_busy_git`（带 `detail`） |
 | `POST /v1/conversations/<id>/messages` | 回执新增 `steered` / `delivery`；running 时 `agent.steer` |
-| 任务记录 | 新增 `workspace`、`deliveryReplies`、`lastDelivery`；`terminalDelivered` 语义收紧为「wait 已消费终态」 |
+| 任务记录 | 新增 `workspace`、`deliveryReplies`、`deliveryClaimedFrom`、`deliveryFailed`、`lastDelivery`；`terminalDelivered` 语义收紧为「wait 已消费终态」 |
 
 ## 边界与取舍
 
@@ -247,7 +254,7 @@ PATH="/root/.dsh/runtime/node/bin:$PATH" ~/.dsh/runtime/node/bin/corepack pnpm b
 3. 并行发起两个会话，任意一个 `wait_member { "all": true }`：返回先有消息的那个，
    列表里两个会话的工作区和状态都在。
 4. `status_member` 查一个会话：除该会话详情外，text 应列出本对话跟踪的全部会话
-   （id、进行中/空闲/被异常中止、工作区名），`data.conversations` 是全量、
+   （id、进行中/空闲/异常中止、工作区名），`data.conversations` 是全量、
    `data.requested` 是被查详情。
 5. 让 `wait_member` 先拿一次 `progress`，之后不再 wait：终态后主对话只应收到一条
    不含该轮正文的完成提示（或未读的下一轮结果），不得重复 `progress` 文本。

@@ -111,6 +111,30 @@ test('completion says no further wait is needed', async () => {
   }
 })
 
+test('a second wait on a consumed terminal result does not reprint the text', async () => {
+  const { dataDir, service, wait } = await harness()
+  try {
+    seed(service, {
+      status: 'completed',
+      replies: [{ seq: 1, turn: 2, text: '只应出现一次的正文' }],
+      replySeq: 1,
+      deliveredSeq: 0,
+    })
+    const exec = { agent: { session: { id: 'session-a' } }, signal: undefined }
+    const first = await wait.execute({ conversationIds: ['c1'] }, exec)
+    assert.match(first.text, /只应出现一次的正文/u)
+    assert.equal(first.data.deliveredSeq, 1)
+
+    const second = await wait.execute({ conversationIds: ['c1'] }, exec)
+    assert.equal(second.data.state, 'done')
+    assert.equal(second.data.textAlreadyReturned, true)
+    assert.doesNotMatch(second.text, /只应出现一次的正文/u)
+    assert.match(second.text, /先前的 wait_member/u)
+  } finally {
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
 test('a failed task carries the reason', async () => {
   const { dataDir, service, wait } = await harness()
   try {

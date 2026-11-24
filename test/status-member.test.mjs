@@ -159,7 +159,7 @@ test('status_member labels an abnormally stopped conversation', async () => {
   const { tool, cleanup } = await harness({ status: 'interrupted', conversation: { status: 'interrupted' } })
   try {
     const result = await tool.execute({ conversationId: 'conv-1' }, {})
-    assert.match(result.text, /状态：被异常中止（目标实时）/u)
+    assert.match(result.text, /状态：异常中止（目标实时）/u)
     assert.equal(result.data.status, 'interrupted')
   } finally {
     await cleanup()

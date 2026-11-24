@@ -313,6 +313,7 @@ test('a parked wait gets the terminal reply even when its sync outlasts the plai
     const terminal = await parked
     assert.equal(terminal.done, true)
     assert.deepEqual(terminal.replies.map(reply => reply.text), ['最终结果'])
+    assert.equal(tasks.deliveryTimers.has(task.id), false, 'the parked wait cancelled the fallback timer')
     await sleep(200)
     assert.equal(agent.messages.length, 0, 'the parked wait consumed the result; no fallback may repeat it')
   } finally {
@@ -372,6 +373,67 @@ test('wait_member does not repeat text the fallback already delivered', async ()
     assert.doesNotMatch(late.text, /最终结果/u)
     assert.match(late.text, /不再重复正文/u)
     assert.equal(agent.messages.length, 1)
+  } finally {
+    await service.memberTasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+
+test('a failed fallback delivery releases the reply so a later wait can return it', async () => {
+  const member = await fakeMember({ progressText: '第一轮进展', finalText: '最终结果' })
+  const agent = {
+    id: 'session-a',
+    session: { id: 'session-a' },
+    status: 'idle',
+    messages: [],
+    followup: () => { throw new Error('origin write failed') },
+    steer: () => { throw new Error('origin write failed') },
+  }
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'mesh-delivery-tool-fail-'))
+  const service = {
+    dataDir,
+    repositoryRoot: '/nonexistent',
+    config: { interopPort: member.port, interopToken: 'test-token', interopUseGatePassword: false },
+    async members() {
+      return { local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }
+    },
+  }
+  const definitions = new Map()
+  registerTools(
+    {
+      logger: {},
+      effect(fn) { fn() },
+      get: name => name === 'agents' ? { get: id => (id === agent.id ? agent : undefined) } : undefined,
+    },
+    { tools: { register: definition => definitions.set(definition.name, definition) } },
+    service,
+  )
+  service.memberTasks.deliveryGraceMs = 60
+  service.memberTasks.waitDeliveryGraceMs = 60
+  try {
+    const call = definitions.get('call_member')
+    const wait = definitions.get('wait_member')
+    const start = await call.execute({ member: '127.0.0.1', prompt: '检查磁盘' }, { agent })
+    const task = [...service.memberTasks.tasks.values()].find(entry => entry.conversationId === start.data.conversationId)
+    assert.ok(task)
+    await waitFor(() => task.replySeq === 1)
+    const progress = await wait.execute({ conversationIds: [task.conversationId] }, { agent })
+    assert.equal(progress.data.state, 'progress')
+
+    member.release()
+    await waitFor(() => task.notifyError !== null && task.deliveryFailed === true)
+    assert.equal(agent.messages.length, 0)
+    assert.equal(task.notified, false)
+
+    // The failed delivery must not suppress the text: the reply is readable
+    // again and the wait returns it instead of claiming it was delivered.
+    const late = await wait.execute({ conversationIds: [task.conversationId] }, { agent })
+    assert.equal(late.data.state, 'done')
+    assert.equal(late.data.fallbackDelivered, false)
+    assert.match(late.text, /最终结果/u)
+    assert.doesNotMatch(late.text, /已由完成消息投递/u)
   } finally {
     await service.memberTasks.dispose()
     await member.close()

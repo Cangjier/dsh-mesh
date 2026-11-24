@@ -432,6 +432,12 @@ call_member { "conversationId": "<会话id>", "prompt": "继续", "compress": tr
 成员版本过旧（没有 `/compact` 或 `ctx.compaction`）会明确提示先升级；
 不要为了压缩而重开对话（那样上下文会丢）。
 
+**超过 30% 自动强制压缩**：不传 `compress` 时，投递前会先读一次目标对话的上下文占用
+（`GET /v1/conversations/<id>`，响应里的 `context`），**严格大于 30.0%** 就先压缩、压缩完成
+才投递；正好 30.0% 不压缩。自动压缩同样要求对话空闲：目标还在跑时会返回错误并拒绝这次
+投递（不会跳过压缩直接发），等 `wait_member` 到 `state=done` 后重试即可。成员侧读取返回
+`context` 的能力随插件一起升级；旧成员不返回 `context` 时退回到最近一次 `wait` 报告的占用。
+
 ### 6.5 wait_member：按轮返回
 
 ```text

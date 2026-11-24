@@ -13048,6 +13048,7 @@ var DEFAULT_INTEROP_PORT = 8765;
 var WAIT_TIMEOUT_MS = 6e4;
 var MAX_ATTEMPTS = 30;
 var DELIVERY_GRACE_MS = 3e3;
+var FORCED_COMPACT_PERCENT = 30;
 var COMPACT_TIMEOUT_MS = 18e4;
 var LOST_CONVERSATION = /conversation not found|unknown SDK session|session "?[\w-]+"? already exists|SDK session is already open or opening|session agent was disposed/iu;
 var EMPTY_TURN = "\u76EE\u6807\u7684 DSH \u5728\u4EFB\u52A1\u6267\u884C\u671F\u95F4\u91CD\u542F\u4E86\uFF1A\u5BF9\u8BDD\u6CA1\u6709\u4EA7\u751F\u4EFB\u4F55\u8F93\u51FA\uFF0C\u8FD9\u4E00\u8F6E\u5DF2\u4E2D\u65AD";
@@ -13554,7 +13555,9 @@ var MemberTaskService = class {
    *
    * `compress` runs the member's own compaction before the message is queued,
    * so the next turn starts from a shortened context. It requires that
-   * conversation to be idle.
+   * conversation to be idle. Without the flag, a conversation whose context
+   * occupancy is already above {@link FORCED_COMPACT_PERCENT} is compacted
+   * anyway before the message is delivered.
    *
    * @param {{conversationId: string, member?: string, prompt: string, compress?: boolean, agent?: any, signal?: AbortSignal}} request send request.
    * @returns {Promise<object>} the tracked task.
@@ -13565,7 +13568,12 @@ var MemberTaskService = class {
     if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("prompt is required");
     const signal = request.signal;
     const { task, fresh } = await this.#sendTarget(request);
-    if (request.compress === true) await this.#compact(task, signal);
+    task.lastCompaction = null;
+    if (request.compress === true) {
+      await this.#compact(task, signal);
+    } else {
+      await this.#compactIfCrowded(task, signal);
+    }
     const result = await this.#waitForRuntime(
       () => this.#request(task.baseUrl, "POST", `/v1/conversations/${encodeURIComponent(task.conversationId)}/messages`, { content: prompt }, 3e4, signal),
       9e4,
@@ -13689,6 +13697,50 @@ var MemberTaskService = class {
     if (context !== null) task.context = context;
   }
   /**
+   * Compact before delivery when the target conversation is already loaded.
+   *
+   * The occupancy is re-read from the member first: the cached figure comes
+   * from the last wait, and an adopted conversation has none. A member that
+   * does not answer the read with a context leaves the cached value alone, so
+   * an older member still decides on what the last wait reported.
+   * @param {object} task member task.
+   * @param {AbortSignal} [signal] cancellation of the sending tool call.
+   * @returns {Promise<boolean>} whether a compaction was attempted.
+   */
+  async #compactIfCrowded(task, signal) {
+    await this.#refreshContext(task, signal);
+    const percent = task.context?.percent;
+    if (typeof percent !== "number" || percent <= FORCED_COMPACT_PERCENT) return false;
+    await this.#compact(task, signal, { forced: true, percent });
+    return true;
+  }
+  /**
+   * Re-read the target conversation's context occupancy before a delivery.
+   *
+   * `GET /v1/conversations/<id>` is cheap and reports the same projection the
+   * wait responses do. A member from an older release returns no context; the
+   * cached value then stays in place.
+   * @param {object} task member task.
+   * @param {AbortSignal} [signal] cancellation of the sending tool call.
+   * @returns {Promise<void>} resolution after the best-effort read.
+   */
+  async #refreshContext(task, signal) {
+    try {
+      const result = await this.#request(
+        task.baseUrl,
+        "GET",
+        `/v1/conversations/${encodeURIComponent(task.conversationId)}?resume=1`,
+        void 0,
+        15e3,
+        signal
+      );
+      this.#rememberContext(task, result?.context);
+    } catch (error) {
+      signal?.throwIfAborted();
+      void error;
+    }
+  }
+  /**
    * Compact a member conversation before delivering into it.
    *
    * The member owns the session, so only it can compact. An older member has
@@ -13696,10 +13748,16 @@ var MemberTaskService = class {
    * retried as a transient failure.
    * @param {object} task member task.
    * @param {AbortSignal} [signal] cancellation of the sending tool call.
+   * @param {{forced?: boolean, percent?: number}} [options] set by the
+   *   automatic over-threshold path, which has no `compress` flag to drop.
    * @returns {Promise<object>} the recorded compaction.
    */
-  async #compact(task, signal) {
-    await this.#log(task, "compacting context before delivery");
+  async #compact(task, signal, options = {}) {
+    const forced = options.forced === true;
+    await this.#log(
+      task,
+      forced ? `compacting context before delivery (forced at ${String(options.percent)}%)` : "compacting context before delivery"
+    );
     let result;
     try {
       result = await this.#waitForRuntime(
@@ -13720,15 +13778,17 @@ var MemberTaskService = class {
         throw new Error(`\u6210\u5458 ${task.member} \u4E0A\u5DF2\u7ECF\u6CA1\u6709\u5BF9\u8BDD ${task.conversationId}\uFF1A${message}`);
       }
       if (/unknown endpoint|not_found|unsupported|compaction_unavailable/iu.test(message)) {
-        throw new Error(`\u6210\u5458 ${task.member} \u7684 interop \u670D\u52A1\u4E0D\u652F\u6301\u4E0A\u4E0B\u6587\u538B\u7F29\uFF08\u7248\u672C\u8FC7\u65E7\uFF09\uFF1A${message}\u3002\u53BB\u6389 compress \u76F4\u63A5\u6295\u9012\uFF0C\u6216\u5148\u5347\u7EA7\u8BE5\u6210\u5458\u3002`);
+        throw new Error(forced ? `\u5BF9\u8BDD ${task.conversationId} \u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF0C\u4F46\u6210\u5458 ${task.member} \u7684 interop \u670D\u52A1\u4E0D\u652F\u6301\u4E0A\u4E0B\u6587\u538B\u7F29\uFF08\u7248\u672C\u8FC7\u65E7\uFF09\uFF1A${message}\u3002\u5148\u5347\u7EA7\u8BE5\u6210\u5458\u518D\u6295\u9012\u3002` : `\u6210\u5458 ${task.member} \u7684 interop \u670D\u52A1\u4E0D\u652F\u6301\u4E0A\u4E0B\u6587\u538B\u7F29\uFF08\u7248\u672C\u8FC7\u65E7\uFF09\uFF1A${message}\u3002\u53BB\u6389 compress \u76F4\u63A5\u6295\u9012\uFF0C\u6216\u5148\u5347\u7EA7\u8BE5\u6210\u5458\u3002`);
       }
       if (/busy|already has active work|conversation_busy|409/iu.test(message)) {
-        throw new Error(`\u5BF9\u8BDD ${task.conversationId} \u8FD8\u5728\u8FD0\u884C\uFF0C\u4E0D\u80FD\u538B\u7F29\uFF1A${message}\u3002\u7B49 wait_member \u8FD4\u56DE state=done \u540E\u518D\u6295\u9012\uFF0C\u6216\u53BB\u6389 compress\u3002`);
+        throw new Error(forced ? `\u5BF9\u8BDD ${task.conversationId} \u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF0C\u9700\u8981\u5148\u538B\u7F29\uFF0C\u4F46\u5B83\u8FD8\u5728\u8FD0\u884C\uFF1A${message}\u3002\u7B49 wait_member \u8FD4\u56DE state=done \u540E\u518D\u6295\u9012\u3002` : `\u5BF9\u8BDD ${task.conversationId} \u8FD8\u5728\u8FD0\u884C\uFF0C\u4E0D\u80FD\u538B\u7F29\uFF1A${message}\u3002\u7B49 wait_member \u8FD4\u56DE state=done \u540E\u518D\u6295\u9012\uFF0C\u6216\u53BB\u6389 compress\u3002`);
       }
       throw error;
     }
     task.lastCompaction = {
       at: (/* @__PURE__ */ new Date()).toISOString(),
+      forced,
+      ...forced ? { forcedPercent: options.percent } : {},
       compacted: result?.compacted === true,
       summary: summaryText(result?.summary),
       shadowedCount: Number.isSafeInteger(result?.shadowedCount) ? result.shadowedCount : 0,
@@ -14163,6 +14223,7 @@ function registerTools(ctx, toolsCtx, service) {
       "\u4F1A\u8BDDid\uFF08conversationId\uFF09\u662F\u8DE8\u8FDB\u7A0B\u7684\u7EE7\u7EED\u6295\u9012\u51ED\u636E\uFF1A\u91CD\u65B0\u542F\u52A8\u540E\u3001\u6216\u4E0D\u662F\u672C\u673A\u53D1\u8D77\u7684\u5BF9\u8BDD\uFF0C",
       "\u53EA\u8981\u77E5\u9053\u4F1A\u8BDDid\uFF0C\u914D\u4E0A member \u5C31\u80FD\u7EE7\u7EED\uFF1B\u672C\u673A\u5DF2\u8DDF\u8E2A\u8BE5\u5BF9\u8BDD\u65F6 member \u53EF\u4EE5\u7701\u7565\u3002",
       "`compress: true`\uFF1A\u7EE7\u7EED\u6295\u9012\u524D\u5148\u5728\u6210\u5458 B \u4E0A\u538B\u7F29\u8BE5\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\uFF08\u8981\u6C42\u5BF9\u8BDD\u5F53\u524D\u7A7A\u95F2\uFF09\uFF1B\u65B0\u5EFA\u5BF9\u8BDD\u4E0D\u9002\u7528\u3002",
+      `\u4E0D\u4F20 compress \u65F6\uFF0C\u5982\u679C\u76EE\u6807\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u7ECF\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF0C\u6295\u9012\u524D\u4F1A\u81EA\u52A8\u5F3A\u5236\u538B\u7F29\uFF08\u540C\u6837\u8981\u6C42\u5BF9\u8BDD\u7A7A\u95F2\uFF09\u3002`,
       "\u7528 wait_member \u7B49\u7ED3\u679C\uFF1A\u6210\u5458\u6BCF\u7ED3\u675F\u4E00\u8F6E\u56DE\u7B54\u5C31\u8FD4\u56DE\u4E00\u6B21\uFF08state=progress \u8868\u793A\u8FD8\u4F1A\u7EE7\u7EED\uFF09\uFF0C",
       "\u53EA\u6709 state=done \u624D\u662F\u6574\u6BB5\u4EFB\u52A1\u7684\u6700\u7EC8\u7ED3\u679C\uFF1B\u8D85\u65F6\uFF08state=running\uFF09\u7528\u540C\u4E00\u4E2A conversationId \u63A5\u7740\u7B49\u3002",
       "\u5982\u679C\u4E0D\u518D\u7EE7\u7EED wait\uFF1A\u5BF9\u8BDD\u5B8C\u6210\uFF08\u6216\u5931\u8D25/\u4E2D\u65AD\uFF09\u540E\uFF0C3 \u79D2\u5185\u6CA1\u6709 wait_member \u53D6\u8D70\u7ED3\u679C\uFF0C",
@@ -14180,7 +14241,7 @@ function registerTools(ctx, toolsCtx, service) {
         prompt: { type: "string", description: "\u53D1\u7ED9\u6210\u5458\u7684\u6D88\u606F\uFF1A\u65B0\u5EFA\u5BF9\u8BDD\u65F6\u662F\u521D\u59CB\u4EFB\u52A1\uFF0C\u7EE7\u7EED\u6295\u9012\u65F6\u662F\u8FD9\u4E00\u8F6E\u7684\u5185\u5BB9\u3002" },
         member: { type: "string", description: "\u6210\u5458 id\u3001\u540D\u79F0\u3001VPN IP \u6216 http(s) URL\u3002\u65B0\u5EFA\u5BF9\u8BDD\u65F6\u5FC5\u586B\uFF1B\u7EE7\u7EED\u6295\u9012\u4E14\u672C\u673A\u5DF2\u8DDF\u8E2A\u8BE5\u5BF9\u8BDD\u65F6\u53EF\u7701\u7565\u3002" },
         conversationId: { type: "string", description: "\u8981\u7EE7\u7EED\u7684\u4F1A\u8BDDid\uFF08call_member / wait_member \u8FD4\u56DE\uFF09\u3002\u7701\u7565\u5C31\u65B0\u5EFA\u5BF9\u8BDD\u3002" },
-        compress: { type: "boolean", description: "\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u65F6\uFF0C\u6295\u9012\u524D\u5148\u8BA9\u6210\u5458\u538B\u7F29\u8BE5\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\uFF1B\u8981\u6C42\u5BF9\u8BDD\u7A7A\u95F2\u3002" },
+        compress: { type: "boolean", description: "\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u65F6\uFF0C\u6295\u9012\u524D\u5148\u8BA9\u6210\u5458\u538B\u7F29\u8BE5\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\uFF1B\u8981\u6C42\u5BF9\u8BDD\u7A7A\u95F2\u3002\u7701\u7565\u65F6\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7 30% \u4F1A\u81EA\u52A8\u538B\u7F29\u3002" },
         cwd: { type: "string", description: "\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u6210\u5458 B \u4E0A\u7684\u5DE5\u4F5C\u76EE\u5F55\uFF08\u7EDD\u5BF9\u8DEF\u5F84\uFF0C\u53EF\u7A7A\uFF09\u3002" },
         workspace: { type: "string", description: "\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u6210\u5458 B \u4E0A\u7684\u4EFB\u52A1\u5DE5\u4F5C\u533A\u540D\u79F0\uFF1B\u5B9E\u9645\u76EE\u5F55\u56FA\u5B9A\u4E3A\u6210\u5458\u672C\u673A\u7684 ~/.dsh/workspaces/<name>\u3002\u548C cwd \u4E8C\u9009\u4E00\u3002" }
       },
@@ -14244,7 +14305,9 @@ function registerTools(ctx, toolsCtx, service) {
       });
       const data = memberTaskData(task, memberTasks);
       const compaction = task.lastCompaction;
-      const compactionLine = args.compress === true ? compaction?.compacted === true ? `\u4E0A\u4E0B\u6587\u538B\u7F29\uFF1A\u5DF2\u538B\u7F29\uFF0C\u66FF\u6362 ${String(compaction.shadowedCount)} \u9879\u5386\u53F2\uFF08\u7EA6 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens\uFF09\u3002` : "\u4E0A\u4E0B\u6587\u538B\u7F29\uFF1A\u6CA1\u6709\u53EF\u538B\u7F29\u7684\u5386\u53F2\u3002" : "";
+      const forced = compaction?.forced === true;
+      const forcedLine = forced ? compaction.compacted === true ? `\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF08${formatOneDecimal(compaction.forcedPercent)}%\uFF09\uFF0C\u6295\u9012\u524D\u5DF2\u5F3A\u5236\u538B\u7F29\uFF1A\u66FF\u6362 ${String(compaction.shadowedCount)} \u9879\u5386\u53F2\uFF08\u7EA6 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens\uFF09\u3002` : `\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF08${formatOneDecimal(compaction.forcedPercent)}%\uFF09\uFF0C\u6295\u9012\u524D\u5DF2\u5C1D\u8BD5\u5F3A\u5236\u538B\u7F29\uFF0C\u4F46\u6CA1\u6709\u53EF\u538B\u7F29\u7684\u5386\u53F2\u3002` : "";
+      const compactionLine = forcedLine !== "" ? forcedLine : args.compress === true ? compaction?.compacted === true ? `\u4E0A\u4E0B\u6587\u538B\u7F29\uFF1A\u5DF2\u538B\u7F29\uFF0C\u66FF\u6362 ${String(compaction.shadowedCount)} \u9879\u5386\u53F2\uFF08\u7EA6 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens\uFF09\u3002` : "\u4E0A\u4E0B\u6587\u538B\u7F29\uFF1A\u6CA1\u6709\u53EF\u538B\u7F29\u7684\u5386\u53F2\u3002" : "";
       return {
         ok: true,
         text: [
@@ -14480,7 +14543,7 @@ function formatCompactionAdvice(context) {
   if (context === null || typeof context !== "object") return "";
   const percent = Number.isFinite(context.percent) ? context.percent : null;
   if (percent === null || percent <= CONTEXT_COMPACT_THRESHOLD) return "";
-  return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\u5DF2\u7528 ${formatOneDecimal(percent)}%\uFF0C\u8D85\u8FC7 ${String(CONTEXT_COMPACT_THRESHOLD)}%\uFF1A\u4E0B\u6B21\u6295\u9012\u65F6\u5EFA\u8BAE\u52A0 "compress": true\uFF0C\u5148\u538B\u7F29\u4E0A\u4E0B\u6587\u518D\u6295\u9012\u3002`;
+  return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\u5DF2\u7528 ${formatOneDecimal(percent)}%\uFF0C\u8D85\u8FC7 ${String(CONTEXT_COMPACT_THRESHOLD)}%\uFF1A\u4E0B\u6B21\u6295\u9012\u65F6\u5EFA\u8BAE\u52A0 "compress": true\uFF1B\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}% \u65F6\u6295\u9012\u524D\u4F1A\u81EA\u52A8\u5F3A\u5236\u538B\u7F29\u3002`;
 }
 function formatBuild(job) {
   const lines = [
@@ -15679,7 +15742,12 @@ data: ${JSON.stringify(payload)}
       const suffix = match[2] ?? "";
       if (request.method === "GET" && suffix === "") {
         reconcileStatus(conversation);
-        json(response, 200, { ok: true, conversation: publicConversation(conversation) });
+        if (url.searchParams.get("resume") === "1") await ensureAgent(conversation);
+        json(response, 200, {
+          ok: true,
+          conversation: publicConversation(conversation),
+          context: contextOf(conversation)
+        });
         return;
       }
       if (request.method === "GET" && suffix === "result") {

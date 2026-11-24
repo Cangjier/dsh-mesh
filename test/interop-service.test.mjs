@@ -767,6 +767,12 @@ test('manual compaction runs through the agent preset compaction service and rep
     const waited = await call('POST', `/v1/conversations/${id}/wait`, { timeoutMs: 1000 })
     assert.equal(waited.body.state, 'done')
     assert.deepEqual(waited.body.context, { usedTokens: 1200, maxTokens: 128_000, percent: 0.9 })
+
+    // The caller reads the conversation before delivering so it can decide on
+    // a forced compaction; the read carries the same projection as a wait.
+    const read = await call('GET', `/v1/conversations/${id}`)
+    assert.equal(read.status, 200)
+    assert.deepEqual(read.body.context, { usedTokens: 1200, maxTokens: 128_000, percent: 0.9 })
   } finally {
     await service.dispose()
     await rm(dir, { recursive: true, force: true })

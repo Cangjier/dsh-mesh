@@ -1432,7 +1432,16 @@ export function createInteropService(options) {
       const suffix = match[2] ?? ''
       if (request.method === 'GET' && suffix === '') {
         reconcileStatus(conversation)
-        json(response, 200, { ok: true, conversation: publicConversation(conversation) })
+        // The context read lets an initiator decide on a forced compaction
+        // before it delivers the next message. A restored conversation has no
+        // live agent to measure until it is resumed; the delivery probe asks
+        // for that explicitly, while a plain read stays side-effect free.
+        if (url.searchParams.get('resume') === '1') await ensureAgent(conversation)
+        json(response, 200, {
+          ok: true,
+          conversation: publicConversation(conversation),
+          context: contextOf(conversation),
+        })
         return
       }
       if (request.method === 'GET' && suffix === 'result') {

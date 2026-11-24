@@ -12,7 +12,7 @@
  * @module @local/dsh-mesh/tools
  */
 
-import { MemberTaskService } from './member-tasks.mjs'
+import { FORCED_COMPACT_PERCENT, MemberTaskService } from './member-tasks.mjs'
 
 /**
  * Register the tools on an injected `tools` context.
@@ -171,6 +171,7 @@ export function registerTools(ctx, toolsCtx, service) {
       '会话id（conversationId）是跨进程的继续投递凭据：重新启动后、或不是本机发起的对话，',
       '只要知道会话id，配上 member 就能继续；本机已跟踪该对话时 member 可以省略。',
       '`compress: true`：继续投递前先在成员 B 上压缩该对话的上下文（要求对话当前空闲）；新建对话不适用。',
+      `不传 compress 时，如果目标对话的上下文占比已经超过 ${String(FORCED_COMPACT_PERCENT)}%，投递前会自动强制压缩（同样要求对话空闲）。`,
       '用 wait_member 等结果：成员每结束一轮回答就返回一次（state=progress 表示还会继续），',
       '只有 state=done 才是整段任务的最终结果；超时（state=running）用同一个 conversationId 接着等。',
       '如果不再继续 wait：对话完成（或失败/中断）后，3 秒内没有 wait_member 取走结果，',
@@ -188,7 +189,7 @@ export function registerTools(ctx, toolsCtx, service) {
         prompt: { type: 'string', description: '发给成员的消息：新建对话时是初始任务，继续投递时是这一轮的内容。' },
         member: { type: 'string', description: '成员 id、名称、VPN IP 或 http(s) URL。新建对话时必填；继续投递且本机已跟踪该对话时可省略。' },
         conversationId: { type: 'string', description: '要继续的会话id（call_member / wait_member 返回）。省略就新建对话。' },
-        compress: { type: 'boolean', description: '继续已有对话时，投递前先让成员压缩该对话的上下文；要求对话空闲。' },
+        compress: { type: 'boolean', description: '继续已有对话时，投递前先让成员压缩该对话的上下文；要求对话空闲。省略时，上下文占比超过 30% 会自动压缩。' },
         cwd: { type: 'string', description: '新建对话：成员 B 上的工作目录（绝对路径，可空）。' },
         workspace: { type: 'string', description: '新建对话：成员 B 上的任务工作区名称；实际目录固定为成员本机的 ~/.dsh/workspaces/<name>。和 cwd 二选一。' },
       },
@@ -252,11 +253,19 @@ export function registerTools(ctx, toolsCtx, service) {
       })
       const data = memberTaskData(task, memberTasks)
       const compaction = task.lastCompaction
-      const compactionLine = args.compress === true
-        ? compaction?.compacted === true
-          ? `上下文压缩：已压缩，替换 ${String(compaction.shadowedCount)} 项历史（约 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens）。`
-          : '上下文压缩：没有可压缩的历史。'
+      const forced = compaction?.forced === true
+      const forcedLine = forced
+        ? compaction.compacted === true
+          ? `上下文占比已超过 ${String(FORCED_COMPACT_PERCENT)}%（${formatOneDecimal(compaction.forcedPercent)}%），投递前已强制压缩：替换 ${String(compaction.shadowedCount)} 项历史（约 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens）。`
+          : `上下文占比已超过 ${String(FORCED_COMPACT_PERCENT)}%（${formatOneDecimal(compaction.forcedPercent)}%），投递前已尝试强制压缩，但没有可压缩的历史。`
         : ''
+      const compactionLine = forcedLine !== ''
+        ? forcedLine
+        : args.compress === true
+          ? compaction?.compacted === true
+            ? `上下文压缩：已压缩，替换 ${String(compaction.shadowedCount)} 项历史（约 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens）。`
+            : '上下文压缩：没有可压缩的历史。'
+          : ''
       return {
         ok: true,
         text: [
@@ -533,7 +542,7 @@ function formatCompactionAdvice(context) {
   if (context === null || typeof context !== 'object') return ''
   const percent = Number.isFinite(context.percent) ? context.percent : null
   if (percent === null || percent <= CONTEXT_COMPACT_THRESHOLD) return ''
-  return `对话上下文已用 ${formatOneDecimal(percent)}%，超过 ${String(CONTEXT_COMPACT_THRESHOLD)}%：下次投递时建议加 "compress": true，先压缩上下文再投递。`
+  return `对话上下文已用 ${formatOneDecimal(percent)}%，超过 ${String(CONTEXT_COMPACT_THRESHOLD)}%：下次投递时建议加 "compress": true；超过 ${String(FORCED_COMPACT_PERCENT)}% 时投递前会自动强制压缩。`
 }
 
 /**

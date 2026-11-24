@@ -13,13 +13,16 @@ import { registerTools } from '../src/lib/tools.mjs'
  * A send queues a message; the next wait reports the new sixth reply only when
  * the caller's cursor is past the five old ones, which is exactly what proves
  * that an adopted conversation does not replay its history.
- * @param {{compact?: 'ok'|'unsupported'|'busy', usedTokens?: number}} [options] knobs.
+ * @param {{compact?: 'ok'|'unsupported'|'busy', usedTokens?: number, liveContext?: object|null}} [options] knobs.
  * @returns {Promise<object>} server handle.
  */
 async function fakeMember(options = {}) {
   const members = {
     compact: options.compact ?? 'ok',
     usedTokens: options.usedTokens ?? 12_000,
+    // What a conversation read reports before a delivery; null keeps an older
+    // member's response (no context on the read).
+    liveContext: options.liveContext ?? null,
   }
   const messages = []
   const created = []
@@ -57,6 +60,14 @@ async function fakeMember(options = {}) {
         replies: [{ seq: 1, turn: 1, text: '新任务完成' }],
         conversation: { id: 'conv-new', status: 'idle', turns: 1, lastText: '新任务完成', replySeq: 1 },
         context: { usedTokens: 3000, maxTokens: 128_000, percent: 2.3 },
+      })
+      return
+    }
+    if (request.method === 'GET' && (request.url === `/v1/conversations/${use}` || request.url === `/v1/conversations/${use}?resume=1`)) {
+      reply(200, {
+        ok: true,
+        conversation: { id: use, status: 'idle', turns: 5, replySeq: 5 },
+        ...(members.liveContext === null ? {} : { context: members.liveContext }),
       })
       return
     }
@@ -257,6 +268,89 @@ test('a continued conversation is delivered back when nobody waits for it', asyn
     assert.ok(Date.now() - started >= 2_900, 'the 3 second grace window must elapse first')
   } finally {
     await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a delivery whose context is already over 30% compacts before sending', async () => {
+  const member = await fakeMember({
+    liveContext: { usedTokens: 60_000, maxTokens: 128_000, percent: 46.9 },
+  })
+  const { tasks, dataDir } = await buildService(member.port)
+  try {
+    const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' })
+    assert.deepEqual(member.order, ['compact', 'message'], 'the forced compaction must finish before delivery')
+    assert.equal(task.lastCompaction?.forced, true)
+    assert.equal(task.lastCompaction?.forcedPercent, 46.9)
+    assert.equal(task.lastCompaction?.compacted, true)
+    assert.deepEqual(member.messages, ['继续'])
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('exactly 30% does not force a compaction', async () => {
+  const member = await fakeMember({
+    liveContext: { usedTokens: 38_400, maxTokens: 128_000, percent: 30 },
+  })
+  const { tasks, dataDir } = await buildService(member.port)
+  try {
+    const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' })
+    assert.deepEqual(member.order, ['message'], '30.0% is not over the threshold')
+    assert.equal(task.lastCompaction, null)
+    assert.deepEqual(member.messages, ['继续'])
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a forced compaction that cannot reach an idle conversation refuses the delivery', async () => {
+  const member = await fakeMember({
+    compact: 'busy',
+    liveContext: { usedTokens: 60_000, maxTokens: 128_000, percent: 46.9 },
+  })
+  const { tasks, dataDir } = await buildService(member.port)
+  try {
+    await assert.rejects(
+      () => tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' }),
+      /超过 30%|还在运行/u,
+    )
+    assert.deepEqual(member.order, ['compact'], 'the message must not be delivered without the compaction')
+    assert.deepEqual(member.messages, [])
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('call_member reports the forced compaction', async () => {
+  const member = await fakeMember({
+    liveContext: { usedTokens: 60_000, maxTokens: 128_000, percent: 46.9 },
+  })
+  const { service, dataDir } = await buildService(member.port)
+  const tools = []
+  const ctx = {
+    logger: { info: () => {}, error: () => {} },
+    effect: () => () => {},
+    get: () => undefined,
+  }
+  try {
+    registerTools(ctx, { tools: { register: tool => { tools.push(tool) } } }, service)
+    const call = tools.find(tool => tool.name === 'call_member')
+    const result = await call.execute(
+      { member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' },
+      { agent: { id: 'session-a', session: { id: 'session-a' } } },
+    )
+    assert.match(result.text, /上下文占比已超过 30%（46\.9%），投递前已强制压缩/u)
+    assert.deepEqual(member.messages, ['继续'])
+  } finally {
+    await service.memberTasks.dispose()
     await member.close()
     await rm(dataDir, { recursive: true, force: true })
   }

@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { formatEgressLine } from './egress-probe.mjs'
@@ -390,6 +390,13 @@ export class MemberTaskService {
     this.deliveryTimers = new Map()
     /** @type {Map<string, ReturnType<typeof setTimeout>>} retries for a cold origin conversation */
     this.notifyTimers = new Map()
+    /**
+     * Per-task write chains. A monitor and a tool call can save the same task
+     * at the same time; without a chain both writes share one temporary file,
+     * and the first rename makes the second fail with ENOENT.
+     * @type {Map<string, Promise<void>>}
+     */
+    this.saveChains = new Map()
     /** Cached `{ id, name, ip }` of this machine, filled by the first member lookup. */
     this.identity = null
     this.loaded = false
@@ -488,13 +495,53 @@ export class MemberTaskService {
     }
   }
 
+  /**
+   * Persist one task, serialized per task id.
+   *
+   * Concurrent saves used to share `${file}.${pid}.tmp`: the first rename
+   * moved it away, so every other writer failed with ENOENT. Each call now
+   * takes its snapshot synchronously and queues it behind the previous write
+   * of the same task, which also keeps an older snapshot from landing after a
+   * newer one. The writer catches up on failures so one bad save cannot block
+   * the queue forever.
+   * @param {object} task task record.
+   * @returns {Promise<void>} resolution after this snapshot is on disk.
+   */
   async #save(task) {
     task.updatedAt = new Date().toISOString()
-    const file = path.join(this.taskRoot, `${task.id}.json`)
-    const temporary = `${file}.${process.pid}.tmp`
-    await mkdir(this.taskRoot, { recursive: true })
-    await writeFile(temporary, `${JSON.stringify(task, null, 2)}\n`, 'utf8')
-    await rename(temporary, file)
+    const id = task.id
+    const body = `${JSON.stringify(task, null, 2)}\n`
+    const previous = this.saveChains.get(id) ?? Promise.resolve()
+    const write = previous.catch(() => {}).then(() => this.#writeTaskSnapshot(id, body))
+    this.saveChains.set(id, write)
+    const cleanup = () => {
+      if (this.saveChains.get(id) === write) this.saveChains.delete(id)
+    }
+    write.then(cleanup, cleanup)
+    return write
+  }
+
+  /**
+   * Write one already-taken snapshot through a unique temporary file.
+   *
+   * The random suffix covers writes that do not share a chain, such as two
+   * service instances on the same data directory; on any failure the
+   * temporary file is removed instead of being left behind.
+   * @param {string} id task id.
+   * @param {string} body serialized task.
+   * @returns {Promise<void>} resolution after the rename.
+   */
+  async #writeTaskSnapshot(id, body) {
+    const file = path.join(this.taskRoot, `${id}.json`)
+    const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
+    try {
+      await mkdir(this.taskRoot, { recursive: true })
+      await writeFile(temporary, body, 'utf8')
+      await rename(temporary, file)
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => {})
+      throw error
+    }
   }
 
   async #log(task, line) {

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { MeshService } from '../src/lib/service.mjs'
+import { MemberTaskService } from '../src/lib/member-tasks.mjs'
 import { registerTools } from '../src/lib/tools.mjs'
 
 /**
@@ -236,6 +237,54 @@ test('set_member_scope updates a tracked member conversation and ignores keep', 
     assert.equal(service.memberTasks.tasks.get('task-1').profile, null)
   } finally {
     await service?.memberTasks.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('concurrent saves of one task serialize and never collide on a temporary file', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-scope-concurrent-'))
+  const dataDir = path.join(dir, 'mesh')
+  let memberTasks
+  try {
+    memberTasks = new MemberTaskService({
+      ctx: {},
+      service: { config: {}, dataDir, repositoryRoot: dataDir },
+      dataDir,
+      log: () => {},
+    })
+    await memberTasks.init()
+    memberTasks.tasks.set('task-concurrent', {
+      id: 'task-concurrent',
+      conversationId: 'conv-concurrent',
+      member: 'B',
+      memberIp: '10.66.66.2',
+      baseUrl: 'http://127.0.0.1:1',
+      originSessionId: 'main-1',
+      status: 'completed',
+      workspace: 'dsh-mesh',
+      createdAt: '2026-11-24T00:00:00.000Z',
+      updatedAt: '2026-11-24T00:00:00.000Z',
+      profile: null,
+    })
+
+    // A monitor and a tool call used to save the same task through one shared
+    // temporary file; the first rename moved it away and the rest hit ENOENT.
+    const writes = 64
+    await Promise.all(Array.from({ length: writes }, (_, index) => memberTasks.syncTaskScope(
+      'conv-concurrent',
+      { identity: `identity-${index}`, scope: `scope-${index}` },
+    )))
+
+    // Serialization must also leave the newest snapshot, not whichever
+    // temporary rename finished last.
+    const expected = { name: 'B', identity: `identity-${writes - 1}`, scope: `scope-${writes - 1}` }
+    assert.deepEqual(memberTasks.tasks.get('task-concurrent').profile, expected)
+    const saved = JSON.parse(await readFile(path.join(dataDir, 'member-tasks', 'task-concurrent.json'), 'utf8'))
+    assert.deepEqual(saved.profile, expected)
+    const leftovers = (await readdir(path.join(dataDir, 'member-tasks'))).filter(file => file.endsWith('.tmp'))
+    assert.deepEqual(leftovers, [], 'no temporary file may be left behind')
+  } finally {
+    await memberTasks?.dispose()
     await rm(dir, { recursive: true, force: true })
   }
 })

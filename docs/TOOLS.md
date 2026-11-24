@@ -462,6 +462,12 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 用户消息投递回发起 `call_member` 的对话。`wait_member` 已经返回过的结果——包括没有新文本的
 `done` 和失败——不会重复投递。新建对话和带 `conversationId` 的继续投递都适用。
 
+**成员重启后的回复游标**：成员把 `replySeq` 持久化，重启后从原值继续递增，调用方的 `since`
+仍然有效。旧成员、或已经被重置过的对话会报告更小的 `replySeq`；`wait_member` / `call_member`
+发现游标倒退时会丢弃旧游标、从 0 重新同步，而不是把旧摘要当成最新结果。重启前已经产生、
+但调用方还没取走的回复文本只保留在成员的 `lastText` 预览里，完整内容需要用 `call_member`
+继续同一个对话，让成员重新汇报。
+
 `state=done` 的 text 还会带：
 
 ```text

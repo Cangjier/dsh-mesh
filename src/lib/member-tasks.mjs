@@ -539,10 +539,18 @@ export class MemberTaskService {
     const timeoutMs = Math.max(1000, Math.min(Number.isSafeInteger(options.timeoutMs) ? options.timeoutMs : 30_000, 300_000))
     const signal = options.signal
     const deadline = Date.now() + timeoutMs
+    let terminalSynced = false
     for (;;) {
       signal?.throwIfAborted()
-      const replies = this.#pendingReplies(task)
       const terminal = task.status === 'completed' || task.status === 'failed' || task.status === 'interrupted'
+      if (terminal && !terminalSynced) {
+        // The monitor stopped when this task ended, so any turn the member ran
+        // afterwards is invisible locally. Re-read the conversation once before
+        // answering a wait on a finished task.
+        terminalSynced = true
+        await this.#syncTerminal(task, signal)
+      }
+      const replies = this.#pendingReplies(task)
       if (replies.length > 0) {
         task.deliveredSeq = replies[replies.length - 1].seq
         // A terminal answer handed over together with its text also tells the
@@ -586,6 +594,97 @@ export class MemberTaskService {
     const delivered = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0
     const replies = Array.isArray(task.replies) ? task.replies : []
     return replies.filter(reply => Number.isSafeInteger(reply?.seq) && reply.seq > delivered)
+  }
+
+  /**
+   * Whether the member's reply counter went backwards.
+   *
+   * The counter is an in-memory increment per conversation. A member that
+   * restarted used to begin a new epoch at zero while the caller still held the
+   * old cursor, which made every new reply look "already seen"; older members
+   * still do this, so the caller must notice it rather than trust `since`.
+   * @param {object} task tracked task.
+   * @param {unknown} conversation conversation projection from the member.
+   * @returns {boolean} true when a re-sync is needed.
+   */
+  #replyCursorReset(task, conversation) {
+    const seen = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0
+    const reported = Number.isSafeInteger(conversation?.replySeq) ? conversation.replySeq : null
+    return seen > 0 && reported !== null && reported < seen
+  }
+
+  /**
+   * Start a new reply epoch at the member's current counter.
+   *
+   * The stored reply texts belong to the previous epoch, and their seq numbers
+   * no longer match the member's; dropping them is what lets the caller accept
+   * the replies the member still has.
+   * @param {object} task tracked task.
+   * @param {number} reported the member's counter.
+   * @returns {Promise<void>} resolution after the state is saved.
+   */
+  async #resetReplyCursor(task, reported) {
+    const previous = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0
+    task.replySeq = 0
+    task.deliveredSeq = 0
+    task.replies = []
+    await this.#log(task, `reply cursor reset on the member (was ${String(previous)}, member now reports ${String(reported)}); re-syncing replies`)
+    await this.#save(task).catch(() => {})
+  }
+
+  /**
+   * Re-read a finished task's member conversation before answering a wait.
+   *
+   * The monitor stops at the terminal state, so a turn the member ran
+   * afterwards (or a restart that reset its reply counter) never reached the
+   * local record. The read decides whether a fetch is needed; only an idle
+   * conversation is synced, because a running one is the caller's next send
+   * to handle.
+   * @param {object} task tracked task.
+   * @param {AbortSignal} [signal] cancellation of the waiting tool call.
+   * @returns {Promise<void>} resolution after the best-effort sync.
+   */
+  async #syncTerminal(task, signal) {
+    let state
+    try {
+      state = await this.#request(
+        task.baseUrl,
+        'GET',
+        `/v1/conversations/${encodeURIComponent(task.conversationId)}`,
+        undefined,
+        5_000,
+        signal,
+      )
+    } catch {
+      signal?.throwIfAborted()
+      return
+    }
+    const conversation = state?.conversation
+    if (conversation === null || typeof conversation !== 'object') return
+    if (String(conversation.status ?? '') !== 'idle') return
+    const reset = this.#replyCursorReset(task, conversation)
+    if (reset) await this.#resetReplyCursor(task, conversation.replySeq)
+    const cursor = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0
+    const reported = Number.isSafeInteger(conversation.replySeq) ? conversation.replySeq : 0
+    if (!reset && reported <= cursor) return
+    let result
+    try {
+      result = await this.#request(
+        task.baseUrl,
+        'POST',
+        `/v1/conversations/${encodeURIComponent(task.conversationId)}/wait`,
+        { timeoutMs: 1_000, since: cursor },
+        20_000,
+        signal,
+      )
+    } catch {
+      signal?.throwIfAborted()
+      return
+    }
+    if (result?.state !== 'progress' && result?.state !== 'done') return
+    await this.#acceptReplies(task, result, { notify: false }).catch(() => {})
+    if (Number.isSafeInteger(result.turn)) task.turns = result.turn
+    await this.#save(task).catch(() => {})
   }
 
   /**
@@ -659,6 +758,9 @@ export class MemberTaskService {
     const { task, fresh } = await this.#sendTarget(request)
     // A compaction record belongs to one delivery; the next one starts clean.
     task.lastCompaction = null
+    // The read also detects a member whose reply counter restarted; the cursor
+    // must move to the new epoch before the monitor polls it again.
+    await this.#refreshContext(task, signal)
     if (request.compress === true) {
       await this.#compact(task, signal)
     } else {
@@ -806,7 +908,6 @@ export class MemberTaskService {
    * @returns {Promise<boolean>} whether a compaction was attempted.
    */
   async #compactIfCrowded(task, signal) {
-    await this.#refreshContext(task, signal)
     const percent = task.context?.percent
     if (typeof percent !== 'number' || percent <= FORCED_COMPACT_PERCENT) return false
     await this.#compact(task, signal, { forced: true, percent })
@@ -834,6 +935,9 @@ export class MemberTaskService {
         signal,
       )
       this.#rememberContext(task, result?.context)
+      if (this.#replyCursorReset(task, result?.conversation)) {
+        await this.#resetReplyCursor(task, result.conversation.replySeq)
+      }
     } catch (error) {
       // Stopping the tool call must stop the delivery, not be reported as a
       // missing context. Any other read failure is left to the message
@@ -931,13 +1035,21 @@ export class MemberTaskService {
         // budget over, so a long multi-turn task is not failed by one late blip.
         task.attempts = 0
         this.#rememberContext(task, result.context ?? result.conversation?.context)
+        const conversation = result.conversation ?? {}
+        if (this.#replyCursorReset(task, conversation)) {
+          // The member restarted and its reply counter began a new epoch; the
+          // old `since` would hide every reply the member still has, and a
+          // timed-out poll is just as good a place to notice it.
+          if (Number.isSafeInteger(conversation.turns)) task.turns = conversation.turns
+          await this.#resetReplyCursor(task, conversation.replySeq)
+          continue
+        }
         if (result.timedOut === true) {
           task.status = 'running'
           await this.#save(task)
           continue
         }
         if (this.disposed) break
-        const conversation = result.conversation ?? {}
         if (conversation.error) task.error = String(conversation.error)
         const status = String(conversation.status ?? '')
         if (status === 'interrupted' || status === 'unavailable') {

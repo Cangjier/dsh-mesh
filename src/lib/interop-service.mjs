@@ -663,7 +663,6 @@ export function createInteropService(options) {
           clients: new Set(),
           callbackUrl: '',
           notifiedAt: null,
-          replySeq: 0,
           replies: [],
           turnText: '',
           idle: true,

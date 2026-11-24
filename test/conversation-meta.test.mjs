@@ -68,15 +68,17 @@ test('the persisted record drops events, sockets and receipts', () => {
     updatedAt: '2026-11-12T06:01:00.000Z',
     lastText: 'y'.repeat(900),
     turns: 3,
+    replySeq: 7,
     events: [{ type: 'x' }],
     clients: new Set(),
     lastReceipt: { big: true },
   })
   assert.deepEqual(Object.keys(record).sort(), [
-    'createdAt', 'cwd', 'error', 'id', 'initiator', 'lastText', 'prompt', 'sessionId', 'status', 'title', 'turns', 'updatedAt', 'workspace',
+    'createdAt', 'cwd', 'error', 'id', 'initiator', 'lastText', 'prompt', 'replySeq', 'sessionId', 'status', 'title', 'turns', 'updatedAt', 'workspace',
   ])
   assert.equal(record.error, null)
   assert.equal(record.turns, 3)
+  assert.equal(record.replySeq, 7, 'the reply cursor is part of the durable record')
   assert.equal(record.workspace, 'demo')
   assert.equal(record.prompt, '# 任务\n\n做点事')
   assert.ok(record.lastText.length <= 400)
@@ -103,11 +105,12 @@ test('a conversation whose turn was in flight restores as interrupted', () => {
   assert.equal(restored.turns, 0)
 
   // A finished conversation comes back exactly as it was.
-  const idle = restoredConversation({ ...record, status: 'idle', lastText: 'done', turns: 2, workspace: 'demo', prompt: '# 原文' }, '/fallback')
+  const idle = restoredConversation({ ...record, status: 'idle', lastText: 'done', turns: 2, replySeq: 7, workspace: 'demo', prompt: '# 原文' }, '/fallback')
   assert.equal(idle.status, 'idle')
   assert.equal(idle.error, null)
   assert.equal(idle.workspace, 'demo')
   assert.equal(idle.prompt, '# 原文')
+  assert.equal(idle.replySeq, 7, 'a restart must not reset the cursor callers depend on')
 
   // A failed turn keeps its reason across the restart.
   const failed = restoredConversation({ ...record, status: 'error', error: 'model refused', turns: 2 }, '/fallback')

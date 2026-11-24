@@ -23,6 +23,11 @@ async function fakeMember(options = {}) {
     // What a conversation read reports before a delivery; null keeps an older
     // member's response (no context on the read).
     liveContext: options.liveContext ?? null,
+    // Live conversation position. `reset` simulates a member restart, where
+    // the reply counter begins a new epoch at zero.
+    turns: 5,
+    replySeq: 5,
+    reset: false,
   }
   const messages = []
   const created = []
@@ -66,7 +71,7 @@ async function fakeMember(options = {}) {
     if (request.method === 'GET' && (request.url === `/v1/conversations/${use}` || request.url === `/v1/conversations/${use}?resume=1`)) {
       reply(200, {
         ok: true,
-        conversation: { id: use, status: 'idle', turns: 5, replySeq: 5 },
+        conversation: { id: use, status: 'idle', turns: members.turns, replySeq: members.replySeq },
         ...(members.liveContext === null ? {} : { context: members.liveContext }),
       })
       return
@@ -105,15 +110,22 @@ async function fakeMember(options = {}) {
     if (request.method === 'POST' && request.url === `/v1/conversations/${use}/wait`) {
       waits.push(body.since)
       const since = Number.isSafeInteger(body.since) ? body.since : 0
-      const all = [
-        { seq: 1, turn: 1, text: 'old-1' },
-        { seq: 2, turn: 2, text: 'old-2' },
-        { seq: 3, turn: 3, text: 'old-3' },
-        { seq: 4, turn: 4, text: 'old-4' },
-        { seq: 5, turn: 5, text: 'old-5' },
-        { seq: 6, turn: 6, text: 'new-answer' },
-      ]
+      const all = members.reset
+        ? [{ seq: 1, turn: 7, text: 'new-epoch' }]
+        : [
+          { seq: 1, turn: 1, text: 'old-1' },
+          { seq: 2, turn: 2, text: 'old-2' },
+          { seq: 3, turn: 3, text: 'old-3' },
+          { seq: 4, turn: 4, text: 'old-4' },
+          { seq: 5, turn: 5, text: 'old-5' },
+          { seq: 6, turn: 6, text: 'new-answer' },
+        ]
       const replies = all.filter(reply => reply.seq > since)
+      const last = replies[replies.length - 1]
+      if (last !== undefined) {
+        members.replySeq = last.seq
+        members.turns = last.turn
+      }
       const usedTokens = members.usedTokens
       reply(200, {
         ok: true,
@@ -121,10 +133,10 @@ async function fakeMember(options = {}) {
         state: 'done',
         settled: true,
         text: replies.map(reply => reply.text).join('\n\n'),
-        turn: 6,
-        seq: 6,
+        turn: members.turns,
+        seq: members.replySeq,
         replies,
-        conversation: { id: use, status: 'idle', turns: 6, lastText: 'new-answer', replySeq: 6 },
+        conversation: { id: use, status: 'idle', turns: members.turns, lastText: members.reset ? '' : 'new-answer', replySeq: members.replySeq },
         context: { usedTokens, maxTokens: 128_000, percent: Math.round((usedTokens / 128_000) * 1000) / 10 },
       })
       return
@@ -138,6 +150,11 @@ async function fakeMember(options = {}) {
     created,
     order,
     waits,
+    resetEpoch: () => {
+      members.reset = true
+      members.replySeq = 0
+      members.turns = 7
+    },
     close: () => new Promise(resolve => server.close(resolve)),
   }
 }
@@ -351,6 +368,32 @@ test('call_member reports the forced compaction', async () => {
     assert.deepEqual(member.messages, ['继续'])
   } finally {
     await service.memberTasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a wait on a finished task re-syncs after the member counter resets', async () => {
+  const member = await fakeMember()
+  const { tasks, dataDir } = await buildService(member.port)
+  try {
+    const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '第一轮' })
+    const first = await tasks.wait(task.conversationId, { timeoutMs: 3000 })
+    assert.equal(first.done, true)
+    assert.deepEqual(first.replies.map(reply => reply.text), ['new-answer'])
+    assert.equal(first.task.replySeq, 6)
+
+    // The member restarted (counter back at zero) and ran a new turn after the
+    // restart. The old cursor would hide it: a plain `since=6` returns nothing.
+    member.resetEpoch()
+    const second = await tasks.wait(task.conversationId, { timeoutMs: 3000 })
+    assert.equal(second.done, true)
+    assert.deepEqual(second.replies.map(reply => reply.text), ['new-epoch'])
+    assert.equal(second.task.replySeq, 1)
+    assert.equal(second.task.deliveredSeq, 1)
+    assert.equal(second.task.lastText, 'new-epoch')
+  } finally {
+    await tasks.dispose()
     await member.close()
     await rm(dataDir, { recursive: true, force: true })
   }

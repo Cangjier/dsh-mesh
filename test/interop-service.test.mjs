@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync } from 'node:fs'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -695,11 +695,19 @@ test('a running conversation restores as interrupted and keeps its error', async
     assert.equal(raw.conversations[0].status, 'running')
     await service.dispose()
 
+    // A conversation that had finished turns before the restart carries a
+    // non-zero cursor; the restored record must keep it so callers can still
+    // use their `since`.
+    const saved = JSON.parse(await readFile(settings.stateFile, 'utf8'))
+    saved.conversations[0].replySeq = 5
+    await writeFile(settings.stateFile, `${JSON.stringify(saved, null, 2)}\n`)
+
     service = createInteropService({ ctx: fake.host, settings, log: () => {}, retry: false })
     ;({ port } = await service.start())
     const restored = await call('GET', `/v1/conversations/${created.body.conversation.id}`, undefined, port)
     assert.equal(restored.body.conversation.status, 'interrupted')
     assert.match(restored.body.conversation.error, /interrupted/iu)
+    assert.equal(restored.body.conversation.replySeq, 5, 'the reply cursor survives the restart')
   } finally {
     await service.dispose()
     await rm(dir, { recursive: true, force: true })

@@ -128,6 +128,10 @@ export function conversationRecord(conversation) {
     // result.
     error: typeof conversation.error === 'string' && conversation.error !== '' ? conversation.error : null,
     turns: Number.isSafeInteger(conversation.turns) ? conversation.turns : 0,
+    // The reply cursor must survive a restart: callers remember the last reply
+    // seq they received, and a counter that restarted at zero would make every
+    // new reply look already seen.
+    replySeq: Number.isSafeInteger(conversation.replySeq) ? conversation.replySeq : 0,
   }
 }
 
@@ -170,5 +174,8 @@ export function restoredConversation(record, workdir) {
       ? INTERRUPTED_ERROR
       : typeof record.error === 'string' && record.error !== '' ? record.error : null,
     turns: Number.isSafeInteger(record.turns) ? record.turns : 0,
+    // Reply texts stay in memory, but the cursor is a durable contract with
+    // callers: it never goes backwards across a restart.
+    replySeq: Number.isSafeInteger(record.replySeq) ? record.replySeq : 0,
   }
 }

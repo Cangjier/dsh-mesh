@@ -3,7 +3,7 @@
 - 插件：`@local/dsh-mesh`
 - 工具注册：`src/lib/tools.mjs` → `registerTools()`
 - 当前共 7 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`wait_member`、`status_member`；另有一个 turn 结束后的自动提醒 hook
-- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续，`wait_member` 只做有界等待。
+- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续，`wait_member` 只做有界等待，`wait_member` / `status_member` 都支持一次传多个会话id（`conversationIds`）。
 - 所有工具统一返回 `{ ok, text, data }`。`text` 是给人看的摘要，`data` 是结构化结果。
 - 同步执行的工具会在 `text` 和 `data` 里都返回日志文件地址，便于调用结束后继续读取完整日志。
 
@@ -16,8 +16,8 @@
 | `repack` | 用当前仓库刷新已有离线包 | `package` | `false` |
 | `members` | 只读成员发现 | 无 | `true` |
 | `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `compress` / `cwd` / `workspace` | `false` |
-| `wait_member` | 有界等待成员会话，按轮返回 | `conversationId` `timeoutMs` | `true` |
-| `status_member` | 目标会话状态 + 最近两次用户消息 + 最近一次思考 | `conversationId` | `true` |
+| `wait_member` | 有界等待成员会话，按轮返回；多个会话时任意一个先返回 | `conversationId` / `conversationIds` `timeoutMs` | `true` |
+| `status_member` | 目标会话状态 + 最近两次用户消息 + 最近一次思考；可一次查多个 | `conversationId` / `conversationIds` | `true` |
 
 ## 2. 共享基础
 
@@ -372,6 +372,19 @@ call_member { "member": "10.66.66.3", "prompt": "检查磁盘" }
   → 由 wait_member 取回；不再等待时，终态后 3 秒内无人取走则自动投递回发起对话
 ```
 
+同一个对话里已经有好几个成员会话在跑时，`call_member` 的返回值会直接列出它们，并提示
+用 `wait_member { "conversationIds": [...] }` 一次等多个：
+
+```text
+当前对话有 2 个成员会话同时在跑：
+- conv-a（B 10.66.66.2，第 2 轮）
+- conv-b（B 10.66.66.2）
+可以一次等多个：wait_member { "conversationIds": ["conv-a","conv-b"] }，其中任意一个先返回就立刻返回；
+也可以只等这个：wait_member { "conversationId": "conv-b" }。
+```
+
+只有一个会话在跑时，仍然是原来的单 `conversationId` 提示。
+
 返回里的 `data.logFile`：
 
 ```text
@@ -443,11 +456,27 @@ call_member { "conversationId": "<会话id>", "prompt": "继续", "compress": tr
 投递（不会跳过压缩直接发），等 `wait_member` 到 `state=done` 后重试即可。成员侧读取返回
 `context` 的能力随插件一起升级；旧成员不返回 `context` 时退回到最近一次 `wait` 报告的占用。
 
-### 6.5 wait_member：按轮返回
+### 6.5 wait_member：按轮返回、一次等多个
 
 ```text
 wait_member { "conversationId": "<会话id>", "timeoutMs": 30000 }
+wait_member { "conversationIds": ["<会话id1>", "<会话id2>"], "timeoutMs": 30000 }
 ```
+
+传 `conversationIds` 时**任意一个会话先有消息就立刻返回**，只取走那一个的回复；其余会话的
+回复保持未读，返回值里会列出它们（带成员、轮次、进行中/已完成），并提示怎么继续等：
+
+```text
+还有 1 个会话没有返回：
+- conv-b（B 10.66.66.2，第 3 轮，进行中）
+一次等剩下的任意一个：wait_member { "conversationIds": ["conv-b"], "timeoutMs": 30000 }（其中任意一个返回就立刻返回）。
+也可以只等某一个：wait_member { "conversationId": "<会话id>" }。
+```
+
+- 优先级按传入顺序；`conversationId` 和 `conversationIds` 可以并用，`conversationId` 排在最前。
+- 有回复的会话优先于「已经结束但没有新文本」的会话：先把实际内容给模型。
+- 全部会话在 `timeoutMs` 内都没有新回复时，返回一行超时说明和完整的剩余列表。
+- 一次最多 `20` 个会话id；列表里任何一个本机没有跟踪都会报错（不会静默跳过）。
 
 成员对话每结束一轮回答就返回，不等整段任务结束：
 
@@ -466,6 +495,12 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 才把结果（失败时是原因和会话id）按下面的 `[成员任务完成]` / `[成员任务失败]` 文本作为一条
 用户消息投递回发起 `call_member` 的对话。`wait_member` 已经返回过的结果——包括没有新文本的
 `done` 和失败——不会重复投递。新建对话和带 `conversationId` 的继续投递都适用。
+
+**主对话正在跑时直接插入**：投递时如果发起对话仍在执行 turn（`agent.status === 'running'`），
+插件用 `agent.steer()` 把这条结果**插进当前 turn 的下一步边界**（等同于用户在执行中手动推一条
+消息进去），而不是排队等 turn 结束；对话空闲时才用 `agent.followup()` 开一个新的 turn。
+`steer` 被刚销毁的 agent 拒绝时自动回退到 `followup`，结果不会丢。任务记录里的
+`notifiedVia` 会写 `steer` 或 `followup`。
 
 **成员重启后的回复游标**：成员把 `replySeq` 持久化，重启后从原值继续递增，调用方的 `since`
 仍然有效。旧成员、或已经被重置过的对话会报告更小的 `replySeq`；`wait_member` / `call_member`
@@ -533,11 +568,15 @@ interrupted    插件停止或重启时，未完成任务被标记
 
 ```text
 status_member { "conversationId": "<会话id>" }
+status_member { "conversationIds": ["<会话id1>", "<会话id2>"] }
   → 按本机任务记录找到目标成员和 baseUrl
   → GET /v1/conversations/<会话id> 取目标最新投影（含 lastReasoning）
   → 返回状态、最近两次用户消息、最近一次思考
 ```
 
+传 `conversationIds` 时按会话分块输出，第一行是汇总（例如
+`成员会话状态：共 2 个（进行中 1，空闲 1）`），每块以 `[1]`、`[2]` 编号；本机没有跟踪的
+会话id 不报错，而是在末尾列出。全部都没有跟踪时才报错。
 - 状态优先用目标实时投影：进行中 / 空闲 / 被异常中止 / 出错；目标不可达时退回本机任务状态，
   并在 text 里说明。
 - 最近两次用户消息取自本机任务记录，最多两条，旧→新；重启后从任务文件恢复。

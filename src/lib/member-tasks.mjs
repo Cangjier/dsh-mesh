@@ -93,6 +93,15 @@ function truncate(text, limit) {
 }
 
 /**
+ * Whether one task status means the member conversation stopped running.
+ * @param {string} status task status.
+ * @returns {boolean} true for completed / failed / interrupted.
+ */
+function isTerminalStatus(status) {
+  return status === 'completed' || status === 'failed' || status === 'interrupted'
+}
+
+/**
  * Clean one workspace title into a name the member's interop accepts.
  *
  * The member rejects a name longer than 120 characters or one containing a
@@ -636,6 +645,170 @@ export class MemberTaskService {
   }
 
   /**
+   * Wait on several tasks at once and return the first one that has news.
+   *
+   * This is the fan-out form of {@link MemberTaskService.wait}: the caller
+   * watches every conversation it started in this turn without paying one
+   * full timeout per conversation. The winner is the first conversation (in
+   * the requested order) with an unread reply; when no conversation has text,
+   * the first one that reached a terminal state wins, so a failure is reported
+   * as promptly as a result.
+   *
+   * Only the winner's cursor moves. Every other conversation keeps its unread
+   * replies, so the caller can wait for the rest without losing anything; the
+   * `remaining` field describes exactly what is still outstanding.
+   * @param {string[]} conversationIds member conversation ids, in priority order.
+   * @param {{timeoutMs?: number, signal?: AbortSignal}} [options] wait options.
+   * @returns {Promise<{done: boolean, timedOut: boolean, task: object, replies: object[], state: string, remaining: object[]}>} first outcome.
+   */
+  async waitAny(conversationIds, options = {}) {
+    await this.#ensureLoaded()
+    const ids = []
+    for (const value of Array.isArray(conversationIds) ? conversationIds : []) {
+      const id = String(value ?? '').trim()
+      if (id !== '' && !ids.includes(id)) ids.push(id)
+    }
+    if (ids.length === 0) throw new Error('conversationId is required')
+    const tasks = []
+    const untracked = []
+    for (const id of ids) {
+      const task = this.#taskOfConversation(id)
+      if (task === undefined) untracked.push(id)
+      else tasks.push(task)
+    }
+    if (untracked.length > 0) throw new Error(`member conversation is not tracked: ${untracked.join(', ')}`)
+    // One id keeps the exact single-conversation behaviour, including its
+    // cursor bookkeeping and its terminal re-read.
+    if (tasks.length === 1) {
+      const single = await this.wait(tasks[0].conversationId, options)
+      return { ...single, remaining: [] }
+    }
+    const timeoutMs = Math.max(1000, Math.min(Number.isSafeInteger(options.timeoutMs) ? options.timeoutMs : 30_000, 300_000))
+    const signal = options.signal
+    const deadline = Date.now() + timeoutMs
+    const synced = new Set()
+    for (;;) {
+      signal?.throwIfAborted()
+      let winner
+      let finished
+      for (const task of tasks) {
+        const terminal = isTerminalStatus(task.status)
+        if (terminal && !synced.has(task.id)) {
+          // The monitor stopped when this task ended, so turns the member ran
+          // afterwards are invisible locally: re-read once before deciding.
+          synced.add(task.id)
+          await this.#syncTerminal(task, signal)
+        }
+        if (winner === undefined && this.#pendingReplies(task).length > 0) winner = task
+        if (finished === undefined && isTerminalStatus(task.status)) finished = task
+      }
+      const task = winner ?? finished
+      if (task !== undefined) {
+        const replies = this.#pendingReplies(task)
+        const terminal = isTerminalStatus(task.status)
+        if (replies.length > 0) {
+          task.deliveredSeq = replies[replies.length - 1].seq
+          // A terminal answer handed over together with its text also tells
+          // the model the task is over, so the fallback delivery is skipped.
+          if (terminal) task.terminalDelivered = true
+        } else {
+          task.terminalDelivered = true
+        }
+        await this.#save(task).catch(() => {})
+        return {
+          done: terminal,
+          timedOut: false,
+          task,
+          replies,
+          state: terminal ? (task.status === 'completed' ? 'done' : 'failed') : 'progress',
+          remaining: this.#describeRemaining(tasks, task),
+        }
+      }
+      const left = deadline - Date.now()
+      if (left <= 0) {
+        return {
+          done: false,
+          timedOut: true,
+          task: tasks[0],
+          replies: [],
+          state: 'running',
+          remaining: this.#describeRemaining(tasks, undefined),
+        }
+      }
+      await this.#waitForAnyTask(tasks, left, signal)
+    }
+  }
+
+  /**
+   * The tasks still outstanding after one `waitAny` outcome.
+   * @param {object[]} tasks watched tasks, in priority order.
+   * @param {object|undefined} exclude the task that just returned.
+   * @returns {object[]} model-facing summaries.
+   */
+  #describeRemaining(tasks, exclude) {
+    return tasks
+      .filter(task => task !== exclude)
+      .map(task => ({
+        conversationId: task.conversationId,
+        member: task.member,
+        memberIp: task.memberIp,
+        status: task.status,
+        turns: Number.isSafeInteger(task.turns) ? task.turns : null,
+        settled: isTerminalStatus(task.status),
+        context: task.context ?? null,
+      }))
+  }
+
+  /**
+   * Park until any of the watched tasks is woken, the deadline passes, or the
+   * tool call is cancelled.
+   *
+   * `waiters` is keyed by task id, so the same wake that serves a single wait
+   * also serves this one. The first wake removes every registration, which is
+   * what keeps a fan-out wait from leaving stray timers behind.
+   * @param {object[]} tasks watched tasks.
+   * @param {number} ms maximum wait.
+   * @param {AbortSignal} [signal] cancellation of the waiting tool call.
+   * @returns {Promise<void>} resolves on a wake, on the deadline, or on abort.
+   */
+  #waitForAnyTask(tasks, ms, signal) {
+    return new Promise((resolve) => {
+      let settled = false
+      const cleanups = []
+      const wake = () => {
+        if (settled) return
+        settled = true
+        for (const cleanup of cleanups) {
+          try { cleanup() } catch { }
+        }
+        resolve()
+      }
+      for (const task of tasks) {
+        const timer = setTimeout(wake, Math.max(0, ms))
+        timer.unref?.()
+        let parked = this.waiters.get(task.id)
+        if (parked === undefined) {
+          parked = new Set()
+          this.waiters.set(task.id, parked)
+        }
+        parked.add(wake)
+        cleanups.push(() => {
+          clearTimeout(timer)
+          this.waiters.get(task.id)?.delete(wake)
+        })
+      }
+      if (signal !== undefined) {
+        if (signal.aborted) {
+          wake()
+          return
+        }
+        signal.addEventListener('abort', wake, { once: true })
+        cleanups.push(() => signal.removeEventListener('abort', wake))
+      }
+    })
+  }
+
+  /**
    * The newest task tracked for one member conversation.
    * @param {string} conversationId member conversation id.
    * @returns {object|undefined} task record.
@@ -688,6 +861,25 @@ export class MemberTaskService {
       }
     }
     return newest
+  }
+
+  /**
+   * Every conversation one origin session still has running, oldest first.
+   *
+   * `call_member` uses this to tell the model it now has several parallel
+   * member conversations, so it can wait on all of them with one `wait_member`
+   * instead of polling them one timeout at a time.
+   * @param {string} sessionId origin session id.
+   * @returns {Promise<object[]>} running tasks, oldest delivery first.
+   */
+  async inFlightForOrigin(sessionId) {
+    await this.#ensureLoaded()
+    const key = String(sessionId ?? '')
+    if (key === '') return []
+    return [...this.tasks.values()]
+      .filter(task => task.originSessionId === key && (task.status === 'running' || task.status === 'starting'))
+      .sort((left, right) => String(left.lastSentAt ?? left.createdAt ?? '')
+        .localeCompare(String(right.lastSentAt ?? right.createdAt ?? '')))
   }
 
   /**
@@ -1450,12 +1642,28 @@ export class MemberTaskService {
         `会话id: ${task.conversationId}`,
       ].join('\n')
     try {
-      agent.followup({
+      const message = {
         id: randomUUID(),
         role: 'user',
         content: [{ type: 'text', text }],
         source: { kind: 'user' },
-      })
+      }
+      // A running conversation is steered: the result is claimed at the next
+      // step boundary of the turn in progress, which is what a user gets when
+      // pushing a message into a running turn, instead of waiting for the turn
+      // to end. An idle conversation still gets an ordinary follow-up turn. A
+      // steer the driver refuses (it was just disposed) falls back to the
+      // follow-up path so the result is never dropped.
+      let steered = false
+      if (agent.status === 'running' && typeof agent.steer === 'function') {
+        try {
+          agent.steer(message)
+          steered = true
+        } catch {
+          steered = false
+        }
+      }
+      if (!steered) agent.followup(message)
       const pending = this.notifyTimers.get(task.id)
       if (pending !== undefined) {
         clearTimeout(pending)
@@ -1463,10 +1671,11 @@ export class MemberTaskService {
       }
       task.notified = true
       task.notifiedAt = new Date().toISOString()
+      task.notifiedVia = steered ? 'steer' : 'followup'
       task.notifyError = null
       task.notifyRetries = 0
       await this.#save(task)
-      await this.#log(task, `notification queued into ${task.originSessionId}`)
+      await this.#log(task, `notification ${steered ? 'steered into' : 'queued into'} ${task.originSessionId}`)
     } catch (error) {
       task.notifyError = error instanceof Error ? error.message : String(error)
       await this.#save(task)

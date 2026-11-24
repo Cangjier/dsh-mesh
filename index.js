@@ -13073,6 +13073,9 @@ function truncate(text, limit) {
   const value = String(text ?? "");
   return value.length > limit ? `${value.slice(0, limit)}\u2026` : value;
 }
+function isTerminalStatus(status) {
+  return status === "completed" || status === "failed" || status === "interrupted";
+}
 function workspaceNameFromTitle(value) {
   const name = typeof value === "string" ? value.trim() : "";
   if (name === "" || name === "." || name === ".." || name.length > 120) return "";
@@ -13529,6 +13532,163 @@ var MemberTaskService = class {
     }
   }
   /**
+   * Wait on several tasks at once and return the first one that has news.
+   *
+   * This is the fan-out form of {@link MemberTaskService.wait}: the caller
+   * watches every conversation it started in this turn without paying one
+   * full timeout per conversation. The winner is the first conversation (in
+   * the requested order) with an unread reply; when no conversation has text,
+   * the first one that reached a terminal state wins, so a failure is reported
+   * as promptly as a result.
+   *
+   * Only the winner's cursor moves. Every other conversation keeps its unread
+   * replies, so the caller can wait for the rest without losing anything; the
+   * `remaining` field describes exactly what is still outstanding.
+   * @param {string[]} conversationIds member conversation ids, in priority order.
+   * @param {{timeoutMs?: number, signal?: AbortSignal}} [options] wait options.
+   * @returns {Promise<{done: boolean, timedOut: boolean, task: object, replies: object[], state: string, remaining: object[]}>} first outcome.
+   */
+  async waitAny(conversationIds, options = {}) {
+    await this.#ensureLoaded();
+    const ids = [];
+    for (const value of Array.isArray(conversationIds) ? conversationIds : []) {
+      const id = String(value ?? "").trim();
+      if (id !== "" && !ids.includes(id)) ids.push(id);
+    }
+    if (ids.length === 0) throw new Error("conversationId is required");
+    const tasks = [];
+    const untracked = [];
+    for (const id of ids) {
+      const task = this.#taskOfConversation(id);
+      if (task === void 0) untracked.push(id);
+      else tasks.push(task);
+    }
+    if (untracked.length > 0) throw new Error(`member conversation is not tracked: ${untracked.join(", ")}`);
+    if (tasks.length === 1) {
+      const single = await this.wait(tasks[0].conversationId, options);
+      return { ...single, remaining: [] };
+    }
+    const timeoutMs = Math.max(1e3, Math.min(Number.isSafeInteger(options.timeoutMs) ? options.timeoutMs : 3e4, 3e5));
+    const signal = options.signal;
+    const deadline = Date.now() + timeoutMs;
+    const synced = /* @__PURE__ */ new Set();
+    for (; ; ) {
+      signal?.throwIfAborted();
+      let winner;
+      let finished2;
+      for (const task2 of tasks) {
+        const terminal = isTerminalStatus(task2.status);
+        if (terminal && !synced.has(task2.id)) {
+          synced.add(task2.id);
+          await this.#syncTerminal(task2, signal);
+        }
+        if (winner === void 0 && this.#pendingReplies(task2).length > 0) winner = task2;
+        if (finished2 === void 0 && isTerminalStatus(task2.status)) finished2 = task2;
+      }
+      const task = winner ?? finished2;
+      if (task !== void 0) {
+        const replies = this.#pendingReplies(task);
+        const terminal = isTerminalStatus(task.status);
+        if (replies.length > 0) {
+          task.deliveredSeq = replies[replies.length - 1].seq;
+          if (terminal) task.terminalDelivered = true;
+        } else {
+          task.terminalDelivered = true;
+        }
+        await this.#save(task).catch(() => {
+        });
+        return {
+          done: terminal,
+          timedOut: false,
+          task,
+          replies,
+          state: terminal ? task.status === "completed" ? "done" : "failed" : "progress",
+          remaining: this.#describeRemaining(tasks, task)
+        };
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        return {
+          done: false,
+          timedOut: true,
+          task: tasks[0],
+          replies: [],
+          state: "running",
+          remaining: this.#describeRemaining(tasks, void 0)
+        };
+      }
+      await this.#waitForAnyTask(tasks, left, signal);
+    }
+  }
+  /**
+   * The tasks still outstanding after one `waitAny` outcome.
+   * @param {object[]} tasks watched tasks, in priority order.
+   * @param {object|undefined} exclude the task that just returned.
+   * @returns {object[]} model-facing summaries.
+   */
+  #describeRemaining(tasks, exclude) {
+    return tasks.filter((task) => task !== exclude).map((task) => ({
+      conversationId: task.conversationId,
+      member: task.member,
+      memberIp: task.memberIp,
+      status: task.status,
+      turns: Number.isSafeInteger(task.turns) ? task.turns : null,
+      settled: isTerminalStatus(task.status),
+      context: task.context ?? null
+    }));
+  }
+  /**
+   * Park until any of the watched tasks is woken, the deadline passes, or the
+   * tool call is cancelled.
+   *
+   * `waiters` is keyed by task id, so the same wake that serves a single wait
+   * also serves this one. The first wake removes every registration, which is
+   * what keeps a fan-out wait from leaving stray timers behind.
+   * @param {object[]} tasks watched tasks.
+   * @param {number} ms maximum wait.
+   * @param {AbortSignal} [signal] cancellation of the waiting tool call.
+   * @returns {Promise<void>} resolves on a wake, on the deadline, or on abort.
+   */
+  #waitForAnyTask(tasks, ms, signal) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const cleanups = [];
+      const wake = () => {
+        if (settled) return;
+        settled = true;
+        for (const cleanup of cleanups) {
+          try {
+            cleanup();
+          } catch {
+          }
+        }
+        resolve();
+      };
+      for (const task of tasks) {
+        const timer = setTimeout(wake, Math.max(0, ms));
+        timer.unref?.();
+        let parked = this.waiters.get(task.id);
+        if (parked === void 0) {
+          parked = /* @__PURE__ */ new Set();
+          this.waiters.set(task.id, parked);
+        }
+        parked.add(wake);
+        cleanups.push(() => {
+          clearTimeout(timer);
+          this.waiters.get(task.id)?.delete(wake);
+        });
+      }
+      if (signal !== void 0) {
+        if (signal.aborted) {
+          wake();
+          return;
+        }
+        signal.addEventListener("abort", wake, { once: true });
+        cleanups.push(() => signal.removeEventListener("abort", wake));
+      }
+    });
+  }
+  /**
    * The newest task tracked for one member conversation.
    * @param {string} conversationId member conversation id.
    * @returns {object|undefined} task record.
@@ -13574,6 +13734,21 @@ var MemberTaskService = class {
       }
     }
     return newest;
+  }
+  /**
+   * Every conversation one origin session still has running, oldest first.
+   *
+   * `call_member` uses this to tell the model it now has several parallel
+   * member conversations, so it can wait on all of them with one `wait_member`
+   * instead of polling them one timeout at a time.
+   * @param {string} sessionId origin session id.
+   * @returns {Promise<object[]>} running tasks, oldest delivery first.
+   */
+  async inFlightForOrigin(sessionId) {
+    await this.#ensureLoaded();
+    const key = String(sessionId ?? "");
+    if (key === "") return [];
+    return [...this.tasks.values()].filter((task) => task.originSessionId === key && (task.status === "running" || task.status === "starting")).sort((left, right) => String(left.lastSentAt ?? left.createdAt ?? "").localeCompare(String(right.lastSentAt ?? right.createdAt ?? "")));
   }
   /**
    * Live status of one tracked member conversation, for `status_member`.
@@ -14270,12 +14445,22 @@ var MemberTaskService = class {
       `\u4F1A\u8BDDid: ${task.conversationId}`
     ].join("\n");
     try {
-      agent.followup({
+      const message = {
         id: randomUUID(),
         role: "user",
         content: [{ type: "text", text }],
         source: { kind: "user" }
-      });
+      };
+      let steered = false;
+      if (agent.status === "running" && typeof agent.steer === "function") {
+        try {
+          agent.steer(message);
+          steered = true;
+        } catch {
+          steered = false;
+        }
+      }
+      if (!steered) agent.followup(message);
       const pending = this.notifyTimers.get(task.id);
       if (pending !== void 0) {
         clearTimeout(pending);
@@ -14283,10 +14468,11 @@ var MemberTaskService = class {
       }
       task.notified = true;
       task.notifiedAt = (/* @__PURE__ */ new Date()).toISOString();
+      task.notifiedVia = steered ? "steer" : "followup";
       task.notifyError = null;
       task.notifyRetries = 0;
       await this.#save(task);
-      await this.#log(task, `notification queued into ${task.originSessionId}`);
+      await this.#log(task, `notification ${steered ? "steered into" : "queued into"} ${task.originSessionId}`);
     } catch (error) {
       task.notifyError = error instanceof Error ? error.message : String(error);
       await this.#save(task);
@@ -14689,8 +14875,10 @@ function registerTools(ctx, toolsCtx, service) {
       `\u4E0D\u4F20 compress \u65F6\uFF0C\u5982\u679C\u76EE\u6807\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u7ECF\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF0C\u6295\u9012\u524D\u4F1A\u81EA\u52A8\u5F3A\u5236\u538B\u7F29\uFF08\u540C\u6837\u8981\u6C42\u5BF9\u8BDD\u7A7A\u95F2\uFF09\u3002`,
       "\u7528 wait_member \u7B49\u7ED3\u679C\uFF1A\u6210\u5458\u6BCF\u7ED3\u675F\u4E00\u8F6E\u56DE\u7B54\u5C31\u8FD4\u56DE\u4E00\u6B21\uFF08state=progress \u8868\u793A\u8FD8\u4F1A\u7EE7\u7EED\uFF09\uFF0C",
       "\u53EA\u6709 state=done \u624D\u662F\u6574\u6BB5\u4EFB\u52A1\u7684\u6700\u7EC8\u7ED3\u679C\uFF1B\u8D85\u65F6\uFF08state=running\uFF09\u7528\u540C\u4E00\u4E2A conversationId \u63A5\u7740\u7B49\u3002",
+      '\u672C\u5BF9\u8BDD\u540C\u65F6\u8FD8\u6709\u522B\u7684\u6210\u5458\u4F1A\u8BDD\u5728\u8DD1\u65F6\uFF0C\u8FD4\u56DE\u503C\u4F1A\u5217\u51FA\u8FD9\u4E9B\u4F1A\u8BDDid\uFF0C\u5E76\u63D0\u793A\u7528 wait_member { "conversationIds": [...] } \u4E00\u6B21\u7B49\u591A\u4E2A\u3002',
       "\u5982\u679C\u4E0D\u518D\u7EE7\u7EED wait\uFF1A\u5BF9\u8BDD\u5B8C\u6210\uFF08\u6216\u5931\u8D25/\u4E2D\u65AD\uFF09\u540E\uFF0C3 \u79D2\u5185\u6CA1\u6709 wait_member \u53D6\u8D70\u7ED3\u679C\uFF0C",
       "\u63D2\u4EF6\u4F1A\u628A\u7ED3\u679C\u6295\u9012\u56DE\u8C03\u7528 call_member \u7684\u8FD9\u4E2A\u5BF9\u8BDD\uFF0C\u4E0D\u4F1A\u4E22\uFF1B\u5DF2\u7ECF\u53D6\u8D70\u7684\u7ED3\u679C\u4E0D\u4F1A\u91CD\u590D\u6295\u9012\u3002",
+      "\u4E3B\u5BF9\u8BDD\u5F53\u65F6\u6B63\u5728\u6267\u884C turn \u65F6\uFF0C\u8FD9\u6761\u7ED3\u679C\u4F1A\u76F4\u63A5\u63D2\u5165\u5F53\u524D turn\uFF08agent.steer\uFF09\uFF0C\u4E0D\u7B49 turn \u7ED3\u675F\u3002",
       "\u65B0\u5EFA\u5BF9\u8BDD\u524D\u4F1A\u6309\u7EC4\u7F51\u76F4\u8FDE\u914D\u7F6E\u627E\u5230\u76EE\u6807\u6210\u5458\u7684\u672C\u5730\u4EE3\u7406\u7AEF\u53E3\uFF0C\u7528 SSH \u5728\u76EE\u6807\u6210\u5458\u4E0A\u8DD1 mjs \u63A2\u9488\u5B9E\u6D4B\u5176\u5EF6\u8FDF\u548C\u4E0B\u884C\u5E26\u5BBD\uFF0C",
       "\u628A\u4E00\u884C\u7ED3\u679C\u3001\u4EE3\u7406\u7AEF\u53E3\u548C hub \u7684 git token \u6CE8\u5165\u76EE\u6807\u4F1A\u8BDD\uFF08\u6CA1\u6709\u76F4\u8FDE\u914D\u7F6E\u5C31\u4E0D\u62A5\u51FA\u7F51\uFF09\uFF1B\u5E76\u7981\u7528\u8BE5\u4F1A\u8BDD\u7684 ask_user_question\uFF1A",
       "\u6210\u5458\u9700\u8981\u4FE1\u606F\u65F6\u4F1A\u5728\u56DE\u590D\u91CC\u63D0\u95EE\u5E76\u505C\u4E0B\uFF0C\u7528 call_member \u5E26 conversationId \u56DE\u7B54\u3002",
@@ -14739,13 +14927,15 @@ function registerTools(ctx, toolsCtx, service) {
           signal: exec.signal
         });
         const data2 = memberTaskData(task2, memberTasks);
+        const inFlight2 = await memberTasks.inFlightForOrigin(originSessionOf(exec.agent)).catch(() => []);
+        const parallelHint2 = formatParallelWaitHint(inFlight2, task2);
         return {
           ok: task2.status !== "failed",
           text: [
             `\u5DF2\u53D1\u8D77\u6210\u5458\u4EFB\u52A1\uFF1A${task2.member}\uFF08${task2.memberIp}\uFF09\uFF0C\u4F1A\u8BDD ${task2.conversationId}\u3002`,
             typeof task2.egressLine === "string" && task2.egressLine !== "" ? `\u51FA\u7F51\u5B9E\u6D4B\uFF1A${task2.egressLine}` : "",
             `\u4F1A\u8BDDid\uFF1A${task2.conversationId}`,
-            `\u7528 wait_member \u7B49\u5F85\u7ED3\u679C\uFF1AconversationId="${task2.conversationId}"\uFF0CtimeoutMs=30000\uFF08\u53EF\u6309\u9700\u8C03\u5927\uFF0C\u6700\u5927 300000\uFF09\u3002`,
+            parallelHint2 !== "" ? parallelHint2 : `\u7528 wait_member \u7B49\u5F85\u7ED3\u679C\uFF1AconversationId="${task2.conversationId}"\uFF0CtimeoutMs=30000\uFF08\u53EF\u6309\u9700\u8C03\u5927\uFF0C\u6700\u5927 300000\uFF09\u3002`,
             "\u6210\u5458\u6BCF\u7ED3\u675F\u4E00\u8F6E\u56DE\u7B54\u5C31\u8FD4\u56DE\u4E00\u6B21\uFF08state=progress\uFF09\uFF0C\u62FF\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002",
             "\u4E0D\u518D\u7B49\u5F85\u4E5F\u6CA1\u5173\u7CFB\uFF1A\u5B8C\u6210\u540E 3 \u79D2\u5185\u6CA1\u6709 wait_member \u53D6\u8D70\u7ED3\u679C\uFF0C\u7ED3\u679C\u4F1A\u81EA\u52A8\u6295\u9012\u56DE\u672C\u5BF9\u8BDD\u3002",
             `\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\uFF1Acall_member { "member": ${JSON.stringify(String(task2.member))}, "conversationId": ${JSON.stringify(String(task2.conversationId))}, "prompt": "..." }\u3002`,
@@ -14771,6 +14961,8 @@ function registerTools(ctx, toolsCtx, service) {
       const forced = compaction?.forced === true;
       const forcedLine = forced ? compaction.compacted === true ? `\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF08${formatOneDecimal(compaction.forcedPercent)}%\uFF09\uFF0C\u6295\u9012\u524D\u5DF2\u5F3A\u5236\u538B\u7F29\uFF1A\u66FF\u6362 ${String(compaction.shadowedCount)} \u9879\u5386\u53F2\uFF08\u7EA6 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens\uFF09\u3002` : `\u4E0A\u4E0B\u6587\u5360\u6BD4\u5DF2\u8D85\u8FC7 ${String(FORCED_COMPACT_PERCENT)}%\uFF08${formatOneDecimal(compaction.forcedPercent)}%\uFF09\uFF0C\u6295\u9012\u524D\u5DF2\u5C1D\u8BD5\u5F3A\u5236\u538B\u7F29\uFF0C\u4F46\u6CA1\u6709\u53EF\u538B\u7F29\u7684\u5386\u53F2\u3002` : "";
       const compactionLine = forcedLine !== "" ? forcedLine : args.compress === true ? compaction?.compacted === true ? `\u4E0A\u4E0B\u6587\u538B\u7F29\uFF1A\u5DF2\u538B\u7F29\uFF0C\u66FF\u6362 ${String(compaction.shadowedCount)} \u9879\u5386\u53F2\uFF08\u7EA6 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens\uFF09\u3002` : "\u4E0A\u4E0B\u6587\u538B\u7F29\uFF1A\u6CA1\u6709\u53EF\u538B\u7F29\u7684\u5386\u53F2\u3002" : "";
+      const inFlight = await memberTasks.inFlightForOrigin(originSessionOf(exec.agent)).catch(() => []);
+      const parallelHint = formatParallelWaitHint(inFlight, task);
       return {
         ok: true,
         text: [
@@ -14778,7 +14970,7 @@ function registerTools(ctx, toolsCtx, service) {
           `\u4F1A\u8BDDid\uFF1A${task.conversationId}`,
           compactionLine,
           formatContextLine(task.context),
-          `\u7528 wait_member \u7B49\u5F85\u56DE\u590D\uFF1AconversationId="${task.conversationId}"\uFF0CtimeoutMs=30000\uFF1B\u540C\u6837\u6BCF\u8F6E\u8FD4\u56DE\u4E00\u6B21\uFF0Cstate=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
+          parallelHint !== "" ? parallelHint : `\u7528 wait_member \u7B49\u5F85\u56DE\u590D\uFF1AconversationId="${task.conversationId}"\uFF0CtimeoutMs=30000\uFF1B\u540C\u6837\u6BCF\u8F6E\u8FD4\u56DE\u4E00\u6B21\uFF0Cstate=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
           "\u4E0D\u518D\u7B49\u5F85\u4E5F\u6CA1\u5173\u7CFB\uFF1A\u5B8C\u6210\u540E 3 \u79D2\u5185\u6CA1\u6709 wait_member \u53D6\u8D70\u7ED3\u679C\uFF0C\u7ED3\u679C\u4F1A\u81EA\u52A8\u6295\u9012\u56DE\u672C\u5BF9\u8BDD\u3002",
           `\u65E5\u5FD7\uFF1A${data.logFile}`
         ].filter((line) => line !== "").join("\n"),
@@ -14789,16 +14981,20 @@ function registerTools(ctx, toolsCtx, service) {
   const waitMemberDefinition = {
     name: "wait_member",
     description: [
-      "\u7B49\u5F85\u4E00\u4E2A\u7531 call_member \u53D1\u8D77\u7684\u6210\u5458\u4F1A\u8BDD\uFF0C\u6700\u591A timeoutMs \u6BEB\u79D2\u3002",
+      "\u7B49\u5F85\u4E00\u4E2A\u6216\u591A\u4E2A\u7531 call_member \u53D1\u8D77\u7684\u6210\u5458\u4F1A\u8BDD\uFF0C\u6700\u591A timeoutMs \u6BEB\u79D2\u3002",
       "",
       "conversationId \u5C31\u662F call_member \u8FD4\u56DE\u7684\u4F1A\u8BDDid\uFF1B\u63D2\u4EF6\u5185\u90E8\u7684 task id \u4E0D\u5BF9\u5916\u66B4\u9732\u3002",
+      "`conversationIds` \u4E00\u6B21\u7B49\u591A\u4E2A\u4F1A\u8BDD\uFF1A\u5176\u4E2D\u4EFB\u610F\u4E00\u4E2A\u5148\u6709\u6D88\u606F\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF0C\u53EA\u53D6\u8D70\u90A3\u4E00\u4E2A\u7684\u56DE\u590D\uFF0C",
+      "\u5176\u4F59\u4F1A\u8BDD\u7684\u56DE\u590D\u4E0D\u4F1A\u4E22\uFF0C\u8FD4\u56DE\u503C\u4F1A\u5728\u201C\u8FD8\u6709 N \u4E2A\u4F1A\u8BDD\u6CA1\u6709\u8FD4\u56DE\u201D\u91CC\u5217\u51FA\u5B83\u4EEC\u7684\u4F1A\u8BDDid\uFF0C",
+      "\u53EF\u4EE5\u7EE7\u7EED\u7528 conversationIds \u7B49\u5269\u4E0B\u7684\uFF0C\u4E5F\u53EF\u4EE5\u53EA\u7B49\u67D0\u4E00\u4E2A\u3002",
       "\u6210\u5458\u5BF9\u8BDD\u4E00\u6709\u65B0\u56DE\u590D\uFF08\u4E00\u8F6E\u7ED3\u675F\uFF09\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF0C\u4E0D\u7B49\u5230\u6574\u6BB5\u4EFB\u52A1\u7ED3\u675F\uFF1B\u8FD4\u56DE\u503C\u5E26 state\uFF1A",
       "progress\uFF1A\u672C\u8F6E\u56DE\u590D\u5DF2\u8FD4\u56DE\uFF0C\u4F46\u6210\u5458\u8FD8\u4F1A\u7EE7\u7EED\uFF08\u53EF\u80FD\u8FD8\u6709\u672A\u5B8C\u6210\u7684\u5B50\u4EE3\u7406\uFF09\uFF1B\u7528\u540C\u4E00\u4E2A conversationId \u518D\u7B49\u4E0B\u4E00\u8F6E\u3002",
       "done\uFF1A\u6574\u6BB5\u4EFB\u52A1\u5B8C\u6210\uFF0C\u8FD4\u56DE\u6700\u7EC8\u6587\u672C\u3001\u4F1A\u8BDDid\u548C\u5F53\u524D\u4E0A\u4E0B\u6587\u5360\u7528\u3002",
-      "\u8D85\u65F6\uFF1Adone=false\u3001state=running\uFF0C\u7528\u540C\u4E00\u4E2A conversationId \u7EE7\u7EED\u7B49\u5373\u53EF\uFF0C\u671F\u95F4\u4EA7\u751F\u7684\u56DE\u590D\u4E0D\u4F1A\u4E22\u3002",
+      "\u8D85\u65F6\uFF1Adone=false\u3001state=running\uFF0C\u7528\u540C\u4E00\u4E2A conversationId\uFF08\u6216\u591A\u4E2A conversationIds\uFF09\u7EE7\u7EED\u7B49\u5373\u53EF\uFF0C\u671F\u95F4\u4EA7\u751F\u7684\u56DE\u590D\u4E0D\u4F1A\u4E22\u3002",
       "\u5931\u8D25/\u4E2D\u65AD\uFF1A\u8FD4\u56DE\u9519\u8BEF\uFF1B\u76EE\u6807 DSH \u91CD\u542F\u65F6\u53EF\u4EE5\u7528 call_member \u5E26 conversationId \u7EE7\u7EED\u8BE5\u5BF9\u8BDD\u3002",
       "\u5982\u679C\u51B3\u5B9A\u4E0D\u518D\u7EE7\u7EED\u7B49\uFF1A\u5BF9\u8BDD\u5B8C\u6210\uFF08\u6216\u5931\u8D25/\u4E2D\u65AD\uFF09\u540E\uFF0C3 \u79D2\u5185\u6CA1\u6709 wait_member \u53D6\u8D70\u7ED3\u679C\uFF0C",
       "\u63D2\u4EF6\u4F1A\u628A\u7ED3\u679C\u6216\u5931\u8D25\u539F\u56E0\u81EA\u52A8\u6295\u9012\u56DE\u53D1\u8D77\u5BF9\u8BDD\uFF1B\u5DF2\u7ECF\u53D6\u8D70\u7684\u7ED3\u679C\u4E0D\u4F1A\u91CD\u590D\u6295\u9012\u3002",
+      "\u53D1\u8D77\u5BF9\u8BDD\u5F53\u65F6\u6B63\u5728\u6267\u884C turn \u65F6\uFF0C\u8FD9\u6761\u7ED3\u679C\u4F1A\u76F4\u63A5\u63D2\u5165\u5F53\u524D turn\uFF08\u4E0D\u7B49 turn \u7ED3\u675F\uFF09\u3002",
       "state=done \u65F6\u53EF\u4EE5\u7528\u8FD4\u56DE\u7684\u4F1A\u8BDDid\u7EE7\u7EED\u6295\u9012\uFF1Acall_member { conversationId, prompt }\uFF1B",
       '\u4E0A\u4E0B\u6587\u5360\u7528\u8D85\u8FC7 20% \u65F6\u4F1A\u5EFA\u8BAE\u4E0B\u6B21\u6295\u9012\u52A0 "compress": true\uFF0C\u5148\u538B\u7F29\u518D\u6295\u9012\u3002',
       "\u6BCF\u6B21\u8C03\u7528\u6709\u4E0A\u9650\uFF08\u9ED8\u8BA4 30000\uFF0C\u6700\u5927 300000 \u6BEB\u79D2\uFF09\uFF0C\u4E0D\u4F1A\u65E0\u9650\u963B\u585E\uFF1B\u7528\u6237\u505C\u6B62\u5F53\u524D\u5BF9\u8BDD\u4F1A\u4E2D\u6B62\u672C\u6B21\u7B49\u5F85\u3002"
@@ -14806,10 +15002,14 @@ function registerTools(ctx, toolsCtx, service) {
     parameters: {
       type: "object",
       properties: {
-        conversationId: { type: "string", description: "\u8981\u7B49\u5F85\u7684\u4F1A\u8BDDid\uFF08call_member \u8FD4\u56DE\uFF09\u3002" },
+        conversationId: { type: "string", description: "\u8981\u7B49\u5F85\u7684\u4F1A\u8BDDid\uFF08call_member \u8FD4\u56DE\uFF09\u3002\u53EA\u7B49\u4E00\u4E2A\u65F6\u7528\u5B83\u3002" },
+        conversationIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "\u4E00\u6B21\u7B49\u591A\u4E2A\u4F1A\u8BDDid\uFF1A\u4EFB\u610F\u4E00\u4E2A\u5148\u6709\u6D88\u606F\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF0C\u5176\u4F59\u4F1A\u8BDD\u5728\u8FD4\u56DE\u503C\u91CC\u5217\u51FA\u6765\u53EF\u4EE5\u7EE7\u7EED\u7B49\u3002\u548C conversationId \u4E8C\u9009\u4E00\u6216\u5E76\u7528\u3002"
+        },
         timeoutMs: { type: "integer", minimum: 1e3, maximum: 3e5, description: "\u672C\u6B21\u7B49\u5F85\u4E0A\u9650\uFF0C\u9ED8\u8BA4 30000 \u6BEB\u79D2\u3002" }
       },
-      required: ["conversationId"],
       additionalProperties: false
     },
     output: {
@@ -14822,32 +15022,118 @@ function registerTools(ctx, toolsCtx, service) {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const timeoutMs = Number.isSafeInteger(args.timeoutMs) ? args.timeoutMs : 3e4;
-      const result = await memberTasks.wait(args.conversationId, { timeoutMs, signal: exec.signal });
+      const ids = requestedConversationIds(args);
+      if (ids.length === 0) throw new Error("conversationId or conversationIds is required");
+      if (ids.length === 1) {
+        const result2 = await memberTasks.wait(ids[0], { timeoutMs, signal: exec.signal });
+        const task2 = result2.task;
+        const replies2 = Array.isArray(result2.replies) ? result2.replies : [];
+        const replyText2 = replies2.map((reply) => reply.text).join("\n\n").trim();
+        const data2 = {
+          ...memberTaskData(task2, memberTasks),
+          done: result2.done,
+          timedOut: result2.timedOut,
+          state: result2.state,
+          text: replyText2,
+          replies: replies2
+        };
+        const turn2 = Number.isSafeInteger(task2.turns) && task2.turns > 0 ? `\u7B2C ${String(task2.turns)} \u8F6E` : "";
+        const where2 = `${task2.member}\uFF08${task2.memberIp}\uFF09`;
+        const contextLine = formatContextLine(task2.context);
+        const advice = formatCompactionAdvice(task2.context);
+        if (!result2.done && result2.state === "progress") {
+          return {
+            ok: true,
+            text: [
+              `\u6210\u5458\u4F1A\u8BDD ${task2.conversationId} \u8FDB\u884C\u4E2D${turn2 === "" ? "" : `\uFF08${turn2}\uFF0C\u5C1A\u672A\u7ED3\u675F\uFF09`}\uFF1A${where2}\u3002`,
+              replyText2 !== "" ? `\u672C\u8F6E\u56DE\u590D\uFF1A
+${replyText2}` : "",
+              "\u6210\u5458\u8FD8\u4F1A\u7EE7\u7EED\uFF08\u53EF\u80FD\u8FD8\u6709\u5B50\u4EE3\u7406\u5728\u8DD1\uFF09\uFF0C\u8FD9\u4E0D\u662F\u6700\u7EC8\u7ED3\u679C\u3002",
+              contextLine,
+              `\u8BF7\u7EE7\u7EED\u8C03\u7528 wait_member \u7B49\u4E0B\u4E00\u8F6E\uFF1AconversationId="${task2.conversationId}"\uFF0CtimeoutMs=30000\uFF1B\u6536\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
+              `\u65E5\u5FD7\uFF1A${data2.logFile}`
+            ].filter((line) => line !== "").join("\n"),
+            data: data2
+          };
+        }
+        if (result2.done && task2.status === "completed") {
+          const finalText = replyText2 !== "" ? replyText2 : typeof task2.lastText === "string" ? task2.lastText : "";
+          return {
+            ok: true,
+            text: [
+              `\u6210\u5458\u4F1A\u8BDD ${task2.conversationId} \u5DF2\u5B8C\u6210\uFF1A${where2}\u3002`,
+              "\uFF08\u4EFB\u52A1\u5DF2\u7ED3\u675F\uFF0C\u4E0D\u9700\u8981\u518D\u8C03\u7528 wait_member\uFF1B\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\u7528 call_member \u5E26 conversationId\u3002\uFF09",
+              `\u4F1A\u8BDDid\uFF1A${task2.conversationId}`,
+              `\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\uFF1Acall_member { "member": ${JSON.stringify(String(task2.member))}, "conversationId": ${JSON.stringify(String(task2.conversationId))}, "prompt": "..." }`,
+              contextLine,
+              advice,
+              "\u7ED3\u679C\uFF1A",
+              finalText !== "" ? finalText : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
+              `\u65E5\u5FD7\uFF1A${data2.logFile}`
+            ].filter((line) => line !== "").join("\n"),
+            data: data2
+          };
+        }
+        if (!result2.done) {
+          const effective2 = Math.min(3e5, Math.max(1e3, timeoutMs));
+          return {
+            ok: true,
+            text: [
+              `\u6210\u5458\u4F1A\u8BDD ${task2.conversationId} \u4ECD\u5728\u8FD0\u884C${turn2 === "" ? "" : `\uFF08${turn2}\uFF0C\u5C1A\u672A\u7ED3\u675F\uFF09`}\uFF1A${where2}\u3002`,
+              "\u8FD9\u6BB5\u65F6\u95F4\u6CA1\u6709\u65B0\u56DE\u590D\uFF0C\u4F46\u4EFB\u52A1\u6CA1\u6709\u7ED3\u675F\u3001\u671F\u95F4\u7684\u56DE\u590D\u4E5F\u4E0D\u4F1A\u4E22\u3002",
+              contextLine,
+              `\u8BF7\u7EE7\u7EED\u8C03\u7528 wait_member\uFF1AconversationId="${task2.conversationId}"\uFF0CtimeoutMs=${String(effective2)}\uFF1B\u6536\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
+              typeof task2.lastText === "string" && task2.lastText !== "" ? `\u6700\u8FD1\u8F93\u51FA\uFF1A${task2.lastText.slice(0, 500)}` : "",
+              `\u65E5\u5FD7\uFF1A${data2.logFile}`
+            ].filter((line) => line !== "").join("\n"),
+            data: data2
+          };
+        }
+        return {
+          ok: false,
+          text: [
+            `\u6210\u5458\u4F1A\u8BDD ${task2.conversationId} ${task2.status}\uFF08\u5DF2\u7ED3\u675F\uFF09\uFF1A${where2}\u3002`,
+            `\u4F1A\u8BDDid\uFF1A${task2.conversationId}`,
+            `\u539F\u56E0\uFF1A${task2.error ?? "unknown"}`,
+            replyText2 !== "" ? `\u4E2D\u65AD\u524D\u7684\u56DE\u590D\uFF1A
+${replyText2}` : "",
+            task2.interrupted === true ? "\u76EE\u6807\u6210\u5458\u7684 DSH \u91CD\u542F\u6216\u8FD0\u884C\u65F6\u9000\u51FA\u6253\u65AD\u4E86\u8FD9\u4E00\u8F6E\uFF1B\u53EF\u4EE5\u7528 call_member \u5E26\u540C\u4E00\u4E2A conversationId \u7EE7\u7EED\u3002" : "",
+            contextLine,
+            `\u65E5\u5FD7\uFF1A${data2.logFile}`
+          ].filter((line) => line !== "").join("\n"),
+          data: data2
+        };
+      }
+      const result = await memberTasks.waitAny(ids, { timeoutMs, signal: exec.signal });
       const task = result.task;
       const replies = Array.isArray(result.replies) ? result.replies : [];
       const replyText = replies.map((reply) => reply.text).join("\n\n").trim();
+      const remaining = Array.isArray(result.remaining) ? result.remaining : [];
       const data = {
         ...memberTaskData(task, memberTasks),
+        conversationIds: ids,
         done: result.done,
         timedOut: result.timedOut,
         state: result.state,
         text: replyText,
-        replies
+        replies,
+        remaining
       };
-      const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `\u7B2C ${String(task.turns)} \u8F6E` : "";
+      const effective = Math.min(3e5, Math.max(1e3, timeoutMs));
+      const remainingHint = formatRemainingWait(remaining, effective);
       const where = `${task.member}\uFF08${task.memberIp}\uFF09`;
-      const contextLine = formatContextLine(task.context);
-      const advice = formatCompactionAdvice(task.context);
+      const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `\u7B2C ${String(task.turns)} \u8F6E` : "";
       if (!result.done && result.state === "progress") {
         return {
           ok: true,
           text: [
-            `\u6210\u5458\u4F1A\u8BDD ${task.conversationId} \u8FDB\u884C\u4E2D${turn === "" ? "" : `\uFF08${turn}\uFF0C\u5C1A\u672A\u7ED3\u675F\uFF09`}\uFF1A${where}\u3002`,
+            `\u6210\u5458\u4F1A\u8BDD ${task.conversationId} \u6709\u65B0\u7684\u8FDB\u5C55${turn === "" ? "" : `\uFF08${turn}\uFF0C\u5C1A\u672A\u7ED3\u675F\uFF09`}\uFF1A${where}\u3002`,
             replyText !== "" ? `\u672C\u8F6E\u56DE\u590D\uFF1A
 ${replyText}` : "",
-            "\u6210\u5458\u8FD8\u4F1A\u7EE7\u7EED\uFF08\u53EF\u80FD\u8FD8\u6709\u5B50\u4EE3\u7406\u5728\u8DD1\uFF09\uFF0C\u8FD9\u4E0D\u662F\u6700\u7EC8\u7ED3\u679C\u3002",
-            contextLine,
-            `\u8BF7\u7EE7\u7EED\u8C03\u7528 wait_member \u7B49\u4E0B\u4E00\u8F6E\uFF1AconversationId="${task.conversationId}"\uFF0CtimeoutMs=30000\uFF1B\u6536\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
+            "\u672C\u6B21\u53EA\u8FD4\u56DE\u4E86\u6700\u5148\u6709\u6D88\u606F\u7684\u90A3\u4E2A\u4F1A\u8BDD\uFF1B\u8FD9\u4E0D\u662F\u6700\u7EC8\u7ED3\u679C\uFF0C\u8FD8\u8981\u7EE7\u7EED\u7B49\u3002",
+            formatContextLine(task.context),
+            `\u7EE7\u7EED\u7B49\u8FD9\u4E2A\u4F1A\u8BDD\uFF1Await_member { "conversationId": ${JSON.stringify(String(task.conversationId))}, "timeoutMs": ${String(effective)} }`,
+            ...remainingHint,
             `\u65E5\u5FD7\uFF1A${data.logFile}`
           ].filter((line) => line !== "").join("\n"),
           data
@@ -14859,28 +15145,26 @@ ${replyText}` : "",
           ok: true,
           text: [
             `\u6210\u5458\u4F1A\u8BDD ${task.conversationId} \u5DF2\u5B8C\u6210\uFF1A${where}\u3002`,
-            "\uFF08\u4EFB\u52A1\u5DF2\u7ED3\u675F\uFF0C\u4E0D\u9700\u8981\u518D\u8C03\u7528 wait_member\uFF1B\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\u7528 call_member \u5E26 conversationId\u3002\uFF09",
+            "\uFF08\u8FD9\u4E2A\u4F1A\u8BDD\u5DF2\u7ED3\u675F\uFF0C\u4E0D\u9700\u8981\u518D\u7B49\u5B83\uFF1B\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\u7528 call_member \u5E26 conversationId\u3002\uFF09",
             `\u4F1A\u8BDDid\uFF1A${task.conversationId}`,
             `\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\uFF1Acall_member { "member": ${JSON.stringify(String(task.member))}, "conversationId": ${JSON.stringify(String(task.conversationId))}, "prompt": "..." }`,
-            contextLine,
-            advice,
+            formatContextLine(task.context),
+            formatCompactionAdvice(task.context),
             "\u7ED3\u679C\uFF1A",
             finalText !== "" ? finalText : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
+            ...remainingHint,
             `\u65E5\u5FD7\uFF1A${data.logFile}`
           ].filter((line) => line !== "").join("\n"),
           data
         };
       }
-      if (!result.done) {
-        const effective = Math.min(3e5, Math.max(1e3, timeoutMs));
+      if (result.timedOut) {
         return {
           ok: true,
           text: [
-            `\u6210\u5458\u4F1A\u8BDD ${task.conversationId} \u4ECD\u5728\u8FD0\u884C${turn === "" ? "" : `\uFF08${turn}\uFF0C\u5C1A\u672A\u7ED3\u675F\uFF09`}\uFF1A${where}\u3002`,
-            "\u8FD9\u6BB5\u65F6\u95F4\u6CA1\u6709\u65B0\u56DE\u590D\uFF0C\u4F46\u4EFB\u52A1\u6CA1\u6709\u7ED3\u675F\u3001\u671F\u95F4\u7684\u56DE\u590D\u4E5F\u4E0D\u4F1A\u4E22\u3002",
-            contextLine,
-            `\u8BF7\u7EE7\u7EED\u8C03\u7528 wait_member\uFF1AconversationId="${task.conversationId}"\uFF0CtimeoutMs=${String(effective)}\uFF1B\u6536\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
-            typeof task.lastText === "string" && task.lastText !== "" ? `\u6700\u8FD1\u8F93\u51FA\uFF1A${task.lastText.slice(0, 500)}` : "",
+            `\u7B49\u5F85\u8D85\u65F6\uFF1A${String(ids.length)} \u4E2A\u4F1A\u8BDD\u5728 ${String(effective)} \u6BEB\u79D2\u5185\u90FD\u6CA1\u6709\u65B0\u56DE\u590D\u3002`,
+            "\u4EFB\u52A1\u90FD\u6CA1\u6709\u7ED3\u675F\uFF0C\u671F\u95F4\u7684\u56DE\u590D\u4E5F\u4E0D\u4F1A\u4E22\u3002",
+            ...remainingHint,
             `\u65E5\u5FD7\uFF1A${data.logFile}`
           ].filter((line) => line !== "").join("\n"),
           data
@@ -14895,7 +15179,8 @@ ${replyText}` : "",
           replyText !== "" ? `\u4E2D\u65AD\u524D\u7684\u56DE\u590D\uFF1A
 ${replyText}` : "",
           task.interrupted === true ? "\u76EE\u6807\u6210\u5458\u7684 DSH \u91CD\u542F\u6216\u8FD0\u884C\u65F6\u9000\u51FA\u6253\u65AD\u4E86\u8FD9\u4E00\u8F6E\uFF1B\u53EF\u4EE5\u7528 call_member \u5E26\u540C\u4E00\u4E2A conversationId \u7EE7\u7EED\u3002" : "",
-          contextLine,
+          formatContextLine(task.context),
+          ...remainingHint,
           `\u65E5\u5FD7\uFF1A${data.logFile}`
         ].filter((line) => line !== "").join("\n"),
         data
@@ -14905,9 +15190,9 @@ ${replyText}` : "",
   const statusMemberDefinition = {
     name: "status_member",
     description: [
-      "\u67E5\u770B\u4E00\u4E2A\u6210\u5458\u4F1A\u8BDD\u7684\u5F53\u524D\u72B6\u6001\uFF0C\u4EE5\u53CA\u8FD9\u4E2A\u76EE\u6807\u5BF9\u8BDD\u6700\u8FD1\u4E24\u6B21\u7684\u7528\u6237\u6D88\u606F\uFF08\u5C31\u662F call_member \u6295\u9012\u8FC7\u53BB\u7684\u6D88\u606F\uFF09\u3002",
+      "\u67E5\u770B\u4E00\u4E2A\u6216\u591A\u4E2A\u6210\u5458\u4F1A\u8BDD\u7684\u5F53\u524D\u72B6\u6001\uFF0C\u4EE5\u53CA\u8FD9\u4E9B\u76EE\u6807\u5BF9\u8BDD\u6700\u8FD1\u4E24\u6B21\u7684\u7528\u6237\u6D88\u606F\uFF08\u5C31\u662F call_member \u6295\u9012\u8FC7\u53BB\u7684\u6D88\u606F\uFF09\u3002",
       "",
-      "`conversationId` \u662F call_member / wait_member \u8FD4\u56DE\u7684\u4F1A\u8BDDid\u3002",
+      "`conversationId` \u67E5\u4E00\u4E2A\uFF0C`conversationIds` \u4E00\u6B21\u67E5\u591A\u4E2A\uFF08\u8FD4\u56DE\u6309\u4F1A\u8BDD\u5206\u5757\u5217\u51FA\uFF0C\u5E76\u5E26\u4E00\u884C\u6C47\u603B\uFF09\u3002",
       "\u72B6\u6001\u4F18\u5148\u53D6\u76EE\u6807\u6210\u5458\u7684\u6700\u65B0\u6295\u5F71\uFF1A\u8FDB\u884C\u4E2D / \u7A7A\u95F2 / \u88AB\u5F02\u5E38\u4E2D\u6B62 / \u51FA\u9519\uFF1B\u76EE\u6807\u4E0D\u53EF\u8FBE\u65F6\u9000\u56DE\u672C\u673A\u4EFB\u52A1\u72B6\u6001\u3002",
       "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\u6765\u81EA\u672C\u673A\u4EFB\u52A1\u8BB0\u5F55\uFF0C\u6309\u6295\u9012\u65F6\u95F4\u4ECE\u65E7\u5230\u65B0\u6392\u5217\uFF0C\u6700\u591A\u4E24\u6761\uFF1B",
       "\u6700\u8FD1\u4E00\u6B21\u601D\u8003\u662F\u76EE\u6807\u5BF9\u8BDD\u6700\u65B0\u4E00\u8F6E\u7684 reasoning\uFF1B\u53EA\u8DDF\u8E2A\u672C\u673A\u53D1\u8D77\u6216\u7EE7\u7EED\u8FC7\u7684\u4F1A\u8BDD\uFF0C\u6CA1\u6709\u8DDF\u8E2A\u7684\u4F1A\u8BDD\u4F1A\u660E\u786E\u62A5\u9519\u3002"
@@ -14915,9 +15200,13 @@ ${replyText}` : "",
     parameters: {
       type: "object",
       properties: {
-        conversationId: { type: "string", description: "\u8981\u67E5\u770B\u7684\u6210\u5458\u4F1A\u8BDDid\uFF08call_member / wait_member \u8FD4\u56DE\uFF09\u3002" }
+        conversationId: { type: "string", description: "\u8981\u67E5\u770B\u7684\u6210\u5458\u4F1A\u8BDDid\uFF08call_member / wait_member \u8FD4\u56DE\uFF09\u3002\u67E5\u4E00\u4E2A\u65F6\u7528\u5B83\u3002" },
+        conversationIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "\u4E00\u6B21\u67E5\u770B\u591A\u4E2A\u6210\u5458\u4F1A\u8BDDid\uFF1B\u8FD4\u56DE\u6BCF\u4E2A\u4F1A\u8BDD\u7684\u72B6\u6001\u3001\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\u548C\u6700\u8FD1\u4E00\u6B21\u601D\u8003\u3002"
+        }
       },
-      required: ["conversationId"],
       additionalProperties: false
     },
     output: {
@@ -14929,45 +15218,43 @@ ${replyText}` : "",
     },
     isConcurrencySafe: () => true,
     async execute(args) {
-      const conversationId = String(args.conversationId ?? "").trim();
-      if (conversationId === "") throw new Error("conversationId is required");
-      const found = await memberTasks.inspect(conversationId);
-      if (found === null) {
-        throw new Error(`\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u4F1A\u8BDD ${conversationId}\uFF1B\u5148\u7528 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u518D\u67E5\u72B6\u6001\u3002`);
+      const ids = requestedConversationIds(args);
+      if (ids.length === 0) throw new Error("conversationId is required");
+      const inspected = await Promise.all(ids.map(async (id) => {
+        try {
+          return { id, found: await memberTasks.inspect(id) };
+        } catch {
+          return { id, found: null };
+        }
+      }));
+      const missing = inspected.filter((entry) => entry.found === null).map((entry) => entry.id);
+      const entries = inspected.filter((entry) => entry.found !== null).map((entry) => describeStatus(entry.found, memberTasks));
+      if (entries.length === 0) {
+        throw new Error(`\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u4F1A\u8BDD ${missing.join("\u3001")}\uFF1B\u5148\u7528 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u518D\u67E5\u72B6\u6001\u3002`);
       }
-      const { task, live, liveError } = found;
-      const liveStatus = typeof live?.status === "string" ? live.status : "";
-      const label = memberStatusLabel(liveStatus, task);
-      const turns = Number.isSafeInteger(live?.turns) ? live.turns : Number.isSafeInteger(task.turns) ? task.turns : null;
-      const context = live?.context ?? task.context ?? null;
-      const messages = memberTasks.sentMessages(task);
-      const reasoning = typeof live?.lastReasoning === "string" ? live.lastReasoning : "";
-      const lines = [
-        `\u6210\u5458\u4F1A\u8BDD ${task.conversationId}\uFF08${task.member} ${task.memberIp}\uFF09`,
-        liveStatus === "" ? `\u72B6\u6001\uFF1A${label}\uFF08\u76EE\u6807\u4E0D\u53EF\u8FBE\uFF1A${liveError ?? "unknown"}\uFF09` : `\u72B6\u6001\uFF1A${label}\uFF08\u76EE\u6807\u5B9E\u65F6\uFF09`,
-        `\u672C\u673A\u4EFB\u52A1\uFF1A${task.status}${turns === null ? "" : `\uFF0C\u8F6E\u6B21 ${String(turns)}`}`,
-        formatContextLine(context),
-        messages.length === 0 ? "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\uFF1A(\u6CA1\u6709\u8BB0\u5F55)" : "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\uFF08\u65E7\u2192\u65B0\uFF09\uFF1A",
-        ...messages.map((message, index) => `${String(index + 1)}. ${typeof message.at === "string" && message.at !== "" ? `[${message.at}] ` : ""}${truncateText(message.text, 1200)}`),
-        reasoning === "" ? "\u6700\u8FD1\u4E00\u6B21\u601D\u8003\uFF1A(\u76EE\u6807\u6CA1\u6709\u62A5\u544A\u601D\u8003)" : `\u6700\u8FD1\u4E00\u6B21\u601D\u8003\uFF1A${truncateText(reasoning, 4e3)}`,
-        typeof task.error === "string" && task.error !== "" ? `\u9519\u8BEF\uFF1A${task.error}` : ""
-      ].filter((line) => line !== "");
+      if (entries.length === 1 && missing.length === 0) {
+        return {
+          ok: true,
+          text: formatStatusBlock(entries[0]),
+          data: { ...statusData(entries[0]), conversations: entries.map(statusData) }
+        };
+      }
+      const counts = /* @__PURE__ */ new Map();
+      for (const entry of entries) counts.set(entry.statusLabel, (counts.get(entry.statusLabel) ?? 0) + 1);
+      const parts = [
+        `\u6210\u5458\u4F1A\u8BDD\u72B6\u6001\uFF1A\u5171 ${String(entries.length)} \u4E2A\uFF08${[...counts].map(([label, count]) => `${label} ${String(count)}`).join("\uFF0C")}\uFF09`
+      ];
+      entries.forEach((entry, index) => {
+        const lines = formatStatusBlock(entry).split("\n");
+        parts.push("", lines.map((line, lineIndex) => lineIndex === 0 ? `[${String(index + 1)}] ${line}` : line).join("\n"));
+      });
+      if (missing.length > 0) {
+        parts.push("", `\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u8FD9\u4E9B\u4F1A\u8BDD\uFF1A${missing.join("\u3001")}\uFF1B\u5148\u7528 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u518D\u67E5\u72B6\u6001\u3002`);
+      }
       return {
         ok: true,
-        text: lines.join("\n"),
-        data: {
-          conversationId: task.conversationId,
-          member: task.member,
-          memberIp: task.memberIp,
-          status: liveStatus === "" ? task.status : liveStatus,
-          taskStatus: task.status,
-          turns,
-          context,
-          messages,
-          reasoning,
-          error: task.error ?? null,
-          liveError
-        }
+        text: parts.join("\n"),
+        data: { count: entries.length, conversations: entries.map(statusData), missing }
       };
     }
   };
@@ -15050,6 +15337,7 @@ function memberTaskData(task, memberTasks) {
   return { ...fields, logFile: memberTasks.logPath(taskId) };
 }
 var CONTEXT_COMPACT_THRESHOLD = 20;
+var MAX_FANOUT_CONVERSATIONS = 20;
 function formatTokens(value) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount < 0) return "?";
@@ -15070,6 +15358,96 @@ function formatContextLine(context) {
   if (max === null) return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\uFF1A\u5DF2\u7528 ${formatTokens(used)} tokens${percentText}\uFF08\u6210\u5458\u672A\u62A5\u544A\u4E0A\u9650\uFF09`;
   if (used === null) return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\uFF1A\u4E0A\u9650 ${formatTokens(max)} tokens\uFF08\u6210\u5458\u672A\u62A5\u544A\u5DF2\u7528\uFF09`;
   return `\u5BF9\u8BDD\u4E0A\u4E0B\u6587\uFF1A${formatTokens(used)} / ${formatTokens(max)} tokens${percentText}`;
+}
+function requestedConversationIds(args) {
+  const ids = [];
+  const push = (value) => {
+    const id = String(value ?? "").trim();
+    if (id === "" || ids.includes(id)) return;
+    ids.push(id);
+  };
+  if (typeof args?.conversationId === "string") push(args.conversationId);
+  if (Array.isArray(args?.conversationIds)) {
+    for (const value of args.conversationIds) push(value);
+  }
+  if (ids.length > MAX_FANOUT_CONVERSATIONS) {
+    throw new Error(`too many conversations in one call: ${String(ids.length)} > ${String(MAX_FANOUT_CONVERSATIONS)}`);
+  }
+  return ids;
+}
+function originSessionOf(agent) {
+  const sessionId = agent?.session?.id;
+  if (typeof sessionId === "string" && sessionId !== "") return sessionId;
+  return typeof agent?.id === "string" ? agent.id : "";
+}
+function formatParallelWaitHint(inFlight, current) {
+  if (!Array.isArray(inFlight) || inFlight.length < 2) return "";
+  const ids = inFlight.map((task) => String(task.conversationId));
+  return [
+    `\u5F53\u524D\u5BF9\u8BDD\u6709 ${String(inFlight.length)} \u4E2A\u6210\u5458\u4F1A\u8BDD\u540C\u65F6\u5728\u8DD1\uFF1A`,
+    ...inFlight.map((task) => {
+      const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `\uFF0C\u7B2C ${String(task.turns)} \u8F6E` : "";
+      return `- ${task.conversationId}\uFF08${task.member} ${task.memberIp}${turn}\uFF09`;
+    }),
+    `\u53EF\u4EE5\u4E00\u6B21\u7B49\u591A\u4E2A\uFF1Await_member { "conversationIds": ${JSON.stringify(ids)} }\uFF0C\u5176\u4E2D\u4EFB\u610F\u4E00\u4E2A\u5148\u8FD4\u56DE\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF1B`,
+    `\u4E5F\u53EF\u4EE5\u53EA\u7B49\u8FD9\u4E2A\uFF1Await_member { "conversationId": ${JSON.stringify(String(current.conversationId))} }\u3002`
+  ].join("\n");
+}
+function formatRemainingWait(remaining, effectiveTimeout) {
+  if (!Array.isArray(remaining) || remaining.length === 0) return [];
+  const ids = remaining.map((entry) => String(entry.conversationId));
+  return [
+    `\u8FD8\u6709 ${String(remaining.length)} \u4E2A\u4F1A\u8BDD\u6CA1\u6709\u8FD4\u56DE\uFF1A`,
+    ...remaining.map((entry) => {
+      const turn = Number.isSafeInteger(entry.turns) && entry.turns > 0 ? `\uFF0C\u7B2C ${String(entry.turns)} \u8F6E` : "";
+      return `- ${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}${turn}\uFF0C${remainingStatusLabel(entry)}\uFF09`;
+    }),
+    `\u4E00\u6B21\u7B49\u5269\u4E0B\u7684\u4EFB\u610F\u4E00\u4E2A\uFF1Await_member { "conversationIds": ${JSON.stringify(ids)}, "timeoutMs": ${String(effectiveTimeout)} }\uFF08\u5176\u4E2D\u4EFB\u610F\u4E00\u4E2A\u8FD4\u56DE\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF09\u3002`,
+    '\u4E5F\u53EF\u4EE5\u53EA\u7B49\u67D0\u4E00\u4E2A\uFF1Await_member { "conversationId": "<\u4F1A\u8BDDid>" }\u3002'
+  ];
+}
+function remainingStatusLabel(entry) {
+  if (entry?.settled !== true) return "\u8FDB\u884C\u4E2D";
+  if (entry.status === "completed") return "\u5DF2\u5B8C\u6210\uFF0C\u7ED3\u679C\u8FD8\u6CA1\u53D6\u8D70";
+  if (entry.status === "failed") return "\u5DF2\u5931\u8D25";
+  if (entry.status === "interrupted") return "\u88AB\u5F02\u5E38\u4E2D\u6B62";
+  return String(entry.status);
+}
+function describeStatus(found, memberTasks) {
+  const { task, live, liveError } = found;
+  const liveStatus = typeof live?.status === "string" ? live.status : "";
+  const turns = Number.isSafeInteger(live?.turns) ? live.turns : Number.isSafeInteger(task.turns) ? task.turns : null;
+  return {
+    conversationId: task.conversationId,
+    member: task.member,
+    memberIp: task.memberIp,
+    status: liveStatus === "" ? task.status : liveStatus,
+    liveStatus,
+    statusLabel: memberStatusLabel(liveStatus, task),
+    taskStatus: task.status,
+    turns,
+    context: live?.context ?? task.context ?? null,
+    messages: memberTasks.sentMessages(task),
+    reasoning: typeof live?.lastReasoning === "string" ? live.lastReasoning : "",
+    error: task.error ?? null,
+    liveError: liveError ?? null
+  };
+}
+function statusData(entry) {
+  return { ...entry };
+}
+function formatStatusBlock(entry) {
+  const lines = [
+    `\u6210\u5458\u4F1A\u8BDD ${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF09`,
+    entry.liveStatus === "" ? `\u72B6\u6001\uFF1A${entry.statusLabel}\uFF08\u76EE\u6807\u4E0D\u53EF\u8FBE\uFF1A${entry.liveError ?? "unknown"}\uFF09` : `\u72B6\u6001\uFF1A${entry.statusLabel}\uFF08\u76EE\u6807\u5B9E\u65F6\uFF09`,
+    `\u672C\u673A\u4EFB\u52A1\uFF1A${entry.taskStatus}${entry.turns === null ? "" : `\uFF0C\u8F6E\u6B21 ${String(entry.turns)}`}`,
+    formatContextLine(entry.context),
+    entry.messages.length === 0 ? "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\uFF1A(\u6CA1\u6709\u8BB0\u5F55)" : "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\uFF08\u65E7\u2192\u65B0\uFF09\uFF1A",
+    ...entry.messages.map((message, index) => `${String(index + 1)}. ${typeof message.at === "string" && message.at !== "" ? `[${message.at}] ` : ""}${truncateText(message.text, 1200)}`),
+    entry.reasoning === "" ? "\u6700\u8FD1\u4E00\u6B21\u601D\u8003\uFF1A(\u76EE\u6807\u6CA1\u6709\u62A5\u544A\u601D\u8003)" : `\u6700\u8FD1\u4E00\u6B21\u601D\u8003\uFF1A${truncateText(entry.reasoning, 4e3)}`,
+    typeof entry.error === "string" && entry.error !== "" ? `\u9519\u8BEF\uFF1A${entry.error}` : ""
+  ];
+  return lines.filter((line) => line !== "").join("\n");
 }
 function memberStatusLabel(liveStatus, task) {
   if (liveStatus === "running") return "\u8FDB\u884C\u4E2D";

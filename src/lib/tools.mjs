@@ -7,8 +7,8 @@
  *   repack         refresh an existing offline package from this checkout
  *   members        read-only WireGuard member discovery
  *   call_member    start / continue a conversation on another member
- *   wait_member    bounded wait for one member task
- *   status_member  live state and the last two delivered messages of a task
+ *   wait_member    bounded wait for one or more member tasks, returns on the first
+ *   status_member  live state and the last two delivered messages of tracked tasks
  *
  * @module @local/dsh-mesh/tools
  */
@@ -189,8 +189,10 @@ export function registerTools(ctx, toolsCtx, service) {
       `不传 compress 时，如果目标对话的上下文占比已经超过 ${String(FORCED_COMPACT_PERCENT)}%，投递前会自动强制压缩（同样要求对话空闲）。`,
       '用 wait_member 等结果：成员每结束一轮回答就返回一次（state=progress 表示还会继续），',
       '只有 state=done 才是整段任务的最终结果；超时（state=running）用同一个 conversationId 接着等。',
+      '本对话同时还有别的成员会话在跑时，返回值会列出这些会话id，并提示用 wait_member { "conversationIds": [...] } 一次等多个。',
       '如果不再继续 wait：对话完成（或失败/中断）后，3 秒内没有 wait_member 取走结果，',
       '插件会把结果投递回调用 call_member 的这个对话，不会丢；已经取走的结果不会重复投递。',
+      '主对话当时正在执行 turn 时，这条结果会直接插入当前 turn（agent.steer），不等 turn 结束。',
       '新建对话前会按组网直连配置找到目标成员的本地代理端口，用 SSH 在目标成员上跑 mjs 探针实测其延迟和下行带宽，',
       '把一行结果、代理端口和 hub 的 git token 注入目标会话（没有直连配置就不报出网）；并禁用该会话的 ask_user_question：',
       '成员需要信息时会在回复里提问并停下，用 call_member 带 conversationId 回答。',
@@ -239,13 +241,15 @@ export function registerTools(ctx, toolsCtx, service) {
           signal: exec.signal,
         })
         const data = memberTaskData(task, memberTasks)
+        const inFlight = await memberTasks.inFlightForOrigin(originSessionOf(exec.agent)).catch(() => [])
+        const parallelHint = formatParallelWaitHint(inFlight, task)
         return {
           ok: task.status !== 'failed',
           text: [
             `已发起成员任务：${task.member}（${task.memberIp}），会话 ${task.conversationId}。`,
             typeof task.egressLine === 'string' && task.egressLine !== '' ? `出网实测：${task.egressLine}` : '',
             `会话id：${task.conversationId}`,
-            `用 wait_member 等待结果：conversationId="${task.conversationId}"，timeoutMs=30000（可按需调大，最大 300000）。`,
+            parallelHint !== '' ? parallelHint : `用 wait_member 等待结果：conversationId="${task.conversationId}"，timeoutMs=30000（可按需调大，最大 300000）。`,
             '成员每结束一轮回答就返回一次（state=progress），拿到 state=done 才是最终结果。',
             '不再等待也没关系：完成后 3 秒内没有 wait_member 取走结果，结果会自动投递回本对话。',
             `要继续这个对话：call_member { "member": ${JSON.stringify(String(task.member))}, "conversationId": ${JSON.stringify(String(task.conversationId))}, "prompt": "..." }。`,
@@ -281,6 +285,8 @@ export function registerTools(ctx, toolsCtx, service) {
             ? `上下文压缩：已压缩，替换 ${String(compaction.shadowedCount)} 项历史（约 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens）。`
             : '上下文压缩：没有可压缩的历史。'
           : ''
+      const inFlight = await memberTasks.inFlightForOrigin(originSessionOf(exec.agent)).catch(() => [])
+      const parallelHint = formatParallelWaitHint(inFlight, task)
       return {
         ok: true,
         text: [
@@ -288,7 +294,7 @@ export function registerTools(ctx, toolsCtx, service) {
           `会话id：${task.conversationId}`,
           compactionLine,
           formatContextLine(task.context),
-          `用 wait_member 等待回复：conversationId="${task.conversationId}"，timeoutMs=30000；同样每轮返回一次，state=done 才是最终结果。`,
+          parallelHint !== '' ? parallelHint : `用 wait_member 等待回复：conversationId="${task.conversationId}"，timeoutMs=30000；同样每轮返回一次，state=done 才是最终结果。`,
           '不再等待也没关系：完成后 3 秒内没有 wait_member 取走结果，结果会自动投递回本对话。',
           `日志：${data.logFile}`,
         ].filter(line => line !== '').join('\n'),
@@ -300,16 +306,20 @@ export function registerTools(ctx, toolsCtx, service) {
   const waitMemberDefinition = {
     name: 'wait_member',
     description: [
-      '等待一个由 call_member 发起的成员会话，最多 timeoutMs 毫秒。',
+      '等待一个或多个由 call_member 发起的成员会话，最多 timeoutMs 毫秒。',
       '',
       'conversationId 就是 call_member 返回的会话id；插件内部的 task id 不对外暴露。',
+      '`conversationIds` 一次等多个会话：其中任意一个先有消息就立刻返回，只取走那一个的回复，',
+      '其余会话的回复不会丢，返回值会在“还有 N 个会话没有返回”里列出它们的会话id，',
+      '可以继续用 conversationIds 等剩下的，也可以只等某一个。',
       '成员对话一有新回复（一轮结束）就立刻返回，不等到整段任务结束；返回值带 state：',
       'progress：本轮回复已返回，但成员还会继续（可能还有未完成的子代理）；用同一个 conversationId 再等下一轮。',
       'done：整段任务完成，返回最终文本、会话id和当前上下文占用。',
-      '超时：done=false、state=running，用同一个 conversationId 继续等即可，期间产生的回复不会丢。',
+      '超时：done=false、state=running，用同一个 conversationId（或多个 conversationIds）继续等即可，期间产生的回复不会丢。',
       '失败/中断：返回错误；目标 DSH 重启时可以用 call_member 带 conversationId 继续该对话。',
       '如果决定不再继续等：对话完成（或失败/中断）后，3 秒内没有 wait_member 取走结果，',
       '插件会把结果或失败原因自动投递回发起对话；已经取走的结果不会重复投递。',
+      '发起对话当时正在执行 turn 时，这条结果会直接插入当前 turn（不等 turn 结束）。',
       'state=done 时可以用返回的会话id继续投递：call_member { conversationId, prompt }；',
       '上下文占用超过 20% 时会建议下次投递加 "compress": true，先压缩再投递。',
       '每次调用有上限（默认 30000，最大 300000 毫秒），不会无限阻塞；用户停止当前对话会中止本次等待。',
@@ -317,10 +327,14 @@ export function registerTools(ctx, toolsCtx, service) {
     parameters: {
       type: 'object',
       properties: {
-        conversationId: { type: 'string', description: '要等待的会话id（call_member 返回）。' },
+        conversationId: { type: 'string', description: '要等待的会话id（call_member 返回）。只等一个时用它。' },
+        conversationIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '一次等多个会话id：任意一个先有消息就立刻返回，其余会话在返回值里列出来可以继续等。和 conversationId 二选一或并用。',
+        },
         timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, description: '本次等待上限，默认 30000 毫秒。' },
       },
-      required: ['conversationId'],
       additionalProperties: false,
     },
     output: {
@@ -333,31 +347,118 @@ export function registerTools(ctx, toolsCtx, service) {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const timeoutMs = Number.isSafeInteger(args.timeoutMs) ? args.timeoutMs : 30_000
-      const result = await memberTasks.wait(args.conversationId, { timeoutMs, signal: exec.signal })
+      const ids = requestedConversationIds(args)
+      if (ids.length === 0) throw new Error('conversationId or conversationIds is required')
+      if (ids.length === 1) {
+        const result = await memberTasks.wait(ids[0], { timeoutMs, signal: exec.signal })
+        const task = result.task
+        const replies = Array.isArray(result.replies) ? result.replies : []
+        const replyText = replies.map(reply => reply.text).join('\n\n').trim()
+        const data = {
+          ...memberTaskData(task, memberTasks),
+          done: result.done,
+          timedOut: result.timedOut,
+          state: result.state,
+          text: replyText,
+          replies,
+        }
+        const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `第 ${String(task.turns)} 轮` : ''
+        const where = `${task.member}（${task.memberIp}）`
+        const contextLine = formatContextLine(task.context)
+        const advice = formatCompactionAdvice(task.context)
+        if (!result.done && result.state === 'progress') {
+          return {
+            ok: true,
+            text: [
+              `成员会话 ${task.conversationId} 进行中${turn === '' ? '' : `（${turn}，尚未结束）`}：${where}。`,
+              replyText !== '' ? `本轮回复：\n${replyText}` : '',
+              '成员还会继续（可能还有子代理在跑），这不是最终结果。',
+              contextLine,
+              `请继续调用 wait_member 等下一轮：conversationId="${task.conversationId}"，timeoutMs=30000；收到 state=done 才是最终结果。`,
+              `日志：${data.logFile}`,
+            ].filter(line => line !== '').join('\n'),
+            data,
+          }
+        }
+        if (result.done && task.status === 'completed') {
+          const finalText = replyText !== '' ? replyText : (typeof task.lastText === 'string' ? task.lastText : '')
+          return {
+            ok: true,
+            text: [
+              `成员会话 ${task.conversationId} 已完成：${where}。`,
+              '（任务已结束，不需要再调用 wait_member；要继续这个对话用 call_member 带 conversationId。）',
+              `会话id：${task.conversationId}`,
+              `继续这个对话：call_member { "member": ${JSON.stringify(String(task.member))}, "conversationId": ${JSON.stringify(String(task.conversationId))}, "prompt": "..." }`,
+              contextLine,
+              advice,
+              '结果：',
+              finalText !== '' ? finalText : '(成员没有返回文本结果)',
+              `日志：${data.logFile}`,
+            ].filter(line => line !== '').join('\n'),
+            data,
+          }
+        }
+        if (!result.done) {
+          const effective = Math.min(300_000, Math.max(1000, timeoutMs))
+          return {
+            ok: true,
+            text: [
+              `成员会话 ${task.conversationId} 仍在运行${turn === '' ? '' : `（${turn}，尚未结束）`}：${where}。`,
+              '这段时间没有新回复，但任务没有结束、期间的回复也不会丢。',
+              contextLine,
+              `请继续调用 wait_member：conversationId="${task.conversationId}"，timeoutMs=${String(effective)}；收到 state=done 才是最终结果。`,
+              typeof task.lastText === 'string' && task.lastText !== '' ? `最近输出：${task.lastText.slice(0, 500)}` : '',
+              `日志：${data.logFile}`,
+            ].filter(line => line !== '').join('\n'),
+            data,
+          }
+        }
+        return {
+          ok: false,
+          text: [
+            `成员会话 ${task.conversationId} ${task.status}（已结束）：${where}。`,
+            `会话id：${task.conversationId}`,
+            `原因：${task.error ?? 'unknown'}`,
+            replyText !== '' ? `中断前的回复：\n${replyText}` : '',
+            task.interrupted === true ? '目标成员的 DSH 重启或运行时退出打断了这一轮；可以用 call_member 带同一个 conversationId 继续。' : '',
+            contextLine,
+            `日志：${data.logFile}`,
+          ].filter(line => line !== '').join('\n'),
+          data,
+        }
+      }
+
+      // Several conversations at once: return the first one with news and list
+      // the rest, so one wait covers the whole fan-out without losing replies.
+      const result = await memberTasks.waitAny(ids, { timeoutMs, signal: exec.signal })
       const task = result.task
       const replies = Array.isArray(result.replies) ? result.replies : []
       const replyText = replies.map(reply => reply.text).join('\n\n').trim()
+      const remaining = Array.isArray(result.remaining) ? result.remaining : []
       const data = {
         ...memberTaskData(task, memberTasks),
+        conversationIds: ids,
         done: result.done,
         timedOut: result.timedOut,
         state: result.state,
         text: replyText,
         replies,
+        remaining,
       }
-      const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `第 ${String(task.turns)} 轮` : ''
+      const effective = Math.min(300_000, Math.max(1000, timeoutMs))
+      const remainingHint = formatRemainingWait(remaining, effective)
       const where = `${task.member}（${task.memberIp}）`
-      const contextLine = formatContextLine(task.context)
-      const advice = formatCompactionAdvice(task.context)
+      const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `第 ${String(task.turns)} 轮` : ''
       if (!result.done && result.state === 'progress') {
         return {
           ok: true,
           text: [
-            `成员会话 ${task.conversationId} 进行中${turn === '' ? '' : `（${turn}，尚未结束）`}：${where}。`,
+            `成员会话 ${task.conversationId} 有新的进展${turn === '' ? '' : `（${turn}，尚未结束）`}：${where}。`,
             replyText !== '' ? `本轮回复：\n${replyText}` : '',
-            '成员还会继续（可能还有子代理在跑），这不是最终结果。',
-            contextLine,
-            `请继续调用 wait_member 等下一轮：conversationId="${task.conversationId}"，timeoutMs=30000；收到 state=done 才是最终结果。`,
+            '本次只返回了最先有消息的那个会话；这不是最终结果，还要继续等。',
+            formatContextLine(task.context),
+            `继续等这个会话：wait_member { "conversationId": ${JSON.stringify(String(task.conversationId))}, "timeoutMs": ${String(effective)} }`,
+            ...remainingHint,
             `日志：${data.logFile}`,
           ].filter(line => line !== '').join('\n'),
           data,
@@ -369,28 +470,26 @@ export function registerTools(ctx, toolsCtx, service) {
           ok: true,
           text: [
             `成员会话 ${task.conversationId} 已完成：${where}。`,
-            '（任务已结束，不需要再调用 wait_member；要继续这个对话用 call_member 带 conversationId。）',
+            '（这个会话已结束，不需要再等它；要继续这个对话用 call_member 带 conversationId。）',
             `会话id：${task.conversationId}`,
             `继续这个对话：call_member { "member": ${JSON.stringify(String(task.member))}, "conversationId": ${JSON.stringify(String(task.conversationId))}, "prompt": "..." }`,
-            contextLine,
-            advice,
+            formatContextLine(task.context),
+            formatCompactionAdvice(task.context),
             '结果：',
             finalText !== '' ? finalText : '(成员没有返回文本结果)',
+            ...remainingHint,
             `日志：${data.logFile}`,
           ].filter(line => line !== '').join('\n'),
           data,
         }
       }
-      if (!result.done) {
-        const effective = Math.min(300_000, Math.max(1000, timeoutMs))
+      if (result.timedOut) {
         return {
           ok: true,
           text: [
-            `成员会话 ${task.conversationId} 仍在运行${turn === '' ? '' : `（${turn}，尚未结束）`}：${where}。`,
-            '这段时间没有新回复，但任务没有结束、期间的回复也不会丢。',
-            contextLine,
-            `请继续调用 wait_member：conversationId="${task.conversationId}"，timeoutMs=${String(effective)}；收到 state=done 才是最终结果。`,
-            typeof task.lastText === 'string' && task.lastText !== '' ? `最近输出：${task.lastText.slice(0, 500)}` : '',
+            `等待超时：${String(ids.length)} 个会话在 ${String(effective)} 毫秒内都没有新回复。`,
+            '任务都没有结束，期间的回复也不会丢。',
+            ...remainingHint,
             `日志：${data.logFile}`,
           ].filter(line => line !== '').join('\n'),
           data,
@@ -404,7 +503,8 @@ export function registerTools(ctx, toolsCtx, service) {
           `原因：${task.error ?? 'unknown'}`,
           replyText !== '' ? `中断前的回复：\n${replyText}` : '',
           task.interrupted === true ? '目标成员的 DSH 重启或运行时退出打断了这一轮；可以用 call_member 带同一个 conversationId 继续。' : '',
-          contextLine,
+          formatContextLine(task.context),
+          ...remainingHint,
           `日志：${data.logFile}`,
         ].filter(line => line !== '').join('\n'),
         data,
@@ -415,9 +515,9 @@ export function registerTools(ctx, toolsCtx, service) {
   const statusMemberDefinition = {
     name: 'status_member',
     description: [
-      '查看一个成员会话的当前状态，以及这个目标对话最近两次的用户消息（就是 call_member 投递过去的消息）。',
+      '查看一个或多个成员会话的当前状态，以及这些目标对话最近两次的用户消息（就是 call_member 投递过去的消息）。',
       '',
-      '`conversationId` 是 call_member / wait_member 返回的会话id。',
+      '`conversationId` 查一个，`conversationIds` 一次查多个（返回按会话分块列出，并带一行汇总）。',
       '状态优先取目标成员的最新投影：进行中 / 空闲 / 被异常中止 / 出错；目标不可达时退回本机任务状态。',
       '最近两次用户消息来自本机任务记录，按投递时间从旧到新排列，最多两条；',
       '最近一次思考是目标对话最新一轮的 reasoning；只跟踪本机发起或继续过的会话，没有跟踪的会话会明确报错。',
@@ -425,9 +525,13 @@ export function registerTools(ctx, toolsCtx, service) {
     parameters: {
       type: 'object',
       properties: {
-        conversationId: { type: 'string', description: '要查看的成员会话id（call_member / wait_member 返回）。' },
+        conversationId: { type: 'string', description: '要查看的成员会话id（call_member / wait_member 返回）。查一个时用它。' },
+        conversationIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '一次查看多个成员会话id；返回每个会话的状态、最近两次用户消息和最近一次思考。',
+        },
       },
-      required: ['conversationId'],
       additionalProperties: false,
     },
     output: {
@@ -439,45 +543,45 @@ export function registerTools(ctx, toolsCtx, service) {
     },
     isConcurrencySafe: () => true,
     async execute(args) {
-      const conversationId = String(args.conversationId ?? '').trim()
-      if (conversationId === '') throw new Error('conversationId is required')
-      const found = await memberTasks.inspect(conversationId)
-      if (found === null) {
-        throw new Error(`本机没有跟踪会话 ${conversationId}；先用 call_member 发起或继续一次，再查状态。`)
+      const ids = requestedConversationIds(args)
+      if (ids.length === 0) throw new Error('conversationId is required')
+      const inspected = await Promise.all(ids.map(async (id) => {
+        try {
+          return { id, found: await memberTasks.inspect(id) }
+        } catch {
+          return { id, found: null }
+        }
+      }))
+      const missing = inspected.filter(entry => entry.found === null).map(entry => entry.id)
+      const entries = inspected
+        .filter(entry => entry.found !== null)
+        .map(entry => describeStatus(entry.found, memberTasks))
+      if (entries.length === 0) {
+        throw new Error(`本机没有跟踪会话 ${missing.join('、')}；先用 call_member 发起或继续一次，再查状态。`)
       }
-      const { task, live, liveError } = found
-      const liveStatus = typeof live?.status === 'string' ? live.status : ''
-      const label = memberStatusLabel(liveStatus, task)
-      const turns = Number.isSafeInteger(live?.turns) ? live.turns : (Number.isSafeInteger(task.turns) ? task.turns : null)
-      const context = live?.context ?? task.context ?? null
-      const messages = memberTasks.sentMessages(task)
-      const reasoning = typeof live?.lastReasoning === 'string' ? live.lastReasoning : ''
-      const lines = [
-        `成员会话 ${task.conversationId}（${task.member} ${task.memberIp}）`,
-        liveStatus === '' ? `状态：${label}（目标不可达：${liveError ?? 'unknown'}）` : `状态：${label}（目标实时）`,
-        `本机任务：${task.status}${turns === null ? '' : `，轮次 ${String(turns)}`}`,
-        formatContextLine(context),
-        messages.length === 0 ? '最近两次用户消息：(没有记录)' : '最近两次用户消息（旧→新）：',
-        ...messages.map((message, index) => `${String(index + 1)}. ${typeof message.at === 'string' && message.at !== '' ? `[${message.at}] ` : ''}${truncateText(message.text, 1200)}`),
-        reasoning === '' ? '最近一次思考：(目标没有报告思考)' : `最近一次思考：${truncateText(reasoning, 4000)}`,
-        typeof task.error === 'string' && task.error !== '' ? `错误：${task.error}` : '',
-      ].filter(line => line !== '')
+      if (entries.length === 1 && missing.length === 0) {
+        return {
+          ok: true,
+          text: formatStatusBlock(entries[0]),
+          data: { ...statusData(entries[0]), conversations: entries.map(statusData) },
+        }
+      }
+      const counts = new Map()
+      for (const entry of entries) counts.set(entry.statusLabel, (counts.get(entry.statusLabel) ?? 0) + 1)
+      const parts = [
+        `成员会话状态：共 ${String(entries.length)} 个（${[...counts].map(([label, count]) => `${label} ${String(count)}`).join('，')}）`,
+      ]
+      entries.forEach((entry, index) => {
+        const lines = formatStatusBlock(entry).split('\n')
+        parts.push('', lines.map((line, lineIndex) => (lineIndex === 0 ? `[${String(index + 1)}] ${line}` : line)).join('\n'))
+      })
+      if (missing.length > 0) {
+        parts.push('', `本机没有跟踪这些会话：${missing.join('、')}；先用 call_member 发起或继续一次，再查状态。`)
+      }
       return {
         ok: true,
-        text: lines.join('\n'),
-        data: {
-          conversationId: task.conversationId,
-          member: task.member,
-          memberIp: task.memberIp,
-          status: liveStatus === '' ? task.status : liveStatus,
-          taskStatus: task.status,
-          turns,
-          context,
-          messages,
-          reasoning,
-          error: task.error ?? null,
-          liveError,
-        },
+        text: parts.join('\n'),
+        data: { count: entries.length, conversations: entries.map(statusData), missing },
       }
     },
   }
@@ -580,6 +684,14 @@ function memberTaskData(task, memberTasks) {
 const CONTEXT_COMPACT_THRESHOLD = 20
 
 /**
+ * Hard limit on one fan-out `wait_member` / `status_member` call.
+ *
+ * Twenty conversations cover every realistic fan-out while keeping one tool
+ * result readable and the waiter table small.
+ */
+const MAX_FANOUT_CONVERSATIONS = 20
+
+/**
  * Format a token count for a one-line status.
  * @param {number} value token count.
  * @returns {string} text.
@@ -616,6 +728,160 @@ function formatContextLine(context) {
   if (max === null) return `对话上下文：已用 ${formatTokens(used)} tokens${percentText}（成员未报告上限）`
   if (used === null) return `对话上下文：上限 ${formatTokens(max)} tokens（成员未报告已用）`
   return `对话上下文：${formatTokens(used)} / ${formatTokens(max)} tokens${percentText}`
+}
+
+/**
+ * The conversation ids one tool call targets, in priority order.
+ *
+ * Both shapes are accepted so a single id call stays the ordinary form while a
+ * fan-out call can name several; duplicates are dropped, and the list is
+ * bounded so a malformed list cannot register thousands of waiters.
+ * @param {{conversationId?: unknown, conversationIds?: unknown}} args tool arguments.
+ * @returns {string[]} distinct ids.
+ */
+function requestedConversationIds(args) {
+  const ids = []
+  const push = (value) => {
+    const id = String(value ?? '').trim()
+    if (id === '' || ids.includes(id)) return
+    ids.push(id)
+  }
+  if (typeof args?.conversationId === 'string') push(args.conversationId)
+  if (Array.isArray(args?.conversationIds)) {
+    for (const value of args.conversationIds) push(value)
+  }
+  if (ids.length > MAX_FANOUT_CONVERSATIONS) {
+    throw new Error(`too many conversations in one call: ${String(ids.length)} > ${String(MAX_FANOUT_CONVERSATIONS)}`)
+  }
+  return ids
+}
+
+/**
+ * The origin session id a member task is filed under.
+ *
+ * The task service records `agent.session.id`; the fallback keeps the lookup
+ * working for an agent whose session id is only exposed as its own id.
+ * @param {object} [agent] executing agent.
+ * @returns {string} session id, or '' when unknown.
+ */
+function originSessionOf(agent) {
+  const sessionId = agent?.session?.id
+  if (typeof sessionId === 'string' && sessionId !== '') return sessionId
+  return typeof agent?.id === 'string' ? agent.id : ''
+}
+
+/**
+ * Tell the model about the other member conversations this turn started.
+ *
+ * Without it a fan-out looks like a single task: the model would wait on the
+ * last conversation only and leave the others unread until the fallback
+ * delivery.
+ * @param {object[]} inFlight running tasks of this origin session, oldest first.
+ * @param {object} current the task this call just produced.
+ * @returns {string} a hint block, or '' when this is the only task.
+ */
+function formatParallelWaitHint(inFlight, current) {
+  if (!Array.isArray(inFlight) || inFlight.length < 2) return ''
+  const ids = inFlight.map(task => String(task.conversationId))
+  return [
+    `当前对话有 ${String(inFlight.length)} 个成员会话同时在跑：`,
+    ...inFlight.map((task) => {
+      const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `，第 ${String(task.turns)} 轮` : ''
+      return `- ${task.conversationId}（${task.member} ${task.memberIp}${turn}）`
+    }),
+    `可以一次等多个：wait_member { "conversationIds": ${JSON.stringify(ids)} }，其中任意一个先返回就立刻返回；`,
+    `也可以只等这个：wait_member { "conversationId": ${JSON.stringify(String(current.conversationId))} }。`,
+  ].join('\n')
+}
+
+/**
+ * Describe the conversations one fan-out wait did not return.
+ * @param {object[]} remaining outstanding tasks.
+ * @param {number} effectiveTimeout the timeout the tool call used.
+ * @returns {string[]} hint lines, empty when nothing is left.
+ */
+function formatRemainingWait(remaining, effectiveTimeout) {
+  if (!Array.isArray(remaining) || remaining.length === 0) return []
+  const ids = remaining.map(entry => String(entry.conversationId))
+  return [
+    `还有 ${String(remaining.length)} 个会话没有返回：`,
+    ...remaining.map((entry) => {
+      const turn = Number.isSafeInteger(entry.turns) && entry.turns > 0 ? `，第 ${String(entry.turns)} 轮` : ''
+      return `- ${entry.conversationId}（${entry.member} ${entry.memberIp}${turn}，${remainingStatusLabel(entry)}）`
+    }),
+    `一次等剩下的任意一个：wait_member { "conversationIds": ${JSON.stringify(ids)}, "timeoutMs": ${String(effectiveTimeout)} }（其中任意一个返回就立刻返回）。`,
+    '也可以只等某一个：wait_member { "conversationId": "<会话id>" }。',
+  ]
+}
+
+/**
+ * Label one outstanding fan-out conversation for the wait hint.
+ * @param {object} entry remaining summary.
+ * @returns {string} status label.
+ */
+function remainingStatusLabel(entry) {
+  if (entry?.settled !== true) return '进行中'
+  if (entry.status === 'completed') return '已完成，结果还没取走'
+  if (entry.status === 'failed') return '已失败'
+  if (entry.status === 'interrupted') return '被异常中止'
+  return String(entry.status)
+}
+
+/**
+ * Merge one `status_member` inspection into model-facing fields.
+ * @param {{task: object, live: object|null, liveError: string|null}} found inspection.
+ * @param {{sentMessages: (task: object) => object[]}} memberTasks task service.
+ * @returns {object} status entry.
+ */
+function describeStatus(found, memberTasks) {
+  const { task, live, liveError } = found
+  const liveStatus = typeof live?.status === 'string' ? live.status : ''
+  const turns = Number.isSafeInteger(live?.turns) ? live.turns : (Number.isSafeInteger(task.turns) ? task.turns : null)
+  return {
+    conversationId: task.conversationId,
+    member: task.member,
+    memberIp: task.memberIp,
+    status: liveStatus === '' ? task.status : liveStatus,
+    liveStatus,
+    statusLabel: memberStatusLabel(liveStatus, task),
+    taskStatus: task.status,
+    turns,
+    context: live?.context ?? task.context ?? null,
+    messages: memberTasks.sentMessages(task),
+    reasoning: typeof live?.lastReasoning === 'string' ? live.lastReasoning : '',
+    error: task.error ?? null,
+    liveError: liveError ?? null,
+  }
+}
+
+/**
+ * The `status_member` data block for one conversation.
+ * @param {object} entry status entry.
+ * @returns {object} data fields.
+ */
+function statusData(entry) {
+  return { ...entry }
+}
+
+/**
+ * Render one conversation's status block.
+ * @param {object} entry status entry.
+ * @returns {string} text block.
+ */
+function formatStatusBlock(entry) {
+  const lines = [
+    `成员会话 ${entry.conversationId}（${entry.member} ${entry.memberIp}）`,
+    entry.liveStatus === ''
+      ? `状态：${entry.statusLabel}（目标不可达：${entry.liveError ?? 'unknown'}）`
+      : `状态：${entry.statusLabel}（目标实时）`,
+    `本机任务：${entry.taskStatus}${entry.turns === null ? '' : `，轮次 ${String(entry.turns)}`}`,
+    formatContextLine(entry.context),
+    entry.messages.length === 0 ? '最近两次用户消息：(没有记录)' : '最近两次用户消息（旧→新）：',
+    ...entry.messages.map((message, index) => `${String(index + 1)}. ${typeof message.at === 'string' && message.at !== '' ? `[${message.at}] ` : ''}${truncateText(message.text, 1200)}`),
+    entry.reasoning === '' ? '最近一次思考：(目标没有报告思考)' : `最近一次思考：${truncateText(entry.reasoning, 4000)}`,
+    typeof entry.error === 'string' && entry.error !== '' ? `错误：${entry.error}` : '',
+  ]
+  return lines.filter(line => line !== '').join('\n')
 }
 
 /**

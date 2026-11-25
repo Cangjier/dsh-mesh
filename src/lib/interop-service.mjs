@@ -502,6 +502,8 @@ export function createInteropService(options) {
   const bySession = new Map()
   /** @type {Map<string, {agent: any, dispose: () => Promise<void>}>} */
   const handles = new Map()
+  /** Agents whose member rules (denied question tool, interaction prompts) are already in place. */
+  const preparedAgents = new WeakSet()
   const listeners = []
   let server = null
   let stopped = false
@@ -903,11 +905,11 @@ export function createInteropService(options) {
         resumeSessionId: conversation.sessionId,
         // Resume re-runs setup on the restored session, so the denied question
         // tool and the interaction rules come back with it.
-        setup: async (agentCtx) => {
+        setup: async (agentCtx, agent) => {
           if (composition.presets !== undefined && composition.id !== '') {
             await composition.presets.mount(agentCtx, composition.id)
           }
-          applyMemberSetup(agentCtx)
+          applyMemberSetup(agentCtx, agent)
         },
       })
       handles.set(conversation.id, handle)
@@ -986,14 +988,21 @@ export function createInteropService(options) {
    * Both registrations belong to the agent's scope, so they end with the
    * conversation and never affect another agent. The preset mount has already
    * run, which is what puts `ask_user_question` in the inherited layer that
-   * `tools.restrict()` filters. A failure is logged, not thrown: a preset
-   * without the tool needs no restriction, and losing the rule must not lose
-   * the task.
-   * @param {any} agentCtx scoped setup context.
+   * `tools.restrict()` filters. The weak set makes the call idempotent: setup
+   * applies it once, and every delivery may call it again without stacking
+   * restrictions or duplicate prompt contexts. A failure is logged, not
+   * thrown: a preset without the tool needs no restriction, and losing the
+   * rule must not lose the task.
+   * @param {any} agentCtx scoped setup context (the agent's own context).
+   * @param {any} [agent] live agent owning that context; the idempotency key.
    * @returns {void}
    */
-  function applyMemberSetup(agentCtx) {
+  function applyMemberSetup(agentCtx, agent) {
     if (agentCtx === null || typeof agentCtx !== 'object') return
+    if (agent !== undefined && agent !== null) {
+      if (preparedAgents.has(agent)) return
+      preparedAgents.add(agent)
+    }
     const tools = agentCtx.tools
     if (tools !== undefined && tools !== null && typeof tools.restrict === 'function') {
       try {
@@ -1190,7 +1199,7 @@ export function createInteropService(options) {
             await composition.presets.mount(agentCtx, composition.id)
           }
           applyPreset(agent)
-          applyMemberSetup(agentCtx)
+          applyMemberSetup(agentCtx, agent)
         },
       })
       handles.set(id, handle)
@@ -1245,6 +1254,11 @@ export function createInteropService(options) {
     }
     const blocks = contentBlocks(request.content ?? request.message ?? request.prompt)
     const agent = await ensureAgent(conversation)
+    // A member conversation can be resumed by the member's own Web UI, which
+    // mounts the preset but never runs this service's setup. Re-apply the
+    // member rules on every delivery so that path cannot keep the answerless
+    // question tool (idempotent; the interop's own agents already have them).
+    applyMemberSetup(agent.ctx, agent)
     conversation.prompted = true
     conversation.status = 'running'
     conversation.idle = false

@@ -15803,7 +15803,8 @@ function registerTools(ctx, toolsCtx, service) {
       "\u63D2\u4EF6\u53EA\u6295\u9012\u5C1A\u672A\u53D6\u8D70\u7684\u56DE\u590D\uFF1B\u5DF2\u7ECF\u53D6\u8D70\u7684\u7ED3\u679C\u4E0D\u4F1A\u91CD\u590D\u6295\u9012\u3002",
       "\u4E3B\u5BF9\u8BDD\u5F53\u65F6\u6B63\u5728\u6267\u884C turn \u65F6\uFF0C\u8FD9\u6761\u7ED3\u679C\u4F1A\u76F4\u63A5\u63D2\u5165\u5F53\u524D turn\uFF08agent.steer\uFF09\uFF0C\u4E0D\u7B49 turn \u7ED3\u675F\u3002",
       "\u65B0\u5EFA\u5BF9\u8BDD\u524D\u4F1A\u6309\u7EC4\u7F51\u76F4\u8FDE\u914D\u7F6E\u627E\u5230\u76EE\u6807\u6210\u5458\u7684\u672C\u5730\u4EE3\u7406\u7AEF\u53E3\uFF0C\u7528 SSH \u5728\u76EE\u6807\u6210\u5458\u4E0A\u8DD1 mjs \u63A2\u9488\u5B9E\u6D4B\u5176\u5EF6\u8FDF\u548C\u4E0B\u884C\u5E26\u5BBD\uFF0C",
-      "\u628A\u4E00\u884C\u7ED3\u679C\u3001\u4EE3\u7406\u7AEF\u53E3\u548C hub \u7684 git token \u6CE8\u5165\u76EE\u6807\u4F1A\u8BDD\uFF08\u6CA1\u6709\u76F4\u8FDE\u914D\u7F6E\u5C31\u4E0D\u62A5\u51FA\u7F51\uFF09\uFF1B\u5E76\u7981\u7528\u8BE5\u4F1A\u8BDD\u7684 ask_user_question\uFF1A",
+      "\u628A\u4E00\u884C\u7ED3\u679C\u3001\u4EE3\u7406\u7AEF\u53E3\u548C hub \u7684 git token \u6CE8\u5165\u76EE\u6807\u4F1A\u8BDD\uFF08\u6CA1\u6709\u76F4\u8FDE\u914D\u7F6E\u5C31\u4E0D\u62A5\u51FA\u7F51\uFF09\uFF1B\u5E76\u7981\u7528\u8BE5\u4F1A\u8BDD\u7684 ask_user_question\uFF0C",
+      "\u6BCF\u6B21\u6295\u9012\u524D\u8FD8\u4F1A\u5BF9\u5F53\u524D live agent \u91CD\u65B0\u5E94\u7528\u4E00\u6B21\uFF08\u6210\u5458\u81EA\u5DF1 Web UI \u6062\u590D\u7684\u4F1A\u8BDD\u4E5F\u8986\u76D6\uFF09\uFF1A",
       "\u6210\u5458\u9700\u8981\u4FE1\u606F\u65F6\u4F1A\u5728\u56DE\u590D\u91CC\u63D0\u95EE\u5E76\u505C\u4E0B\uFF0C\u7528 call_member \u5E26 conversationId \u56DE\u7B54\u3002",
       "`identity` / `scope` \u53EF\u9009\uFF1A\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8EAB\u4EFD/\u89D2\u8272\u548C\u8D1F\u8D23\u7684\u5DE5\u4F5C\u8303\u56F4\uFF0C\u6309\u4F1A\u8BDDid \u6301\u4E45\u5316\u5230 member-scopes.json\uFF1B",
       "\u65B0\u5EFA\u5BF9\u8BDD\u65F6\u968F mesh.profile \u6CE8\u5165\u6210\u5458\u7684\u7CFB\u7EDF\u4E0A\u4E0B\u6587\uFF0C\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u65F6\u4F1A\u5408\u5E76\u8BE5\u4F1A\u8BDD\u7684\u8BBE\u7F6E\u5E76\u5728\u6D88\u606F\u524D\u52A0\u4E00\u884C\u3010\u6210\u5458\u8EAB\u4EFD\u3011\u8BF4\u660E\u3002",
@@ -17305,6 +17306,7 @@ function createInteropService(options) {
   const conversations = /* @__PURE__ */ new Map();
   const bySession = /* @__PURE__ */ new Map();
   const handles = /* @__PURE__ */ new Map();
+  const preparedAgents = /* @__PURE__ */ new WeakSet();
   const listeners = [];
   let server = null;
   let stopped = false;
@@ -17583,11 +17585,11 @@ data: ${JSON.stringify(payload)}
         resumeSessionId: conversation.sessionId,
         // Resume re-runs setup on the restored session, so the denied question
         // tool and the interaction rules come back with it.
-        setup: async (agentCtx) => {
+        setup: async (agentCtx, agent) => {
           if (composition.presets !== void 0 && composition.id !== "") {
             await composition.presets.mount(agentCtx, composition.id);
           }
-          applyMemberSetup(agentCtx);
+          applyMemberSetup(agentCtx, agent);
         }
       });
       handles.set(conversation.id, handle2);
@@ -17634,8 +17636,12 @@ data: ${JSON.stringify(payload)}
       log(`could not title ${conversation.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  function applyMemberSetup(agentCtx) {
+  function applyMemberSetup(agentCtx, agent) {
     if (agentCtx === null || typeof agentCtx !== "object") return;
+    if (agent !== void 0 && agent !== null) {
+      if (preparedAgents.has(agent)) return;
+      preparedAgents.add(agent);
+    }
     const tools = agentCtx.tools;
     if (tools !== void 0 && tools !== null && typeof tools.restrict === "function") {
       try {
@@ -17774,7 +17780,7 @@ data: ${JSON.stringify(payload)}
             await composition.presets.mount(agentCtx, composition.id);
           }
           applyPreset(agent);
-          applyMemberSetup(agentCtx);
+          applyMemberSetup(agentCtx, agent);
         }
       });
       handles.set(id, handle2);
@@ -17812,6 +17818,7 @@ data: ${JSON.stringify(payload)}
     }
     const blocks = contentBlocks(request.content ?? request.message ?? request.prompt);
     const agent = await ensureAgent(conversation);
+    applyMemberSetup(agent.ctx, agent);
     conversation.prompted = true;
     conversation.status = "running";
     conversation.idle = false;

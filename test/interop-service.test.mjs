@@ -680,6 +680,84 @@ test('a resumed conversation re-applies the question-tool restriction', async ()
   }
 })
 
+test('a delivery re-applies the member rules to an agent the member Web UI created', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'mesh-interop-'))
+  const settings = {
+    bind: '127.0.0.1',
+    port: 0,
+    token: 'test-token',
+    dataDir: dir,
+    workdir: dir,
+    workspaceRoot: path.join(dir, 'workspaces'),
+    stateFile: path.join(dir, 'conversations.json'),
+    logFile: path.join(dir, 'interop.log'),
+    provider: 'deepseek-account',
+    model: 'deepseek-flash',
+    approve: true,
+    preset: 'workspace-write',
+    agentPreset: 'standard',
+    tokenSource: 'test',
+  }
+  const call = async (port, method, url, body) => {
+    const response = await fetch(`http://127.0.0.1:${port}${url}`, {
+      method,
+      headers: { authorization: 'Bearer test-token', ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+    return { status: response.status, body: await response.json() }
+  }
+  let service = createInteropService({
+    ctx: fakeHost({ agentCtx: { tools: { restrict: () => {} }, systemPrompt: { context: () => {} } } }).host,
+    settings,
+    log: () => {},
+    retry: false,
+  })
+  let port = 0
+  try {
+    ;({ port } = await service.start())
+    const created = await call(port, 'POST', '/v1/conversations', { prompt: '先做一半' })
+    assert.equal(created.status, 201)
+    const id = created.body.conversation.id
+    await service.dispose()
+
+    // The member's own Web UI can resume the session first: the live agent
+    // exists with the preset mounted but without this service's setup, so the
+    // answerless question tool is still available. Every delivery must restore
+    // the member rules before the next step resolves its tools.
+    const restricted = []
+    const contexts = []
+    const webCtx = {
+      tools: { restrict: filter => { restricted.push(filter) } },
+      systemPrompt: { context: entry => { contexts.push(entry) } },
+    }
+    const webHost = fakeHost()
+    webHost.agents.set(id, {
+      id,
+      status: 'idle',
+      ctx: webCtx,
+      session: { id, append() {} },
+      followup() {},
+      steer() {},
+      async runMaintenance(job) { return job(new AbortController().signal) },
+    })
+    service = createInteropService({ ctx: webHost.host, settings, log: () => {}, retry: false })
+    ;({ port } = await service.start())
+    const sent = await call(port, 'POST', `/v1/conversations/${id}/messages`, { content: '继续' })
+    assert.equal(sent.status, 202)
+    assert.deepEqual(restricted, [{ deny: ['ask_user_question'] }])
+    assert.deepEqual(contexts.map(entry => entry.name), ['mesh:interaction', 'mesh:subagent'])
+
+    // A second delivery must not stack another restriction or prompt context.
+    const again = await call(port, 'POST', `/v1/conversations/${id}/messages`, { content: '再继续' })
+    assert.equal(again.status, 202)
+    assert.equal(restricted.length, 1)
+    assert.equal(contexts.length, 2)
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a workspace conversation lives below the root and keeps its prompt', async () => {
   const { service, call, settings, dir } = await serviceOf()
   try {

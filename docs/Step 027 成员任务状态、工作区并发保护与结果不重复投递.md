@@ -9,8 +9,9 @@
 
 > **后续更新（feat/member-idle-compress）**：本文描述的「30 秒状态注入」和
 > `call_member` 的 `compress` 选项已被取代。当前实现：`agent/pre-step` 注入间隔为 60 秒；
-> 主对话空闲主动推送默认 **5 分钟**（`set_member_scope` 的 `idlePushMs`，1000–86400000 毫秒，
-> 只对主对话生效）；压缩阈值默认 **35%**（`compressPercent`，主对话和成员会话都生效），
+> 主对话 `turn/end` 后，若距上一次成员状态 review 结束超过 **10 分钟**且 `keep === true`，
+> 投递一条「新建子代理 review `.coder/members` 与现有 gap」的派活指令（不再有静默等待，
+> 也删除了 `idlePushMs` 设置）；压缩阈值默认 **35%**（`compressPercent`，主对话和成员会话都生效），
 > `call_member` 不再有 `compress` 参数，投递前按会话阈值自动压缩。下文相关旧描述保留作历史记录。
 
 ## 为什么改

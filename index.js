@@ -9855,9 +9855,6 @@ var PROBE_RETRY_MS = 4500;
 var PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 6e4;
 var MEMBER_IDENTITY_MAX = 40;
 var MEMBER_SCOPE_MAX = 120;
-var DEFAULT_MEMBER_IDLE_PUSH_MS = 3e5;
-var MEMBER_IDLE_PUSH_MIN_MS = 1e3;
-var MEMBER_IDLE_PUSH_MAX_MS = 864e5;
 var DEFAULT_COMPRESS_PERCENT = 35;
 var MEMBER_NOTE_MAX = 500;
 function normalizeMemberScopePatch(patch = {}) {
@@ -9897,16 +9894,6 @@ function normalizeMemberScopePatch(patch = {}) {
     if (typeof patch.avoidLongJobs !== "boolean") throw new Error("avoidLongJobs must be a boolean");
     normalized.avoidLongJobs = patch.avoidLongJobs;
   }
-  if (patch.idlePushMs !== void 0) {
-    const value = patch.idlePushMs;
-    if (typeof value !== "number" || !Number.isSafeInteger(value)) {
-      throw new Error("idlePushMs must be an integer number of milliseconds");
-    }
-    if (value < MEMBER_IDLE_PUSH_MIN_MS || value > MEMBER_IDLE_PUSH_MAX_MS) {
-      throw new Error(`idlePushMs is out of range: ${String(value)} (${String(MEMBER_IDLE_PUSH_MIN_MS)}-${String(MEMBER_IDLE_PUSH_MAX_MS)})`);
-    }
-    normalized.idlePushMs = value;
-  }
   if (patch.compressPercent !== void 0) {
     const value = patch.compressPercent;
     if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -9918,10 +9905,6 @@ function normalizeMemberScopePatch(patch = {}) {
     normalized.compressPercent = value;
   }
   return normalized;
-}
-function effectiveMemberIdlePushMs(scope) {
-  const value = scope?.idlePushMs;
-  return Number.isSafeInteger(value) && value >= MEMBER_IDLE_PUSH_MIN_MS && value <= MEMBER_IDLE_PUSH_MAX_MS ? value : DEFAULT_MEMBER_IDLE_PUSH_MS;
 }
 function effectiveCompressPercent(scope) {
   const value = scope?.compressPercent;
@@ -10400,14 +10383,14 @@ var MeshService = class {
     return { ok: true, tags };
   }
   /**
-   * Identity, work scope, keep flag and push/compaction settings for
+   * Identity, work scope, keep flag and compaction settings for
    * conversations, keyed by conversation id.
    *
    * The file is only an optional hint book: a missing, unreadable, or damaged
    * file is the same as "nothing set yet", never a startup failure. Only the
    * fields that were actually set are stored; defaults are applied by readers
-   * ({@link effectiveMemberIdlePushMs}, {@link effectiveCompressPercent}).
-   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, idlePushMs?: number, compressPercent?: number}>>} scopes.
+   * ({@link effectiveCompressPercent}).
+   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, compressPercent?: number}>>} scopes.
    */
   async memberScopes() {
     try {
@@ -10422,19 +10405,14 @@ var MeshService = class {
         const keep = typeof value.keep === "boolean" ? value.keep : void 0;
         const avoidLongJobs = typeof value.avoidLongJobs === "boolean" ? value.avoidLongJobs : void 0;
         const note = savedScopeText(value.note, MEMBER_NOTE_MAX);
-        const idlePushMs = savedScopeNumber(
-          value.idlePushMs,
-          (candidate) => Number.isSafeInteger(candidate) && candidate >= MEMBER_IDLE_PUSH_MIN_MS && candidate <= MEMBER_IDLE_PUSH_MAX_MS
-        );
         const compressPercent = savedScopeNumber(value.compressPercent, (candidate) => candidate >= 1 && candidate <= 100);
-        if (identity === null && scope === null && keep === void 0 && avoidLongJobs === void 0 && note === null && idlePushMs === void 0 && compressPercent === void 0) continue;
+        if (identity === null && scope === null && keep === void 0 && avoidLongJobs === void 0 && note === null && compressPercent === void 0) continue;
         scopes[rawId.trim()] = {
           ...identity === null ? {} : { identity },
           ...scope === null ? {} : { scope },
           ...keep === void 0 ? {} : { keep },
           ...avoidLongJobs === void 0 ? {} : { avoidLongJobs },
           ...note === null ? {} : { note },
-          ...idlePushMs === void 0 ? {} : { idlePushMs },
           ...compressPercent === void 0 ? {} : { compressPercent }
         };
       }
@@ -10446,7 +10424,7 @@ var MeshService = class {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, idlePushMs?: number, compressPercent?: number}|null>} scope.
+   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? "").trim();
@@ -10461,10 +10439,10 @@ var MeshService = class {
    * text field (the record is dropped when nothing remains). `keep` and
    * `avoidLongJobs` are stored as given; only the self target is supposed to
    * pass them. `note` is main-conversation-only metadata and is never injected
-   * or delivered to the member. `idlePushMs` is only meaningful for the self
-   * target; `compressPercent` applies to both self and member conversations.
+   * or delivered to the member. `compressPercent` applies to both self and
+   * member conversations.
    * @param {string} conversationId conversation or session id.
-   * @param {{identity?: unknown, scope?: unknown, keep?: unknown, avoidLongJobs?: unknown, note?: unknown, idlePushMs?: unknown, compressPercent?: unknown}} [patch] fields to change.
+   * @param {{identity?: unknown, scope?: unknown, keep?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] fields to change.
    * @returns {Promise<{ok: boolean, scopes: Record<string, object>, scope: object|null}>} saved scopes.
    */
   async setMemberScope(conversationId, patch = {}) {
@@ -10487,7 +10465,6 @@ var MeshService = class {
       if (normalized.note === null) delete next.note;
       else next.note = normalized.note;
     }
-    if (normalized.idlePushMs !== void 0) next.idlePushMs = normalized.idlePushMs;
     if (normalized.compressPercent !== void 0) next.compressPercent = normalized.compressPercent;
     if (Object.keys(next).length === 0) delete scopes[id];
     else scopes[id] = next;
@@ -15295,25 +15272,11 @@ function clearMemberSessions() {
 
 // src/lib/member-context.mjs
 var MEMBER_STATUS_INTERVAL_MS = 6e4;
-var MEMBER_PUSH_DELAY_MS = DEFAULT_MEMBER_IDLE_PUSH_MS;
+var MEMBER_REVIEW_INTERVAL_MS = 10 * 6e4;
 var PUSH_COMPACT_TIMEOUT_MS = 18e4;
 var LONG_JOB_WARN_MS = 6e4;
 var LONG_JOBS_MAX = 20;
 var MEMBER_CONTEXT_SOURCE = "member-context";
-function formatMemberPushDelay(ms) {
-  const value = Number.isFinite(ms) && ms > 0 ? Math.round(ms) : DEFAULT_MEMBER_IDLE_PUSH_MS;
-  if (value % 6e4 === 0) return `${String(value / 6e4)} \u5206\u949F`;
-  if (value >= 6e4) {
-    const minutes = Math.floor(value / 6e4);
-    const seconds = Math.round(value % 6e4 / 1e3);
-    return `${String(minutes)} \u5206 ${String(seconds)} \u79D2`;
-  }
-  return `${String(Math.round(value / 1e3))} \u79D2`;
-}
-function resolveMemberPushDelayMs(selfScope, pushDelayMs = MEMBER_PUSH_DELAY_MS) {
-  if (selfScope?.idlePushMs === void 0) return pushDelayMs;
-  return effectiveMemberIdlePushMs(selfScope);
-}
 function formatMemberPercent(value) {
   const amount = Number.isFinite(value) ? value : DEFAULT_COMPRESS_PERCENT;
   return `${amount >= 100 ? String(Math.round(amount)) : amount.toFixed(1).replace(/\.0$/u, "")}%`;
@@ -15389,6 +15352,18 @@ function formatJobDuration(ms) {
   const seconds = total % 60;
   return seconds === 0 ? `${String(minutes)} \u5206\u949F` : `${String(minutes)} \u5206 ${String(seconds)} \u79D2`;
 }
+function formatMemberConversationLine(task, scopes = {}) {
+  const entry = describeMemberTask(task);
+  const profile = scopeForTask(task, scopes);
+  const stored = scopes[String(task?.conversationId ?? "")];
+  const explicitCompress = typeof stored?.compressPercent === "number" && Number.isFinite(stored.compressPercent) ? `\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(stored.compressPercent)}` : "";
+  const noteText = typeof stored?.note === "string" && stored.note.trim() !== "" ? `\uFF1B\u5907\u6CE8\uFF1A${stored.note.trim().length > 120 ? `${stored.note.trim().slice(0, 120)}\u2026` : stored.note.trim()}` : "";
+  const turn = entry.turns !== null && entry.turns > 0 ? `\u7B2C ${String(entry.turns)} \u8F6E` : "";
+  return `- ${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${entry.workspace}\uFF0C${entry.statusLabel}${turn === "" ? "" : `\uFF0C${turn}`}\uFF09\u8EAB\u4EFD\uFF1A${profile?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${profile?.scope ?? "\u672A\u8BBE\u7F6E"}${explicitCompress}${noteText}`;
+}
+function formatSelfLine(selfId, selfScope) {
+  return `- \u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1A\u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${selfScope?.keep === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
+}
 function formatMemberStatusSnapshot(tasks, options = {}) {
   const list = Array.isArray(tasks) ? tasks : [];
   const running = list.filter((task) => task?.status === "running" || task?.status === "starting");
@@ -15396,23 +15371,11 @@ function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfId = String(options.selfId ?? "");
   const selfScope = options.selfScope ?? null;
   const scopes = options.scopes ?? {};
-  const selfIdlePushMs = effectiveMemberIdlePushMs(selfScope);
-  const selfCompressPercent = effectiveCompressPercent(selfScope);
   const lines = [
     `[\u6210\u5458\u4E0A\u4E0B\u6587] \u672C\u5BF9\u8BDD\u8DDF\u8E2A ${String(list.length)} \u4E2A\u6210\u5458\u4F1A\u8BDD\uFF0C\u5176\u4E2D ${String(running.length)} \u4E2A\u8FDB\u884C\u4E2D\uFF08\u5FEB\u7167 ${new Date(at).toISOString()}\uFF09\u3002`,
-    `- \u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1A\u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${selfScope?.keep === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u9759\u9ED8\u63A8\u9001\uFF1A${formatMemberPushDelay(selfIdlePushMs)}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(selfCompressPercent)}`
+    formatSelfLine(selfId, selfScope),
+    ...list.map((task) => formatMemberConversationLine(task, scopes))
   ];
-  for (const task of list) {
-    const entry = describeMemberTask(task);
-    const profile = scopeForTask(task, scopes);
-    const stored = scopes[String(task?.conversationId ?? "")];
-    const explicitCompress = typeof stored?.compressPercent === "number" && Number.isFinite(stored.compressPercent) ? `\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(stored.compressPercent)}` : "";
-    const noteText = typeof stored?.note === "string" && stored.note.trim() !== "" ? `\uFF1B\u5907\u6CE8\uFF1A${stored.note.trim().length > 120 ? `${stored.note.trim().slice(0, 120)}\u2026` : stored.note.trim()}` : "";
-    const turn = entry.turns !== null && entry.turns > 0 ? `\u7B2C ${String(entry.turns)} \u8F6E` : "";
-    lines.push(
-      `- ${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${entry.workspace}\uFF0C${entry.statusLabel}${turn === "" ? "" : `\uFF0C${turn}`}\uFF09\u8EAB\u4EFD\uFF1A${profile?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${profile?.scope ?? "\u672A\u8BBE\u7F6E"}${explicitCompress}${noteText}`
-    );
-  }
   const longJobs = Array.isArray(options.longJobs) ? options.longJobs : [];
   if (longJobs.length > 0) {
     lines.push(
@@ -15431,32 +15394,22 @@ function formatMemberStatusSnapshot(tasks, options = {}) {
   if (selfHint !== "") lines.push(selfHint);
   return lines.join("\n");
 }
-function formatMemberStatusSignature(state = {}) {
-  const tasks = Array.isArray(state.tasks) ? state.tasks : [];
-  const scopes = state.scopes ?? {};
-  return JSON.stringify({
-    selfId: String(state.selfId ?? ""),
-    self: {
-      identity: state.selfScope?.identity ?? null,
-      scope: state.selfScope?.scope ?? null,
-      keep: state.selfScope?.keep === true,
-      avoidLongJobs: state.selfScope?.avoidLongJobs === true,
-      idlePushMs: effectiveMemberIdlePushMs(state.selfScope),
-      compressPercent: effectiveCompressPercent(state.selfScope)
-    },
-    tasks: tasks.map((task) => {
-      const profile = scopeForTask(task, scopes);
-      const stored = scopes[String(task?.conversationId ?? "")];
-      return {
-        conversationId: String(task?.conversationId ?? ""),
-        member: String(task?.member ?? ""),
-        status: String(task?.status ?? ""),
-        turns: Number.isSafeInteger(task?.turns) ? task.turns : null,
-        ...typeof stored?.compressPercent === "number" && Number.isFinite(stored.compressPercent) ? { compressPercent: stored.compressPercent } : {},
-        profile: profile === null ? null : { name: profile.name, identity: profile.identity, scope: profile.scope }
-      };
-    })
-  });
+function formatMemberDispatchPush(tasks, options = {}) {
+  const list = Array.isArray(tasks) ? tasks : [];
+  const running = list.filter((task) => task?.status === "running" || task?.status === "starting");
+  const at = Number.isFinite(options.now) ? options.now : Date.now();
+  const selfId = String(options.selfId ?? "");
+  const selfScope = options.selfScope ?? null;
+  const scopes = options.scopes ?? {};
+  return [
+    "[\u6210\u5458\u8C03\u5EA6] \u672C\u5BF9\u8BDD\u5DF2\u7A7A\u95F2\u3002\u8BF7\u7ACB\u5373\u7528 subagent \u65B0\u5EFA\u4E00\u4E2A\u5B50\u4EE3\u7406\u505A\u53EA\u8BFB\u5BA1\u67E5\uFF1A\u8BFB\u672C\u5DE5\u4F5C\u533A\u7684 `.coder/members/all.md`\u3001`.coder/members/flow.md` \u548C\u73B0\u6709 gap\uFF08`.coder/issues/open.md`\u3001`.coder/plan/todo.md`\u3001`.coder/plan/goal.md` \u7B49\uFF09\uFF0C\u5224\u65AD\u662F\u5426\u53EF\u4EE5\u6FC0\u6D3B\u90E8\u5206\u73B0\u6709\u7A7A\u95F2\u6210\u5458\u5BF9\u8BDD\u3002",
+    "- \u5B50\u4EE3\u7406\u53EA\u8BFB\uFF1A\u4E0D\u6539\u4EE3\u7801\u3001\u4E0D\u8DD1\u91CD\u6D3B\uFF1B\u7ED3\u8BBA\u9010\u6761\u7ED9\u51FA\u53EF\u6FC0\u6D3B\u7684\u6210\u5458\u4F1A\u8BDD\uFF08conversationId\uFF09\u3001\u5EFA\u8BAE\u4EFB\u52A1\u4E0E\u4F9D\u636E\uFF1B\u4E0D\u5EFA\u8BAE\u6FC0\u6D3B\u7684\u5199\u539F\u56E0\u3002",
+    "- \u53EA\u8003\u8651\u7A7A\u95F2\u6210\u5458\u4F1A\u8BDD\uFF1B\u8FDB\u884C\u4E2D/\u5F02\u5E38\u4E2D\u6B62\u7684\u4E00\u5F8B\u8DF3\u8FC7\uFF0C\u7981\u6B62\u91CD\u542F\u3001\u5F52\u6863\u6216\u65B0\u5EFA\u540C\u540D\u4F1A\u8BDD\u2014\u2014\u6D3E\u6D3B\u5FC5\u987B\u5E26\u539F conversationId \u7EE7\u7EED\u3002",
+    "- \u5BA1\u67E5\u7ED3\u8BBA\u4EA4\u56DE\u672C\u5BF9\u8BDD\uFF0C\u7531\u672C\u5BF9\u8BDD\u7528 call_member \u51B3\u5B9A\u662F\u5426\u6D3E\u6D3B\u3002",
+    `- \u5F53\u524D\u6210\u5458\u4F1A\u8BDD\uFF08\u672C\u5BF9\u8BDD\u8DDF\u8E2A ${String(list.length)} \u4E2A\uFF0C\u5176\u4E2D ${String(running.length)} \u4E2A\u8FDB\u884C\u4E2D\uFF1B\u5FEB\u7167 ${new Date(at).toISOString()}\uFF09\uFF1A`,
+    ...list.map((task) => formatMemberConversationLine(task, scopes)),
+    formatSelfLine(selfId, selfScope)
+  ].join("\n");
 }
 function createMemberContext({
   ctx,
@@ -15465,26 +15418,19 @@ function createMemberContext({
   log = () => {
   },
   intervalMs = MEMBER_STATUS_INTERVAL_MS,
-  pushDelayMs = MEMBER_PUSH_DELAY_MS,
+  reviewIntervalMs = MEMBER_REVIEW_INTERVAL_MS,
   now = () => Date.now()
 }) {
   const lastInjection = /* @__PURE__ */ new Map();
-  const pushTimers = /* @__PURE__ */ new Map();
-  const lastPushSignature = /* @__PURE__ */ new Map();
+  const lastReviewEnd = /* @__PURE__ */ new Map();
+  const reviewPending = /* @__PURE__ */ new Set();
   const turns = /* @__PURE__ */ new Map();
-  const generations = /* @__PURE__ */ new Map();
   const longJobs = /* @__PURE__ */ new Map();
   const disposers = [];
   let closed = false;
   async function readScopes() {
     if (typeof service?.memberScopes !== "function") return {};
     return await service.memberScopes().catch(() => ({}));
-  }
-  function cancelPush(sessionId) {
-    const timer = pushTimers.get(sessionId);
-    if (timer === void 0) return;
-    clearTimeout(timer);
-    pushTimers.delete(sessionId);
   }
   async function snapshotFor(agent) {
     const sessionId = String(agent?.session?.id ?? agent?.id ?? "");
@@ -15556,33 +15502,8 @@ function createMemberContext({
       return decision;
     }
   }
-  async function schedulePush(sessionId, turn, generation) {
+  async function maybeReview(sessionId, turn) {
     if (closed) return;
-    const [tasks, scopes] = await Promise.all([
-      memberTasks.listForOrigin(sessionId).catch(() => []),
-      readScopes()
-    ]);
-    if (closed || generations.get(sessionId) !== generation) return;
-    if (!turns.has(sessionId) || turns.get(sessionId) !== turn) return;
-    const selfScope = scopes[sessionId] ?? null;
-    if (tasks.length === 0 && selfScope === null) return;
-    if (selfScope?.keep !== true) return;
-    cancelPush(sessionId);
-    const delay2 = resolveMemberPushDelayMs(selfScope, pushDelayMs);
-    const timer = setTimeout(() => {
-      pushTimers.delete(sessionId);
-      void pushSnapshot(sessionId, turn).catch((error) => {
-        log(`member status push failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
-    }, delay2);
-    timer.unref?.();
-    pushTimers.set(sessionId, timer);
-  }
-  async function pushSnapshot(sessionId, turn) {
-    if (closed) return;
-    if (turns.get(sessionId) !== turn) return;
-    const agent = typeof ctx?.get === "function" ? ctx.get("agents")?.get(sessionId) : void 0;
-    if (agent === void 0 || agent === null || agent.status !== "idle") return;
     const [tasks, scopes] = await Promise.all([
       memberTasks.listForOrigin(sessionId).catch(() => []),
       readScopes()
@@ -15591,16 +15512,19 @@ function createMemberContext({
     const selfScope = scopes[sessionId] ?? null;
     if (tasks.length === 0 && selfScope === null) return;
     if (selfScope?.keep !== true) return;
-    if (agent.status !== "idle") return;
-    const signature = formatMemberStatusSignature({ selfId: sessionId, selfScope, tasks, scopes });
-    if (lastPushSignature.get(sessionId) === signature) return;
+    const last = lastReviewEnd.get(sessionId);
+    if (typeof last === "number" && now() - last <= reviewIntervalMs) return;
+    await new Promise((resolve) => setImmediate(resolve));
+    if (closed || turns.get(sessionId) !== turn) return;
+    const agent = typeof ctx?.get === "function" ? ctx.get("agents")?.get(sessionId) : void 0;
+    if (agent === void 0 || agent === null || agent.status !== "idle") return;
     const threshold = effectiveCompressPercent(selfScope);
     const beforePercent = measureMemberContextPercent(ctx, agent);
     let compressionLine;
     if (beforePercent !== null && beforePercent > threshold) {
       const outcome = await compactMainAgent(ctx, agent);
       if (closed || turns.get(sessionId) !== turn || agent.status !== "idle") {
-        log(`member status push abandoned: conversation resumed while compacting (context ${formatMemberPercent(beforePercent)}, threshold ${formatMemberPercent(threshold)})`);
+        log(`member dispatch push abandoned: conversation resumed while compacting (context ${formatMemberPercent(beforePercent)}, threshold ${formatMemberPercent(threshold)})`);
         return;
       }
       if (outcome.ok) {
@@ -15619,7 +15543,7 @@ function createMemberContext({
       compressionLine = `no compression\uFF08\u4E0A\u4E0B\u6587 ${formatMemberPercent(beforePercent)} <= \u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
     }
     const at = now();
-    const text = formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes });
+    const text = formatMemberDispatchPush(tasks, { now: at, selfId: sessionId, selfScope, scopes });
     try {
       agent.followup({
         id: randomUUID2(),
@@ -15627,11 +15551,11 @@ function createMemberContext({
         content: [{ type: "text", text }],
         source: { kind: MEMBER_CONTEXT_SOURCE, form: "push" }
       });
-      lastPushSignature.set(sessionId, signature);
+      reviewPending.add(sessionId);
       lastInjection.set(sessionId, at);
-      log(`member status pushed to ${sessionId}: ${compressionLine}`);
+      log(`member dispatch push to ${sessionId}: ${compressionLine}`);
     } catch (error) {
-      log(`member status push failed: ${error instanceof Error ? error.message : String(error)}`);
+      log(`member dispatch push failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   function onEvent(session, event) {
@@ -15656,18 +15580,17 @@ function createMemberContext({
     }
     if (event.type === "turn/start") {
       turns.set(sessionId, Number.isSafeInteger(event.data?.turn) ? event.data.turn : null);
-      generations.set(sessionId, (generations.get(sessionId) ?? 0) + 1);
-      cancelPush(sessionId);
       return;
     }
     if (event.type !== "turn/end") return;
     const turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : turns.get(sessionId) ?? null;
     turns.set(sessionId, turn);
-    const generation = (generations.get(sessionId) ?? 0) + 1;
-    generations.set(sessionId, generation);
-    cancelPush(sessionId);
-    void schedulePush(sessionId, turn, generation).catch((error) => {
-      log(`member status push scheduling failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (reviewPending.delete(sessionId)) {
+      lastReviewEnd.set(sessionId, now());
+      return;
+    }
+    void maybeReview(sessionId, turn).catch((error) => {
+      log(`member status review failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
   if (typeof ctx?.on === "function") {
@@ -15676,11 +15599,10 @@ function createMemberContext({
     disposers.push(ctx.on("session/disposed", (session) => {
       const id = String(session?.id ?? "");
       if (id === "") return;
-      cancelPush(id);
       lastInjection.delete(id);
-      lastPushSignature.delete(id);
+      lastReviewEnd.delete(id);
+      reviewPending.delete(id);
       turns.delete(id);
-      generations.delete(id);
       longJobs.delete(id);
     }));
   }
@@ -15688,8 +15610,8 @@ function createMemberContext({
     handler,
     onEvent,
     lastInjection,
-    pushTimers,
-    lastPushSignature,
+    lastReviewEnd,
+    reviewPending,
     turns,
     dispose() {
       closed = true;
@@ -15699,12 +15621,10 @@ function createMemberContext({
         } catch {
         }
       }
-      for (const timer of pushTimers.values()) clearTimeout(timer);
-      pushTimers.clear();
       lastInjection.clear();
-      lastPushSignature.clear();
+      lastReviewEnd.clear();
+      reviewPending.clear();
       turns.clear();
-      generations.clear();
       longJobs.clear();
     }
   };
@@ -16008,19 +15928,18 @@ function registerTools(ctx, toolsCtx, service) {
   const setMemberScopeDefinition = {
     name: "set_member_scope",
     description: [
-      "\u8BBE\u7F6E\u4E00\u4E2A\u6210\u5458\u4F1A\u8BDD\u6216\u5F53\u524D\u4E3B\u5BF9\u8BDD\uFF08\u81EA\u8EAB\uFF09\u7684\u8EAB\u4EFD\u3001\u5DE5\u4F5C\u8303\u56F4\uFF0C\u4EE5\u53CA\u72B6\u6001\u63A8\u9001\u548C\u81EA\u52A8\u538B\u7F29\u53C2\u6570\u3002",
+      "\u8BBE\u7F6E\u4E00\u4E2A\u6210\u5458\u4F1A\u8BDD\u6216\u5F53\u524D\u4E3B\u5BF9\u8BDD\uFF08\u81EA\u8EAB\uFF09\u7684\u8EAB\u4EFD\u3001\u5DE5\u4F5C\u8303\u56F4\uFF0C\u4EE5\u53CA\u6D3E\u6D3B\u63A8\u9001\u548C\u81EA\u52A8\u538B\u7F29\u53C2\u6570\u3002",
       "",
       "`conversationId` \u7701\u7565\u3001`self`\u3001`local` \u6216\u7B49\u4E8E\u5F53\u524D\u4F1A\u8BDD id \u65F6\u8BBE\u7F6E\u201C\u81EA\u8EAB\u201D\uFF1B\u5176\u4ED6\u503C\u4F5C\u4E3A\u6210\u5458\u4F1A\u8BDD id\u3002",
       "`identity` / `scope` / `note` \u662F\u53EF\u9009\u7684\u5B57\u7B26\u4E32\uFF0C\u53EA\u4F20\u8981\u6539\u7684\u5B57\u6BB5\uFF1B\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002",
       "identity \u6700\u957F 40 \u5B57\u7B26\uFF0Cscope \u6700\u957F 120 \u5B57\u7B26\uFF0Cnote\uFF08\u5907\u6CE8\uFF09\u6700\u957F 500 \u5B57\u7B26\u3002",
       "`note` \u4EC5\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF1A\u5B83\u4E0D\u4F1A\u6CE8\u5165\u6210\u5458\u7684\u7CFB\u7EDF\u4E0A\u4E0B\u6587\uFF0C\u4E5F\u4E0D\u4F1A\u968F call_member \u6295\u9012\uFF0C\u53EA\u5728\u4E3B\u5BF9\u8BDD\u7684 status_member \u548C\u6210\u5458\u4E0A\u4E0B\u6587\u91CC\u53EF\u89C1\uFF1B\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5FFD\u7565\u3002",
-      "`keep` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u663E\u5F0F\u4F20 keep=true \u65F6\uFF0Cturn \u7ED3\u675F\u540E\u4E3B\u5BF9\u8BDD\u7A7A\u95F2\u65F6\u4F1A\u4E3B\u52A8\u6536\u5230\u6210\u5458\u72B6\u6001\u5FEB\u7167\uFF1B\u4E0D\u4F20 keep \u4E0D\u6539\u53D8\u5DF2\u4FDD\u5B58\u7684\u503C\uFF0C\u4ECE\u672A\u8BBE\u7F6E\u8FC7\u5373\u4E3A\u5173\u95ED\u3002",
+      "`keep` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u663E\u5F0F\u4F20 keep=true \u65F6\uFF0C\u4E3B\u5BF9\u8BDD\u5728 turn \u7ED3\u675F\u540E\u3001\u82E5\u8DDD\u4E0A\u4E00\u6B21\u6210\u5458\u72B6\u6001 review \u7ED3\u675F\u5DF2\u8D85\u8FC7 10 \u5206\u949F\uFF0C\u4F1A\u6536\u5230\u4E00\u6761\u6D3E\u6D3B\u6307\u4EE4\uFF0C\u8981\u6C42\u65B0\u5EFA\u5B50\u4EE3\u7406 review `.coder/members` \u548C\u73B0\u6709 gap\uFF0C\u5224\u65AD\u80FD\u5426\u6FC0\u6D3B\u7A7A\u95F2\u6210\u5458\u4F1A\u8BDD\uFF1B\u4E0D\u4F20 keep \u4E0D\u6539\u53D8\u5DF2\u4FDD\u5B58\u7684\u503C\uFF0C\u4ECE\u672A\u8BBE\u7F6E\u8FC7\u5373\u4E3A\u5173\u95ED\u3002",
       "`avoidLongJobs` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0C\u4E3B\u5BF9\u8BDD\u4E0B\u4E00\u6B21\u72B6\u6001\u5FEB\u7167\u4F1A\u68C0\u67E5\u8DDD\u4E0A\u4E00\u6B21\u5FEB\u7167\u4E4B\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5728\u6CE8\u5165\u91CC\u5217\u51FA\u8FD9\u4E9B job \u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
-      `\`idlePushMs\`\uFF1A\u9759\u9ED8\u63A8\u9001\u5EF6\u8FDF\uFF08\u6574\u6570\u6BEB\u79D2\uFF0C${String(MEMBER_IDLE_PUSH_MIN_MS)}\u2013${String(MEMBER_IDLE_PUSH_MAX_MS)}\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_MEMBER_IDLE_PUSH_MS)} \u5373 5 \u5206\u949F\uFF09\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002`,
-      `\`compressPercent\`\uFF1A\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u6570\u5B57 1\u2013100\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_COMPRESS_PERCENT)}\uFF09\uFF1B\u4E3B\u5BF9\u8BDD\u548C\u6210\u5458\u4F1A\u8BDD\u90FD\u751F\u6548\uFF1A\u4E3B\u5BF9\u8BDD\u63A8\u9001\u5FEB\u7167\u524D\u3001\u6216\u6210\u5458\u4F1A\u8BDD\u4E0B\u4E00\u6B21\u6295\u9012\u524D\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u538B\u7F29\u3002`,
+      `\`compressPercent\`\uFF1A\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u6570\u5B57 1\u2013100\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_COMPRESS_PERCENT)}\uFF09\uFF1B\u4E3B\u5BF9\u8BDD\u548C\u6210\u5458\u4F1A\u8BDD\u90FD\u751F\u6548\uFF1A\u4E3B\u5BF9\u8BDD\u63A8\u9001\u6D3E\u6D3B\u6307\u4EE4\u524D\u3001\u6216\u6210\u5458\u4F1A\u8BDD\u4E0B\u4E00\u6B21\u6295\u9012\u524D\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u538B\u7F29\u3002`,
       "\u7ED9\u81EA\u8EAB\u8BBE\u7F6E identity/scope \u4E0D\u4F1A\u987A\u5E26\u5F00\u542F keep\uFF1B\u9700\u8981\u63A8\u9001\u5C31\u663E\u5F0F\u4F20 keep=true\u3002",
-      "\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6 keep \u548C idlePushMs \u88AB\u5FFD\u7565\uFF0C\u8FD4\u56DE\u6587\u5B57\u4F1A\u8BF4\u660E\u3002",
-      "\u81F3\u5C11\u63D0\u4F9B identity\u3001scope\u3001keep\u3001idlePushMs\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001scope \u6216 compressPercent \u4E4B\u4E00\u3002",
+      "\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6 keep \u548C avoidLongJobs \u88AB\u5FFD\u7565\uFF0C\u8FD4\u56DE\u6587\u5B57\u4F1A\u8BF4\u660E\u3002",
+      "\u81F3\u5C11\u63D0\u4F9B identity\u3001scope\u3001note\u3001keep\u3001avoidLongJobs\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001scope\u3001note \u6216 compressPercent \u4E4B\u4E00\u3002",
       "\u6210\u5458\u4F1A\u8BDD\u53EF\u4EE5\u672A\u88AB\u672C\u673A\u8DDF\u8E2A\uFF0C\u8BBE\u7F6E\u4ECD\u4F1A\u4FDD\u5B58\uFF0C\u53EA\u662F\u4E0D\u4F1A\u540C\u6B65\u4EFB\u52A1\u5FEB\u7167\u3002",
       "\u8FD9\u4E2A\u5DE5\u5177\u53EA\u4FDD\u5B58\u8BBE\u7F6E\uFF0C\u4E0D\u7ED9\u6210\u5458\u4F1A\u8BDD\u53D1\u6D88\u606F\u3001\u4E0D\u81EA\u52A8\u52A0\u6295\u9012\u524D\u7F00\uFF1B\u968F\u5BF9\u8BDD\u4E00\u8D77\u8BBE\u7F6E/\u66F4\u65B0\u7528 call_member \u7684 identity/scope \u53C2\u6570\u3002"
     ].join("\n"),
@@ -16045,17 +15964,11 @@ function registerTools(ctx, toolsCtx, service) {
         },
         keep: {
           type: "boolean",
-          description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF08\u9700\u8981\u663E\u5F0F\u5F00\u542F\uFF09\uFF1B\u63A7\u5236\u4E3B\u5BF9\u8BDD\u7A7A\u95F2\u540E\u662F\u5426\u4E3B\u52A8\u63A8\u9001\u6210\u5458\u72B6\u6001\u5FEB\u7167\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
+          description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF08\u9700\u8981\u663E\u5F0F\u5F00\u542F\uFF09\uFF1B\u63A7\u5236\u4E3B\u5BF9\u8BDD turn \u7ED3\u675F\u540E\u662F\u5426\u89E6\u53D1\u6D3E\u6D3B\u5BA1\u67E5\uFF08\u8DDD\u4E0A\u6B21 review \u7ED3\u675F\u8D85\u8FC7 10 \u5206\u949F\u65F6\u63A8\u9001\u4E00\u6761\u6307\u4EE4\uFF0C\u8981\u6C42\u65B0\u5EFA\u5B50\u4EE3\u7406 review `.coder/members` \u4E0E\u73B0\u6709 gap\uFF0C\u5224\u65AD\u80FD\u5426\u6FC0\u6D3B\u7A7A\u95F2\u6210\u5458\u4F1A\u8BDD\uFF09\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
         },
         avoidLongJobs: {
           type: "boolean",
           description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF1B\u5F00\u542F\u540E\u72B6\u6001\u5FEB\u7167\u4F1A\u5217\u51FA\u4E24\u6B21\u5FEB\u7167\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
-        },
-        idlePushMs: {
-          type: "integer",
-          minimum: MEMBER_IDLE_PUSH_MIN_MS,
-          maximum: MEMBER_IDLE_PUSH_MAX_MS,
-          description: "\u4E3B\u5BF9\u8BDD\u9759\u9ED8\u63A8\u9001\u5EF6\u8FDF\uFF08\u6BEB\u79D2\uFF0C\u9ED8\u8BA4 300000 = 5 \u5206\u949F\uFF09\uFF1B\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
         },
         compressPercent: {
           type: "number",
@@ -16083,14 +15996,13 @@ function registerTools(ctx, toolsCtx, service) {
       const hasNote = args.note !== void 0;
       const hasKeep = args.keep !== void 0;
       const hasAvoidLongJobs = args.avoidLongJobs !== void 0;
-      const hasIdlePushMs = args.idlePushMs !== void 0;
       const hasCompressPercent = args.compressPercent !== void 0;
-      if (!hasIdentity && !hasScope && !hasNote && !hasKeep && !hasAvoidLongJobs && !hasIdlePushMs && !hasCompressPercent) {
-        throw new Error("identity, scope, note, keep, avoidLongJobs, idlePushMs, or compressPercent is required");
+      if (!hasIdentity && !hasScope && !hasNote && !hasKeep && !hasAvoidLongJobs && !hasCompressPercent) {
+        throw new Error("identity, scope, note, keep, avoidLongJobs, or compressPercent is required");
       }
       if (isSelf && selfId === "") throw new Error("cannot set the current session scope: no current session");
       if (!isSelf && !hasIdentity && !hasScope && !hasNote && !hasCompressPercent) {
-        throw new Error("keep, avoidLongJobs, and idlePushMs only apply to the current session; set identity, scope, note, or compressPercent for a member conversation");
+        throw new Error("keep and avoidLongJobs only apply to the current session; set identity, scope, note, or compressPercent for a member conversation");
       }
       const patch = {
         ...hasIdentity ? { identity: args.identity } : {},
@@ -16098,7 +16010,6 @@ function registerTools(ctx, toolsCtx, service) {
         ...!isSelf && hasNote ? { note: args.note } : {},
         ...isSelf && hasKeep ? { keep: args.keep } : {},
         ...isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {},
-        ...isSelf && hasIdlePushMs ? { idlePushMs: args.idlePushMs } : {},
         ...hasCompressPercent ? { compressPercent: args.compressPercent } : {}
       };
       normalizeMemberScopePatch(patch);
@@ -16106,7 +16017,6 @@ function registerTools(ctx, toolsCtx, service) {
       const saved = await service.setMemberScope(targetId, patch);
       const scope = saved.scope ?? null;
       const tracked = isSelf ? false : await memberTasks.syncTaskScope(targetId, scope, { profile: hasIdentity || hasScope });
-      const idleDelay = effectiveMemberIdlePushMs(scope);
       const compressThreshold = effectiveCompressPercent(scope);
       const lines = [
         isSelf ? `\u5DF2\u8BBE\u7F6E\u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId}\uFF09\u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u4E0E\u63A8\u9001\u914D\u7F6E\u3002` : `\u5DF2\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD ${targetId} \u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u4E0E\u538B\u7F29\u9608\u503C\u3002`,
@@ -16116,10 +16026,9 @@ function registerTools(ctx, toolsCtx, service) {
         ...isSelf ? [
           `\u4FDD\u6301\u76EE\u6807\uFF1A${scope?.keep === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
           `\u907F\u514D\u8017\u65F6\uFF1A${scope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
-          `\u9759\u9ED8\u63A8\u9001\uFF1A${formatMemberPushDelay(idleDelay)}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
           `\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%\uFF08\u4E3B\u5BF9\u8BDD\u63A8\u9001\u524D\u548C\u6210\u5458\u4F1A\u8BDD\u6295\u9012\u524D\u751F\u6548\uFF09`
         ] : [`\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%\uFF08\u6295\u9012\u524D\u8D85\u8FC7\u8BE5\u5360\u6BD4\u81EA\u52A8\u538B\u7F29\uFF09`],
-        ...!isSelf && (hasKeep || hasAvoidLongJobs || hasIdlePushMs) ? ["keep / avoidLongJobs / idlePushMs \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
+        ...!isSelf && (hasKeep || hasAvoidLongJobs) ? ["keep / avoidLongJobs \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...isSelf && hasNote ? ["note \u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...!isSelf && !tracked ? ["\u672C\u673A\u672A\u8DDF\u8E2A\u8BE5\u4F1A\u8BDD\uFF0C\u53EA\u4FDD\u5B58\u8BBE\u7F6E\u3002"] : []
       ];
@@ -16131,15 +16040,13 @@ function registerTools(ctx, toolsCtx, service) {
           conversationId: targetId,
           self: isSelf,
           scope,
-          idlePushMs: idleDelay,
           compressPercent: compressThreshold,
           avoidLongJobs: scope?.avoidLongJobs === true,
           tracked,
           note: !isSelf ? scope?.note ?? null : null,
           ignoredKeep: !isSelf && hasKeep,
           ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
-          ignoredNote: isSelf && hasNote,
-          ignoredIdlePushMs: !isSelf && hasIdlePushMs
+          ignoredNote: isSelf && hasNote
         }
       };
     }

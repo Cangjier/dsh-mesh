@@ -9,10 +9,14 @@
  * - the snapshot is request-only context attached to `decision.messages` from
  *   an `agent/pre-step` listener, at most once per
  *   {@link MEMBER_STATUS_INTERVAL_MS};
- * - after a main-conversation turn ends, if `keep` is explicitly on, the same
- *   snapshot is pushed back with `followup` after {@link MEMBER_PUSH_DELAY_MS}
- *   of quiet, so the model sees completed work without another user message.
- *   `keep` defaults to off: a scope without the flag never pushes;
+ * - after a main-conversation turn ends, if `keep` is explicitly on and more
+ *   than {@link MEMBER_REVIEW_INTERVAL_MS} has passed since the previous review
+ *   ended, a dispatch push is delivered with `followup`: it asks the main
+ *   conversation to create a subagent that reviews `.coder/members` plus the
+ *   current gaps and decides whether any idle member conversation can be
+ *   activated, carrying only the tracked conversation lines as facts. There is
+ *   no quiet delay any more: the review turn's own `turn/end` anchors the
+ *   window. `keep` defaults to off: a scope without the flag never pushes;
  * - when the self scope sets `avoidLongJobs`, the snapshot names the settled
  *   jobs longer than {@link LONG_JOB_WARN_MS} since the previous snapshot and
  *   recommends delegating that work to a member conversation;
@@ -26,18 +30,13 @@
 import { randomUUID } from 'node:crypto'
 import { describeMemberTask, memberTaskProfile } from './member-tasks.mjs'
 import { isMemberSession } from './member-sessions.mjs'
-import {
-  DEFAULT_COMPRESS_PERCENT,
-  DEFAULT_MEMBER_IDLE_PUSH_MS,
-  effectiveCompressPercent,
-  effectiveMemberIdlePushMs,
-} from './service.mjs'
+import { DEFAULT_COMPRESS_PERCENT, effectiveCompressPercent } from './service.mjs'
 
 /** Minimum distance between two status snapshots in one session. */
 export const MEMBER_STATUS_INTERVAL_MS = 60_000
 
-/** Default quiet time after a main-conversation turn end before the active push. */
-export const MEMBER_PUSH_DELAY_MS = DEFAULT_MEMBER_IDLE_PUSH_MS
+/** Minimum time between the end of one member-status review and the next review. */
+export const MEMBER_REVIEW_INTERVAL_MS = 10 * 60_000
 
 /** How long one pre-push main-conversation compaction may take. */
 const PUSH_COMPACT_TIMEOUT_MS = 180_000
@@ -50,37 +49,6 @@ const LONG_JOBS_MAX = 20
 
 /** Source kind of the injected/pushed message; it must never read as user input. */
 export const MEMBER_CONTEXT_SOURCE = 'member-context'
-
-/**
- * Render a push delay in human-readable form.
- * @param {number} ms delay in milliseconds.
- * @returns {string} "5 分钟" / "30 秒" / "1 分 30 秒".
- */
-export function formatMemberPushDelay(ms) {
-  const value = Number.isFinite(ms) && ms > 0 ? Math.round(ms) : DEFAULT_MEMBER_IDLE_PUSH_MS
-  if (value % 60_000 === 0) return `${String(value / 60_000)} 分钟`
-  if (value >= 60_000) {
-    const minutes = Math.floor(value / 60_000)
-    const seconds = Math.round((value % 60_000) / 1000)
-    return `${String(minutes)} 分 ${String(seconds)} 秒`
-  }
-  return `${String(Math.round(value / 1000))} 秒`
-}
-
-/**
- * Resolve the quiet-period delay for one main conversation.
- *
- * An unset `idlePushMs` keeps the injected `pushDelayMs` (the test knob); an
- * explicit one is validated again, so an out-of-range stored value falls back
- * to {@link DEFAULT_MEMBER_IDLE_PUSH_MS} rather than a huge or tiny timeout.
- * @param {{idlePushMs?: number}|null} selfScope stored self scope.
- * @param {number} [pushDelayMs] default/test delay.
- * @returns {number} delay in milliseconds.
- */
-export function resolveMemberPushDelayMs(selfScope, pushDelayMs = MEMBER_PUSH_DELAY_MS) {
-  if (selfScope?.idlePushMs === undefined) return pushDelayMs
-  return effectiveMemberIdlePushMs(selfScope)
-}
 
 /**
  * Render a percentage threshold without a trailing `.0`.
@@ -220,6 +188,36 @@ export function formatJobDuration(ms) {
 }
 
 /**
+ * Render one tracked conversation line, shared by the snapshot and the push.
+ * @param {object} task task or status entry.
+ * @param {Record<string, object>} [scopes] conversation id -> stored scope.
+ * @returns {string} the bullet line.
+ */
+function formatMemberConversationLine(task, scopes = {}) {
+  const entry = describeMemberTask(task)
+  const profile = scopeForTask(task, scopes)
+  const stored = scopes[String(task?.conversationId ?? '')]
+  const explicitCompress = typeof stored?.compressPercent === 'number' && Number.isFinite(stored.compressPercent)
+    ? `；压缩阈值：${formatMemberPercent(stored.compressPercent)}`
+    : ''
+  const noteText = typeof stored?.note === 'string' && stored.note.trim() !== ''
+    ? `；备注：${stored.note.trim().length > 120 ? `${stored.note.trim().slice(0, 120)}…` : stored.note.trim()}`
+    : ''
+  const turn = entry.turns !== null && entry.turns > 0 ? `第 ${String(entry.turns)} 轮` : ''
+  return `- ${entry.conversationId}（${entry.member} ${entry.memberIp}，工作区 ${entry.workspace}，${entry.statusLabel}${turn === '' ? '' : `，${turn}`}）身份：${profile?.identity ?? '未设置'}；工作范围：${profile?.scope ?? '未设置'}${explicitCompress}${noteText}`
+}
+
+/**
+ * Render the current conversation's own settings line.
+ * @param {string} selfId current conversation id.
+ * @param {object|null} selfScope stored self scope.
+ * @returns {string} the bullet line.
+ */
+function formatSelfLine(selfId, selfScope) {
+  return `- 自身（会话 ${selfId === '' ? 'unknown' : selfId}）：身份：${selfScope?.identity ?? '未设置'}；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === true ? '开启' : '关闭'}（只对主对话生效）；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
+}
+
+/**
  * Render one status snapshot for the model.
  *
  * Statuses are the initiator's task states, matching the documented mapping:
@@ -235,27 +233,11 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfId = String(options.selfId ?? '')
   const selfScope = options.selfScope ?? null
   const scopes = options.scopes ?? {}
-  const selfIdlePushMs = effectiveMemberIdlePushMs(selfScope)
-  const selfCompressPercent = effectiveCompressPercent(selfScope)
   const lines = [
     `[成员上下文] 本对话跟踪 ${String(list.length)} 个成员会话，其中 ${String(running.length)} 个进行中（快照 ${new Date(at).toISOString()}）。`,
-    `- 自身（会话 ${selfId === '' ? 'unknown' : selfId}）：身份：${selfScope?.identity ?? '未设置'}；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === true ? '开启' : '关闭'}（只对主对话生效）；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；静默推送：${formatMemberPushDelay(selfIdlePushMs)}（只对主对话生效）；压缩阈值：${formatMemberPercent(selfCompressPercent)}`,
+    formatSelfLine(selfId, selfScope),
+    ...list.map(task => formatMemberConversationLine(task, scopes)),
   ]
-  for (const task of list) {
-    const entry = describeMemberTask(task)
-    const profile = scopeForTask(task, scopes)
-    const stored = scopes[String(task?.conversationId ?? '')]
-    const explicitCompress = typeof stored?.compressPercent === 'number' && Number.isFinite(stored.compressPercent)
-      ? `；压缩阈值：${formatMemberPercent(stored.compressPercent)}`
-      : ''
-    const noteText = typeof stored?.note === 'string' && stored.note.trim() !== ''
-      ? `；备注：${stored.note.trim().length > 120 ? `${stored.note.trim().slice(0, 120)}…` : stored.note.trim()}`
-      : ''
-    const turn = entry.turns !== null && entry.turns > 0 ? `第 ${String(entry.turns)} 轮` : ''
-    lines.push(
-      `- ${entry.conversationId}（${entry.member} ${entry.memberIp}，工作区 ${entry.workspace}，${entry.statusLabel}${turn === '' ? '' : `，${turn}`}）身份：${profile?.identity ?? '未设置'}；工作范围：${profile?.scope ?? '未设置'}${explicitCompress}${noteText}`,
-    )
-  }
   const longJobs = Array.isArray(options.longJobs) ? options.longJobs : []
   if (longJobs.length > 0) {
     lines.push(
@@ -276,55 +258,43 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
 }
 
 /**
- * The timestamp-free signature used to deduplicate active pushes.
+ * Render the idle dispatch push.
  *
- * It covers the self scope/keep and every tracked conversation's id, member,
- * status, turns and profile. Same signature means the previous push still
- * describes the current state.
- * @param {{selfId?: string, selfScope?: object|null, tasks?: object[], scopes?: Record<string, object>}} state current snapshot facts.
- * @returns {string} stable signature.
+ * The push no longer repeats the status snapshot: the main conversation is
+ * idle, so the useful action is a fresh review of the roster and the current
+ * gaps. The tracked conversation lines stay in the text because the review
+ * needs to know which conversations exist and which are already busy.
+ * @param {object[]} tasks every conversation this session tracks.
+ * @param {{now?: number, selfId?: string, selfScope?: object|null, scopes?: Record<string, object>}} [options] push facts (tests pin the time).
+ * @returns {string} push text.
  */
-export function formatMemberStatusSignature(state = {}) {
-  const tasks = Array.isArray(state.tasks) ? state.tasks : []
-  const scopes = state.scopes ?? {}
-  return JSON.stringify({
-    selfId: String(state.selfId ?? ''),
-    self: {
-      identity: state.selfScope?.identity ?? null,
-      scope: state.selfScope?.scope ?? null,
-      keep: state.selfScope?.keep === true,
-      avoidLongJobs: state.selfScope?.avoidLongJobs === true,
-      idlePushMs: effectiveMemberIdlePushMs(state.selfScope),
-      compressPercent: effectiveCompressPercent(state.selfScope),
-    },
-    tasks: tasks.map((task) => {
-      const profile = scopeForTask(task, scopes)
-      const stored = scopes[String(task?.conversationId ?? '')]
-      return {
-        conversationId: String(task?.conversationId ?? ''),
-        member: String(task?.member ?? ''),
-        status: String(task?.status ?? ''),
-        turns: Number.isSafeInteger(task?.turns) ? task.turns : null,
-        ...(typeof stored?.compressPercent === 'number' && Number.isFinite(stored.compressPercent)
-          ? { compressPercent: stored.compressPercent }
-          : {}),
-        profile: profile === null
-          ? null
-          : { name: profile.name, identity: profile.identity, scope: profile.scope },
-      }
-    }),
-  })
+export function formatMemberDispatchPush(tasks, options = {}) {
+  const list = Array.isArray(tasks) ? tasks : []
+  const running = list.filter(task => task?.status === 'running' || task?.status === 'starting')
+  const at = Number.isFinite(options.now) ? options.now : Date.now()
+  const selfId = String(options.selfId ?? '')
+  const selfScope = options.selfScope ?? null
+  const scopes = options.scopes ?? {}
+  return [
+    '[成员调度] 本对话已空闲。请立即用 subagent 新建一个子代理做只读审查：读本工作区的 `.coder/members/all.md`、`.coder/members/flow.md` 和现有 gap（`.coder/issues/open.md`、`.coder/plan/todo.md`、`.coder/plan/goal.md` 等），判断是否可以激活部分现有空闲成员对话。',
+    '- 子代理只读：不改代码、不跑重活；结论逐条给出可激活的成员会话（conversationId）、建议任务与依据；不建议激活的写原因。',
+    '- 只考虑空闲成员会话；进行中/异常中止的一律跳过，禁止重启、归档或新建同名会话——派活必须带原 conversationId 继续。',
+    '- 审查结论交回本对话，由本对话用 call_member 决定是否派活。',
+    `- 当前成员会话（本对话跟踪 ${String(list.length)} 个，其中 ${String(running.length)} 个进行中；快照 ${new Date(at).toISOString()}）：`,
+    ...list.map(task => formatMemberConversationLine(task, scopes)),
+    formatSelfLine(selfId, selfScope),
+  ].join('\n')
 }
 
 /**
- * Install the pre-step status injection and the idle active push.
+ * Install the pre-step status injection and the turn-end review push.
  * @param {{
  *   ctx: any,
  *   memberTasks: any,
  *   service?: {memberScopes?: () => Promise<Record<string, object>>},
  *   log?: (line: string) => void,
  *   intervalMs?: number,
- *   pushDelayMs?: number,
+ *   reviewIntervalMs?: number,
  *   now?: () => number,
  * }} options host context, task service, scope store, logger and test knobs.
  * @returns {object} handle with the listener, maps and disposal.
@@ -335,19 +305,17 @@ export function createMemberContext({
   service,
   log = () => {},
   intervalMs = MEMBER_STATUS_INTERVAL_MS,
-  pushDelayMs = MEMBER_PUSH_DELAY_MS,
+  reviewIntervalMs = MEMBER_REVIEW_INTERVAL_MS,
   now = () => Date.now(),
 }) {
   /** @type {Map<string, number>} session id -> last injection/push time */
   const lastInjection = new Map()
-  /** @type {Map<string, ReturnType<typeof setTimeout>>} session id -> pending push timer */
-  const pushTimers = new Map()
-  /** @type {Map<string, string>} session id -> signature of the last push */
-  const lastPushSignature = new Map()
+  /** @type {Map<string, number>} session id -> when the last review turn ended */
+  const lastReviewEnd = new Map()
+  /** @type {Set<string>} sessions whose dispatch push has not seen its turn end yet */
+  const reviewPending = new Set()
   /** @type {Map<string, number|null>} session id -> current/ended turn */
   const turns = new Map()
-  /** @type {Map<string, number>} session id -> scheduling generation */
-  const generations = new Map()
   /** @type {Map<string, object[]>} session id -> settled jobs over the warn threshold */
   const longJobs = new Map()
   const disposers = []
@@ -360,18 +328,6 @@ export function createMemberContext({
   async function readScopes() {
     if (typeof service?.memberScopes !== 'function') return {}
     return await service.memberScopes().catch(() => ({}))
-  }
-
-  /**
-   * Cancel one pending push timer.
-   * @param {string} sessionId session id.
-   * @returns {void}
-   */
-  function cancelPush(sessionId) {
-    const timer = pushTimers.get(sessionId)
-    if (timer === undefined) return
-    clearTimeout(timer)
-    pushTimers.delete(sessionId)
   }
 
   /**
@@ -480,54 +436,19 @@ export function createMemberContext({
   }
 
   /**
-   * Arm the quiet-period push after one main-conversation turn ends.
+   * Review the member conversations after one main-conversation turn ends.
    *
-   * Only a session that has a tracked member task or an existing self scope is
-   * armed, and anything but an explicit `keep: true` cancels it (`keep`
-   * defaults off). The timer is intentionally not awaited by the event
-   * listener.
+   * There is no quiet delay: a normal turn end evaluates the window since the
+   * last review ended and, when it is over {@link MEMBER_REVIEW_INTERVAL_MS},
+   * delivers the dispatch instruction. The turn that the dispatch push starts
+   * is the review itself, so its `turn/end` records the anchor. Only an
+   * explicit `keep: true` opts in; `keep` defaults to off.
    * @param {string} sessionId session id.
    * @param {number|null} turn turn that just ended.
-   * @param {number} generation scheduling generation this call belongs to.
-   * @returns {Promise<void>} resolution after scheduling or skipping.
-   */
-  async function schedulePush(sessionId, turn, generation) {
-    if (closed) return
-    const [tasks, scopes] = await Promise.all([
-      memberTasks.listForOrigin(sessionId).catch(() => []),
-      readScopes(),
-    ])
-    if (closed || generations.get(sessionId) !== generation) return
-    if (!turns.has(sessionId) || turns.get(sessionId) !== turn) return
-    const selfScope = scopes[sessionId] ?? null
-    if (tasks.length === 0 && selfScope === null) return
-    if (selfScope?.keep !== true) return
-    cancelPush(sessionId)
-    // The per-conversation setting wins over the process default; injecting
-    // `pushDelayMs` remains the test knob only when no setting is stored.
-    const delay = resolveMemberPushDelayMs(selfScope, pushDelayMs)
-    const timer = setTimeout(() => {
-      pushTimers.delete(sessionId)
-      void pushSnapshot(sessionId, turn).catch(error => {
-        log(`member status push failed: ${error instanceof Error ? error.message : String(error)}`)
-      })
-    }, delay)
-    timer.unref?.()
-    pushTimers.set(sessionId, timer)
-  }
-
-  /**
-   * Push the current snapshot if the conversation is still quiet and idle and
-   * its content signature changed since the last push.
-   * @param {string} sessionId session id.
-   * @param {number|null} turn turn that armed the timer.
    * @returns {Promise<void>} resolution after the attempt.
    */
-  async function pushSnapshot(sessionId, turn) {
+  async function maybeReview(sessionId, turn) {
     if (closed) return
-    if (turns.get(sessionId) !== turn) return
-    const agent = typeof ctx?.get === 'function' ? ctx.get('agents')?.get(sessionId) : undefined
-    if (agent === undefined || agent === null || agent.status !== 'idle') return
     const [tasks, scopes] = await Promise.all([
       memberTasks.listForOrigin(sessionId).catch(() => []),
       readScopes(),
@@ -536,20 +457,26 @@ export function createMemberContext({
     const selfScope = scopes[sessionId] ?? null
     if (tasks.length === 0 && selfScope === null) return
     if (selfScope?.keep !== true) return
-    if (agent.status !== 'idle') return
-    // Signature first: an unchanged snapshot must not pay for a compaction.
-    const signature = formatMemberStatusSignature({ selfId: sessionId, selfScope, tasks, scopes })
-    if (lastPushSignature.get(sessionId) === signature) return
+    const last = lastReviewEnd.get(sessionId)
+    if (typeof last === 'number' && now() - last <= reviewIntervalMs) return
+    // `session/event` for `turn/end` fires while the loop still reports the
+    // agent as running; let that turn settle on a macrotask so the agent is
+    // idle for the compaction and the dispatch is not queued behind a turn
+    // that has already ended.
+    await new Promise(resolve => setImmediate(resolve))
+    if (closed || turns.get(sessionId) !== turn) return
+    const agent = typeof ctx?.get === 'function' ? ctx.get('agents')?.get(sessionId) : undefined
+    if (agent === undefined || agent === null || agent.status !== 'idle') return
     // Measure and, when the main conversation is over its threshold, compact
     // before the push. A missing/failed compaction never blocks the push, but
-    // a turn that started meanwhile invalidates this snapshot.
+    // a turn that started meanwhile invalidates this review.
     const threshold = effectiveCompressPercent(selfScope)
     const beforePercent = measureMemberContextPercent(ctx, agent)
     let compressionLine
     if (beforePercent !== null && beforePercent > threshold) {
       const outcome = await compactMainAgent(ctx, agent)
       if (closed || turns.get(sessionId) !== turn || agent.status !== 'idle') {
-        log(`member status push abandoned: conversation resumed while compacting (context ${formatMemberPercent(beforePercent)}, threshold ${formatMemberPercent(threshold)})`)
+        log(`member dispatch push abandoned: conversation resumed while compacting (context ${formatMemberPercent(beforePercent)}, threshold ${formatMemberPercent(threshold)})`)
         return
       }
       if (outcome.ok) {
@@ -568,12 +495,10 @@ export function createMemberContext({
       compressionLine = `no compression（上下文 ${formatMemberPercent(beforePercent)} <= 阈值 ${formatMemberPercent(threshold)}）`
     }
     // A slow compaction must not leave the injection clock at the old start
-    // time: the snapshot text (and the timestamp used to suppress the next
+    // time: the push text (and the timestamp used to suppress the next
     // pre-step injection) belongs to the moment the push actually happens.
-    // The signature stays the pre-compaction one so a time-only difference
-    // never re-pushes.
     const at = now()
-    const text = formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes })
+    const text = formatMemberDispatchPush(tasks, { now: at, selfId: sessionId, selfScope, scopes })
     try {
       agent.followup({
         id: randomUUID(),
@@ -581,11 +506,11 @@ export function createMemberContext({
         content: [{ type: 'text', text }],
         source: { kind: MEMBER_CONTEXT_SOURCE, form: 'push' },
       })
-      lastPushSignature.set(sessionId, signature)
+      reviewPending.add(sessionId)
       lastInjection.set(sessionId, at)
-      log(`member status pushed to ${sessionId}: ${compressionLine}`)
+      log(`member dispatch push to ${sessionId}: ${compressionLine}`)
     } catch (error) {
-      log(`member status push failed: ${error instanceof Error ? error.message : String(error)}`)
+      log(`member dispatch push failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -617,18 +542,19 @@ export function createMemberContext({
     }
     if (event.type === 'turn/start') {
       turns.set(sessionId, Number.isSafeInteger(event.data?.turn) ? event.data.turn : null)
-      generations.set(sessionId, (generations.get(sessionId) ?? 0) + 1)
-      cancelPush(sessionId)
       return
     }
     if (event.type !== 'turn/end') return
     const turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : (turns.get(sessionId) ?? null)
     turns.set(sessionId, turn)
-    const generation = (generations.get(sessionId) ?? 0) + 1
-    generations.set(sessionId, generation)
-    cancelPush(sessionId)
-    void schedulePush(sessionId, turn, generation).catch(error => {
-      log(`member status push scheduling failed: ${error instanceof Error ? error.message : String(error)}`)
+    // The turn the dispatch push started is the review itself: its end is the
+    // anchor for the next 10-minute window, and it must not push again.
+    if (reviewPending.delete(sessionId)) {
+      lastReviewEnd.set(sessionId, now())
+      return
+    }
+    void maybeReview(sessionId, turn).catch(error => {
+      log(`member status review failed: ${error instanceof Error ? error.message : String(error)}`)
     })
   }
 
@@ -638,11 +564,10 @@ export function createMemberContext({
     disposers.push(ctx.on('session/disposed', session => {
       const id = String(session?.id ?? '')
       if (id === '') return
-      cancelPush(id)
       lastInjection.delete(id)
-      lastPushSignature.delete(id)
+      lastReviewEnd.delete(id)
+      reviewPending.delete(id)
       turns.delete(id)
-      generations.delete(id)
       longJobs.delete(id)
     }))
   }
@@ -651,20 +576,18 @@ export function createMemberContext({
     handler,
     onEvent,
     lastInjection,
-    pushTimers,
-    lastPushSignature,
+    lastReviewEnd,
+    reviewPending,
     turns,
     dispose() {
       closed = true
       for (const dispose of disposers.splice(0)) {
         try { dispose?.() } catch { }
       }
-      for (const timer of pushTimers.values()) clearTimeout(timer)
-      pushTimers.clear()
       lastInjection.clear()
-      lastPushSignature.clear()
+      lastReviewEnd.clear()
+      reviewPending.clear()
       turns.clear()
-      generations.clear()
       longJobs.clear()
     },
   }

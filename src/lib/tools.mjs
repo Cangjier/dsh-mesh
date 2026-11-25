@@ -15,14 +15,10 @@
  */
 
 import { DEFAULT_COMPRESS_PERCENT, MemberTaskService, describeMemberTask, memberTaskProfile, memberTaskResultAlreadyDelivered, memberTaskWorkspace } from './member-tasks.mjs'
-import { createMemberContext, formatMemberPushDelay, formatMemberScopeMissingHint } from './member-context.mjs'
+import { createMemberContext, formatMemberScopeMissingHint } from './member-context.mjs'
 import {
-  DEFAULT_MEMBER_IDLE_PUSH_MS,
-  MEMBER_IDLE_PUSH_MAX_MS,
-  MEMBER_IDLE_PUSH_MIN_MS,
   MEMBER_NOTE_MAX,
   effectiveCompressPercent,
-  effectiveMemberIdlePushMs,
   normalizeMemberScopePatch,
 } from './service.mjs'
 
@@ -353,19 +349,18 @@ export function registerTools(ctx, toolsCtx, service) {
   const setMemberScopeDefinition = {
     name: 'set_member_scope',
     description: [
-      '设置一个成员会话或当前主对话（自身）的身份、工作范围，以及状态推送和自动压缩参数。',
+      '设置一个成员会话或当前主对话（自身）的身份、工作范围，以及派活推送和自动压缩参数。',
       '',
       '`conversationId` 省略、`self`、`local` 或等于当前会话 id 时设置“自身”；其他值作为成员会话 id。',
       '`identity` / `scope` / `note` 是可选的字符串，只传要改的字段；空字符串表示清除。',
       'identity 最长 40 字符，scope 最长 120 字符，note（备注）最长 500 字符。',
       '`note` 仅对成员会话生效：它不会注入成员的系统上下文，也不会随 call_member 投递，只在主对话的 status_member 和成员上下文里可见；设置自身时忽略。',
-      '`keep` 默认 false，只对自身/主对话生效：显式传 keep=true 时，turn 结束后主对话空闲时会主动收到成员状态快照；不传 keep 不改变已保存的值，从未设置过即为关闭。',
+      '`keep` 默认 false，只对自身/主对话生效：显式传 keep=true 时，主对话在 turn 结束后、若距上一次成员状态 review 结束已超过 10 分钟，会收到一条派活指令，要求新建子代理 review `.coder/members` 和现有 gap，判断能否激活空闲成员会话；不传 keep 不改变已保存的值，从未设置过即为关闭。',
       '`avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，主对话下一次状态快照会检查距上一次快照之间结束、耗时超过 1 分钟的 job，并在注入里列出这些 job 并建议交给成员对话执行。设置成员会话时忽略。',
-      `\`idlePushMs\`：静默推送延迟（整数毫秒，${String(MEMBER_IDLE_PUSH_MIN_MS)}–${String(MEMBER_IDLE_PUSH_MAX_MS)}，默认 ${String(DEFAULT_MEMBER_IDLE_PUSH_MS)} 即 5 分钟），只对自身/主对话生效；设置成员会话时忽略。`,
-      `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；主对话和成员会话都生效：主对话推送快照前、或成员会话下一次投递前，上下文占比超过阈值就先压缩。`,
+      `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；主对话和成员会话都生效：主对话推送派活指令前、或成员会话下一次投递前，上下文占比超过阈值就先压缩。`,
       '给自身设置 identity/scope 不会顺带开启 keep；需要推送就显式传 keep=true。',
-      '设置成员会话时 keep 和 idlePushMs 被忽略，返回文字会说明。',
-      '至少提供 identity、scope、keep、idlePushMs、compressPercent 之一；设置成员会话时必须有 identity、scope 或 compressPercent 之一。',
+      '设置成员会话时 keep 和 avoidLongJobs 被忽略，返回文字会说明。',
+      '至少提供 identity、scope、note、keep、avoidLongJobs、compressPercent 之一；设置成员会话时必须有 identity、scope、note 或 compressPercent 之一。',
       '成员会话可以未被本机跟踪，设置仍会保存，只是不会同步任务快照。',
       '这个工具只保存设置，不给成员会话发消息、不自动加投递前缀；随对话一起设置/更新用 call_member 的 identity/scope 参数。',
     ].join('\n'),
@@ -390,17 +385,11 @@ export function registerTools(ctx, toolsCtx, service) {
         },
         keep: {
           type: 'boolean',
-          description: '只对自身/主对话生效，默认 false（需要显式开启）；控制主对话空闲后是否主动推送成员状态快照。设置成员会话时忽略。',
+          description: '只对自身/主对话生效，默认 false（需要显式开启）；控制主对话 turn 结束后是否触发派活审查（距上次 review 结束超过 10 分钟时推送一条指令，要求新建子代理 review `.coder/members` 与现有 gap，判断能否激活空闲成员会话）。设置成员会话时忽略。',
         },
         avoidLongJobs: {
           type: 'boolean',
           description: '只对自身/主对话生效，默认 false；开启后状态快照会列出两次快照间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
-        },
-        idlePushMs: {
-          type: 'integer',
-          minimum: MEMBER_IDLE_PUSH_MIN_MS,
-          maximum: MEMBER_IDLE_PUSH_MAX_MS,
-          description: '主对话静默推送延迟（毫秒，默认 300000 = 5 分钟）；只对自身/主对话生效，设置成员会话时忽略。',
         },
         compressPercent: {
           type: 'number',
@@ -428,14 +417,13 @@ export function registerTools(ctx, toolsCtx, service) {
       const hasNote = args.note !== undefined
       const hasKeep = args.keep !== undefined
       const hasAvoidLongJobs = args.avoidLongJobs !== undefined
-      const hasIdlePushMs = args.idlePushMs !== undefined
       const hasCompressPercent = args.compressPercent !== undefined
-      if (!hasIdentity && !hasScope && !hasNote && !hasKeep && !hasAvoidLongJobs && !hasIdlePushMs && !hasCompressPercent) {
-        throw new Error('identity, scope, note, keep, avoidLongJobs, idlePushMs, or compressPercent is required')
+      if (!hasIdentity && !hasScope && !hasNote && !hasKeep && !hasAvoidLongJobs && !hasCompressPercent) {
+        throw new Error('identity, scope, note, keep, avoidLongJobs, or compressPercent is required')
       }
       if (isSelf && selfId === '') throw new Error('cannot set the current session scope: no current session')
       if (!isSelf && !hasIdentity && !hasScope && !hasNote && !hasCompressPercent) {
-        throw new Error('keep, avoidLongJobs, and idlePushMs only apply to the current session; set identity, scope, note, or compressPercent for a member conversation')
+        throw new Error('keep and avoidLongJobs only apply to the current session; set identity, scope, note, or compressPercent for a member conversation')
       }
       const patch = {
         ...(hasIdentity ? { identity: args.identity } : {}),
@@ -443,7 +431,6 @@ export function registerTools(ctx, toolsCtx, service) {
         ...(!isSelf && hasNote ? { note: args.note } : {}),
         ...(isSelf && hasKeep ? { keep: args.keep } : {}),
         ...(isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {}),
-        ...(isSelf && hasIdlePushMs ? { idlePushMs: args.idlePushMs } : {}),
         ...(hasCompressPercent ? { compressPercent: args.compressPercent } : {}),
       }
       // Validate before touching the store, then let the service normalise the
@@ -453,11 +440,10 @@ export function registerTools(ctx, toolsCtx, service) {
       const saved = await service.setMemberScope(targetId, patch)
       const scope = saved.scope ?? null
       // Only identity/scope change the task's profile snapshot; setting just
-      // keep/idlePushMs/compressPercent must preserve the old profile.
+      // keep/avoidLongJobs/compressPercent must preserve the old profile.
       const tracked = isSelf
         ? false
         : await memberTasks.syncTaskScope(targetId, scope, { profile: hasIdentity || hasScope })
-      const idleDelay = effectiveMemberIdlePushMs(scope)
       const compressThreshold = effectiveCompressPercent(scope)
       const lines = [
         isSelf
@@ -470,12 +456,11 @@ export function registerTools(ctx, toolsCtx, service) {
           ? [
               `保持目标：${scope?.keep === true ? '开启' : '关闭'}（只对主对话生效）`,
               `避免耗时：${scope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）`,
-              `静默推送：${formatMemberPushDelay(idleDelay)}（只对主对话生效）`,
               `压缩阈值：${formatOneDecimal(compressThreshold)}%（主对话推送前和成员会话投递前生效）`,
             ]
           : [`压缩阈值：${formatOneDecimal(compressThreshold)}%（投递前超过该占比自动压缩）`]),
-        ...(!isSelf && (hasKeep || hasAvoidLongJobs || hasIdlePushMs)
-          ? ['keep / avoidLongJobs / idlePushMs 只对主对话自身生效，设置成员会话时已忽略。']
+        ...(!isSelf && (hasKeep || hasAvoidLongJobs)
+          ? ['keep / avoidLongJobs 只对主对话自身生效，设置成员会话时已忽略。']
           : []),
         ...(isSelf && hasNote ? ['note 只对成员会话生效，设置自身时已忽略。'] : []),
         ...(!isSelf && !tracked ? ['本机未跟踪该会话，只保存设置。'] : []),
@@ -488,7 +473,6 @@ export function registerTools(ctx, toolsCtx, service) {
           conversationId: targetId,
           self: isSelf,
           scope,
-          idlePushMs: idleDelay,
           compressPercent: compressThreshold,
           avoidLongJobs: scope?.avoidLongJobs === true,
           tracked,
@@ -496,7 +480,6 @@ export function registerTools(ctx, toolsCtx, service) {
           ignoredKeep: !isSelf && hasKeep,
           ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
           ignoredNote: isSelf && hasNote,
-          ignoredIdlePushMs: !isSelf && hasIdlePushMs,
         },
       }
     },

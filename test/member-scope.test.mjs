@@ -4,7 +4,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { MeshService, effectiveCompressPercent, effectiveMemberIdlePushMs } from '../src/lib/service.mjs'
+import { MeshService, effectiveCompressPercent } from '../src/lib/service.mjs'
 import { MemberTaskService } from '../src/lib/member-tasks.mjs'
 import { registerTools } from '../src/lib/tools.mjs'
 
@@ -125,14 +125,13 @@ test('member scopes persist per conversation, merge, clear, and read as empty wi
     await service.setMemberScope('main-1', {
       scope: '主对话验收',
       keep: false,
-      idlePushMs: 120_000,
       compressPercent: 50,
     })
 
     const saved = JSON.parse(await readFile(path.join(dataDir, 'member-scopes.json'), 'utf8'))
     assert.deepEqual(saved, {
       'conv-1': { identity: '测试', scope: '插件开发' },
-      'main-1': { scope: '主对话验收', keep: false, idlePushMs: 120_000, compressPercent: 50 },
+      'main-1': { scope: '主对话验收', keep: false, compressPercent: 50 },
     })
 
     const cleared = await service.setMemberScope('conv-1', { identity: '' })
@@ -146,9 +145,6 @@ test('member scopes persist per conversation, merge, clear, and read as empty wi
     await assert.rejects(service.setMemberScope('x', { keep: 'yes' }), /keep must be a boolean/u)
     await assert.rejects(service.setMemberScope('x', { identity: 'a'.repeat(41) }), /identity is too long: 41 > 40/u)
     await assert.rejects(service.setMemberScope('x', { scope: 'b'.repeat(121) }), /scope is too long: 121 > 120/u)
-    await assert.rejects(service.setMemberScope('x', { idlePushMs: 'soon' }), /idlePushMs must be an integer/u)
-    await assert.rejects(service.setMemberScope('x', { idlePushMs: 999 }), /idlePushMs is out of range: 999/u)
-    await assert.rejects(service.setMemberScope('x', { idlePushMs: 86_400_001 }), /idlePushMs is out of range/u)
     await assert.rejects(service.setMemberScope('x', { compressPercent: '35' }), /compressPercent must be a number/u)
     await assert.rejects(service.setMemberScope('x', { compressPercent: 0 }), /compressPercent is out of range: 0/u)
     await assert.rejects(service.setMemberScope('x', { compressPercent: 101 }), /compressPercent is out of range/u)
@@ -157,7 +153,6 @@ test('member scopes persist per conversation, merge, clear, and read as empty wi
     assert.deepEqual((await restarted.memberScopes())['main-1'], {
       scope: '主对话验收',
       keep: false,
-      idlePushMs: 120_000,
       compressPercent: 50,
     })
     await writeFile(path.join(dataDir, 'member-scopes.json'), '{not json', 'utf8')
@@ -171,22 +166,20 @@ test('scope readers apply defaults and drop unusable stored values', async () =>
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-scope-defaults-'))
   const dataDir = path.join(dir, 'mesh')
   try {
-    assert.equal(effectiveMemberIdlePushMs(null), 300_000)
-    assert.equal(effectiveMemberIdlePushMs({ idlePushMs: 30_000 }), 30_000)
     assert.equal(effectiveCompressPercent(null), 35)
     assert.equal(effectiveCompressPercent({ compressPercent: 12.5 }), 12.5)
 
     const service = new MeshService({ dataDir, config: {}, log: () => {} })
     await mkdir(dataDir, { recursive: true })
     await writeFile(path.join(dataDir, 'member-scopes.json'), JSON.stringify({
-      good: { identity: '开发', avoidLongJobs: true, note: '只读复核', idlePushMs: 1_000, compressPercent: 75 },
-      badIdle: { identity: '测试', idlePushMs: 'soon' },
+      good: { identity: '开发', avoidLongJobs: true, note: '只读复核', compressPercent: 75 },
+      badIdle: { identity: '测试' },
       badPercent: { compressPercent: 0 },
-      onlyJunk: { idlePushMs: 1, compressPercent: 101, keep: 'yes', avoidLongJobs: 'yes' },
+      onlyJunk: { compressPercent: 101, keep: 'yes', avoidLongJobs: 'yes' },
       badNote: { note: 'x'.repeat(501) },
     }), 'utf8')
     assert.deepEqual(await service.memberScopes(), {
-      good: { identity: '开发', avoidLongJobs: true, note: '只读复核', idlePushMs: 1_000, compressPercent: 75 },
+      good: { identity: '开发', avoidLongJobs: true, note: '只读复核', compressPercent: 75 },
       badIdle: { identity: '测试' },
     })
   } finally {
@@ -262,7 +255,7 @@ test('set_member_scope on self stores avoidLongJobs and shows it', async () => {
   }
 })
 
-test('set_member_scope on self stores idlePushMs and compressPercent and shows effective values', async () => {
+test('set_member_scope on self stores compressPercent and shows effective values', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-scope-self-settings-'))
   const dataDir = path.join(dir, 'mesh')
   let service
@@ -272,37 +265,29 @@ test('set_member_scope on self stores idlePushMs and compressPercent and shows e
     const set = tools.find(tool => tool.name === 'set_member_scope')
 
     const configured = await set.execute(
-      { idlePushMs: 120_000, compressPercent: 50 },
+      { compressPercent: 50 },
       { agent: mainAgent },
     )
     assert.equal(configured.ok, true)
-    assert.deepEqual(await service.memberScope('main-1'), { idlePushMs: 120_000, compressPercent: 50 })
+    assert.deepEqual(await service.memberScope('main-1'), { compressPercent: 50 })
     assert.match(configured.text, /已设置自身（会话 main-1）/u)
-    assert.match(configured.text, /静默推送：2 分钟（只对主对话生效）/u)
     assert.match(configured.text, /压缩阈值：50%（主对话推送前和成员会话投递前生效）/u)
-    assert.equal(configured.data.idlePushMs, 120_000)
     assert.equal(configured.data.compressPercent, 50)
 
     const scope = await set.execute({ identity: '网关' }, { agent: mainAgent })
     assert.deepEqual(await service.memberScope('main-1'), {
       identity: '网关',
-      idlePushMs: 120_000,
       compressPercent: 50,
     }, 'a later identity setting keeps the numeric settings and does not enable keep')
     assert.match(scope.text, /保持目标：关闭/u)
-    assert.match(scope.text, /静默推送：2 分钟/u)
 
-    await assert.rejects(
-      () => set.execute({ idlePushMs: 999 }, { agent: mainAgent }),
-      /idlePushMs is out of range/u,
-    )
     await assert.rejects(
       () => set.execute({ compressPercent: 101 }, { agent: mainAgent }),
       /compressPercent is out of range/u,
     )
     await assert.rejects(
       () => set.execute({}, { agent: mainAgent }),
-      /identity, scope, note, keep, avoidLongJobs, idlePushMs, or compressPercent is required/u,
+      /identity, scope, note, keep, avoidLongJobs, or compressPercent is required/u,
     )
   } finally {
     await service?.memberTasks.dispose()
@@ -338,7 +323,7 @@ test('set_member_scope updates a tracked member conversation and ignores keep', 
     assert.equal(result.ok, true)
     assert.deepEqual(await service.memberScope('conv-9'), { identity: '测试', scope: '跨平台验收' })
     assert.match(result.text, /已设置成员会话 conv-9/u)
-    assert.match(result.text, /keep \/ avoidLongJobs \/ idlePushMs 只对主对话自身生效，设置成员会话时已忽略/u)
+    assert.match(result.text, /keep \/ avoidLongJobs 只对主对话自身生效，设置成员会话时已忽略/u)
     assert.doesNotMatch(result.text, /保持目标：/u)
     assert.match(result.text, /压缩阈值：35%（投递前超过该占比自动压缩）/u)
     assert.deepEqual(service.memberTasks.tasks.get('task-1').profile, {
@@ -369,18 +354,17 @@ test('set_member_scope updates a tracked member conversation and ignores keep', 
     assert.equal(onlyCompress.data.compressPercent, 10)
 
     const ignored = await set.execute(
-      { conversationId: 'conv-9', identity: '开发', keep: false, avoidLongJobs: true, idlePushMs: 5_000 },
+      { conversationId: 'conv-9', identity: '开发', keep: false, avoidLongJobs: true },
       { agent: mainAgent },
     )
     assert.deepEqual(await service.memberScope('conv-9'), { identity: '开发', compressPercent: 10 })
-    assert.match(ignored.text, /keep \/ avoidLongJobs \/ idlePushMs 只对主对话自身生效/u)
+    assert.match(ignored.text, /keep \/ avoidLongJobs 只对主对话自身生效/u)
     assert.doesNotMatch(ignored.text, /保持目标：/u)
-    assert.equal(ignored.data.ignoredIdlePushMs, true)
     assert.equal(ignored.data.ignoredAvoidLongJobs, true)
 
     await assert.rejects(
-      () => set.execute({ conversationId: 'conv-9', idlePushMs: 5_000 }, { agent: mainAgent }),
-      /keep, avoidLongJobs, and idlePushMs only apply to the current session; set identity, scope, note, or compressPercent/u,
+      () => set.execute({ conversationId: 'conv-9', avoidLongJobs: true }, { agent: mainAgent }),
+      /keep and avoidLongJobs only apply to the current session; set identity, scope, note, or compressPercent/u,
     )
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-9', compressPercent: 0 }, { agent: mainAgent }),
@@ -550,10 +534,10 @@ test('set_member_scope saves an untracked conversation and rejects invalid input
     assert.match(untracked.text, /本机未跟踪该会话，只保存设置/u)
     assert.deepEqual(await service.memberScope('conv-other'), { scope: '外部会话' })
 
-    await assert.rejects(() => set.execute({}, { agent: mainAgent }), /identity, scope, note, keep, avoidLongJobs, idlePushMs, or compressPercent is required/u)
+    await assert.rejects(() => set.execute({}, { agent: mainAgent }), /identity, scope, note, keep, avoidLongJobs, or compressPercent is required/u)
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-other', keep: false }, { agent: mainAgent }),
-      /keep, avoidLongJobs, and idlePushMs only apply to the current session; set identity, scope, note, or compressPercent/u,
+      /keep and avoidLongJobs only apply to the current session; set identity, scope, note, or compressPercent/u,
     )
     await assert.rejects(
       () => set.execute({ identity: 'a'.repeat(41) }, { agent: mainAgent }),

@@ -75,8 +75,10 @@ test('the persisted record drops events, sockets and receipts', () => {
     lastReceipt: { big: true },
   })
   assert.deepEqual(Object.keys(record).sort(), [
-    'createdAt', 'cwd', 'error', 'id', 'initiator', 'lastReasoning', 'lastText', 'prompt', 'replySeq', 'sessionId', 'status', 'title', 'turns', 'updatedAt', 'workspace',
+    'archived', 'archivedAt', 'createdAt', 'cwd', 'error', 'id', 'initiator', 'lastReasoning', 'lastText', 'prompt', 'replySeq', 'sessionId', 'status', 'title', 'turns', 'updatedAt', 'workspace',
   ])
+  assert.equal(record.archived, false)
+  assert.equal(record.archivedAt, null)
   assert.equal(record.error, null)
   assert.equal(record.turns, 3)
   assert.equal(record.replySeq, 7, 'the reply cursor is part of the durable record')

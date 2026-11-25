@@ -161,6 +161,7 @@ export function memberTaskState(task) {
  * @returns {string} 进行中 / 空闲 / 异常中止.
  */
 export function memberTaskStatusLabel(task) {
+  if (task?.archived === true) return '已归档'
   const state = memberTaskState(task)
   if (state === 'running') return '进行中'
   if (state === 'idle') return '空闲'
@@ -489,6 +490,10 @@ export class MemberTaskService {
         task.replySeq = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0
         task.deliveredSeq = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0
         task.terminalDelivered = task.terminalDelivered === true
+        // Archived conversations stay in the record so a repeated
+        // `remove_member` is idempotent, but every list filters them out.
+        task.archived = task.archived === true
+        task.archivedAt = typeof task.archivedAt === 'string' ? task.archivedAt : null
         // Old records predate the workspace field. An empty value is not a
         // name, so both fall back to the same placeholder the model sees.
         if (typeof task.workspace !== 'string' || task.workspace.trim() === '') task.workspace = 'unknown'
@@ -935,12 +940,14 @@ export class MemberTaskService {
     if (key === '') throw new Error('conversationId is required')
     const task = this.#taskOfConversation(key)
     if (task === undefined) throw new Error(`member conversation is not tracked: ${key}`)
+    if (task.archived === true) return { done: true, timedOut: false, task, replies: [], state: 'archived' }
     const timeoutMs = Math.max(1000, Math.min(Number.isSafeInteger(options.timeoutMs) ? options.timeoutMs : 30_000, 300_000))
     const signal = options.signal
     const deadline = Date.now() + timeoutMs
     let terminalSynced = false
     for (;;) {
       signal?.throwIfAborted()
+      if (task.archived === true) return { done: true, timedOut: false, task, replies: [], state: 'archived' }
       const terminal = task.status === 'completed' || task.status === 'failed' || task.status === 'interrupted'
       if (terminal && !terminalSynced) {
         // The monitor stopped when this task ended, so any turn the member ran
@@ -1013,6 +1020,10 @@ export class MemberTaskService {
       else tasks.push(task)
     }
     if (untracked.length > 0) throw new Error(`member conversation is not tracked: ${untracked.join(', ')}`)
+    const archivedTask = tasks.find(task => task.archived === true)
+    if (archivedTask !== undefined) {
+      return { done: true, timedOut: false, task: archivedTask, replies: [], state: 'archived', remaining: this.#describeRemaining(tasks, archivedTask) }
+    }
     // One id keeps the exact single-conversation behaviour, including its
     // cursor bookkeeping and its terminal re-read.
     if (tasks.length === 1) {
@@ -1025,6 +1036,10 @@ export class MemberTaskService {
     const synced = new Set()
     for (;;) {
       signal?.throwIfAborted()
+      const archivedTask = tasks.find(entry => entry.archived === true)
+      if (archivedTask !== undefined) {
+        return { done: true, timedOut: false, task: archivedTask, replies: [], state: 'archived', remaining: this.#describeRemaining(tasks, archivedTask) }
+      }
       let winner
       let finished
       for (const task of tasks) {
@@ -1240,7 +1255,8 @@ export class MemberTaskService {
     const key = String(sessionId ?? '')
     if (key === '') return []
     return [...this.tasks.values()]
-      .filter(task => task.originSessionId === key && (task.status === 'running' || task.status === 'starting'))
+      .filter(task => task.originSessionId === key && task.archived !== true
+        && (task.status === 'running' || task.status === 'starting'))
       .sort((left, right) => String(left.lastSentAt ?? left.createdAt ?? '')
         .localeCompare(String(right.lastSentAt ?? right.createdAt ?? '')))
   }
@@ -1260,7 +1276,7 @@ export class MemberTaskService {
     const key = String(sessionId ?? '')
     if (key === '') return []
     return [...this.tasks.values()]
-      .filter(task => task.originSessionId === key)
+      .filter(task => task.originSessionId === key && task.archived !== true)
       .sort((left, right) => String(left.createdAt ?? '')
         .localeCompare(String(right.createdAt ?? '')))
   }
@@ -1277,6 +1293,7 @@ export class MemberTaskService {
   async inspect(conversationId) {
     const task = await this.find(conversationId)
     if (task === undefined) return null
+    if (task.archived === true) return { task, live: null, liveError: null, archived: true }
     let live = null
     let liveError = null
     try {
@@ -1285,7 +1302,91 @@ export class MemberTaskService {
     } catch (error) {
       liveError = error instanceof Error ? error.message : String(error)
     }
-    return { task, live, liveError }
+    // The member's registry is the source of truth: a session archived in its
+    // Web UI must disappear from this side too, even when `remove_member` was
+    // not the one that archived it.
+    if (live?.archived === true) {
+      await this.#markArchived(task)
+      return { task, live, liveError, archived: true }
+    }
+    return { task, live, liveError, archived: false }
+  }
+
+  /**
+   * Archive one member conversation and stop tracking it.
+   *
+   * The archive happens on the target member: its workspace registry hides the
+   * session from every list and, with `stopActivity`, cancels a running turn
+   * first. Locally the task keeps its record with `archived: true` (so a repeat
+   * is idempotent) but is filtered out of every status list and the injected
+   * snapshot, and its monitor, delivery timer, and parked waits are stopped.
+   *
+   * An older member does not serve the archive route at all (404). That is
+   * reported as "upgrade the member", not retried as a transient failure.
+   * @param {string} conversationId member conversation id.
+   * @returns {Promise<{task: object, already: boolean}>} archived task.
+   */
+  async archive(conversationId) {
+    await this.#ensureLoaded()
+    const key = String(conversationId ?? '').trim()
+    if (key === '') throw new Error('conversationId is required')
+    const task = this.#taskOfConversation(key)
+    if (task === undefined) throw new Error(`本机没有跟踪会话 ${key}；先 call_member 发起或继续一次，或确认会话id 正确。`)
+    if (task.archived === true) return { task, already: true }
+    let result
+    try {
+      result = await this.#request(
+        task.baseUrl,
+        'POST',
+        `/v1/conversations/${encodeURIComponent(task.conversationId)}/archive`,
+        undefined,
+        60_000,
+      )
+    } catch (error) {
+      if (error?.status === 404) {
+        throw new Error(`目标成员 ${task.member}（${task.memberIp}）的插件版本不支持归档会话；先给该成员升级到带 remove_member 的版本。`)
+      }
+      if (error?.code === 'archive_unavailable') {
+        throw new Error(`目标成员 ${task.member}（${task.memberIp}）无法归档会话：${error?.memberMessage ?? error?.message ?? '没有 workspace registry'}`)
+      }
+      throw error
+    }
+    await this.#markArchived(task)
+    await this.#log(task, `archived ${task.conversationId} (${String(result?.already === true ? 'already archived' : 'new archive')})`)
+    return { task, already: result?.already === true }
+  }
+
+  /**
+   * Write the archived state and stop every local activity for one task.
+   * @param {object} task tracked task.
+   * @returns {Promise<void>} resolution after the record is durable.
+   */
+  async #markArchived(task) {
+    if (task.archived === true) return
+    task.archived = true
+    task.archivedAt = new Date().toISOString()
+    task.status = 'archived'
+    task.settledAt = task.settledAt ?? task.archivedAt
+    // Nothing about an archived conversation may wake this conversation again:
+    // no completion notice, no fallback result, no retry.
+    task.notify = false
+    task.deliveryReplies = null
+    task.deliveryClaimedFrom = null
+    const controller = this.controllers.get(task.id)
+    if (controller !== undefined) {
+      this.controllers.delete(task.id)
+      try { controller.abort(new Error('the conversation was archived')) } catch { }
+    }
+    for (const timers of [this.deliveryTimers, this.notifyTimers]) {
+      const timer = timers.get(task.id)
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        timers.delete(task.id)
+      }
+    }
+    this.monitors.delete(task.id)
+    this.#notifyWaiters(task)
+    await this.#save(task)
   }
 
   /**
@@ -1488,6 +1589,25 @@ export class MemberTaskService {
     const hasScopePatch = Object.keys(scopePatch).length > 0
     const signal = request.signal
     const { task, fresh, target } = await this.#sendTarget(request)
+    if (task.archived === true) {
+      // The member is the source of truth: if the session was unarchived in
+      // its Web UI, admit the conversation again instead of refusing forever.
+      let live = null
+      try {
+        const probe = await this.#request(task.baseUrl, 'GET', `/v1/conversations/${encodeURIComponent(task.conversationId)}`, undefined, 10_000)
+        live = probe?.conversation ?? null
+      } catch {
+        live = null
+      }
+      if (live?.archived === false) {
+        task.archived = false
+        task.archivedAt = null
+        task.status = 'completed'
+        await this.#save(task)
+      } else {
+        throw new Error(`成员会话 ${task.conversationId} 已归档，不能继续投递；要恢复请在成员 Web UI 取消归档。`)
+      }
+    }
     let deliveredPrompt = prompt
     if (hasScopePatch) {
       if (typeof this.service.setMemberScope !== 'function') throw new Error('member scopes are not available')

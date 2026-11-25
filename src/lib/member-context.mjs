@@ -9,9 +9,10 @@
  * - the snapshot is request-only context attached to `decision.messages` from
  *   an `agent/pre-step` listener, at most once per
  *   {@link MEMBER_STATUS_INTERVAL_MS};
- * - after a main-conversation turn ends, if `keep` is on, the same snapshot is
- *   pushed back with `followup` after {@link MEMBER_PUSH_DELAY_MS} of quiet,
- *   so the model sees completed work without another user message;
+ * - after a main-conversation turn ends, if `keep` is explicitly on, the same
+ *   snapshot is pushed back with `followup` after {@link MEMBER_PUSH_DELAY_MS}
+ *   of quiet, so the model sees completed work without another user message.
+ *   `keep` defaults to off: a scope without the flag never pushes;
  * - member conversations are excluded from the push via
  *   {@link isMemberSession};
  * - a failure is logged and swallowed so the agent loop is never affected.
@@ -216,7 +217,7 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfCompressPercent = effectiveCompressPercent(selfScope)
   const lines = [
     `[成员任务状态] 本对话跟踪 ${String(list.length)} 个成员会话，其中 ${String(running.length)} 个进行中（快照 ${new Date(at).toISOString()}）。`,
-    `- 自身（会话 ${selfId === '' ? 'unknown' : selfId}）：身份：${selfScope?.identity ?? '未设置'}；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === false ? '关闭' : '开启'}（只对主对话生效）；静默推送：${formatMemberPushDelay(selfIdlePushMs)}（只对主对话生效）；压缩阈值：${formatMemberPercent(selfCompressPercent)}`,
+    `- 自身（会话 ${selfId === '' ? 'unknown' : selfId}）：身份：${selfScope?.identity ?? '未设置'}；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === true ? '开启' : '关闭'}（只对主对话生效）；静默推送：${formatMemberPushDelay(selfIdlePushMs)}（只对主对话生效）；压缩阈值：${formatMemberPercent(selfCompressPercent)}`,
   ]
   for (const task of list) {
     const entry = describeMemberTask(task)
@@ -257,7 +258,7 @@ export function formatMemberStatusSignature(state = {}) {
     self: {
       identity: state.selfScope?.identity ?? null,
       scope: state.selfScope?.scope ?? null,
-      keep: state.selfScope?.keep !== false,
+      keep: state.selfScope?.keep === true,
       idlePushMs: effectiveMemberIdlePushMs(state.selfScope),
       compressPercent: effectiveCompressPercent(state.selfScope),
     },
@@ -398,8 +399,9 @@ export function createMemberContext({
    * Arm the quiet-period push after one main-conversation turn ends.
    *
    * Only a session that has a tracked member task or an existing self scope is
-   * armed, and `keep: false` cancels it. The timer is intentionally not
-   * awaited by the event listener.
+   * armed, and anything but an explicit `keep: true` cancels it (`keep`
+   * defaults off). The timer is intentionally not awaited by the event
+   * listener.
    * @param {string} sessionId session id.
    * @param {number|null} turn turn that just ended.
    * @param {number} generation scheduling generation this call belongs to.
@@ -415,7 +417,7 @@ export function createMemberContext({
     if (!turns.has(sessionId) || turns.get(sessionId) !== turn) return
     const selfScope = scopes[sessionId] ?? null
     if (tasks.length === 0 && selfScope === null) return
-    if (selfScope?.keep === false) return
+    if (selfScope?.keep !== true) return
     cancelPush(sessionId)
     // The per-conversation setting wins over the process default; injecting
     // `pushDelayMs` remains the test knob only when no setting is stored.
@@ -449,7 +451,7 @@ export function createMemberContext({
     if (closed || turns.get(sessionId) !== turn) return
     const selfScope = scopes[sessionId] ?? null
     if (tasks.length === 0 && selfScope === null) return
-    if (selfScope?.keep === false) return
+    if (selfScope?.keep !== true) return
     if (agent.status !== 'idle') return
     // Signature first: an unchanged snapshot must not pay for a compaction.
     const signature = formatMemberStatusSignature({ selfId: sessionId, selfScope, tasks, scopes })

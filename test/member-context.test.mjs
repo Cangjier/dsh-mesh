@@ -274,8 +274,9 @@ test('a snapshot shows the self identity, work scope, keep state and effective s
   assert.doesNotMatch(text, /还没有身份\/工作范围/u)
 })
 
-test('a snapshot shows the default 5-minute push delay and 35% threshold', () => {
+test('a snapshot shows the default 5-minute push delay, 35% threshold and keep off', () => {
   const text = formatMemberStatusSnapshot([], { now: 1_000_000, selfId: 'session-a' })
+  assert.match(text, /保持目标：关闭（只对主对话生效）/u)
   assert.match(text, /静默推送：5 分钟（只对主对话生效）；压缩阈值：35%/u)
 })
 
@@ -293,7 +294,7 @@ test('a member line only shows an explicitly configured compression threshold', 
 
 test('a snapshot asks for the self scope and marks missing fields', () => {
   const text = formatMemberStatusSnapshot([], { now: 1_000_000, selfId: 'session-a' })
-  assert.match(text, /自身（会话 session-a）：身份：未设置；工作范围：未设置；保持目标：开启（只对主对话生效）/u)
+  assert.match(text, /自身（会话 session-a）：身份：未设置；工作范围：未设置；保持目标：关闭（只对主对话生效）/u)
   assert.match(text, /自身还没有身份\/工作范围：用 set_member_scope（省略 conversationId 或传 self）设置自身身份和工作范围。/u)
 })
 
@@ -386,6 +387,22 @@ test('a changed task signature is pushed again', async () => {
     await sleep(80)
     assert.equal(h.followups.length, 2)
     assert.match(h.followups[1].content[0].text, /空闲，第 3 轮/u)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('a scope without keep does not arm the active push (keep defaults off)', async () => {
+  const h = harness({
+    tasks: [running],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现' } },
+    pushDelayMs: 15,
+  })
+  try {
+    h.emit('turn/start', { turn: 1 })
+    h.emit('turn/end', { turn: 1 })
+    await sleep(80)
+    assert.equal(h.followups.length, 0)
   } finally {
     h.context.dispose()
   }

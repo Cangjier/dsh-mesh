@@ -546,6 +546,38 @@ export function createInteropService(options) {
   }
 
   /**
+   * The host workspace registry, when this composition has one.
+   *
+   * The embedded interop service runs inside the Web host, which owns the
+   * session list and its archive set; the standalone service has no host
+   * context at all and therefore no registry.
+   * @returns {any} registry or undefined.
+   */
+  function workspaceRegistry() {
+    return typeof ctx.get === 'function' ? ctx.get('workspaceRegistry') : ctx.workspaceRegistry
+  }
+
+  /**
+   * Whether a conversation's session is archived.
+   *
+   * The registry is the source of truth because the Web UI can archive a
+   * session without going through this service. `conversation.archived` is the
+   * durable local copy written by the archive endpoint, kept so a member whose
+   * registry is unavailable still reports the state it last knew.
+   * @param {Record<string, any>} conversation conversation.
+   * @returns {boolean} archived.
+   */
+  function sessionArchived(conversation) {
+    try {
+      const ids = workspaceRegistry()?.archivedSessionIds
+      // The registry wins: the user can unarchive on the member, and a stale
+      // local flag must not keep refusing messages afterwards.
+      if (Array.isArray(ids)) return ids.includes(conversation.sessionId)
+    } catch { }
+    return conversation.archived === true
+  }
+
+  /**
    * One conversation's public projection.
    * @param {Record<string, any>} conversation conversation.
    * @returns {Record<string, any>} projection.
@@ -555,6 +587,8 @@ export function createInteropService(options) {
       id: conversation.id,
       sessionId: conversation.sessionId,
       status: conversation.status,
+      archived: sessionArchived(conversation),
+      archivedAt: typeof conversation.archivedAt === 'string' ? conversation.archivedAt : null,
       createdAt: conversation.createdAt,
       updatedAt: conversation.updatedAt,
       lastText: conversation.lastText,
@@ -774,6 +808,7 @@ export function createInteropService(options) {
    * @returns {void}
    */
   function handleAgentStatus(conversation, status) {
+    if (conversation.archived === true) return
     if (status === 'running') {
       conversation.idle = false
       if (conversation.prompted) conversation.status = 'running'
@@ -1212,6 +1247,16 @@ export function createInteropService(options) {
    * @returns {Promise<{accepted: boolean, steered: boolean, delivery: 'steer'|'followup'}>} receipt.
    */
   async function sendMessage(conversation, request) {
+    if (sessionArchived(conversation)) {
+      throw httpError(409, 'conversation_archived', 'the conversation is archived; unarchive it on the member before sending another message')
+    }
+    if (conversation.archived === true) {
+      // The session was unarchived in the Web UI; drop the stale local flag so
+      // the archive gate in the agent's pre-step stops skipping this session.
+      conversation.archived = false
+      conversation.archivedAt = null
+      scheduleSave()
+    }
     const blocks = contentBlocks(request.content ?? request.message ?? request.prompt)
     const agent = await ensureAgent(conversation)
     conversation.prompted = true
@@ -1283,6 +1328,64 @@ export function createInteropService(options) {
       log(`compaction failed for ${conversation.id}: ${message}`)
       throw httpError(502, 'compaction_failed', `compaction failed${code === '' ? '' : ` (${code})`}: ${message}`)
     }
+  }
+
+  /**
+   * Archive one conversation's session on this member.
+   *
+   * The member's workspace registry owns the archive set the Web UI reads, so
+   * this is the same operation as the session row's archive button: the session
+   * leaves every list (including the sidebar), and `stopActivity` cancels a
+   * running turn first so the archive is durable immediately. The interop
+   * conversation record stays behind with `archived: true`, which makes a
+   * repeated request idempotent and lets `/result` still answer for someone who
+   * archived a conversation while a result was on its way.
+   * @param {Record<string, any>} conversation conversation.
+   * @returns {Promise<{already: boolean}>} whether it was archived before.
+   */
+  async function archiveConversation(conversation) {
+    if (sessionArchived(conversation)) {
+      conversation.archived = true
+      return { already: true }
+    }
+    const registry = workspaceRegistry()
+    if (registry === undefined || registry === null || typeof registry.archiveSession !== 'function') {
+      throw httpError(
+        501,
+        'archive_unavailable',
+        'this member has no workspace registry; archive needs the embedded interop service of a Web host',
+      )
+    }
+    try {
+      await registry.archiveSession(conversation.sessionId, { stopActivity: true })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      log(`archive failed for ${conversation.id}: ${message}`)
+      throw httpError(502, 'archive_failed', `cannot archive this conversation: ${message}`)
+    }
+    // Dispose first: the disposal event rewrites an ordinary conversation's
+    // status, and this one must stay `archived` afterwards.
+    const handle = handles.get(conversation.id)
+    if (handle !== undefined) {
+      handles.delete(conversation.id)
+      conversation.agent = null
+      conversation.handle = null
+      await Promise.resolve(handle.dispose()).catch(() => {})
+    }
+    conversation.archived = true
+    conversation.archivedAt = new Date().toISOString()
+    conversation.status = 'archived'
+    conversation.idle = true
+    conversation.updatedAt = conversation.archivedAt
+    // A parked `/wait` belongs to a task the initiator is about to drop; wake
+    // it so no caller is left until its timeout on an archived conversation.
+    for (const waiter of [...(conversation.waiters ?? [])]) {
+      try { waiter() } catch { }
+    }
+    saveState()
+    broadcast(conversation, { type: 'conversation.archived', sessionId: conversation.sessionId })
+    log(`archived ${conversation.sessionId} (${conversation.id})`)
+    return { already: false }
   }
 
   /**
@@ -1419,6 +1522,9 @@ export function createInteropService(options) {
    * @returns {Promise<Record<string, any>>} wait result.
    */
   async function waitConversation(conversation, timeoutMs, since) {
+    if (sessionArchived(conversation)) {
+      return { timedOut: false, state: 'archived', settled: true, text: conversation.lastText ?? '', turn: turnsOf(conversation), seq: seqOf(conversation), replies: [], archived: true }
+    }
     reconcileStatus(conversation)
     if (conversation.interrupted && conversation.error !== null) {
       return { timedOut: false, state: 'done', settled: true, text: conversation.lastText ?? '', turn: turnsOf(conversation), seq: seqOf(conversation), replies: [] }
@@ -1521,7 +1627,7 @@ export function createInteropService(options) {
         json(response, 201, { ok: true, conversation: publicConversation(conversation) })
         return
       }
-      const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact))?$/u.exec(url.pathname)
+      const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact|archive))?$/u.exec(url.pathname)
       if (match === null) { fail(response, 404, 'not_found', 'Unknown endpoint.'); return }
       const conversation = findConversation(decodeURIComponent(match[1]))
       const suffix = match[2] ?? ''
@@ -1581,6 +1687,11 @@ export function createInteropService(options) {
         })
         return
       }
+      if (request.method === 'POST' && suffix === 'archive') {
+        const result = await archiveConversation(conversation)
+        json(response, 200, { ok: true, archived: true, already: result.already, conversation: publicConversation(conversation) })
+        return
+      }
       if (request.method === 'POST' && suffix === 'compact') {
         const result = await compactConversation(conversation)
         json(response, 200, {
@@ -1607,6 +1718,7 @@ export function createInteropService(options) {
           ok: true,
           timedOut: result.timedOut === true,
           state: result.state ?? 'done',
+          archived: result.archived === true,
           settled: result.settled === true,
           text: typeof result.text === 'string' ? result.text : '',
           turn: Number.isSafeInteger(result.turn) ? result.turn : turnsOf(conversation),
@@ -1666,7 +1778,7 @@ export function createInteropService(options) {
       conversation.agent = null
       conversation.handle = null
       conversation.idle = true
-      if (conversation.prompted) {
+      if (conversation.prompted && conversation.archived !== true) {
         conversation.status = conversation.interrupted ? 'interrupted' : conversation.error !== null ? 'error' : 'idle'
       }
       conversation.updatedAt = new Date().toISOString()

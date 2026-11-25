@@ -191,6 +191,8 @@ function memoryWorkspaceRegistry(options = {}) {
   const records = new Map()
   const creates = []
   const attaches = []
+  const archived = []
+  const archiveCalls = []
   /** Register one record without going through `create`, for pre-seeded state. */
   const seed = (dir, title) => {
     const workspace = {
@@ -222,8 +224,14 @@ function memoryWorkspaceRegistry(options = {}) {
       if (existing !== undefined) return existing
       return seed(dir, title)
     },
+    get archivedSessionIds() { return archived },
+    async archiveSession(sessionId, archiveOptions) {
+      if (options.archiveThrows === true) throw new Error('archive failed')
+      archiveCalls.push([sessionId, archiveOptions])
+      if (!archived.includes(sessionId)) archived.push(sessionId)
+    },
   }
-  return { registry, records, creates, attaches, seed }
+  return { registry, records, creates, attaches, seed, archived, archiveCalls }
 }
 
 test('a conversation without workspace or cwd joins the default workspace', async () => {
@@ -240,6 +248,86 @@ test('a conversation without workspace or cwd joins the default workspace', asyn
     assert.deepEqual(memory.creates, [[expected, 'default-workspace']])
     assert.deepEqual(memory.attaches, [[expected, conversation.id]])
     assert.equal(memory.records.get(expected).title, 'default-workspace')
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('archiving a conversation stops it, hides the session and refuses new messages', async () => {
+  const memory = memoryWorkspaceRegistry()
+  const { service, call, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+  try {
+    const created = await call('POST', '/v1/conversations', { prompt: '归档我' })
+    assert.equal(created.status, 201)
+    const id = created.body.conversation.id
+
+    const archived = await call('POST', `/v1/conversations/${id}/archive`)
+    assert.equal(archived.status, 200)
+    assert.equal(archived.body.ok, true)
+    assert.equal(archived.body.archived, true)
+    assert.equal(archived.body.already, false)
+    assert.equal(archived.body.conversation.archived, true)
+    assert.equal(archived.body.conversation.status, 'archived')
+    assert.deepEqual(memory.archiveCalls, [[id, { stopActivity: true }]])
+    assert.deepEqual(memory.archived, [id])
+
+    const again = await call('POST', `/v1/conversations/${id}/archive`)
+    assert.equal(again.status, 200)
+    assert.equal(again.body.already, true)
+    assert.equal(memory.archiveCalls.length, 1, 'a second archive must not ask the registry again')
+
+    const sent = await call('POST', `/v1/conversations/${id}/messages`, { content: '还要继续' })
+    assert.equal(sent.status, 409)
+    assert.equal(sent.body.error.code, 'conversation_archived')
+
+    const waited = await call('POST', `/v1/conversations/${id}/wait`, { timeoutMs: 1000 })
+    assert.equal(waited.status, 200)
+    assert.equal(waited.body.state, 'archived')
+    assert.equal(waited.body.archived, true)
+
+    const read = await call('GET', `/v1/conversations/${id}`)
+    assert.equal(read.status, 200)
+    assert.equal(read.body.conversation.archived, true)
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('unarchiving on the member lets the conversation receive messages again', async () => {
+  const memory = memoryWorkspaceRegistry()
+  const { service, call, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+  try {
+    const created = await call('POST', '/v1/conversations', { prompt: '先归档再恢复' })
+    const id = created.body.conversation.id
+    await call('POST', `/v1/conversations/${id}/archive`)
+    const refused = await call('POST', `/v1/conversations/${id}/messages`, { content: '归档中' })
+    assert.equal(refused.status, 409)
+
+    // The user unarchives the session in the member Web UI: the registry is
+    // the source of truth, so a stale local flag must not block the message.
+    memory.archived.splice(0)
+    const resumed = await call('POST', `/v1/conversations/${id}/messages`, { content: '恢复' })
+    assert.equal(resumed.status, 202)
+    assert.equal(resumed.body.conversation.archived, false)
+
+    const waited = await call('POST', `/v1/conversations/${id}/wait`, { timeoutMs: 1000 })
+    assert.notEqual(waited.body.state, 'archived')
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a member without a workspace registry reports archive as unavailable', async () => {
+  const { service, call, dir } = await serviceOf({}, {})
+  try {
+    const created = await call('POST', '/v1/conversations', { prompt: '没有 registry' })
+    const id = created.body.conversation.id
+    const archived = await call('POST', `/v1/conversations/${id}/archive`)
+    assert.equal(archived.status, 501)
+    assert.equal(archived.body.error.code, 'archive_unavailable')
   } finally {
     await service.dispose()
     await rm(dir, { recursive: true, force: true })

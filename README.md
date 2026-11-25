@@ -4,7 +4,7 @@
 
 这个仓库现在同时是：
 
-- **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `build` / `deploy` / `members` / `call_member` / `set_member_scope` / `wait_member` / `status_member` 工具。
+- **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `build` / `deploy` / `members` / `call_member` / `set_member_scope` / `wait_member` / `status_member` / `remove_member` 工具。
 - **可观察的部署**：点「部署」后按钮变为「正在部署」，随时点开查看获取安装包（Release 下载或网关上传）的进度（字节、速度、剩余时间）、获取/解压准备/切换重启三步状态与远端脚本日志尾部，结束后直接给出成功或失败原因。进度与日志走 **SSE 推送**（`/api/dsh-mesh/events`、`/__gate/hysteria/events`），面板里没有定时轮询。
 - **网关**：`code/gate/`，负责密码门、反向代理、成员 cluster 认证、目标 cookie。
 - **构建引擎**：`code/build/`，从 DSH GitHub 源码确定性地应用覆盖层、构建 Web 前端、按目标系统和架构打包。
@@ -157,7 +157,8 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.7z \
 - **重启不丢结果**：插件停止前仍在跑的任务会被重新接回监控（24 小时内），成员完成后照常投递；原对话当时不在线会重试几次。
 - **子代理上下文预算**：注入给成员会话的规则要求控制子代理的上下文占比——某个子代理超过 35% 时尽量改用新的子代理（交接已有结论），不再继续用旧的；DSH 在子代理一轮结束时就会卸载它，父对话既量不到也压不了。
 - **`status_member`**：按会话id 返回目标会话状态（进行中/空闲/异常中止/出错）、工作区、身份/工作范围、最近两次用户消息（本机 `call_member` 投递记录）和最近一次思考（目标会话的 reasoning）；`conversationIds` 可一次查多个，分块输出并带汇总；返回值同时列出本对话跟踪的**所有**成员会话（id、状态、工作区名称、身份/工作范围），不只看本次查询的会话，缺失项会提示用 `call_member` 或 `set_member_scope` 补齐。
-- **主对话空闲主动推送**：`session/event` 的 `turn/end` 后，若会话不是 interop 创建的成员会话、且 `keep` 不为 false（默认 true）、且有被跟踪的成员任务或已有自身 scope，插件会在**默认 5 分钟**静默后检查主 agent 仍 idle、没有新 turn，然后以 `followup` 投递**与快照完全相同**的内容（source 为 `mesh-member-status` / `form: push`，非 user 来源）。静默时长用 `set_member_scope` 的 `idlePushMs` 配置（1000–86400000 毫秒，只对主对话生效）。投递前会测量主对话上下文占比：超过 `compressPercent`（默认 35%）先压缩再推送；压缩失败只记日志、不阻塞推送，压缩期间开始了新 turn 则放弃本次推送。`turn/start` 取消计时，dispose 清理；用不含时间戳的内容签名**先去重**，相同状态直接返回、不触发压缩，任务进展/完成或 scope 变化才再次推送。成员会话永不主动推送。
+- **`remove_member`**：输入 `conversationId`，在目标成员上归档该对话（等同成员 Web UI 的「归档」）。目标成员从本机任务记录解析；成员侧先停止正在跑的工作，再把会话放进归档集，本机任务标记为 `archived` 并停止监视、完成通知和等待。归档后 `status_member` 和成员状态快照都不再列出它；未取消归档前用 `call_member` 继续会被明确拒绝，在成员 Web UI 取消归档后再投递会重新识别并继续。目标成员没有归档接口（旧版插件）会明确报错。成员 UI 里自行归档的会话也会在下一次 `status_member` 读取时被识别并移出列表。
+- **主对话空闲主动推送**：`session/event` 的 `turn/end` 后，若会话不是 interop 创建的成员会话、且 `keep === true`（默认 false，需要显式开启）、且有被跟踪的成员任务或已有自身 scope，插件会在**默认 5 分钟**静默后检查主 agent 仍 idle、没有新 turn，然后以 `followup` 投递**与快照完全相同**的内容（source 为 `mesh-member-status` / `form: push`，非 user 来源）。静默时长用 `set_member_scope` 的 `idlePushMs` 配置（1000–86400000 毫秒，只对主对话生效）。投递前会测量主对话上下文占比：超过 `compressPercent`（默认 35%）先压缩再推送；压缩失败只记日志、不阻塞推送，压缩期间开始了新 turn 则放弃本次推送。`turn/start` 取消计时，dispose 清理；用不含时间戳的内容签名**先去重**，相同状态直接返回、不触发压缩，任务进展/完成或 scope 变化才再次推送。成员会话永不主动推送。
 - **没人继续等待时的兜底投递（不重复）**：模型拿到 `progress` 后可能就不再 `wait_member`。对话完成（或失败/中断）后，插件先等 3 秒，让正在等待或紧接着发起的 `wait_member` 取走结果；如果任务结束时有 `wait_member` 正停在上面，窗口延长到 15 秒，让它先完成终态复读。兜底**只投递 `seq > deliveredSeq` 的未取回复**，同一个回复文本绝不重复投递；终态文本已经被 `wait_member` 取走时，最多发一条不含回复正文的简短完成提示；后到的 `wait_member` 也不会再从 `lastText` 重印已取走或已由兜底认领的正文。`wait_member` 消费终态时同步取消待投递 timer 并标记已消费；兜底投递失败会释放已认领的回复，后续 wait 仍能返回正文。投递时如果主对话正在执行 turn，用 `agent.steer()` 把结果**直接插入当前 turn 的下一步边界**，不等 turn 结束；空闲时才开新 turn。
 - 不需要 B 主动访问 A；A 长轮询（阻塞式等待）B 的 `/wait`，避免回调端口/NAT 问题。
 - 状态快照、工作区并发保护、steer 与结果去重的完整边界见 [Step 027](docs/Step%20027%20成员任务状态、工作区并发保护与结果不重复投递.md)。
@@ -354,7 +355,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `src/lib/member-context.mjs` | 成员会话状态快照：`agent/pre-step` 每 60 秒附加一次；主对话 `turn/end` 后默认 5 分钟空闲主动 `followup` 推送（`idlePushMs` 可配），超过压缩阈值（默认 35%）先压缩 |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
-| `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `set_member_scope` / `wait_member` / `status_member` 工具 |
+| `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `set_member_scope` / `wait_member` / `status_member` / `remove_member` 工具 |
 | `src/lib/member-sessions.mjs` | 标记 interop 创建的成员会话，主动推送时排除 |
 | `src/client/index.tsx` | 侧边栏「DSH 成员」面板 |
 | `code/gate/server.mjs` | 网关：密码门、目标路由、反向代理、WebSocket |
@@ -384,7 +385,8 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `call_member` | 在成员上新建/继续对话，返回会话id；可设 `identity` / `scope` |
 | `set_member_scope` | 设置成员会话或自身的 `identity` / `scope` / `compressPercent`；自身还可设 `keep` / `idlePushMs` |
 | `wait_member` | 有界等待成员会话：`all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定；有新回复立刻返回（`state=progress`），完成返回 `done` |
-| `status_member` | 目标会话状态、工作区、身份/工作范围、最近两次用户消息、最近一次思考；附带本对话全部成员会话的状态、工作区与身份/工作范围 |
+| `status_member` | 目标会话状态、工作区、身份/工作范围、最近两次用户消息、最近一次思考；附带本对话全部成员会话的状态、工作区与身份/工作范围（已归档的不列出） |
+| `remove_member` | 在目标成员上归档一个对话并停止本机跟踪；归档会先停止正在跑的工作，之后 `status_member` 和状态快照都不再列出它 |
 
 ## 约定与限制
 

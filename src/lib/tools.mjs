@@ -1,7 +1,7 @@
 /**
  * Model-visible tools for the mesh plugin.
  *
- * Seven tools:
+ * Nine tools:
  *   build          deterministic source build, waits for the final state
  *   deploy         SSH blue-green deployment, waits for the final state
  *   repack         refresh an existing offline package from this checkout
@@ -9,6 +9,7 @@
  *   call_member    start / continue a conversation on another member
  *   wait_member    bounded wait for one or more member tasks, returns on the first
  *   status_member  live state and the last two delivered messages of tracked tasks
+ *   remove_member  archive a conversation on its member and stop tracking it
  *
  * @module @local/dsh-mesh/tools
  */
@@ -363,10 +364,10 @@ export function registerTools(ctx, toolsCtx, service) {
       '`conversationId` 省略、`self`、`local` 或等于当前会话 id 时设置“自身”；其他值作为成员会话 id。',
       '`identity` / `scope` 是可选的字符串，只传要改的字段；空字符串表示清除。',
       'identity 最长 40 字符，scope 最长 120 字符。',
-      '`keep` 默认 true，只对自身/主对话生效：turn 结束后若为 true，主对话空闲时会主动收到成员状态快照。',
+      '`keep` 默认 false，只对自身/主对话生效：显式传 keep=true 时，turn 结束后主对话空闲时会主动收到成员状态快照；不传 keep 不改变已保存的值，从未设置过即为关闭。',
       `\`idlePushMs\`：静默推送延迟（整数毫秒，${String(MEMBER_IDLE_PUSH_MIN_MS)}–${String(MEMBER_IDLE_PUSH_MAX_MS)}，默认 ${String(DEFAULT_MEMBER_IDLE_PUSH_MS)} 即 5 分钟），只对自身/主对话生效；设置成员会话时忽略。`,
       `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；主对话和成员会话都生效：主对话推送快照前、或成员会话下一次投递前，上下文占比超过阈值就先压缩。`,
-      '首次给自身设置 identity/scope 且未传 keep 时 keep 默认开启；已有 keep=false 不会被重置。',
+      '给自身设置 identity/scope 不会顺带开启 keep；需要推送就显式传 keep=true。',
       '设置成员会话时 keep 和 idlePushMs 被忽略，返回文字会说明。',
       '至少提供 identity、scope、keep、idlePushMs、compressPercent 之一；设置成员会话时必须有 identity、scope 或 compressPercent 之一。',
       '成员会话可以未被本机跟踪，设置仍会保存，只是不会同步任务快照。',
@@ -389,7 +390,7 @@ export function registerTools(ctx, toolsCtx, service) {
         },
         keep: {
           type: 'boolean',
-          description: '只对自身/主对话生效，默认 true；控制主对话空闲后是否主动推送成员状态快照。设置成员会话时忽略。',
+          description: '只对自身/主对话生效，默认 false（需要显式开启）；控制主对话空闲后是否主动推送成员状态快照。设置成员会话时忽略。',
         },
         idlePushMs: {
           type: 'integer',
@@ -440,13 +441,6 @@ export function registerTools(ctx, toolsCtx, service) {
       // Validate before touching the store, then let the service normalise the
       // same raw patch (so an empty string still means "clear").
       normalizeMemberScopePatch(patch)
-      if (isSelf && !hasKeep && (hasIdentity || hasScope)) {
-        // First identity/scope setting defaults keep on; an existing
-        // keep=false is preserved and idlePushMs/compressPercent are not
-        // written implicitly (readers apply their defaults).
-        const existing = await service.memberScope(selfId)
-        if (existing === null || existing.keep === undefined) patch.keep = true
-      }
       const targetId = isSelf ? selfId : rawId
       const saved = await service.setMemberScope(targetId, patch)
       const scope = saved.scope ?? null
@@ -465,7 +459,7 @@ export function registerTools(ctx, toolsCtx, service) {
         `工作范围：${scope?.scope ?? '未设置'}`,
         ...(isSelf
           ? [
-              `保持目标：${scope?.keep === false ? '关闭' : '开启'}（只对主对话生效）`,
+              `保持目标：${scope?.keep === true ? '开启' : '关闭'}（只对主对话生效）`,
               `静默推送：${formatMemberPushDelay(idleDelay)}（只对主对话生效）`,
               `压缩阈值：${formatOneDecimal(compressThreshold)}%（主对话推送前和成员会话投递前生效）`,
             ]
@@ -600,6 +594,13 @@ export function registerTools(ctx, toolsCtx, service) {
         const where = `${task.member}（${task.memberIp}）`
         const contextLine = formatContextLine(task.context)
         const advice = formatCompactionAdvice(task.context, await compressThresholdFor(service, task.conversationId))
+        if (result.state === 'archived' || task.status === 'archived') {
+          return {
+            ok: true,
+            text: `成员会话 ${task.conversationId} 已归档，不再跟踪；要恢复请在成员 Web UI 取消归档。`,
+            data,
+          }
+        }
         if (!result.done && result.state === 'progress') {
           return {
             ok: true,
@@ -697,6 +698,13 @@ export function registerTools(ctx, toolsCtx, service) {
       const remainingHint = formatRemainingWait(remaining, effective)
       const where = `${task.member}（${task.memberIp}）`
       const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `第 ${String(task.turns)} 轮` : ''
+      if (result.state === 'archived' || task.status === 'archived') {
+        return {
+          ok: true,
+          text: `成员会话 ${task.conversationId} 已归档，不再跟踪；要恢复请在成员 Web UI 取消归档。`,
+          data,
+        }
+      }
       if (!result.done && result.state === 'progress') {
         return {
           ok: true,
@@ -814,13 +822,25 @@ export function registerTools(ctx, toolsCtx, service) {
         }
       }))
       const missing = inspected.filter(entry => entry.found === null).map(entry => entry.id)
+      const archived = inspected
+        .filter(entry => entry.found !== null && entry.found.archived === true)
+        .map(entry => entry.id)
       const scopes = typeof service.memberScopes === 'function'
         ? await service.memberScopes().catch(() => ({}))
         : {}
+      // Archived conversations are removed from every list: the member hides
+      // the session and this side no longer tracks it for status purposes.
       const entries = inspected
-        .filter(entry => entry.found !== null)
+        .filter(entry => entry.found !== null && entry.found.archived !== true)
         .map(entry => describeStatus(entry.found, memberTasks, scopes))
       if (entries.length === 0) {
+        if (archived.length > 0) {
+          return {
+            ok: true,
+            text: `已归档，不再列出：${archived.join('、')}。`,
+            data: { count: 0, requestedCount: 0, conversations: [], requested: [], missing, archived },
+          }
+        }
         throw new Error(`本机没有跟踪会话 ${missing.join('、')}；先用 call_member 发起或继续一次，再查状态。`)
       }
       // Every tracked conversation of this origin, not just the ids asked for:
@@ -845,13 +865,14 @@ export function registerTools(ctx, toolsCtx, service) {
       if (entries.length === 1 && missing.length === 0) {
         return {
           ok: true,
-          text: [formatStatusBlock(entries[0]), '', ...allLines].join('\n'),
+          text: [formatStatusBlock(entries[0]), '', ...allLines, ...(archived.length === 0 ? [] : [`已归档，不再列出：${archived.join('、')}。`])].join('\n'),
           data: {
             ...statusData(entries[0]),
             count: allBlock.conversations.length,
             requestedCount: 1,
             conversations: allBlock.conversations,
             requested: entries.map(statusData),
+            archived,
           },
         }
       }
@@ -867,6 +888,9 @@ export function registerTools(ctx, toolsCtx, service) {
       if (missing.length > 0) {
         parts.push('', `本机没有跟踪这些会话：${missing.join('、')}；先用 call_member 发起或继续一次，再查状态。`)
       }
+      if (archived.length > 0) {
+        parts.push('', `已归档，不再列出：${archived.join('、')}。`)
+      }
       parts.push('', ...allLines)
       return {
         ok: true,
@@ -877,6 +901,58 @@ export function registerTools(ctx, toolsCtx, service) {
           conversations: allBlock.conversations,
           requested: entries.map(statusData),
           missing,
+          archived,
+        },
+      }
+    },
+  }
+
+  const removeMemberDefinition = {
+    name: 'remove_member',
+    description: [
+      '把目标成员上的一个对话归档，并停止本机对它的跟踪。',
+      '',
+      '`conversationId` 必填：`call_member` / `wait_member` 返回的会话id，或本机跟踪过的任何成员会话；目标成员由本机任务记录解析，没跟踪过的会话会报错。',
+      '归档在目标成员上执行，等同于成员 Web UI 的「归档」：先停止正在跑的工作，再把会话放进成员的归档集。',
+      '归档后它不会再出现在 `status_member` 和成员状态快照里，也不能再用 `call_member` 继续投递；要恢复请在成员 Web UI 取消归档。',
+      '目标成员需要带归档接口的新版插件；旧版本会返回明确错误，不会假装成功。',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      properties: {
+        conversationId: { type: 'string', description: '要归档的成员会话id（call_member / wait_member 返回）。' },
+      },
+      required: ['conversationId'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{
+        type: 'text',
+        text: typeof value?.text === 'string' ? value.text : JSON.stringify(value, null, 2),
+      }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args) {
+      const conversationId = typeof args.conversationId === 'string' ? args.conversationId.trim() : ''
+      if (conversationId === '') throw new Error('conversationId is required')
+      const result = await memberTasks.archive(conversationId)
+      const task = result.task
+      const workspace = memberTaskWorkspace(task)
+      return {
+        ok: true,
+        text: [
+          `已归档成员会话 ${task.conversationId}（${task.member} ${task.memberIp}，工作区 ${workspace}）。`,
+          ...(result.already ? ['该会话此前已归档，本次没有重复操作。'] : ['成员上的对话已归档，正在跑的工作已停止。']),
+          '它不会再出现在 status_member 和成员状态快照里，也不能再继续投递；要恢复请在成员 Web UI 取消归档。',
+        ].join('\n'),
+        data: {
+          conversationId: task.conversationId,
+          member: task.member,
+          memberIp: task.memberIp,
+          workspace,
+          archived: true,
+          already: result.already,
         },
       }
     },
@@ -946,7 +1022,7 @@ export function registerTools(ctx, toolsCtx, service) {
     },
   }
 
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, waitMemberDefinition, statusMemberDefinition, membersDefinition, repackDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, waitMemberDefinition, statusMemberDefinition, removeMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool)
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`)

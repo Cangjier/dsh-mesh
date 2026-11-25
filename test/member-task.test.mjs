@@ -556,7 +556,7 @@ test('registerTools exposes build, deploy, members, call_member, set_member_scop
   const toolsCtx = { tools: { register: tool => { names.push(tool.name); tools.push(tool) } } }
   try {
     registerTools(ctx, toolsCtx, service)
-    assert.deepEqual(names.sort(), ['build', 'call_member', 'deploy', 'members', 'repack', 'set_member_scope', 'status_member', 'wait_member'].sort())
+    assert.deepEqual(names.sort(), ['build', 'call_member', 'deploy', 'members', 'remove_member', 'repack', 'set_member_scope', 'status_member', 'wait_member'].sort())
     for (const name of ['build', 'deploy', 'members']) {
       const tool = tools.find(candidate => candidate.name === name)
       assert.equal(tool.parameters.properties.action, undefined)

@@ -2,8 +2,8 @@
 
 - 插件：`@local/dsh-mesh`
 - 工具注册：`src/lib/tools.mjs` → `registerTools()`
-- 当前共 8 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`set_member_scope`、`wait_member`、`status_member`
-- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续（不再有 `compress` 参数），`set_member_scope` 单独设置任意会话或自身的身份/工作范围、静默推送延迟和自动压缩阈值，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）。
+- 当前共 9 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`set_member_scope`、`wait_member`、`status_member`、`remove_member`
+- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续（不再有 `compress` 参数），`set_member_scope` 单独设置任意会话或自身的身份/工作范围、静默推送延迟和自动压缩阈值，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）；`remove_member` 输入会话id，在目标成员上归档该对话并停止本机跟踪。
 - 所有工具统一返回 `{ ok, text, data }`。`text` 是给人看的摘要，`data` 是结构化结果。
 - 同步执行的工具会在 `text` 和 `data` 里都返回日志文件地址，便于调用结束后继续读取完整日志。
 
@@ -18,7 +18,8 @@
 | `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `cwd` / `workspace` / `force` / `identity` / `scope` | `false` |
 | `set_member_scope` | 设置成员会话或自身的身份/工作范围、推送延迟与压缩阈值 | `conversationId` / `identity` / `scope` / `keep` / `idlePushMs` / `compressPercent` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
-| `status_member` | 目标会话状态 + 身份/工作范围 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区/身份/工作范围）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
+| `status_member` | 目标会话状态 + 身份/工作范围 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区/身份/工作范围，已归档的不列出）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
+| `remove_member` | 在目标成员上归档一个对话并停止本机跟踪 | `conversationId` | `false` |
 
 ## 2. 共享基础
 
@@ -619,8 +620,8 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 - 注入消息的 `source.kind` 是 `mesh-member-status`（不是 `user`），带
   `form: "snapshot"` 和 `sections`；
 - 没有进行中的会话、或距上次注入不足 60 秒时不注入；
-- 身份/工作范围优先取 `member-scopes.json`（按 conversationId），回退任务 profile 快照；
-- 自身行显示有效配置：保持目标、静默推送（`idlePushMs`，默认 300000 = 5 分钟）和压缩阈值
+- 身份/工作范围优先取 `member-scopes.json`（按 conversationId），回退任务 profile 快照；已归档的会话不进入快照；
+- 自身行显示有效配置：保持目标（`keep`，默认关闭，需显式开启）、静默推送（`idlePushMs`，默认 300000 = 5 分钟）和压缩阈值
   （`compressPercent`，默认 35%）；成员行只在显式设置过 `compressPercent` 时显示该阈值；
 - 缺成员会话身份/工作范围时聚合提示 `call_member` / `set_member_scope`；自身缺失时提示
   `set_member_scope`（省略 conversationId 或传 `self`）；全齐时不提示；
@@ -629,7 +630,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 
 ### 6.6.1 主对话空闲主动推送
 
-主对话 `turn/end` 后，若该会话不是 interop 创建的成员会话、`keep !== false`、且有被跟踪的
+主对话 `turn/end` 后，若该会话不是 interop 创建的成员会话、`keep === true`（默认 false）、且有被跟踪的
 成员任务或自身 scope，插件在默认 **5 分钟**静默后检查：主 agent 仍 idle、没有新 turn、会话
 未 dispose。静默时长取自身 scope 的 `idlePushMs`（1000–86400000 毫秒，默认 300000），只对
 主对话生效。满足时先测量主对话上下文占比：超过 `compressPercent`（默认 35%）就用
@@ -702,6 +703,7 @@ status_member { "conversationIds": ["<会话id1>", "<会话id2>"] }
 - 最近一次思考来自目标会话最新一轮的 reasoning（`lastReasoning`），成员升级后才有；
   持久化时保留最近 4000 字符。
 - 只跟踪本机发起/继续过的会话；没有记录时明确报错，不猜成员。
+- 已归档的会话不列出：本机归档过的直接过滤；成员 UI 里归档的，读取到 `archived` 后同步标记并移出列表（显式再查时只回一行「已归档，不再列出」）。
 - 每个被查会话带 `workspace` 和「工作区：…」行，以及「身份：…；工作范围：…」行（缺失标
   `未设置`）；身份/工作范围优先取 `member-scopes.json`，回退任务 profile 快照。
 - 返回值另附全量会话列表，`data.conversations` 是全量摘要（id、状态标签、工作区、identity、
@@ -714,15 +716,15 @@ status_member { "conversationIds": ["<会话id1>", "<会话id2>"] }
 
 ```text
 set_member_scope { "identity": "开发", "scope": "插件开发" }
-set_member_scope { "conversationId": "self", "keep": false, "idlePushMs": 300000 }
+set_member_scope { "conversationId": "self", "keep": true, "idlePushMs": 300000 }
 set_member_scope { "compressPercent": 35 }
 set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "scope": "跨平台验收", "compressPercent": 10 }
 ```
 
 - `conversationId` 省略、`self`、`local` 或等于当前会话 id → 设置“自身”；其他值作为成员会话 id。
 - `identity` / `scope` 只传要改的字段，空字符串清除；identity ≤40 字符，scope ≤120 字符。
-- `keep` 默认 true，只对自身生效：首次给自身设置 identity/scope 且未传 keep 时写入 true；已有
-  keep=false 时只传 identity/scope 不会重置。设置成员会话时忽略，返回文字会说明。
+- `keep` 默认 false，只对自身生效：需要主动推送时显式传 `keep: true`；给自身设置
+  identity/scope 不会顺带开启它。设置成员会话时忽略，返回文字会说明。
 - `idlePushMs`：静默推送延迟，整数毫秒 1000–86400000，默认 300000（5 分钟）；只对自身/主对话
   生效，设置成员会话时忽略，返回文字会说明。
 - `compressPercent`：自动压缩阈值，数字 1–100，默认 35；主对话推送快照前和成员会话下一次
@@ -736,6 +738,32 @@ set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "
   快照。未跟踪的 conversationId 仍保存，返回注明“本机未跟踪该会话，只保存设置”。
 - 不给成员会话投递消息，也不自动在下次投递加前缀；随对话设置/更新仍用 `call_member` 的
   `identity` / `scope`。
+
+### 6.10 `remove_member`
+
+```text
+remove_member { "conversationId": "<会话id>" }
+  → 按本机任务记录解析目标成员和 baseUrl（没跟踪过会报错，不猜）
+  → POST /v1/conversations/<会话id>/archive
+  → 成员把 session 放进 workspaceRegistry 的归档集（先 stopActivity 停止正在跑的工作）
+  → 本机任务标记 archived，停监视/完成通知/等待，之后所有列表过滤它
+  → 返回：成员、IP、工作区、是否此前已归档
+```
+
+- 归档等同于成员 Web UI 的「归档」：会话从成员侧默认列表消失，`status_member` 和成员状态
+  快照也不再列出它。
+- 归档后不能继续投递：`call_member` 带这个 conversationId 会收到「已归档」的明确失败。
+  在成员 Web UI 取消归档后，再用同一个 conversationId 投递会先读成员投影，确认未归档就把
+  本机任务重新纳入跟踪并继续；成员仍报告归档则保持拒绝。
+- 重复调用是幂等的：第二次返回“此前已归档”，不会再请求成员。
+- 成员侧由 `src/lib/interop-service.mjs` 的 `POST /v1/conversations/<id>/archive` 实现，
+  使用 `ctx.get('workspaceRegistry').archiveSession(sessionId, { stopActivity: true })`；
+  独立 interop（`code/interop-service/server.mjs`，没有 Web 宿主）返回 501，说明只能归档
+  嵌入式 interop 的会话。
+- 旧版成员没有这个路由（404），工具会明确报“插件版本不支持归档会话”，不会把任务误标为
+  已归档。
+- 成员 UI 里自行归档的会话：`status_member` 读取目标投影时看到 `archived: true`，会同步把
+  本机任务标记为 archived 并移出列表。
 
 ## 7. 典型组合
 

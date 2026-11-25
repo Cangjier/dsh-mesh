@@ -118,6 +118,10 @@ export function conversationRecord(conversation) {
     title: conversation.title ?? '',
     initiator: conversation.initiator ?? null,
     status: conversation.status,
+    // Archived conversations are hidden from the Web list but stay readable
+    // for a late `/result`; the flag must survive a restart with the rest.
+    archived: conversation.archived === true,
+    archivedAt: typeof conversation.archivedAt === 'string' ? conversation.archivedAt : null,
     cwd: conversation.cwd,
     // Kept so the panel can show what was sent and which workspace it named,
     // even after a restart replaced the in-memory conversation.
@@ -167,6 +171,8 @@ export function restoredConversation(record, workdir) {
     sessionId: typeof record.sessionId === 'string' ? record.sessionId : String(record.id),
     cwd: typeof record.cwd === 'string' ? record.cwd : workdir,
     status: abandoned ? INTERRUPTED_STATUS : status,
+    archived: record.archived === true,
+    archivedAt: typeof record.archivedAt === 'string' ? record.archivedAt : null,
     title: typeof record.title === 'string' ? record.title : '',
     prompt: typeof record.prompt === 'string' ? record.prompt.slice(0, PROMPT_LIMIT) : '',
     workspace: typeof record.workspace === 'string' ? record.workspace : '',

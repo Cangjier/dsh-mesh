@@ -13324,6 +13324,7 @@ function memberTaskState(task) {
   return status === "" ? "unknown" : status;
 }
 function memberTaskStatusLabel(task) {
+  if (task?.archived === true) return "\u5DF2\u5F52\u6863";
   const state = memberTaskState(task);
   if (state === "running") return "\u8FDB\u884C\u4E2D";
   if (state === "idle") return "\u7A7A\u95F2";
@@ -13501,6 +13502,8 @@ var MemberTaskService = class {
         task.replySeq = Number.isSafeInteger(task.replySeq) ? task.replySeq : 0;
         task.deliveredSeq = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0;
         task.terminalDelivered = task.terminalDelivered === true;
+        task.archived = task.archived === true;
+        task.archivedAt = typeof task.archivedAt === "string" ? task.archivedAt : null;
         if (typeof task.workspace !== "string" || task.workspace.trim() === "") task.workspace = "unknown";
         task.profile = memberTaskProfile(task);
         if (!Array.isArray(task.sentMessages)) {
@@ -13898,12 +13901,14 @@ var MemberTaskService = class {
     if (key === "") throw new Error("conversationId is required");
     const task = this.#taskOfConversation(key);
     if (task === void 0) throw new Error(`member conversation is not tracked: ${key}`);
+    if (task.archived === true) return { done: true, timedOut: false, task, replies: [], state: "archived" };
     const timeoutMs = Math.max(1e3, Math.min(Number.isSafeInteger(options.timeoutMs) ? options.timeoutMs : 3e4, 3e5));
     const signal = options.signal;
     const deadline = Date.now() + timeoutMs;
     let terminalSynced = false;
     for (; ; ) {
       signal?.throwIfAborted();
+      if (task.archived === true) return { done: true, timedOut: false, task, replies: [], state: "archived" };
       const terminal = task.status === "completed" || task.status === "failed" || task.status === "interrupted";
       if (terminal && !terminalSynced) {
         terminalSynced = true;
@@ -13967,6 +13972,10 @@ var MemberTaskService = class {
       else tasks.push(task);
     }
     if (untracked.length > 0) throw new Error(`member conversation is not tracked: ${untracked.join(", ")}`);
+    const archivedTask = tasks.find((task) => task.archived === true);
+    if (archivedTask !== void 0) {
+      return { done: true, timedOut: false, task: archivedTask, replies: [], state: "archived", remaining: this.#describeRemaining(tasks, archivedTask) };
+    }
     if (tasks.length === 1) {
       const single = await this.wait(tasks[0].conversationId, options);
       return { ...single, remaining: [] };
@@ -13977,6 +13986,10 @@ var MemberTaskService = class {
     const synced = /* @__PURE__ */ new Set();
     for (; ; ) {
       signal?.throwIfAborted();
+      const archivedTask2 = tasks.find((entry) => entry.archived === true);
+      if (archivedTask2 !== void 0) {
+        return { done: true, timedOut: false, task: archivedTask2, replies: [], state: "archived", remaining: this.#describeRemaining(tasks, archivedTask2) };
+      }
       let winner;
       let finished2;
       for (const task2 of tasks) {
@@ -14176,7 +14189,7 @@ var MemberTaskService = class {
     await this.#ensureLoaded();
     const key = String(sessionId ?? "");
     if (key === "") return [];
-    return [...this.tasks.values()].filter((task) => task.originSessionId === key && (task.status === "running" || task.status === "starting")).sort((left, right) => String(left.lastSentAt ?? left.createdAt ?? "").localeCompare(String(right.lastSentAt ?? right.createdAt ?? "")));
+    return [...this.tasks.values()].filter((task) => task.originSessionId === key && task.archived !== true && (task.status === "running" || task.status === "starting")).sort((left, right) => String(left.lastSentAt ?? left.createdAt ?? "").localeCompare(String(right.lastSentAt ?? right.createdAt ?? "")));
   }
   /**
    * Every conversation one origin session tracks, oldest first.
@@ -14192,7 +14205,7 @@ var MemberTaskService = class {
     await this.#ensureLoaded();
     const key = String(sessionId ?? "");
     if (key === "") return [];
-    return [...this.tasks.values()].filter((task) => task.originSessionId === key).sort((left, right) => String(left.createdAt ?? "").localeCompare(String(right.createdAt ?? "")));
+    return [...this.tasks.values()].filter((task) => task.originSessionId === key && task.archived !== true).sort((left, right) => String(left.createdAt ?? "").localeCompare(String(right.createdAt ?? "")));
   }
   /**
    * Live status of one tracked member conversation, for `status_member`.
@@ -14206,6 +14219,7 @@ var MemberTaskService = class {
   async inspect(conversationId) {
     const task = await this.find(conversationId);
     if (task === void 0) return null;
+    if (task.archived === true) return { task, live: null, liveError: null, archived: true };
     let live = null;
     let liveError = null;
     try {
@@ -14214,7 +14228,87 @@ var MemberTaskService = class {
     } catch (error) {
       liveError = error instanceof Error ? error.message : String(error);
     }
-    return { task, live, liveError };
+    if (live?.archived === true) {
+      await this.#markArchived(task);
+      return { task, live, liveError, archived: true };
+    }
+    return { task, live, liveError, archived: false };
+  }
+  /**
+   * Archive one member conversation and stop tracking it.
+   *
+   * The archive happens on the target member: its workspace registry hides the
+   * session from every list and, with `stopActivity`, cancels a running turn
+   * first. Locally the task keeps its record with `archived: true` (so a repeat
+   * is idempotent) but is filtered out of every status list and the injected
+   * snapshot, and its monitor, delivery timer, and parked waits are stopped.
+   *
+   * An older member does not serve the archive route at all (404). That is
+   * reported as "upgrade the member", not retried as a transient failure.
+   * @param {string} conversationId member conversation id.
+   * @returns {Promise<{task: object, already: boolean}>} archived task.
+   */
+  async archive(conversationId) {
+    await this.#ensureLoaded();
+    const key = String(conversationId ?? "").trim();
+    if (key === "") throw new Error("conversationId is required");
+    const task = this.#taskOfConversation(key);
+    if (task === void 0) throw new Error(`\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u4F1A\u8BDD ${key}\uFF1B\u5148 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u6216\u786E\u8BA4\u4F1A\u8BDDid \u6B63\u786E\u3002`);
+    if (task.archived === true) return { task, already: true };
+    let result;
+    try {
+      result = await this.#request(
+        task.baseUrl,
+        "POST",
+        `/v1/conversations/${encodeURIComponent(task.conversationId)}/archive`,
+        void 0,
+        6e4
+      );
+    } catch (error) {
+      if (error?.status === 404) {
+        throw new Error(`\u76EE\u6807\u6210\u5458 ${task.member}\uFF08${task.memberIp}\uFF09\u7684\u63D2\u4EF6\u7248\u672C\u4E0D\u652F\u6301\u5F52\u6863\u4F1A\u8BDD\uFF1B\u5148\u7ED9\u8BE5\u6210\u5458\u5347\u7EA7\u5230\u5E26 remove_member \u7684\u7248\u672C\u3002`);
+      }
+      if (error?.code === "archive_unavailable") {
+        throw new Error(`\u76EE\u6807\u6210\u5458 ${task.member}\uFF08${task.memberIp}\uFF09\u65E0\u6CD5\u5F52\u6863\u4F1A\u8BDD\uFF1A${error?.memberMessage ?? error?.message ?? "\u6CA1\u6709 workspace registry"}`);
+      }
+      throw error;
+    }
+    await this.#markArchived(task);
+    await this.#log(task, `archived ${task.conversationId} (${String(result?.already === true ? "already archived" : "new archive")})`);
+    return { task, already: result?.already === true };
+  }
+  /**
+   * Write the archived state and stop every local activity for one task.
+   * @param {object} task tracked task.
+   * @returns {Promise<void>} resolution after the record is durable.
+   */
+  async #markArchived(task) {
+    if (task.archived === true) return;
+    task.archived = true;
+    task.archivedAt = (/* @__PURE__ */ new Date()).toISOString();
+    task.status = "archived";
+    task.settledAt = task.settledAt ?? task.archivedAt;
+    task.notify = false;
+    task.deliveryReplies = null;
+    task.deliveryClaimedFrom = null;
+    const controller = this.controllers.get(task.id);
+    if (controller !== void 0) {
+      this.controllers.delete(task.id);
+      try {
+        controller.abort(new Error("the conversation was archived"));
+      } catch {
+      }
+    }
+    for (const timers of [this.deliveryTimers, this.notifyTimers]) {
+      const timer = timers.get(task.id);
+      if (timer !== void 0) {
+        clearTimeout(timer);
+        timers.delete(task.id);
+      }
+    }
+    this.monitors.delete(task.id);
+    this.#notifyWaiters(task);
+    await this.#save(task);
   }
   /**
    * Remember one delivered message in the task's rolling two-message history.
@@ -14413,6 +14507,23 @@ var MemberTaskService = class {
     const hasScopePatch = Object.keys(scopePatch).length > 0;
     const signal = request.signal;
     const { task, fresh, target } = await this.#sendTarget(request);
+    if (task.archived === true) {
+      let live = null;
+      try {
+        const probe = await this.#request(task.baseUrl, "GET", `/v1/conversations/${encodeURIComponent(task.conversationId)}`, void 0, 1e4);
+        live = probe?.conversation ?? null;
+      } catch {
+        live = null;
+      }
+      if (live?.archived === false) {
+        task.archived = false;
+        task.archivedAt = null;
+        task.status = "completed";
+        await this.#save(task);
+      } else {
+        throw new Error(`\u6210\u5458\u4F1A\u8BDD ${task.conversationId} \u5DF2\u5F52\u6863\uFF0C\u4E0D\u80FD\u7EE7\u7EED\u6295\u9012\uFF1B\u8981\u6062\u590D\u8BF7\u5728\u6210\u5458 Web UI \u53D6\u6D88\u5F52\u6863\u3002`);
+      }
+    }
     let deliveredPrompt = prompt;
     if (hasScopePatch) {
       if (typeof this.service.setMemberScope !== "function") throw new Error("member scopes are not available");
@@ -15233,7 +15344,7 @@ function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfCompressPercent = effectiveCompressPercent(selfScope);
   const lines = [
     `[\u6210\u5458\u4EFB\u52A1\u72B6\u6001] \u672C\u5BF9\u8BDD\u8DDF\u8E2A ${String(list.length)} \u4E2A\u6210\u5458\u4F1A\u8BDD\uFF0C\u5176\u4E2D ${String(running.length)} \u4E2A\u8FDB\u884C\u4E2D\uFF08\u5FEB\u7167 ${new Date(at).toISOString()}\uFF09\u3002`,
-    `- \u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1A\u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${selfScope?.keep === false ? "\u5173\u95ED" : "\u5F00\u542F"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u9759\u9ED8\u63A8\u9001\uFF1A${formatMemberPushDelay(selfIdlePushMs)}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(selfCompressPercent)}`
+    `- \u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1A\u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${selfScope?.keep === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u9759\u9ED8\u63A8\u9001\uFF1A${formatMemberPushDelay(selfIdlePushMs)}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(selfCompressPercent)}`
   ];
   for (const task of list) {
     const entry = describeMemberTask(task);
@@ -15262,7 +15373,7 @@ function formatMemberStatusSignature(state = {}) {
     self: {
       identity: state.selfScope?.identity ?? null,
       scope: state.selfScope?.scope ?? null,
-      keep: state.selfScope?.keep !== false,
+      keep: state.selfScope?.keep === true,
       idlePushMs: effectiveMemberIdlePushMs(state.selfScope),
       compressPercent: effectiveCompressPercent(state.selfScope)
     },
@@ -15359,7 +15470,7 @@ function createMemberContext({
     if (!turns.has(sessionId) || turns.get(sessionId) !== turn) return;
     const selfScope = scopes[sessionId] ?? null;
     if (tasks.length === 0 && selfScope === null) return;
-    if (selfScope?.keep === false) return;
+    if (selfScope?.keep !== true) return;
     cancelPush(sessionId);
     const delay2 = resolveMemberPushDelayMs(selfScope, pushDelayMs);
     const timer = setTimeout(() => {
@@ -15383,7 +15494,7 @@ function createMemberContext({
     if (closed || turns.get(sessionId) !== turn) return;
     const selfScope = scopes[sessionId] ?? null;
     if (tasks.length === 0 && selfScope === null) return;
-    if (selfScope?.keep === false) return;
+    if (selfScope?.keep !== true) return;
     if (agent.status !== "idle") return;
     const signature = formatMemberStatusSignature({ selfId: sessionId, selfScope, tasks, scopes });
     if (lastPushSignature.get(sessionId) === signature) return;
@@ -15795,10 +15906,10 @@ function registerTools(ctx, toolsCtx, service) {
       "`conversationId` \u7701\u7565\u3001`self`\u3001`local` \u6216\u7B49\u4E8E\u5F53\u524D\u4F1A\u8BDD id \u65F6\u8BBE\u7F6E\u201C\u81EA\u8EAB\u201D\uFF1B\u5176\u4ED6\u503C\u4F5C\u4E3A\u6210\u5458\u4F1A\u8BDD id\u3002",
       "`identity` / `scope` \u662F\u53EF\u9009\u7684\u5B57\u7B26\u4E32\uFF0C\u53EA\u4F20\u8981\u6539\u7684\u5B57\u6BB5\uFF1B\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002",
       "identity \u6700\u957F 40 \u5B57\u7B26\uFF0Cscope \u6700\u957F 120 \u5B57\u7B26\u3002",
-      "`keep` \u9ED8\u8BA4 true\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1Aturn \u7ED3\u675F\u540E\u82E5\u4E3A true\uFF0C\u4E3B\u5BF9\u8BDD\u7A7A\u95F2\u65F6\u4F1A\u4E3B\u52A8\u6536\u5230\u6210\u5458\u72B6\u6001\u5FEB\u7167\u3002",
+      "`keep` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u663E\u5F0F\u4F20 keep=true \u65F6\uFF0Cturn \u7ED3\u675F\u540E\u4E3B\u5BF9\u8BDD\u7A7A\u95F2\u65F6\u4F1A\u4E3B\u52A8\u6536\u5230\u6210\u5458\u72B6\u6001\u5FEB\u7167\uFF1B\u4E0D\u4F20 keep \u4E0D\u6539\u53D8\u5DF2\u4FDD\u5B58\u7684\u503C\uFF0C\u4ECE\u672A\u8BBE\u7F6E\u8FC7\u5373\u4E3A\u5173\u95ED\u3002",
       `\`idlePushMs\`\uFF1A\u9759\u9ED8\u63A8\u9001\u5EF6\u8FDF\uFF08\u6574\u6570\u6BEB\u79D2\uFF0C${String(MEMBER_IDLE_PUSH_MIN_MS)}\u2013${String(MEMBER_IDLE_PUSH_MAX_MS)}\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_MEMBER_IDLE_PUSH_MS)} \u5373 5 \u5206\u949F\uFF09\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002`,
       `\`compressPercent\`\uFF1A\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u6570\u5B57 1\u2013100\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_COMPRESS_PERCENT)}\uFF09\uFF1B\u4E3B\u5BF9\u8BDD\u548C\u6210\u5458\u4F1A\u8BDD\u90FD\u751F\u6548\uFF1A\u4E3B\u5BF9\u8BDD\u63A8\u9001\u5FEB\u7167\u524D\u3001\u6216\u6210\u5458\u4F1A\u8BDD\u4E0B\u4E00\u6B21\u6295\u9012\u524D\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u538B\u7F29\u3002`,
-      "\u9996\u6B21\u7ED9\u81EA\u8EAB\u8BBE\u7F6E identity/scope \u4E14\u672A\u4F20 keep \u65F6 keep \u9ED8\u8BA4\u5F00\u542F\uFF1B\u5DF2\u6709 keep=false \u4E0D\u4F1A\u88AB\u91CD\u7F6E\u3002",
+      "\u7ED9\u81EA\u8EAB\u8BBE\u7F6E identity/scope \u4E0D\u4F1A\u987A\u5E26\u5F00\u542F keep\uFF1B\u9700\u8981\u63A8\u9001\u5C31\u663E\u5F0F\u4F20 keep=true\u3002",
       "\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6 keep \u548C idlePushMs \u88AB\u5FFD\u7565\uFF0C\u8FD4\u56DE\u6587\u5B57\u4F1A\u8BF4\u660E\u3002",
       "\u81F3\u5C11\u63D0\u4F9B identity\u3001scope\u3001keep\u3001idlePushMs\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001scope \u6216 compressPercent \u4E4B\u4E00\u3002",
       "\u6210\u5458\u4F1A\u8BDD\u53EF\u4EE5\u672A\u88AB\u672C\u673A\u8DDF\u8E2A\uFF0C\u8BBE\u7F6E\u4ECD\u4F1A\u4FDD\u5B58\uFF0C\u53EA\u662F\u4E0D\u4F1A\u540C\u6B65\u4EFB\u52A1\u5FEB\u7167\u3002",
@@ -15821,7 +15932,7 @@ function registerTools(ctx, toolsCtx, service) {
         },
         keep: {
           type: "boolean",
-          description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 true\uFF1B\u63A7\u5236\u4E3B\u5BF9\u8BDD\u7A7A\u95F2\u540E\u662F\u5426\u4E3B\u52A8\u63A8\u9001\u6210\u5458\u72B6\u6001\u5FEB\u7167\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
+          description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF08\u9700\u8981\u663E\u5F0F\u5F00\u542F\uFF09\uFF1B\u63A7\u5236\u4E3B\u5BF9\u8BDD\u7A7A\u95F2\u540E\u662F\u5426\u4E3B\u52A8\u63A8\u9001\u6210\u5458\u72B6\u6001\u5FEB\u7167\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
         },
         idlePushMs: {
           type: "integer",
@@ -15870,10 +15981,6 @@ function registerTools(ctx, toolsCtx, service) {
         ...hasCompressPercent ? { compressPercent: args.compressPercent } : {}
       };
       normalizeMemberScopePatch(patch);
-      if (isSelf && !hasKeep && (hasIdentity || hasScope)) {
-        const existing = await service.memberScope(selfId);
-        if (existing === null || existing.keep === void 0) patch.keep = true;
-      }
       const targetId = isSelf ? selfId : rawId;
       const saved = await service.setMemberScope(targetId, patch);
       const scope = saved.scope ?? null;
@@ -15885,7 +15992,7 @@ function registerTools(ctx, toolsCtx, service) {
         `\u8EAB\u4EFD\uFF1A${scope?.identity ?? "\u672A\u8BBE\u7F6E"}`,
         `\u5DE5\u4F5C\u8303\u56F4\uFF1A${scope?.scope ?? "\u672A\u8BBE\u7F6E"}`,
         ...isSelf ? [
-          `\u4FDD\u6301\u76EE\u6807\uFF1A${scope?.keep === false ? "\u5173\u95ED" : "\u5F00\u542F"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
+          `\u4FDD\u6301\u76EE\u6807\uFF1A${scope?.keep === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
           `\u9759\u9ED8\u63A8\u9001\uFF1A${formatMemberPushDelay(idleDelay)}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
           `\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%\uFF08\u4E3B\u5BF9\u8BDD\u63A8\u9001\u524D\u548C\u6210\u5458\u4F1A\u8BDD\u6295\u9012\u524D\u751F\u6548\uFF09`
         ] : [`\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%\uFF08\u6295\u9012\u524D\u8D85\u8FC7\u8BE5\u5360\u6BD4\u81EA\u52A8\u538B\u7F29\uFF09`],
@@ -16012,6 +16119,13 @@ function registerTools(ctx, toolsCtx, service) {
         const where2 = `${task2.member}\uFF08${task2.memberIp}\uFF09`;
         const contextLine = formatContextLine(task2.context);
         const advice = formatCompactionAdvice(task2.context, await compressThresholdFor(service, task2.conversationId));
+        if (result2.state === "archived" || task2.status === "archived") {
+          return {
+            ok: true,
+            text: `\u6210\u5458\u4F1A\u8BDD ${task2.conversationId} \u5DF2\u5F52\u6863\uFF0C\u4E0D\u518D\u8DDF\u8E2A\uFF1B\u8981\u6062\u590D\u8BF7\u5728\u6210\u5458 Web UI \u53D6\u6D88\u5F52\u6863\u3002`,
+            data: data2
+          };
+        }
         if (!result2.done && result2.state === "progress") {
           return {
             ok: true,
@@ -16102,6 +16216,13 @@ ${replyText2}` : "",
       const remainingHint = formatRemainingWait(remaining, effective);
       const where = `${task.member}\uFF08${task.memberIp}\uFF09`;
       const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `\u7B2C ${String(task.turns)} \u8F6E` : "";
+      if (result.state === "archived" || task.status === "archived") {
+        return {
+          ok: true,
+          text: `\u6210\u5458\u4F1A\u8BDD ${task.conversationId} \u5DF2\u5F52\u6863\uFF0C\u4E0D\u518D\u8DDF\u8E2A\uFF1B\u8981\u6062\u590D\u8BF7\u5728\u6210\u5458 Web UI \u53D6\u6D88\u5F52\u6863\u3002`,
+          data
+        };
+      }
       if (!result.done && result.state === "progress") {
         return {
           ok: true,
@@ -16214,9 +16335,17 @@ ${replyText}` : "",
         }
       }));
       const missing = inspected.filter((entry) => entry.found === null).map((entry) => entry.id);
+      const archived = inspected.filter((entry) => entry.found !== null && entry.found.archived === true).map((entry) => entry.id);
       const scopes = typeof service.memberScopes === "function" ? await service.memberScopes().catch(() => ({})) : {};
-      const entries = inspected.filter((entry) => entry.found !== null).map((entry) => describeStatus(entry.found, memberTasks, scopes));
+      const entries = inspected.filter((entry) => entry.found !== null && entry.found.archived !== true).map((entry) => describeStatus(entry.found, memberTasks, scopes));
       if (entries.length === 0) {
+        if (archived.length > 0) {
+          return {
+            ok: true,
+            text: `\u5DF2\u5F52\u6863\uFF0C\u4E0D\u518D\u5217\u51FA\uFF1A${archived.join("\u3001")}\u3002`,
+            data: { count: 0, requestedCount: 0, conversations: [], requested: [], missing, archived }
+          };
+        }
         throw new Error(`\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u4F1A\u8BDD ${missing.join("\u3001")}\uFF1B\u5148\u7528 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u518D\u67E5\u72B6\u6001\u3002`);
       }
       const requestedOrigin = inspected.find((entry) => entry.found !== null)?.found?.task?.originSessionId ?? "";
@@ -16235,13 +16364,14 @@ ${replyText}` : "",
       if (entries.length === 1 && missing.length === 0) {
         return {
           ok: true,
-          text: [formatStatusBlock(entries[0]), "", ...allLines].join("\n"),
+          text: [formatStatusBlock(entries[0]), "", ...allLines, ...archived.length === 0 ? [] : [`\u5DF2\u5F52\u6863\uFF0C\u4E0D\u518D\u5217\u51FA\uFF1A${archived.join("\u3001")}\u3002`]].join("\n"),
           data: {
             ...statusData(entries[0]),
             count: allBlock.conversations.length,
             requestedCount: 1,
             conversations: allBlock.conversations,
-            requested: entries.map(statusData)
+            requested: entries.map(statusData),
+            archived
           }
         };
       }
@@ -16257,6 +16387,9 @@ ${replyText}` : "",
       if (missing.length > 0) {
         parts.push("", `\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u8FD9\u4E9B\u4F1A\u8BDD\uFF1A${missing.join("\u3001")}\uFF1B\u5148\u7528 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u518D\u67E5\u72B6\u6001\u3002`);
       }
+      if (archived.length > 0) {
+        parts.push("", `\u5DF2\u5F52\u6863\uFF0C\u4E0D\u518D\u5217\u51FA\uFF1A${archived.join("\u3001")}\u3002`);
+      }
       parts.push("", ...allLines);
       return {
         ok: true,
@@ -16266,7 +16399,58 @@ ${replyText}` : "",
           requestedCount: entries.length,
           conversations: allBlock.conversations,
           requested: entries.map(statusData),
-          missing
+          missing,
+          archived
+        }
+      };
+    }
+  };
+  const removeMemberDefinition = {
+    name: "remove_member",
+    description: [
+      "\u628A\u76EE\u6807\u6210\u5458\u4E0A\u7684\u4E00\u4E2A\u5BF9\u8BDD\u5F52\u6863\uFF0C\u5E76\u505C\u6B62\u672C\u673A\u5BF9\u5B83\u7684\u8DDF\u8E2A\u3002",
+      "",
+      "`conversationId` \u5FC5\u586B\uFF1A`call_member` / `wait_member` \u8FD4\u56DE\u7684\u4F1A\u8BDDid\uFF0C\u6216\u672C\u673A\u8DDF\u8E2A\u8FC7\u7684\u4EFB\u4F55\u6210\u5458\u4F1A\u8BDD\uFF1B\u76EE\u6807\u6210\u5458\u7531\u672C\u673A\u4EFB\u52A1\u8BB0\u5F55\u89E3\u6790\uFF0C\u6CA1\u8DDF\u8E2A\u8FC7\u7684\u4F1A\u8BDD\u4F1A\u62A5\u9519\u3002",
+      "\u5F52\u6863\u5728\u76EE\u6807\u6210\u5458\u4E0A\u6267\u884C\uFF0C\u7B49\u540C\u4E8E\u6210\u5458 Web UI \u7684\u300C\u5F52\u6863\u300D\uFF1A\u5148\u505C\u6B62\u6B63\u5728\u8DD1\u7684\u5DE5\u4F5C\uFF0C\u518D\u628A\u4F1A\u8BDD\u653E\u8FDB\u6210\u5458\u7684\u5F52\u6863\u96C6\u3002",
+      "\u5F52\u6863\u540E\u5B83\u4E0D\u4F1A\u518D\u51FA\u73B0\u5728 `status_member` \u548C\u6210\u5458\u72B6\u6001\u5FEB\u7167\u91CC\uFF0C\u4E5F\u4E0D\u80FD\u518D\u7528 `call_member` \u7EE7\u7EED\u6295\u9012\uFF1B\u8981\u6062\u590D\u8BF7\u5728\u6210\u5458 Web UI \u53D6\u6D88\u5F52\u6863\u3002",
+      "\u76EE\u6807\u6210\u5458\u9700\u8981\u5E26\u5F52\u6863\u63A5\u53E3\u7684\u65B0\u7248\u63D2\u4EF6\uFF1B\u65E7\u7248\u672C\u4F1A\u8FD4\u56DE\u660E\u786E\u9519\u8BEF\uFF0C\u4E0D\u4F1A\u5047\u88C5\u6210\u529F\u3002"
+    ].join("\n"),
+    parameters: {
+      type: "object",
+      properties: {
+        conversationId: { type: "string", description: "\u8981\u5F52\u6863\u7684\u6210\u5458\u4F1A\u8BDDid\uFF08call_member / wait_member \u8FD4\u56DE\uFF09\u3002" }
+      },
+      required: ["conversationId"],
+      additionalProperties: false
+    },
+    output: {
+      schema: { type: "object", additionalProperties: true },
+      render: (_args, value) => [{
+        type: "text",
+        text: typeof value?.text === "string" ? value.text : JSON.stringify(value, null, 2)
+      }]
+    },
+    isConcurrencySafe: () => false,
+    async execute(args) {
+      const conversationId = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
+      if (conversationId === "") throw new Error("conversationId is required");
+      const result = await memberTasks.archive(conversationId);
+      const task = result.task;
+      const workspace = memberTaskWorkspace(task);
+      return {
+        ok: true,
+        text: [
+          `\u5DF2\u5F52\u6863\u6210\u5458\u4F1A\u8BDD ${task.conversationId}\uFF08${task.member} ${task.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${workspace}\uFF09\u3002`,
+          ...result.already ? ["\u8BE5\u4F1A\u8BDD\u6B64\u524D\u5DF2\u5F52\u6863\uFF0C\u672C\u6B21\u6CA1\u6709\u91CD\u590D\u64CD\u4F5C\u3002"] : ["\u6210\u5458\u4E0A\u7684\u5BF9\u8BDD\u5DF2\u5F52\u6863\uFF0C\u6B63\u5728\u8DD1\u7684\u5DE5\u4F5C\u5DF2\u505C\u6B62\u3002"],
+          "\u5B83\u4E0D\u4F1A\u518D\u51FA\u73B0\u5728 status_member \u548C\u6210\u5458\u72B6\u6001\u5FEB\u7167\u91CC\uFF0C\u4E5F\u4E0D\u80FD\u518D\u7EE7\u7EED\u6295\u9012\uFF1B\u8981\u6062\u590D\u8BF7\u5728\u6210\u5458 Web UI \u53D6\u6D88\u5F52\u6863\u3002"
+        ].join("\n"),
+        data: {
+          conversationId: task.conversationId,
+          member: task.member,
+          memberIp: task.memberIp,
+          workspace,
+          archived: true,
+          already: result.already
         }
       };
     }
@@ -16336,7 +16520,7 @@ sha256 ${data.sha256}
       };
     }
   };
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, waitMemberDefinition, statusMemberDefinition, membersDefinition, repackDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, waitMemberDefinition, statusMemberDefinition, removeMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool);
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`);
@@ -16706,6 +16890,10 @@ function conversationRecord(conversation) {
     title: conversation.title ?? "",
     initiator: conversation.initiator ?? null,
     status: conversation.status,
+    // Archived conversations are hidden from the Web list but stay readable
+    // for a late `/result`; the flag must survive a restart with the rest.
+    archived: conversation.archived === true,
+    archivedAt: typeof conversation.archivedAt === "string" ? conversation.archivedAt : null,
     cwd: conversation.cwd,
     // Kept so the panel can show what was sent and which workspace it named,
     // even after a restart replaced the in-memory conversation.
@@ -16737,6 +16925,8 @@ function restoredConversation(record, workdir) {
     sessionId: typeof record.sessionId === "string" ? record.sessionId : String(record.id),
     cwd: typeof record.cwd === "string" ? record.cwd : workdir,
     status: abandoned ? INTERRUPTED_STATUS : status,
+    archived: record.archived === true,
+    archivedAt: typeof record.archivedAt === "string" ? record.archivedAt : null,
     title: typeof record.title === "string" ? record.title : "",
     prompt: typeof record.prompt === "string" ? record.prompt.slice(0, PROMPT_LIMIT) : "",
     workspace: typeof record.workspace === "string" ? record.workspace : "",
@@ -17131,11 +17321,24 @@ function createInteropService(options) {
     const digest = createHash9("sha256").update(raw).digest();
     return digest.length === tokenDigest.length && timingSafeEqual2(digest, tokenDigest);
   }
+  function workspaceRegistry() {
+    return typeof ctx.get === "function" ? ctx.get("workspaceRegistry") : ctx.workspaceRegistry;
+  }
+  function sessionArchived(conversation) {
+    try {
+      const ids = workspaceRegistry()?.archivedSessionIds;
+      if (Array.isArray(ids)) return ids.includes(conversation.sessionId);
+    } catch {
+    }
+    return conversation.archived === true;
+  }
   function publicConversation(conversation) {
     return {
       id: conversation.id,
       sessionId: conversation.sessionId,
       status: conversation.status,
+      archived: sessionArchived(conversation),
+      archivedAt: typeof conversation.archivedAt === "string" ? conversation.archivedAt : null,
       createdAt: conversation.createdAt,
       updatedAt: conversation.updatedAt,
       lastText: conversation.lastText,
@@ -17300,6 +17503,7 @@ data: ${JSON.stringify(payload)}
     scheduleSave();
   }
   function handleAgentStatus(conversation, status) {
+    if (conversation.archived === true) return;
     if (status === "running") {
       conversation.idle = false;
       if (conversation.prompted) conversation.status = "running";
@@ -17597,6 +17801,14 @@ data: ${JSON.stringify(payload)}
     }
   }
   async function sendMessage(conversation, request) {
+    if (sessionArchived(conversation)) {
+      throw httpError(409, "conversation_archived", "the conversation is archived; unarchive it on the member before sending another message");
+    }
+    if (conversation.archived === true) {
+      conversation.archived = false;
+      conversation.archivedAt = null;
+      scheduleSave();
+    }
     const blocks = contentBlocks(request.content ?? request.message ?? request.prompt);
     const agent = await ensureAgent(conversation);
     conversation.prompted = true;
@@ -17650,6 +17862,50 @@ data: ${JSON.stringify(payload)}
       log(`compaction failed for ${conversation.id}: ${message}`);
       throw httpError(502, "compaction_failed", `compaction failed${code === "" ? "" : ` (${code})`}: ${message}`);
     }
+  }
+  async function archiveConversation(conversation) {
+    if (sessionArchived(conversation)) {
+      conversation.archived = true;
+      return { already: true };
+    }
+    const registry = workspaceRegistry();
+    if (registry === void 0 || registry === null || typeof registry.archiveSession !== "function") {
+      throw httpError(
+        501,
+        "archive_unavailable",
+        "this member has no workspace registry; archive needs the embedded interop service of a Web host"
+      );
+    }
+    try {
+      await registry.archiveSession(conversation.sessionId, { stopActivity: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`archive failed for ${conversation.id}: ${message}`);
+      throw httpError(502, "archive_failed", `cannot archive this conversation: ${message}`);
+    }
+    const handle2 = handles.get(conversation.id);
+    if (handle2 !== void 0) {
+      handles.delete(conversation.id);
+      conversation.agent = null;
+      conversation.handle = null;
+      await Promise.resolve(handle2.dispose()).catch(() => {
+      });
+    }
+    conversation.archived = true;
+    conversation.archivedAt = (/* @__PURE__ */ new Date()).toISOString();
+    conversation.status = "archived";
+    conversation.idle = true;
+    conversation.updatedAt = conversation.archivedAt;
+    for (const waiter of [...conversation.waiters ?? []]) {
+      try {
+        waiter();
+      } catch {
+      }
+    }
+    saveState();
+    broadcast(conversation, { type: "conversation.archived", sessionId: conversation.sessionId });
+    log(`archived ${conversation.sessionId} (${conversation.id})`);
+    return { already: false };
   }
   function nextSignal(conversation, ms) {
     if (!(conversation.waiters instanceof Set)) conversation.waiters = /* @__PURE__ */ new Set();
@@ -17752,6 +18008,9 @@ data: ${JSON.stringify(payload)}
     }
   }
   async function waitConversation(conversation, timeoutMs, since) {
+    if (sessionArchived(conversation)) {
+      return { timedOut: false, state: "archived", settled: true, text: conversation.lastText ?? "", turn: turnsOf(conversation), seq: seqOf(conversation), replies: [], archived: true };
+    }
     reconcileStatus(conversation);
     if (conversation.interrupted && conversation.error !== null) {
       return { timedOut: false, state: "done", settled: true, text: conversation.lastText ?? "", turn: turnsOf(conversation), seq: seqOf(conversation), replies: [] };
@@ -17839,7 +18098,7 @@ data: ${JSON.stringify(payload)}
         json(response, 201, { ok: true, conversation: publicConversation(conversation2) });
         return;
       }
-      const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact))?$/u.exec(url.pathname);
+      const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact|archive))?$/u.exec(url.pathname);
       if (match === null) {
         fail(response, 404, "not_found", "Unknown endpoint.");
         return;
@@ -17910,6 +18169,11 @@ data: ${JSON.stringify(event)}
         });
         return;
       }
+      if (request.method === "POST" && suffix === "archive") {
+        const result = await archiveConversation(conversation);
+        json(response, 200, { ok: true, archived: true, already: result.already, conversation: publicConversation(conversation) });
+        return;
+      }
       if (request.method === "POST" && suffix === "compact") {
         const result = await compactConversation(conversation);
         json(response, 200, {
@@ -17936,6 +18200,7 @@ data: ${JSON.stringify(event)}
           ok: true,
           timedOut: result.timedOut === true,
           state: result.state ?? "done",
+          archived: result.archived === true,
           settled: result.settled === true,
           text: typeof result.text === "string" ? result.text : "",
           turn: Number.isSafeInteger(result.turn) ? result.turn : turnsOf(conversation),
@@ -17991,7 +18256,7 @@ data: ${JSON.stringify(event)}
       conversation.agent = null;
       conversation.handle = null;
       conversation.idle = true;
-      if (conversation.prompted) {
+      if (conversation.prompted && conversation.archived !== true) {
         conversation.status = conversation.interrupted ? "interrupted" : conversation.error !== null ? "error" : "idle";
       }
       conversation.updatedAt = (/* @__PURE__ */ new Date()).toISOString();

@@ -954,10 +954,16 @@ const server = http.createServer(async (request, response) => {
       json(response, 201, { ok: true, conversation: publicConversation(conversation) })
       return
     }
-    const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact))?$/u.exec(url.pathname)
+    const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact|archive))?$/u.exec(url.pathname)
     if (match === null) { fail(response, 404, 'not_found', 'Unknown endpoint.'); return }
     const conversation = findConversation(decodeURIComponent(match[1]))
     const suffix = match[2] ?? ''
+    if (suffix === 'archive') {
+      // The standalone service owns no Web host and no workspace registry, so
+      // it cannot move the session into the archive set the Web UI reads.
+      fail(response, 501, 'archive_unavailable', 'the standalone interop service cannot archive a conversation; use the embedded interop service of a Web host')
+      return
+    }
     if (suffix === 'compact') {
       // The standalone service drives a child `dsh --profile sdk`; the SDK
       // protocol has no maintenance/compaction call, so only the embedded

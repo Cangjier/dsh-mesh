@@ -193,7 +193,7 @@ test('scope readers apply defaults and drop unusable stored values', async () =>
   }
 })
 
-test('set_member_scope sets self by default, defaults keep on, and preserves keep=false', async () => {
+test('set_member_scope sets self by default, leaves keep off unless enabled, and preserves it', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-scope-self-'))
   const dataDir = path.join(dir, 'mesh')
   let service
@@ -203,26 +203,26 @@ test('set_member_scope sets self by default, defaults keep on, and preserves kee
     const set = tools.find(tool => tool.name === 'set_member_scope')
     const first = await set.execute({ identity: '开发', scope: '插件开发' }, { agent: mainAgent })
     assert.equal(first.ok, true)
-    assert.deepEqual(await service.memberScope('main-1'), { identity: '开发', scope: '插件开发', keep: true })
+    assert.deepEqual(await service.memberScope('main-1'), { identity: '开发', scope: '插件开发' })
     assert.match(first.text, /已设置自身（会话 main-1）/u)
     assert.match(first.text, /身份：开发/u)
     assert.match(first.text, /工作范围：插件开发/u)
-    assert.match(first.text, /保持目标：开启（只对主对话生效）/u)
+    assert.match(first.text, /保持目标：关闭（只对主对话生效）/u)
 
     const viaSelf = await set.execute({ conversationId: 'self', identity: '测试' }, { agent: mainAgent })
     assert.match(viaSelf.text, /已设置自身/u)
     const viaLocal = await set.execute({ conversationId: 'local', scope: '验收' }, { agent: mainAgent })
     assert.match(viaLocal.text, /已设置自身/u)
-    const viaSession = await set.execute({ conversationId: 'main-1', keep: false }, { agent: mainAgent })
-    assert.match(viaSession.text, /保持目标：关闭/u)
+    const viaSession = await set.execute({ conversationId: 'main-1', keep: true }, { agent: mainAgent })
+    assert.match(viaSession.text, /保持目标：开启/u)
 
     const partial = await set.execute({ identity: '网关' }, { agent: mainAgent })
     assert.deepEqual(await service.memberScope('main-1'), {
       identity: '网关',
       scope: '验收',
-      keep: false,
-    }, 'identity-only must not reset an existing keep=false')
-    assert.match(partial.text, /保持目标：关闭/u)
+      keep: true,
+    }, 'identity-only must not reset an existing keep=true')
+    assert.match(partial.text, /保持目标：开启/u)
   } finally {
     await service?.memberTasks.dispose()
     await rm(dir, { recursive: true, force: true })
@@ -255,8 +255,8 @@ test('set_member_scope on self stores idlePushMs and compressPercent and shows e
       identity: '网关',
       idlePushMs: 120_000,
       compressPercent: 50,
-      keep: true,
-    }, 'a later identity setting defaults keep on but preserves the numeric settings')
+    }, 'a later identity setting keeps the numeric settings and does not enable keep')
+    assert.match(scope.text, /保持目标：关闭/u)
     assert.match(scope.text, /静默推送：2 分钟/u)
 
     await assert.rejects(

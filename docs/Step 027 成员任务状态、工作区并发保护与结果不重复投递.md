@@ -155,7 +155,7 @@ wait_member(progress, seq=1, 文本 T)   → deliveredSeq = 1
 - 兜底只投递 `seq > deliveredSeq` 的未读回复；在第一次 `await` 前就同步推进
   `deliveredSeq` 并记下 `deliveryReplies`，并发的 `wait_member` 不可能再拿到同一段
   文本。旧成员只报 `lastText`（没有按轮 `replies`）时，把它当作唯一未读回复；
-- 没有未读回复、但终态尚未被 wait 消费时，只发一条**不含回复正文**的简短完成提示；
+- 终态或 progress 已被 wait 取走时，**完全不投递**；从未产生任何文本的任务仍发一条状态提示；
 - `wait_member` / `waitAny` 返回终态（无论带不带新文本）时调用 `#consumeTerminal`：
   标记 `terminalDelivered` 并同步 `clearTimeout` 取消待投递 timer；
 - `send` 开始新一轮时清掉 `terminalDelivered` / `deliveryReplies` 和旧 timer；
@@ -208,8 +208,8 @@ HTTP 请求（conversation GET + 短 `/wait`），成员短暂变慢时可能超
   被拦。git 工作树的实际竞争范围就是同一个 `.git` 目录，跨子目录的并发仍由调用方判断。
 - `force` 只是显式承认风险，不做额外锁或快照；它不改变 git 本身的行为。
 - steer 依赖成员 DSH 的 `agent.steer`；旧成员没有该方法时自然回退 `followup`。
-- 兜底短完成提示仍然是一条用户消息（`source.kind = 'user'`），这是回调既有语义；它
-  不含回复正文，因此不会和已取结果重复。
+- 兜底投递仍然是一条用户消息（`source.kind = 'user'`），这是回调既有语义；被 wait 取走
+  结果后不再发送任何消息（包括完成提示）。
 - 目标 running 且上下文已超过 30% 时，投递前的自动压缩仍要求空闲：会在到达成员侧
   steer 之前拒绝这次投递（既有、已文档化的行为）。需要 steer 时先等对话空闲、
   压缩后再投递，或去掉自动压缩条件。

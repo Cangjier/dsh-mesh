@@ -13527,6 +13527,7 @@ var MemberTaskService = class {
         task.terminalDelivered = task.terminalDelivered === true;
         task.archived = task.archived === true;
         task.archivedAt = typeof task.archivedAt === "string" ? task.archivedAt : null;
+        task.repliesTakenByWait = task.repliesTakenByWait === true;
         if (typeof task.workspace !== "string" || task.workspace.trim() === "") task.workspace = "unknown";
         task.profile = memberTaskProfile(task);
         if (!Array.isArray(task.sentMessages)) {
@@ -13940,6 +13941,7 @@ var MemberTaskService = class {
       const replies = this.#pendingReplies(task);
       if (replies.length > 0) {
         task.deliveredSeq = replies[replies.length - 1].seq;
+        task.repliesTakenByWait = true;
         if (terminal) this.#consumeTerminal(task);
         await this.#save(task).catch(() => {
         });
@@ -14030,6 +14032,7 @@ var MemberTaskService = class {
         const terminal = isTerminalStatus(task.status);
         if (replies.length > 0) {
           task.deliveredSeq = replies[replies.length - 1].seq;
+          task.repliesTakenByWait = true;
           if (terminal) this.#consumeTerminal(task);
         } else if (terminal) {
           this.#consumeTerminal(task);
@@ -14582,6 +14585,7 @@ ${prompt}`;
     task.attempts = 0;
     task.emptyWaits = 0;
     task.terminalDelivered = false;
+    task.repliesTakenByWait = false;
     task.deliveryReplies = null;
     task.deliveryClaimedFrom = null;
     task.deliveryFailed = false;
@@ -15058,9 +15062,9 @@ ${prompt}`;
    *
    * - unreported replies (`seq > deliveredSeq`) are claimed here and delivered
    *   as the result; a wait that runs afterwards cannot return the same text;
-   * - with nothing unreported, only a short completion notice is sent — the
-   *   text itself was already handed over by an earlier `progress` reply, and
-   *   repeating it was the ai-cad duplicate bug.
+   * - with nothing unreported and a wait already having taken the reply (or
+   *   the terminal outcome), the fallback stays silent; a task that never
+   *   produced any text still gets its single state notice.
    *
    * A terminal outcome a wait already consumed cancels the timer, so no
    * fallback runs at all.
@@ -15075,9 +15079,12 @@ ${prompt}`;
       const seq = Number.isSafeInteger(task.replySeq) && task.replySeq > 0 ? task.replySeq : 1;
       pending = [{ seq, turn: Number.isSafeInteger(task.turns) ? task.turns : null, text: task.lastText }];
     }
-    if (pending.length === 0 && task.terminalDelivered === true) {
+    if (pending.length === 0 && (task.terminalDelivered === true || task.repliesTakenByWait === true)) {
       await this.#log(task, "delivery skipped: a wait_member call already returned the result");
       return;
+    }
+    if (pending.length === 0) {
+      await this.#log(task, "delivery notice: no reply text was produced");
     }
     if (pending.length > 0) {
       task.deliveryClaimedFrom = Number.isSafeInteger(task.deliveredSeq) ? task.deliveredSeq : 0;

@@ -206,7 +206,7 @@ function recordingAgent() {
   }
 }
 
-test('a progress reply taken by wait_member is never delivered a second time', async () => {
+test('a progress reply taken by wait_member is not followed by a completion message', async () => {
   const member = await fakeMember({ progressText: '第一轮进展', finalText: '' })
   const agent = recordingAgent()
   const { tasks, dataDir } = await buildService(member.port, agent)
@@ -222,11 +222,8 @@ test('a progress reply taken by wait_member is never delivered a second time', a
     await waitFor(() => task.status === 'completed')
     await sleep()
 
-    assert.equal(agent.messages.length, 1, 'the fallback still tells the caller the task finished, once')
-    const text = agent.messages[0].content[0].text
-    assert.match(text, /\[成员任务完成\]/u)
-    assert.match(text, /结果已由先前的等待返回，这里不再重复正文/u)
-    assert.doesNotMatch(text, /第一轮进展/u, 'a reply wait_member already returned must not be repeated')
+    assert.equal(agent.messages.length, 0, 'a reply wait_member already returned must not produce another message')
+    assert.equal(task.notified, false)
     assert.equal(agent.steered.length, 0)
     assert.equal(task.deliveredSeq, 1)
   } finally {

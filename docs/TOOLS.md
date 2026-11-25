@@ -553,7 +553,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 
 - 只投递 `seq > deliveredSeq` 的**未取回复**；投递前先同步占用这些 `seq`，并发的
   `wait_member` 不会再拿到同一段文本。
-- 终态文本已经被 `wait_member` 取走时，最多发一条**不含回复正文**的简短完成提示。
+- 终态或 progress 已被 `wait_member` 取走时，兜底**完全不投递**，不再发完成提示；从未产生任何文本的任务仍会收到一条状态提示（失败时尤其需要）。
 - `wait_member` 消费终态时同步取消待投递 timer 并标记 `terminalDelivered`，兜底整体跳过。
 - 旧成员只报 `lastText`、没有按轮 `replies` 时，兜底把 `lastText` 当成唯一未取回复投递。
 

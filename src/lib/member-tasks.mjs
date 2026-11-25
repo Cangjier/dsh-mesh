@@ -494,6 +494,7 @@ export class MemberTaskService {
         // `remove_member` is idempotent, but every list filters them out.
         task.archived = task.archived === true
         task.archivedAt = typeof task.archivedAt === 'string' ? task.archivedAt : null
+        task.repliesTakenByWait = task.repliesTakenByWait === true
         // Old records predate the workspace field. An empty value is not a
         // name, so both fall back to the same placeholder the model sees.
         if (typeof task.workspace !== 'string' || task.workspace.trim() === '') task.workspace = 'unknown'
@@ -959,6 +960,7 @@ export class MemberTaskService {
       const replies = this.#pendingReplies(task)
       if (replies.length > 0) {
         task.deliveredSeq = replies[replies.length - 1].seq
+        task.repliesTakenByWait = true
         // A terminal answer handed over together with its text also tells the
         // model the task is over, so the post-completion delivery is skipped
         // and any timer already scheduled for it is cancelled.
@@ -1059,6 +1061,7 @@ export class MemberTaskService {
         const terminal = isTerminalStatus(task.status)
         if (replies.length > 0) {
           task.deliveredSeq = replies[replies.length - 1].seq
+          task.repliesTakenByWait = true
           // A terminal answer handed over together with its text also tells
           // the model the task is over, so the fallback delivery is skipped
           // and its timer cancelled.
@@ -1650,6 +1653,7 @@ export class MemberTaskService {
     task.attempts = 0
     task.emptyWaits = 0
     task.terminalDelivered = false
+    task.repliesTakenByWait = false
     task.deliveryReplies = null
     task.deliveryClaimedFrom = null
     task.deliveryFailed = false
@@ -2184,9 +2188,9 @@ export class MemberTaskService {
    *
    * - unreported replies (`seq > deliveredSeq`) are claimed here and delivered
    *   as the result; a wait that runs afterwards cannot return the same text;
-   * - with nothing unreported, only a short completion notice is sent — the
-   *   text itself was already handed over by an earlier `progress` reply, and
-   *   repeating it was the ai-cad duplicate bug.
+   * - with nothing unreported and a wait already having taken the reply (or
+   *   the terminal outcome), the fallback stays silent; a task that never
+   *   produced any text still gets its single state notice.
    *
    * A terminal outcome a wait already consumed cancels the timer, so no
    * fallback runs at all.
@@ -2207,9 +2211,18 @@ export class MemberTaskService {
       const seq = Number.isSafeInteger(task.replySeq) && task.replySeq > 0 ? task.replySeq : 1
       pending = [{ seq, turn: Number.isSafeInteger(task.turns) ? task.turns : null, text: task.lastText }]
     }
-    if (pending.length === 0 && task.terminalDelivered === true) {
+    if (pending.length === 0 && (task.terminalDelivered === true || task.repliesTakenByWait === true)) {
+      // The result (or the only progress reply) was already handed over by a
+      // wait: a completion notice would be a second message for something the
+      // caller already has, so stay silent.
       await this.#log(task, 'delivery skipped: a wait_member call already returned the result')
       return
+    }
+    if (pending.length === 0) {
+      // Nothing was ever handed over and there is no text to show (a failure
+      // before the first turn, for instance): the state notice is the only
+      // thing the caller can use.
+      await this.#log(task, 'delivery notice: no reply text was produced')
     }
     if (pending.length > 0) {
       // Claim before the first await: this assignment and the wait call's own

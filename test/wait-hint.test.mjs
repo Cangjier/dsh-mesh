@@ -53,7 +53,7 @@ function seed(service, overrides = {}) {
   return task
 }
 
-test('a finished turn tells the model to keep waiting', async () => {
+test('a finished turn reports progress without a wait hint', async () => {
   const { dataDir, service, wait } = await harness()
   try {
     seed(service, {
@@ -66,15 +66,15 @@ test('a finished turn tells the model to keep waiting', async () => {
     assert.equal(result.data.state, 'progress')
     assert.match(result.text, /进行中/u)
     assert.match(result.text, /第 2 轮/u)
-    assert.match(result.text, /继续等下一轮：wait_member \{ "all": true \}/u)
-    assert.match(result.text, /state=done 才是最终结果/u)
+    assert.doesNotMatch(result.text, /wait_member/u)
+    assert.doesNotMatch(result.text, /继续等/u)
     assert.match(result.text, /第一轮的答复/u)
   } finally {
     await rm(dataDir, { recursive: true, force: true })
   }
 })
 
-test('a timeout says the task is still running and how to continue', async () => {
+test('a timeout says the task is still running without a continuation hint', async () => {
   const { dataDir, service, wait } = await harness()
   try {
     seed(service, { turns: 1 })
@@ -84,14 +84,14 @@ test('a timeout says the task is still running and how to continue', async () =>
     assert.equal(result.data.timedOut, true)
     assert.equal(result.data.state, 'running')
     assert.match(result.text, /仍在运行/u)
-    assert.match(result.text, /继续等待（推荐 all: true）/u)
-    assert.match(result.text, /"timeoutMs": 1000/u)
+    assert.doesNotMatch(result.text, /wait_member/u)
+    assert.doesNotMatch(result.text, /继续等待/u)
   } finally {
     await rm(dataDir, { recursive: true, force: true })
   }
 })
 
-test('completion says no further wait is needed', async () => {
+test('completion reports the result without a wait hint', async () => {
   const { dataDir, service, wait } = await harness()
   try {
     seed(service, {
@@ -104,7 +104,7 @@ test('completion says no further wait is needed', async () => {
     assert.equal(result.data.done, true)
     assert.equal(result.data.state, 'done')
     assert.match(result.text, /已完成/u)
-    assert.match(result.text, /不需要再调用 wait_member/u)
+    assert.doesNotMatch(result.text, /wait_member/u)
     assert.match(result.text, /最终结果/u)
   } finally {
     await rm(dataDir, { recursive: true, force: true })
@@ -129,7 +129,7 @@ test('a second wait on a consumed terminal result does not reprint the text', as
     assert.equal(second.data.state, 'done')
     assert.equal(second.data.textAlreadyReturned, true)
     assert.doesNotMatch(second.text, /只应出现一次的正文/u)
-    assert.match(second.text, /先前的 wait_member/u)
+    assert.match(second.text, /先前的等待/u)
   } finally {
     await rm(dataDir, { recursive: true, force: true })
   }

@@ -3,7 +3,7 @@ import test from 'node:test'
 import {
   MEMBER_PUSH_DELAY_MS,
   MEMBER_STATUS_INTERVAL_MS,
-  MEMBER_STATUS_SOURCE,
+  MEMBER_CONTEXT_SOURCE,
   createMemberContext,
   formatMemberStatusSignature,
   formatMemberStatusSnapshot,
@@ -115,13 +115,14 @@ test('a step with running member conversations carries one status snapshot', asy
     const message = decision.messages[0]
     assert.equal(message.role, 'user')
     assert.notEqual(message.source.kind, 'user')
-    assert.equal(message.source.kind, MEMBER_STATUS_SOURCE)
+    assert.equal(message.source.kind, MEMBER_CONTEXT_SOURCE)
     assert.equal(message.source.form, 'snapshot')
     const text = message.content[0].text
     assert.match(text, /本对话跟踪 2 个成员会话，其中 1 个进行中/u)
     assert.match(text, /c1（B 10\.66\.66\.2，工作区 dsh-mesh，进行中，第 2 轮）/u)
     assert.match(text, /c2（B 10\.66\.66\.2，工作区 unknown，空闲，第 4 轮）/u)
-    assert.match(text, /wait_member \{ "all": true \}/u)
+    assert.match(text, /^\[成员上下文\]/u)
+    assert.doesNotMatch(text, /wait_member/u)
   } finally {
     h.context.dispose()
   }
@@ -329,7 +330,7 @@ test('a main turn end pushes the snapshot after the quiet delay', async () => {
     assert.equal(h.followups.length, 1)
     const message = h.followups[0]
     assert.equal(message.role, 'user')
-    assert.equal(message.source.kind, MEMBER_STATUS_SOURCE)
+    assert.equal(message.source.kind, MEMBER_CONTEXT_SOURCE)
     assert.equal(message.source.form, 'push')
     assert.match(message.content[0].text, /自身（会话 session-a）：身份：网关；工作范围：成员发现/u)
     assert.match(message.content[0].text, /c1（B 10\.66\.66\.2，工作区 dsh-mesh，进行中，第 2 轮）/u)

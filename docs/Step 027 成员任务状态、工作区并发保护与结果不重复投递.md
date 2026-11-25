@@ -78,14 +78,14 @@
 的成员会话，最多每 30 秒往 `decision.messages` 追加一条快照：
 
 ```text
-[成员任务状态] 本对话跟踪 2 个成员会话，其中 1 个进行中（快照 ...）。
+[成员上下文] 本对话跟踪 2 个成员会话，其中 1 个进行中（快照 ...）。
 - conv-a（B 10.66.66.2，工作区 dsh-mesh，进行中，第 2 轮）
 - conv-b（B 10.66.66.2，工作区 unknown，空闲，第 1 轮）
 继续用 wait_member { "all": true } 等所有进行中的会话：任意一个先返回就立刻返回；
 也可以只等指定的会话：wait_member { "conversationIds": [...] }。
 ```
 
-- 注入消息的 `source.kind = 'mesh-member-status'`、`form: 'snapshot'`，
+- 注入消息的 `source.kind = 'member-context'`、`form: 'snapshot'`，
   **不是 `user`**，不会被当成用户输入；
 - 不新开 turn、不调用 `followup` / `steer`；
 - 同一会话的注入时钟只在内存里；`session/disposed` 时清除；

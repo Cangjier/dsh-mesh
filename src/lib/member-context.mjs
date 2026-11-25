@@ -49,7 +49,7 @@ export const LONG_JOB_WARN_MS = 60_000
 const LONG_JOBS_MAX = 20
 
 /** Source kind of the injected/pushed message; it must never read as user input. */
-export const MEMBER_STATUS_SOURCE = 'mesh-member-status'
+export const MEMBER_CONTEXT_SOURCE = 'member-context'
 
 /**
  * Render a push delay in human-readable form.
@@ -238,7 +238,7 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfIdlePushMs = effectiveMemberIdlePushMs(selfScope)
   const selfCompressPercent = effectiveCompressPercent(selfScope)
   const lines = [
-    `[成员任务状态] 本对话跟踪 ${String(list.length)} 个成员会话，其中 ${String(running.length)} 个进行中（快照 ${new Date(at).toISOString()}）。`,
+    `[成员上下文] 本对话跟踪 ${String(list.length)} 个成员会话，其中 ${String(running.length)} 个进行中（快照 ${new Date(at).toISOString()}）。`,
     `- 自身（会话 ${selfId === '' ? 'unknown' : selfId}）：身份：${selfScope?.identity ?? '未设置'}；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === true ? '开启' : '关闭'}（只对主对话生效）；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；静默推送：${formatMemberPushDelay(selfIdlePushMs)}（只对主对话生效）；压缩阈值：${formatMemberPercent(selfCompressPercent)}`,
   ]
   for (const task of list) {
@@ -253,9 +253,6 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
       `- ${entry.conversationId}（${entry.member} ${entry.memberIp}，工作区 ${entry.workspace}，${entry.statusLabel}${turn === '' ? '' : `，${turn}`}）身份：${profile?.identity ?? '未设置'}；工作范围：${profile?.scope ?? '未设置'}${explicitCompress}`,
     )
   }
-  lines.push(
-    '继续用 wait_member { "all": true } 等所有进行中的会话：任意一个先返回就立刻返回；也可以只等指定的会话：wait_member { "conversationIds": [...] }。',
-  )
   const longJobs = Array.isArray(options.longJobs) ? options.longJobs : []
   if (longJobs.length > 0) {
     lines.push(
@@ -464,9 +461,9 @@ export function createMemberContext({
         // Deliberately not `user`: this is injected context, not input the
         // human sent, and the source keeps it distinguishable in the request.
         source: {
-          kind: MEMBER_STATUS_SOURCE,
+          kind: MEMBER_CONTEXT_SOURCE,
           form: 'snapshot',
-          sections: [{ name: MEMBER_STATUS_SOURCE, text: snapshot.text }],
+          sections: [{ name: MEMBER_CONTEXT_SOURCE, text: snapshot.text }],
         },
       }
       lastInjection.set(String(payload.agent?.session?.id ?? payload.agent?.id ?? ''), snapshot.at)
@@ -579,7 +576,7 @@ export function createMemberContext({
         id: randomUUID(),
         role: 'user',
         content: [{ type: 'text', text }],
-        source: { kind: MEMBER_STATUS_SOURCE, form: 'push' },
+        source: { kind: MEMBER_CONTEXT_SOURCE, form: 'push' },
       })
       lastPushSignature.set(sessionId, signature)
       lastInjection.set(sessionId, at)

@@ -15259,7 +15259,7 @@ var MEMBER_PUSH_DELAY_MS = DEFAULT_MEMBER_IDLE_PUSH_MS;
 var PUSH_COMPACT_TIMEOUT_MS = 18e4;
 var LONG_JOB_WARN_MS = 6e4;
 var LONG_JOBS_MAX = 20;
-var MEMBER_STATUS_SOURCE = "mesh-member-status";
+var MEMBER_CONTEXT_SOURCE = "member-context";
 function formatMemberPushDelay(ms) {
   const value = Number.isFinite(ms) && ms > 0 ? Math.round(ms) : DEFAULT_MEMBER_IDLE_PUSH_MS;
   if (value % 6e4 === 0) return `${String(value / 6e4)} \u5206\u949F`;
@@ -15359,7 +15359,7 @@ function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfIdlePushMs = effectiveMemberIdlePushMs(selfScope);
   const selfCompressPercent = effectiveCompressPercent(selfScope);
   const lines = [
-    `[\u6210\u5458\u4EFB\u52A1\u72B6\u6001] \u672C\u5BF9\u8BDD\u8DDF\u8E2A ${String(list.length)} \u4E2A\u6210\u5458\u4F1A\u8BDD\uFF0C\u5176\u4E2D ${String(running.length)} \u4E2A\u8FDB\u884C\u4E2D\uFF08\u5FEB\u7167 ${new Date(at).toISOString()}\uFF09\u3002`,
+    `[\u6210\u5458\u4E0A\u4E0B\u6587] \u672C\u5BF9\u8BDD\u8DDF\u8E2A ${String(list.length)} \u4E2A\u6210\u5458\u4F1A\u8BDD\uFF0C\u5176\u4E2D ${String(running.length)} \u4E2A\u8FDB\u884C\u4E2D\uFF08\u5FEB\u7167 ${new Date(at).toISOString()}\uFF09\u3002`,
     `- \u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1A\u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${selfScope?.keep === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u9759\u9ED8\u63A8\u9001\uFF1A${formatMemberPushDelay(selfIdlePushMs)}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(selfCompressPercent)}`
   ];
   for (const task of list) {
@@ -15372,9 +15372,6 @@ function formatMemberStatusSnapshot(tasks, options = {}) {
       `- ${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${entry.workspace}\uFF0C${entry.statusLabel}${turn === "" ? "" : `\uFF0C${turn}`}\uFF09\u8EAB\u4EFD\uFF1A${profile?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${profile?.scope ?? "\u672A\u8BBE\u7F6E"}${explicitCompress}`
     );
   }
-  lines.push(
-    '\u7EE7\u7EED\u7528 wait_member { "all": true } \u7B49\u6240\u6709\u8FDB\u884C\u4E2D\u7684\u4F1A\u8BDD\uFF1A\u4EFB\u610F\u4E00\u4E2A\u5148\u8FD4\u56DE\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF1B\u4E5F\u53EF\u4EE5\u53EA\u7B49\u6307\u5B9A\u7684\u4F1A\u8BDD\uFF1Await_member { "conversationIds": [...] }\u3002'
-  );
   const longJobs = Array.isArray(options.longJobs) ? options.longJobs : [];
   if (longJobs.length > 0) {
     lines.push(
@@ -15506,9 +15503,9 @@ function createMemberContext({
         // Deliberately not `user`: this is injected context, not input the
         // human sent, and the source keeps it distinguishable in the request.
         source: {
-          kind: MEMBER_STATUS_SOURCE,
+          kind: MEMBER_CONTEXT_SOURCE,
           form: "snapshot",
-          sections: [{ name: MEMBER_STATUS_SOURCE, text: snapshot.text }]
+          sections: [{ name: MEMBER_CONTEXT_SOURCE, text: snapshot.text }]
         }
       };
       lastInjection.set(String(payload.agent?.session?.id ?? payload.agent?.id ?? ""), snapshot.at);
@@ -15587,7 +15584,7 @@ function createMemberContext({
         id: randomUUID2(),
         role: "user",
         content: [{ type: "text", text }],
-        source: { kind: MEMBER_STATUS_SOURCE, form: "push" }
+        source: { kind: MEMBER_CONTEXT_SOURCE, form: "push" }
       });
       lastPushSignature.set(sessionId, signature);
       lastInjection.set(sessionId, at);
@@ -15904,8 +15901,6 @@ function registerTools(ctx, toolsCtx, service) {
           throw error;
         }
         const data2 = memberTaskData(task2, memberTasks);
-        const inFlight2 = await memberTasks.inFlightForOrigin(originSessionId).catch(() => []);
-        const parallelHint2 = formatParallelWaitHint(inFlight2, task2);
         const conversationBlock2 = await originConversationBlock(memberTasks, originSessionId, task2.conversationId);
         return {
           ok: task2.status !== "failed",
@@ -15915,9 +15910,7 @@ function registerTools(ctx, toolsCtx, service) {
             formatTaskProfileMissingHint(task2),
             typeof task2.egressLine === "string" && task2.egressLine !== "" ? `\u51FA\u7F51\u5B9E\u6D4B\uFF1A${task2.egressLine}` : "",
             `\u4F1A\u8BDDid\uFF1A${task2.conversationId}`,
-            parallelHint2 !== "" ? parallelHint2 : formatWaitHint("\u7B49\u5F85\u7ED3\u679C", task2.conversationId),
-            "\u6210\u5458\u6BCF\u7ED3\u675F\u4E00\u8F6E\u56DE\u7B54\u5C31\u8FD4\u56DE\u4E00\u6B21\uFF08state=progress\uFF09\uFF0C\u62FF\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002",
-            "\u4E0D\u518D\u7B49\u5F85\u4E5F\u6CA1\u5173\u7CFB\uFF1A\u5B8C\u6210\u540E 3 \u79D2\u5185\u6CA1\u6709 wait_member \u53D6\u8D70\u7ED3\u679C\uFF0C\u63D2\u4EF6\u53EA\u6295\u9012\u5C1A\u672A\u53D6\u8D70\u7684\u56DE\u590D\uFF0C\u5DF2\u53D6\u8D70\u7684\u4E0D\u91CD\u590D\u3002",
+            "\u7ED3\u679C\u4F1A\u81EA\u52A8\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF1B\u4E0D\u53D6\u8D70\u4E5F\u4E0D\u4F1A\u4E22\uFF0C\u5DF2\u7ECF\u53D6\u8D70\u7684\u4E0D\u91CD\u590D\u3002",
             `\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\uFF1Acall_member { "member": ${JSON.stringify(String(task2.member))}, "conversationId": ${JSON.stringify(String(task2.conversationId))}, "prompt": "..." }\u3002`,
             ...conversationBlock2.lines,
             task2.status === "failed" ? `\u5F53\u524D\u72B6\u6001\uFF1Afailed\uFF0C${task2.error ?? ""}` : "",
@@ -15947,8 +15940,6 @@ function registerTools(ctx, toolsCtx, service) {
       const compaction = task.lastCompaction;
       const observedPercent = Number.isFinite(compaction?.observedPercent) ? formatOneDecimal(compaction.observedPercent) : Number.isFinite(compaction?.forcedPercent) ? formatOneDecimal(compaction.forcedPercent) : "?";
       const forcedLine = compaction?.forced === true ? compaction.compacted === true ? `\u4E0A\u4E0B\u6587\u5360\u6BD4 ${observedPercent}% \u5DF2\u8D85\u8FC7\u538B\u7F29\u9608\u503C ${formatOneDecimal(compaction.forcedPercent)}%\uFF0C\u6295\u9012\u524D\u5DF2\u81EA\u52A8\u538B\u7F29\uFF1A\u66FF\u6362 ${String(compaction.shadowedCount)} \u9879\u5386\u53F2\uFF08\u7EA6 ${formatTokens(compaction.shadowedTokenCount ?? 0)} tokens\uFF09\u3002` : `\u4E0A\u4E0B\u6587\u5360\u6BD4 ${observedPercent}% \u5DF2\u8D85\u8FC7\u538B\u7F29\u9608\u503C ${formatOneDecimal(compaction.forcedPercent)}%\uFF0C\u6295\u9012\u524D\u5DF2\u5C1D\u8BD5\u81EA\u52A8\u538B\u7F29\uFF0C\u4F46\u6CA1\u6709\u53EF\u538B\u7F29\u7684\u5386\u53F2\u3002` : "";
-      const inFlight = await memberTasks.inFlightForOrigin(originSessionId).catch(() => []);
-      const parallelHint = formatParallelWaitHint(inFlight, task);
       const conversationBlock = await originConversationBlock(memberTasks, originSessionId, task.conversationId);
       const deliveryLine = task.lastDelivery === "steer" ? "\u672C\u6B21\u6295\u9012\uFF1A\u76EE\u6807\u5BF9\u8BDD\u6B63\u5728\u8FD0\u884C\uFF0C\u6D88\u606F\u5DF2\u7528 steer \u63D2\u5165\u5F53\u524D turn\u3002" : task.lastDelivery === "followup" ? "\u672C\u6B21\u6295\u9012\uFF1A\u76EE\u6807\u5BF9\u8BDD\u7A7A\u95F2\uFF0C\u6D88\u606F\u5DF2\u6309 followup \u6392\u5165\u4E0B\u4E00\u8F6E\u3002" : "";
       return {
@@ -15961,8 +15952,7 @@ function registerTools(ctx, toolsCtx, service) {
           deliveryLine,
           forcedLine,
           formatContextLine(task.context),
-          parallelHint !== "" ? parallelHint : formatWaitHint("\u7B49\u5F85\u56DE\u590D", task.conversationId),
-          "\u4E0D\u518D\u7B49\u5F85\u4E5F\u6CA1\u5173\u7CFB\uFF1A\u5B8C\u6210\u540E 3 \u79D2\u5185\u6CA1\u6709 wait_member \u53D6\u8D70\u7ED3\u679C\uFF0C\u63D2\u4EF6\u53EA\u6295\u9012\u5C1A\u672A\u53D6\u8D70\u7684\u56DE\u590D\uFF0C\u5DF2\u53D6\u8D70\u7684\u4E0D\u91CD\u590D\u3002",
+          "\u7ED3\u679C\u4F1A\u81EA\u52A8\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF1B\u4E0D\u53D6\u8D70\u4E5F\u4E0D\u4F1A\u4E22\uFF0C\u5DF2\u7ECF\u53D6\u8D70\u7684\u4E0D\u91CD\u590D\u3002",
           ...conversationBlock.lines,
           `\u65E5\u5FD7\uFF1A${data.logFile}`
         ].filter((line) => line !== "").join("\n"),
@@ -16166,8 +16156,7 @@ function registerTools(ctx, toolsCtx, service) {
           ok: true,
           text: [
             "\u672C\u5BF9\u8BDD\u5F53\u524D\u6CA1\u6709\u8FDB\u884C\u4E2D\u7684\u6210\u5458\u4F1A\u8BDD\uFF0C\u4E0D\u9700\u8981\u7B49\u5F85\u3002",
-            ...conversationBlock2.lines,
-            '\u4E0B\u6B21\u76F4\u63A5\u7528 wait_member { "all": true }\uFF1B\u4E5F\u53EF\u4EE5\u53EA\u7B49\u6307\u5B9A\u7684\u4F1A\u8BDD\uFF1Await_member { "conversationIds": [...] }\u3002'
+            ...conversationBlock2.lines
           ].join("\n"),
           data: {
             all: true,
@@ -16221,7 +16210,6 @@ function registerTools(ctx, toolsCtx, service) {
 ${replyText2}` : "",
               "\u6210\u5458\u8FD8\u4F1A\u7EE7\u7EED\uFF08\u53EF\u80FD\u8FD8\u6709\u5B50\u4EE3\u7406\u5728\u8DD1\uFF09\uFF0C\u8FD9\u4E0D\u662F\u6700\u7EC8\u7ED3\u679C\u3002",
               contextLine,
-              `\u7EE7\u7EED\u7B49\u4E0B\u4E00\u8F6E\uFF1Await_member { "all": true }\uFF08\u63A8\u8350\uFF0C\u4EFB\u610F\u4E00\u4E2A\u5148\u8FD4\u56DE\u5C31\u8FD4\u56DE\uFF09\uFF1B\u4E5F\u53EF\u4EE5\u53EA\u7B49\u8FD9\u4E2A\uFF1Await_member { "conversationIds": ${JSON.stringify(watched)} }\uFF1B\u6536\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
               ...conversationBlock2.lines,
               `\u65E5\u5FD7\uFF1A${data2.logFile}`
             ].filter((line) => line !== "").join("\n"),
@@ -16234,13 +16222,13 @@ ${replyText2}` : "",
             ok: true,
             text: [
               `\u6210\u5458\u4F1A\u8BDD ${task2.conversationId} \u5DF2\u5B8C\u6210\uFF1A${where2}\u3002`,
-              "\uFF08\u4EFB\u52A1\u5DF2\u7ED3\u675F\uFF0C\u4E0D\u9700\u8981\u518D\u8C03\u7528 wait_member\uFF1B\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\u7528 call_member \u5E26 conversationId\u3002\uFF09",
+              "\uFF08\u4EFB\u52A1\u5DF2\u7ED3\u675F\uFF1B\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\u7528 call_member \u5E26 conversationId\u3002\uFF09",
               `\u4F1A\u8BDDid\uFF1A${task2.conversationId}`,
               `\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\uFF1Acall_member { "member": ${JSON.stringify(String(task2.member))}, "conversationId": ${JSON.stringify(String(task2.conversationId))}, "prompt": "..." }`,
               contextLine,
               advice,
               "\u7ED3\u679C\uFF1A",
-              terminal.text !== "" ? terminal.text : terminal.alreadyDelivered ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7531\u5B8C\u6210\u6D88\u606F\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : terminal.alreadyReturned ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7ECF\u7531\u5148\u524D\u7684 wait_member \u8FD4\u56DE\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
+              terminal.text !== "" ? terminal.text : terminal.alreadyDelivered ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7531\u5B8C\u6210\u6D88\u606F\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : terminal.alreadyReturned ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7ECF\u7531\u5148\u524D\u7684\u7B49\u5F85\u8FD4\u56DE\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
               ...conversationBlock2.lines,
               `\u65E5\u5FD7\uFF1A${data2.logFile}`
             ].filter((line) => line !== "").join("\n"),
@@ -16255,7 +16243,6 @@ ${replyText2}` : "",
               `\u6210\u5458\u4F1A\u8BDD ${task2.conversationId} \u4ECD\u5728\u8FD0\u884C${turn2 === "" ? "" : `\uFF08${turn2}\uFF0C\u5C1A\u672A\u7ED3\u675F\uFF09`}\uFF1A${where2}\u3002`,
               "\u8FD9\u6BB5\u65F6\u95F4\u6CA1\u6709\u65B0\u56DE\u590D\uFF0C\u4F46\u4EFB\u52A1\u6CA1\u6709\u7ED3\u675F\u3001\u671F\u95F4\u7684\u56DE\u590D\u4E5F\u4E0D\u4F1A\u4E22\u3002",
               contextLine,
-              `\u7EE7\u7EED\u7B49\u5F85\uFF08\u63A8\u8350 all: true\uFF09\uFF1Await_member { "all": true }\uFF1B\u4E5F\u53EF\u4EE5\u53EA\u7B49\u8FD9\u4E2A\uFF1Await_member { "conversationIds": ${JSON.stringify(watched)}, "timeoutMs": ${String(effective2)} }\uFF1B\u6536\u5230 state=done \u624D\u662F\u6700\u7EC8\u7ED3\u679C\u3002`,
               typeof task2.lastText === "string" && task2.lastText !== "" ? `\u6700\u8FD1\u8F93\u51FA\uFF1A${task2.lastText.slice(0, 500)}` : "",
               ...conversationBlock2.lines,
               `\u65E5\u5FD7\uFF1A${data2.logFile}`
@@ -16299,7 +16286,7 @@ ${replyText2}` : "",
         remaining
       };
       const effective = Math.min(3e5, Math.max(1e3, timeoutMs));
-      const remainingHint = formatRemainingWait(remaining, effective);
+      const remainingHint = formatRemainingWait(remaining);
       const where = `${task.member}\uFF08${task.memberIp}\uFF09`;
       const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `\u7B2C ${String(task.turns)} \u8F6E` : "";
       if (result.state === "archived" || task.status === "archived") {
@@ -16318,7 +16305,6 @@ ${replyText2}` : "",
 ${replyText}` : "",
             "\u672C\u6B21\u53EA\u8FD4\u56DE\u4E86\u6700\u5148\u6709\u6D88\u606F\u7684\u90A3\u4E2A\u4F1A\u8BDD\uFF1B\u8FD9\u4E0D\u662F\u6700\u7EC8\u7ED3\u679C\uFF0C\u8FD8\u8981\u7EE7\u7EED\u7B49\u3002",
             formatContextLine(task.context),
-            `\u7EE7\u7EED\u7B49\uFF1Await_member { "all": true }\uFF08\u63A8\u8350\uFF0C\u4EFB\u610F\u4E00\u4E2A\u5148\u8FD4\u56DE\u5C31\u8FD4\u56DE\uFF09\u3002`,
             ...remainingHint,
             ...conversationBlock.lines,
             `\u65E5\u5FD7\uFF1A${data.logFile}`
@@ -16338,7 +16324,7 @@ ${replyText}` : "",
             formatContextLine(task.context),
             formatCompactionAdvice(task.context, await compressThresholdFor(service, task.conversationId)),
             "\u7ED3\u679C\uFF1A",
-            terminal.text !== "" ? terminal.text : terminal.alreadyDelivered ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7531\u5B8C\u6210\u6D88\u606F\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : terminal.alreadyReturned ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7ECF\u7531\u5148\u524D\u7684 wait_member \u8FD4\u56DE\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
+            terminal.text !== "" ? terminal.text : terminal.alreadyDelivered ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7531\u5B8C\u6210\u6D88\u606F\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : terminal.alreadyReturned ? "\uFF08\u8FD9\u6761\u56DE\u590D\u5DF2\u7ECF\u7531\u5148\u524D\u7684\u7B49\u5F85\u8FD4\u56DE\uFF0C\u8FD9\u91CC\u4E0D\u518D\u91CD\u590D\u6B63\u6587\u3002\uFF09" : "(\u6210\u5458\u6CA1\u6709\u8FD4\u56DE\u6587\u672C\u7ED3\u679C)",
             ...remainingHint,
             ...conversationBlock.lines,
             `\u65E5\u5FD7\uFF1A${data.logFile}`
@@ -16352,7 +16338,6 @@ ${replyText}` : "",
           text: [
             `\u7B49\u5F85\u8D85\u65F6\uFF1A${String(watched.length)} \u4E2A\u4F1A\u8BDD\u5728 ${String(effective)} \u6BEB\u79D2\u5185\u90FD\u6CA1\u6709\u65B0\u56DE\u590D\u3002`,
             "\u4EFB\u52A1\u90FD\u6CA1\u6709\u7ED3\u675F\uFF0C\u671F\u95F4\u7684\u56DE\u590D\u4E5F\u4E0D\u4F1A\u4E22\u3002",
-            `\u7EE7\u7EED\u7B49\u5F85\uFF1Await_member { "all": true }\uFF08\u63A8\u8350\uFF0C\u4EFB\u610F\u4E00\u4E2A\u5148\u8FD4\u56DE\u5C31\u8FD4\u56DE\uFF09\u3002`,
             ...remainingHint,
             ...conversationBlock.lines,
             `\u65E5\u5FD7\uFF1A${data.logFile}`
@@ -16393,7 +16378,7 @@ ${replyText}` : "",
     parameters: {
       type: "object",
       properties: {
-        conversationId: { type: "string", description: "\u8981\u67E5\u770B\u7684\u6210\u5458\u4F1A\u8BDDid\uFF08call_member / wait_member \u8FD4\u56DE\uFF09\u3002\u67E5\u4E00\u4E2A\u65F6\u7528\u5B83\u3002" },
+        conversationId: { type: "string", description: "\u8981\u67E5\u770B\u7684\u6210\u5458\u4F1A\u8BDDid\uFF08call_member \u8FD4\u56DE\uFF09\u3002\u67E5\u4E00\u4E2A\u65F6\u7528\u5B83\u3002" },
         conversationIds: {
           type: "array",
           items: { type: "string" },
@@ -16710,9 +16695,6 @@ async function originConversationBlock(memberTasks, sessionId, currentConversati
   const tasks = await memberTasks.listForOrigin(sessionId).catch(() => []);
   return conversationListBlock(tasks, currentConversationId, options);
 }
-function formatWaitHint(action, conversationId) {
-  return `\u7528 wait_member ${action}\uFF08\u63A8\u8350 all: true\uFF09\uFF1Await_member { "all": true }\uFF0C\u4EFB\u610F\u4E00\u4E2A\u5148\u8FD4\u56DE\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF1B\u4E5F\u53EF\u4EE5\u53EA\u7B49\u8FD9\u4E2A\uFF1Await_member { "conversationIds": [${JSON.stringify(String(conversationId))}] }\u3002`;
-}
 function workspaceBusyResult(error, args) {
   const detail = error?.detail !== null && typeof error?.detail === "object" ? error.detail : {};
   const running = Array.isArray(detail.conversationIds) ? detail.conversationIds.map(String) : [];
@@ -16738,32 +16720,15 @@ function workspaceBusyResult(error, args) {
     }
   };
 }
-function formatParallelWaitHint(inFlight, current) {
-  if (!Array.isArray(inFlight) || inFlight.length < 2) return "";
-  const ids = inFlight.map((task) => String(task.conversationId));
-  return [
-    `\u5F53\u524D\u5BF9\u8BDD\u6709 ${String(inFlight.length)} \u4E2A\u6210\u5458\u4F1A\u8BDD\u540C\u65F6\u5728\u8DD1\uFF1A`,
-    ...inFlight.map((task) => {
-      const turn = Number.isSafeInteger(task.turns) && task.turns > 0 ? `\uFF0C\u7B2C ${String(task.turns)} \u8F6E` : "";
-      const workspace = typeof task.workspace === "string" && task.workspace !== "" ? task.workspace : "unknown";
-      return `- ${task.conversationId}\uFF08${task.member} ${task.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${workspace}${turn}\uFF09`;
-    }),
-    '\u4E00\u6B21\u7B49\u5168\u90E8\uFF1Await_member { "all": true }\uFF08\u63A8\u8350\uFF0C\u4EFB\u610F\u4E00\u4E2A\u5148\u8FD4\u56DE\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF09\uFF1B',
-    `\u4E5F\u53EF\u4EE5\u53EA\u7B49\u8FD9\u4E9B\uFF1Await_member { "conversationIds": ${JSON.stringify(ids)} }\u3002`
-  ].join("\n");
-}
-function formatRemainingWait(remaining, effectiveTimeout) {
+function formatRemainingWait(remaining) {
   if (!Array.isArray(remaining) || remaining.length === 0) return [];
-  const ids = remaining.map((entry) => String(entry.conversationId));
   return [
     `\u8FD8\u6709 ${String(remaining.length)} \u4E2A\u4F1A\u8BDD\u6CA1\u6709\u8FD4\u56DE\uFF1A`,
     ...remaining.map((entry) => {
       const turn = Number.isSafeInteger(entry.turns) && entry.turns > 0 ? `\uFF0C\u7B2C ${String(entry.turns)} \u8F6E` : "";
       const workspace = typeof entry.workspace === "string" && entry.workspace !== "" ? `\uFF0C\u5DE5\u4F5C\u533A ${entry.workspace}` : "";
       return `- ${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}${workspace}${turn}\uFF0C${remainingStatusLabel(entry)}\uFF09`;
-    }),
-    `\u4E00\u6B21\u7B49\u5269\u4E0B\u7684\u4EFB\u610F\u4E00\u4E2A\uFF1Await_member { "conversationIds": ${JSON.stringify(ids)}, "timeoutMs": ${String(effectiveTimeout)} }\uFF08\u5176\u4E2D\u4EFB\u610F\u4E00\u4E2A\u8FD4\u56DE\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF09\u3002`,
-    '\u63A8\u8350\u76F4\u63A5\u7528 wait_member { "all": true } \u7B49\u6240\u6709\u8FDB\u884C\u4E2D\u7684\u4F1A\u8BDD\u3002'
+    })
   ];
 }
 function remainingStatusLabel(entry) {

@@ -204,7 +204,7 @@ test('waitAny refuses the whole call when one id is not tracked', async () => {
   }
 })
 
-test('wait_member lists the conversations it did not return and how to wait for them', async () => {
+test('wait_member lists the conversations it did not return without wait hints', async () => {
   const member = await fakeMember()
   const { service, dataDir } = await buildStub(member.port)
   const wait = register(service).get('wait_member')
@@ -216,8 +216,7 @@ test('wait_member lists the conversations it did not return and how to wait for 
     assert.match(result.text, /第一条回复/u)
     assert.match(result.text, /还有 1 个会话没有返回/u)
     assert.match(result.text, /c2（B 10\.66\.66\.2，工作区 unknown，第 3 轮，进行中）/u)
-    assert.match(result.text, /"conversationIds": \["c2"\]/u)
-    assert.match(result.text, /"all": true/u)
+    assert.doesNotMatch(result.text, /wait_member/u)
     assert.deepEqual(result.data.remaining.map(entry => entry.conversationId), ['c2'])
     assert.deepEqual(result.data.conversationIds, ['c1', 'c2'])
   } finally {
@@ -314,7 +313,10 @@ test('a fan-out timeout names every conversation that is still running', async (
     assert.equal(result.data.timedOut, true)
     assert.match(result.text, /等待超时/u)
     assert.match(result.text, /2 个会话在 1000 毫秒内都没有新回复/u)
-    assert.match(result.text, /"conversationIds": \["c1","c2"\]/u)
+    assert.match(result.text, /还有 2 个会话没有返回/u)
+    assert.match(result.text, /c1（B 10\.66\.66\.2/u)
+    assert.match(result.text, /c2（B 10\.66\.66\.2/u)
+    assert.doesNotMatch(result.text, /wait_member/u)
     assert.deepEqual(result.data.remaining.map(entry => entry.conversationId), ['c1', 'c2'])
   } finally {
     await member.close()
@@ -330,11 +332,10 @@ test('call_member points at every conversation the turn already has running', as
   seed(service.memberTasks, 'conv-old', { lastSentAt: '2026-11-24T00:00:00.000Z', turns: 2 })
   try {
     const result = await call.execute({ member: '127.0.0.1', prompt: '再跑一件' }, { agent })
-    assert.match(result.text, /当前对话有 2 个成员会话同时在跑/u)
+    assert.match(result.text, /本对话跟踪的成员会话（共 2 个/u)
     assert.match(result.text, /conv-old/u)
     assert.match(result.text, /conv-new/u)
-    assert.match(result.text, /"conversationIds": \["conv-old","conv-new"\]/u)
-    assert.match(result.text, /"all": true/u)
+    assert.doesNotMatch(result.text, /wait_member/u)
     assert.equal(result.data.currentConversationId, 'conv-new')
     assert.deepEqual(result.data.conversations.map(entry => entry.conversationId), ['conv-old', 'conv-new'])
     assert.deepEqual(result.data.conversations.map(entry => entry.statusLabel), ['进行中', '进行中'])
@@ -347,16 +348,16 @@ test('call_member points at every conversation the turn already has running', as
   }
 })
 
-test('call_member keeps the single-conversation hint when nothing else is running', async () => {
+test('call_member does not append a wait hint to a single conversation', async () => {
   const member = await fakeMember()
   const agent = { id: 'session-a', session: { id: 'session-a' }, status: 'idle' }
   const { service, dataDir } = await buildStub(member.port)
   const call = register(service).get('call_member')
   try {
     const result = await call.execute({ member: '127.0.0.1', prompt: '只跑一件' }, { agent })
-    assert.match(result.text, /用 wait_member 等待结果（推荐 all: true）：wait_member \{ "all": true \}/u)
-    assert.match(result.text, /"conversationIds": \["conv-new"\]/u)
-    assert.doesNotMatch(result.text, /同时在跑/u)
+    assert.match(result.text, /会话id：conv-new/u)
+    assert.match(result.text, /本对话跟踪的成员会话（共 1 个/u)
+    assert.doesNotMatch(result.text, /wait_member/u)
   } finally {
     await service.memberTasks.dispose()
     await member.close()

@@ -387,19 +387,14 @@ call_member { "member": "10.66.66.3", "prompt": "检查磁盘" }
   → 由 wait_member 取回；不再等待时，终态后 3 秒内无人取走则自动投递回发起对话（有 wait 停在任务上时为 15 秒，让 wait 先取）
 ```
 
-同一个对话里已经有好几个成员会话在跑时，`call_member` 的返回值会直接列出它们，并推荐
-用 `wait_member { "all": true }` 一次等全部：
+同一个对话里已经有好几个成员会话在跑时，`call_member` 的返回值会直接列出它们，但不再
+附带 `wait_member` 的等待提示：
 
 ```text
-当前对话有 2 个成员会话同时在跑：
-- conv-a（B 10.66.66.2，工作区 dsh-mesh，第 2 轮）
-- conv-b（B 10.66.66.2，工作区 unknown）
-一次等全部：wait_member { "all": true }（推荐，任意一个先返回就立刻返回）；
-也可以只等这些：wait_member { "conversationIds": ["conv-a","conv-b"] }。
+本对话跟踪的成员会话（共 2 个，* 为当前会话）：
+- * conv-a（B 10.66.66.2，工作区 dsh-mesh，进行中，第 2 轮）
+- conv-b（B 10.66.66.2，工作区 unknown，已完成，第 1 轮）
 ```
-
-只有一个会话在跑时，提示同样是 `all: true` 优先，并给出只等这个会话的
-`conversationIds` 写法。
 
 返回值还包含 `currentConversationId` 和 `conversations`：本对话跟踪的所有成员会话
 （会话id、`进行中` / `空闲` / `异常中止`、工作区、轮次），当前会话 `current: true`。
@@ -519,12 +514,8 @@ wait_member { "conversationIds": ["<会话id1>", "<会话id2>"] }   # 只等指�
 - 有回复的会话优先于「已经结束但没有新文本」的会话：先把实际内容给模型。
 - 全部会话在 `timeoutMs` 内都没有新回复时，返回超时说明和完整的剩余列表。
 
-工具描述和返回值里的所有提示都优先推荐 `all: true`：
-
-```text
-继续等下一轮：wait_member { "all": true }（推荐，任意一个先返回就返回）；
-也可以只等这个：wait_member { "conversationIds": ["conv-a"] }；收到 state=done 才是最终结果。
-```
+工具描述仍推荐 `all: true`；返回值只给状态、剩余会话和结果，不再附带“继续等”之类的
+`wait_member` 提示。
 
 每次返回的 `data.conversations` 都是本对话跟踪的**所有成员会话**：
 
@@ -607,17 +598,17 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 本对话有进行中的成员会话时，插件每 60 秒最多把一份状态快照附加到当前 step 的请求：
 
 ```text
-[成员任务状态] 本对话跟踪 2 个成员会话，其中 1 个进行中（快照 ...）。
+[成员上下文] 本对话跟踪 2 个成员会话，其中 1 个进行中（快照 ...）。
 - 自身（会话 <selfId>）：身份：…；工作范围：…；保持目标：开启/关闭（只对主对话生效）；避免耗时：开启/关闭（只对主对话生效）；静默推送：5 分钟（只对主对话生效）；压缩阈值：35%
 - conv-a（B 10.66.66.2，工作区 dsh-mesh，进行中，第 2 轮）身份：…；工作范围：…；压缩阈值：10%
 - conv-b（B 10.66.66.2，工作区 unknown，空闲，第 1 轮）身份：未设置；工作范围：未设置
-继续用 wait_member { "all": true } 等所有进行中的会话：任意一个先返回就立刻返回；
-也可以只等指定的会话：wait_member { "conversationIds": [...] }。
 ```
+
+快照末尾不再追加 `wait_member` 提示。
 
 - 通过 `agent/pre-step` 把消息附加到 `decision.messages`，和 time-context 同一条路径；
 - **不新开 turn**，不调用 `followup` / `steer`，不是用户输入；
-- 注入消息的 `source.kind` 是 `mesh-member-status`（不是 `user`），带
+- 注入消息的 `source.kind` 是 `member-context`（不是 `user`），带
   `form: "snapshot"` 和 `sections`；
 - 没有进行中的会话、或距上次注入不足 60 秒时不注入；
 - 身份/工作范围优先取 `member-scopes.json`（按 conversationId），回退任务 profile 快照；已归档的会话不进入快照；
@@ -643,7 +634,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 最后用 `agent.followup(...)` 投递**与快照完全相同**的内容；`turn/start` 取消计时，
 dispose 清理全部 timer。
 
-- 消息 `role: "user"`，`source: { kind: "mesh-member-status", form: "push" }`，不是普通用户输入；
+- 消息 `role: "user"`，`source: { kind: "member-context", form: "push" }`，不是普通用户输入；
 - 用不含时间戳的内容签名去重（自身 scope/keep/idlePushMs/compressPercent + 各任务
   conversationId/member/status/turns/profile/compressPercent）；**先算签名、相同就直接返回**，
   再测量上下文/按需压缩，所以状态没变的 turn/end 不会白白触发 compactNow；

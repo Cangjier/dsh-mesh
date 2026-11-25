@@ -365,6 +365,7 @@ export function registerTools(ctx, toolsCtx, service) {
       '`identity` / `scope` 是可选的字符串，只传要改的字段；空字符串表示清除。',
       'identity 最长 40 字符，scope 最长 120 字符。',
       '`keep` 默认 false，只对自身/主对话生效：显式传 keep=true 时，turn 结束后主对话空闲时会主动收到成员状态快照；不传 keep 不改变已保存的值，从未设置过即为关闭。',
+      '`avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，主对话下一次状态快照会检查距上一次快照之间结束、耗时超过 1 分钟的 job，并在注入里列出这些 job 并建议交给成员对话执行。设置成员会话时忽略。',
       `\`idlePushMs\`：静默推送延迟（整数毫秒，${String(MEMBER_IDLE_PUSH_MIN_MS)}–${String(MEMBER_IDLE_PUSH_MAX_MS)}，默认 ${String(DEFAULT_MEMBER_IDLE_PUSH_MS)} 即 5 分钟），只对自身/主对话生效；设置成员会话时忽略。`,
       `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；主对话和成员会话都生效：主对话推送快照前、或成员会话下一次投递前，上下文占比超过阈值就先压缩。`,
       '给自身设置 identity/scope 不会顺带开启 keep；需要推送就显式传 keep=true。',
@@ -391,6 +392,10 @@ export function registerTools(ctx, toolsCtx, service) {
         keep: {
           type: 'boolean',
           description: '只对自身/主对话生效，默认 false（需要显式开启）；控制主对话空闲后是否主动推送成员状态快照。设置成员会话时忽略。',
+        },
+        avoidLongJobs: {
+          type: 'boolean',
+          description: '只对自身/主对话生效，默认 false；开启后状态快照会列出两次快照间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
         },
         idlePushMs: {
           type: 'integer',
@@ -422,19 +427,21 @@ export function registerTools(ctx, toolsCtx, service) {
       const hasIdentity = args.identity !== undefined
       const hasScope = args.scope !== undefined
       const hasKeep = args.keep !== undefined
+      const hasAvoidLongJobs = args.avoidLongJobs !== undefined
       const hasIdlePushMs = args.idlePushMs !== undefined
       const hasCompressPercent = args.compressPercent !== undefined
-      if (!hasIdentity && !hasScope && !hasKeep && !hasIdlePushMs && !hasCompressPercent) {
-        throw new Error('identity, scope, keep, idlePushMs, or compressPercent is required')
+      if (!hasIdentity && !hasScope && !hasKeep && !hasAvoidLongJobs && !hasIdlePushMs && !hasCompressPercent) {
+        throw new Error('identity, scope, keep, avoidLongJobs, idlePushMs, or compressPercent is required')
       }
       if (isSelf && selfId === '') throw new Error('cannot set the current session scope: no current session')
       if (!isSelf && !hasIdentity && !hasScope && !hasCompressPercent) {
-        throw new Error('keep and idlePushMs only apply to the current session; set identity, scope, or compressPercent for a member conversation')
+        throw new Error('keep, avoidLongJobs, and idlePushMs only apply to the current session; set identity, scope, or compressPercent for a member conversation')
       }
       const patch = {
         ...(hasIdentity ? { identity: args.identity } : {}),
         ...(hasScope ? { scope: args.scope } : {}),
         ...(isSelf && hasKeep ? { keep: args.keep } : {}),
+        ...(isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {}),
         ...(isSelf && hasIdlePushMs ? { idlePushMs: args.idlePushMs } : {}),
         ...(hasCompressPercent ? { compressPercent: args.compressPercent } : {}),
       }
@@ -460,12 +467,13 @@ export function registerTools(ctx, toolsCtx, service) {
         ...(isSelf
           ? [
               `保持目标：${scope?.keep === true ? '开启' : '关闭'}（只对主对话生效）`,
+              `避免耗时：${scope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）`,
               `静默推送：${formatMemberPushDelay(idleDelay)}（只对主对话生效）`,
               `压缩阈值：${formatOneDecimal(compressThreshold)}%（主对话推送前和成员会话投递前生效）`,
             ]
           : [`压缩阈值：${formatOneDecimal(compressThreshold)}%（投递前超过该占比自动压缩）`]),
-        ...(!isSelf && (hasKeep || hasIdlePushMs)
-          ? ['keep / idlePushMs 只对主对话自身生效，设置成员会话时已忽略。']
+        ...(!isSelf && (hasKeep || hasAvoidLongJobs || hasIdlePushMs)
+          ? ['keep / avoidLongJobs / idlePushMs 只对主对话自身生效，设置成员会话时已忽略。']
           : []),
         ...(!isSelf && !tracked ? ['本机未跟踪该会话，只保存设置。'] : []),
       ]
@@ -479,8 +487,10 @@ export function registerTools(ctx, toolsCtx, service) {
           scope,
           idlePushMs: idleDelay,
           compressPercent: compressThreshold,
+          avoidLongJobs: scope?.avoidLongJobs === true,
           tracked,
           ignoredKeep: !isSelf && hasKeep,
+          ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
           ignoredIdlePushMs: !isSelf && hasIdlePushMs,
         },
       }

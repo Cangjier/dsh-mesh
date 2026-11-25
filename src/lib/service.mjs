@@ -100,12 +100,12 @@ export const DEFAULT_COMPRESS_PERCENT = 35
  *
  * `undefined` means "leave this field alone", an empty string means "clear
  * this field" and is reported as `null`, and a non-empty string is trimmed and
- * length-checked. `keep` is a boolean if present. `idlePushMs` is an integer
+ * length-checked. `keep` and `avoidLongJobs` are booleans if present. `idlePushMs` is an integer
  * within {@link MEMBER_IDLE_PUSH_MIN_MS}..{@link MEMBER_IDLE_PUSH_MAX_MS} and
  * `compressPercent` a number within 1..100. The caller merges the result into
  * the stored record.
- * @param {{identity?: unknown, scope?: unknown, keep?: unknown, idlePushMs?: unknown, compressPercent?: unknown}} [patch] raw patch.
- * @returns {{identity?: string|null, scope?: string|null, keep?: boolean, idlePushMs?: number, compressPercent?: number}} normalised patch.
+ * @param {{identity?: unknown, scope?: unknown, keep?: unknown, avoidLongJobs?: unknown, idlePushMs?: unknown, compressPercent?: unknown}} [patch] raw patch.
+ * @returns {{identity?: string|null, scope?: string|null, keep?: boolean, avoidLongJobs?: boolean, idlePushMs?: number, compressPercent?: number}} normalised patch.
  */
 export function normalizeMemberScopePatch(patch = {}) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
@@ -131,6 +131,10 @@ export function normalizeMemberScopePatch(patch = {}) {
   if (patch.keep !== undefined) {
     if (typeof patch.keep !== 'boolean') throw new Error('keep must be a boolean')
     normalized.keep = patch.keep
+  }
+  if (patch.avoidLongJobs !== undefined) {
+    if (typeof patch.avoidLongJobs !== 'boolean') throw new Error('avoidLongJobs must be a boolean')
+    normalized.avoidLongJobs = patch.avoidLongJobs
   }
   if (patch.idlePushMs !== undefined) {
     const value = patch.idlePushMs
@@ -764,7 +768,7 @@ export class MeshService {
    * file is the same as "nothing set yet", never a startup failure. Only the
    * fields that were actually set are stored; defaults are applied by readers
    * ({@link effectiveMemberIdlePushMs}, {@link effectiveCompressPercent}).
-   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean, idlePushMs?: number, compressPercent?: number}>>} scopes.
+   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, idlePushMs?: number, compressPercent?: number}>>} scopes.
    */
   async memberScopes() {
     try {
@@ -777,16 +781,19 @@ export class MeshService {
         const identity = savedScopeText(value.identity, MEMBER_IDENTITY_MAX)
         const scope = savedScopeText(value.scope, MEMBER_SCOPE_MAX)
         const keep = typeof value.keep === 'boolean' ? value.keep : undefined
+        const avoidLongJobs = typeof value.avoidLongJobs === 'boolean' ? value.avoidLongJobs : undefined
         const idlePushMs = savedScopeNumber(
           value.idlePushMs,
           candidate => Number.isSafeInteger(candidate) && candidate >= MEMBER_IDLE_PUSH_MIN_MS && candidate <= MEMBER_IDLE_PUSH_MAX_MS,
         )
         const compressPercent = savedScopeNumber(value.compressPercent, candidate => candidate >= 1 && candidate <= 100)
-        if (identity === null && scope === null && keep === undefined && idlePushMs === undefined && compressPercent === undefined) continue
+        if (identity === null && scope === null && keep === undefined && avoidLongJobs === undefined
+          && idlePushMs === undefined && compressPercent === undefined) continue
         scopes[rawId.trim()] = {
           ...(identity === null ? {} : { identity }),
           ...(scope === null ? {} : { scope }),
           ...(keep === undefined ? {} : { keep }),
+          ...(avoidLongJobs === undefined ? {} : { avoidLongJobs }),
           ...(idlePushMs === undefined ? {} : { idlePushMs }),
           ...(compressPercent === undefined ? {} : { compressPercent }),
         }
@@ -800,7 +807,7 @@ export class MeshService {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean, idlePushMs?: number, compressPercent?: number}|null>} scope.
+   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, idlePushMs?: number, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? '').trim()
@@ -813,12 +820,12 @@ export class MeshService {
    * Merge and save one conversation's identity/work scope and settings.
    *
    * Only the fields present in the patch change. An empty string clears that
-   * text field (the record is dropped when nothing remains). `keep` is stored
-   * as given; only the self target is supposed to pass it. `idlePushMs` is only
-   * meaningful for the self target; `compressPercent` applies to both self and
-   * member conversations.
+   * text field (the record is dropped when nothing remains). `keep` and
+   * `avoidLongJobs` are stored as given; only the self target is supposed to
+   * pass them. `idlePushMs` is only meaningful for the self target;
+   * `compressPercent` applies to both self and member conversations.
    * @param {string} conversationId conversation or session id.
-   * @param {{identity?: unknown, scope?: unknown, keep?: unknown, idlePushMs?: unknown, compressPercent?: unknown}} [patch] fields to change.
+   * @param {{identity?: unknown, scope?: unknown, keep?: unknown, avoidLongJobs?: unknown, idlePushMs?: unknown, compressPercent?: unknown}} [patch] fields to change.
    * @returns {Promise<{ok: boolean, scopes: Record<string, object>, scope: object|null}>} saved scopes.
    */
   async setMemberScope(conversationId, patch = {}) {
@@ -836,6 +843,7 @@ export class MeshService {
       else next.scope = normalized.scope
     }
     if (normalized.keep !== undefined) next.keep = normalized.keep
+    if (normalized.avoidLongJobs !== undefined) next.avoidLongJobs = normalized.avoidLongJobs
     if (normalized.idlePushMs !== undefined) next.idlePushMs = normalized.idlePushMs
     if (normalized.compressPercent !== undefined) next.compressPercent = normalized.compressPercent
     if (Object.keys(next).length === 0) delete scopes[id]

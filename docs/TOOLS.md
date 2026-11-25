@@ -16,7 +16,7 @@
 | `repack` | 用当前仓库刷新已有离线包 | `package` | `false` |
 | `members` | 只读成员发现 | 无 | `true` |
 | `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `cwd` / `workspace` / `force` / `identity` / `scope` | `false` |
-| `set_member_scope` | 设置成员会话或自身的身份/工作范围、推送延迟与压缩阈值 | `conversationId` / `identity` / `scope` / `keep` / `idlePushMs` / `compressPercent` | `false` |
+| `set_member_scope` | 设置成员会话或自身的身份/工作范围、推送延迟与压缩阈值 | `conversationId` / `identity` / `scope` / `keep` / `avoidLongJobs` / `idlePushMs` / `compressPercent` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
 | `status_member` | 目标会话状态 + 身份/工作范围 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区/身份/工作范围，已归档的不列出）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
 | `remove_member` | 在目标成员上归档一个对话并停止本机跟踪 | `conversationId` | `false` |
@@ -608,7 +608,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 
 ```text
 [成员任务状态] 本对话跟踪 2 个成员会话，其中 1 个进行中（快照 ...）。
-- 自身（会话 <selfId>）：身份：…；工作范围：…；保持目标：开启/关闭（只对主对话生效）；静默推送：5 分钟（只对主对话生效）；压缩阈值：35%
+- 自身（会话 <selfId>）：身份：…；工作范围：…；保持目标：开启/关闭（只对主对话生效）；避免耗时：开启/关闭（只对主对话生效）；静默推送：5 分钟（只对主对话生效）；压缩阈值：35%
 - conv-a（B 10.66.66.2，工作区 dsh-mesh，进行中，第 2 轮）身份：…；工作范围：…；压缩阈值：10%
 - conv-b（B 10.66.66.2，工作区 unknown，空闲，第 1 轮）身份：未设置；工作范围：未设置
 继续用 wait_member { "all": true } 等所有进行中的会话：任意一个先返回就立刻返回；
@@ -621,12 +621,15 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
   `form: "snapshot"` 和 `sections`；
 - 没有进行中的会话、或距上次注入不足 60 秒时不注入；
 - 身份/工作范围优先取 `member-scopes.json`（按 conversationId），回退任务 profile 快照；已归档的会话不进入快照；
-- 自身行显示有效配置：保持目标（`keep`，默认关闭，需显式开启）、静默推送（`idlePushMs`，默认 300000 = 5 分钟）和压缩阈值
+- 自身行显示有效配置：保持目标（`keep`，默认关闭，需显式开启）、避免耗时（`avoidLongJobs`，默认关闭）、静默推送（`idlePushMs`，默认 300000 = 5 分钟）和压缩阈值
   （`compressPercent`，默认 35%）；成员行只在显式设置过 `compressPercent` 时显示该阈值；
 - 缺成员会话身份/工作范围时聚合提示 `call_member` / `set_member_scope`；自身缺失时提示
   `set_member_scope`（省略 conversationId 或传 `self`）；全齐时不提示；
 - 读取任务表失败只记日志并吞掉，step 的 decision 原样返回，不影响 agent loop；
 - 每个会话的注入时钟在 `session/disposed` 时清掉。
+- 自身开启 `avoidLongJobs` 后，快照还会列出「距上一次快照之间结束、耗时超过 1 分钟」的
+  job（kind、标签、耗时），并在末尾建议用 `call_member` 交给成员对话执行；没有进行中的
+  成员会话时，这类提醒也可以单独触发一次注入。窗口每次快照消费一次，同一 job 不重复提示。
 
 ### 6.6.1 主对话空闲主动推送
 
@@ -717,6 +720,7 @@ status_member { "conversationIds": ["<会话id1>", "<会话id2>"] }
 ```text
 set_member_scope { "identity": "开发", "scope": "插件开发" }
 set_member_scope { "conversationId": "self", "keep": true, "idlePushMs": 300000 }
+set_member_scope { "conversationId": "self", "avoidLongJobs": true }
 set_member_scope { "compressPercent": 35 }
 set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "scope": "跨平台验收", "compressPercent": 10 }
 ```
@@ -725,6 +729,9 @@ set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "
 - `identity` / `scope` 只传要改的字段，空字符串清除；identity ≤40 字符，scope ≤120 字符。
 - `keep` 默认 false，只对自身生效：需要主动推送时显式传 `keep: true`；给自身设置
   identity/scope 不会顺带开启它。设置成员会话时忽略，返回文字会说明。
+- `avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，下一次状态快照会检查距上一次快照
+  之间结束、耗时超过 1 分钟的 job，并在注入里列出它们、建议交给成员对话执行；设置成员会话
+  时忽略，返回文字会说明。
 - `idlePushMs`：静默推送延迟，整数毫秒 1000–86400000，默认 300000（5 分钟）；只对自身/主对话
   生效，设置成员会话时忽略，返回文字会说明。
 - `compressPercent`：自动压缩阈值，数字 1–100，默认 35；主对话推送快照前和成员会话下一次

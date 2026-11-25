@@ -13,6 +13,9 @@
  *   snapshot is pushed back with `followup` after {@link MEMBER_PUSH_DELAY_MS}
  *   of quiet, so the model sees completed work without another user message.
  *   `keep` defaults to off: a scope without the flag never pushes;
+ * - when the self scope sets `avoidLongJobs`, the snapshot names the settled
+ *   jobs longer than {@link LONG_JOB_WARN_MS} since the previous snapshot and
+ *   recommends delegating that work to a member conversation;
  * - member conversations are excluded from the push via
  *   {@link isMemberSession};
  * - a failure is logged and swallowed so the agent loop is never affected.
@@ -38,6 +41,12 @@ export const MEMBER_PUSH_DELAY_MS = DEFAULT_MEMBER_IDLE_PUSH_MS
 
 /** How long one pre-push main-conversation compaction may take. */
 const PUSH_COMPACT_TIMEOUT_MS = 180_000
+
+/** A settled job longer than this is worth delegating to a member conversation. */
+export const LONG_JOB_WARN_MS = 60_000
+
+/** How many long-job records one session keeps between snapshots. */
+const LONG_JOBS_MAX = 20
 
 /** Source kind of the injected/pushed message; it must never read as user input. */
 export const MEMBER_STATUS_SOURCE = 'mesh-member-status'
@@ -198,12 +207,25 @@ export function formatSelfScopeMissingHint(selfScope) {
 }
 
 /**
+ * Render one job duration in human-readable form.
+ * @param {number} ms duration in milliseconds.
+ * @returns {string} "45 秒" / "2 分 10 秒" / "3 分钟".
+ */
+export function formatJobDuration(ms) {
+  const total = Number.isFinite(ms) && ms > 0 ? Math.round(ms / 1000) : 0
+  if (total < 60) return `${String(total)} 秒`
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  return seconds === 0 ? `${String(minutes)} 分钟` : `${String(minutes)} 分 ${String(seconds)} 秒`
+}
+
+/**
  * Render one status snapshot for the model.
  *
  * Statuses are the initiator's task states, matching the documented mapping:
  * running/starting = 进行中, completed = 空闲, failed/interrupted = 异常中止.
  * @param {object[]} tasks every conversation this session tracks.
- * @param {{now?: number, selfId?: string, selfScope?: object|null, scopes?: Record<string, object>}} [options] snapshot facts (tests pin the time).
+ * @param {{now?: number, selfId?: string, selfScope?: object|null, scopes?: Record<string, object>, longJobs?: object[]}} [options] snapshot facts (tests pin the time).
  * @returns {string} snapshot text.
  */
 export function formatMemberStatusSnapshot(tasks, options = {}) {
@@ -217,7 +239,7 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfCompressPercent = effectiveCompressPercent(selfScope)
   const lines = [
     `[成员任务状态] 本对话跟踪 ${String(list.length)} 个成员会话，其中 ${String(running.length)} 个进行中（快照 ${new Date(at).toISOString()}）。`,
-    `- 自身（会话 ${selfId === '' ? 'unknown' : selfId}）：身份：${selfScope?.identity ?? '未设置'}；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === true ? '开启' : '关闭'}（只对主对话生效）；静默推送：${formatMemberPushDelay(selfIdlePushMs)}（只对主对话生效）；压缩阈值：${formatMemberPercent(selfCompressPercent)}`,
+    `- 自身（会话 ${selfId === '' ? 'unknown' : selfId}）：身份：${selfScope?.identity ?? '未设置'}；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === true ? '开启' : '关闭'}（只对主对话生效）；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；静默推送：${formatMemberPushDelay(selfIdlePushMs)}（只对主对话生效）；压缩阈值：${formatMemberPercent(selfCompressPercent)}`,
   ]
   for (const task of list) {
     const entry = describeMemberTask(task)
@@ -234,6 +256,18 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
   lines.push(
     '继续用 wait_member { "all": true } 等所有进行中的会话：任意一个先返回就立刻返回；也可以只等指定的会话：wait_member { "conversationIds": [...] }。',
   )
+  const longJobs = Array.isArray(options.longJobs) ? options.longJobs : []
+  if (longJobs.length > 0) {
+    lines.push(
+      `[耗时提醒] 距上一次快照有 ${String(longJobs.length)} 个 job 耗时超过 1 分钟：`,
+      ...longJobs.map((job) => {
+        const kind = typeof job?.kind === 'string' && job.kind !== '' ? `${job.kind}：` : ''
+        const label = typeof job?.label === 'string' && job.label !== '' ? job.label : String(job?.jobId ?? 'job')
+        return `- ${kind}${label}（耗时 ${formatJobDuration(job?.durationMs)}）`
+      }),
+      '推荐把这类耗时工作交给成员对话执行：用 call_member 指定成员和工作区，避免主对话被长任务占用。',
+    )
+  }
   const memberHint = formatMemberScopeMissingHint(list, scopes)
   if (memberHint !== '') lines.push(memberHint)
   const selfHint = formatSelfScopeMissingHint(selfScope)
@@ -259,6 +293,7 @@ export function formatMemberStatusSignature(state = {}) {
       identity: state.selfScope?.identity ?? null,
       scope: state.selfScope?.scope ?? null,
       keep: state.selfScope?.keep === true,
+      avoidLongJobs: state.selfScope?.avoidLongJobs === true,
       idlePushMs: effectiveMemberIdlePushMs(state.selfScope),
       compressPercent: effectiveCompressPercent(state.selfScope),
     },
@@ -313,6 +348,8 @@ export function createMemberContext({
   const turns = new Map()
   /** @type {Map<string, number>} session id -> scheduling generation */
   const generations = new Map()
+  /** @type {Map<string, object[]>} session id -> settled jobs over the warn threshold */
+  const longJobs = new Map()
   const disposers = []
   let closed = false
 
@@ -346,19 +383,66 @@ export function createMemberContext({
   async function snapshotFor(agent) {
     const sessionId = String(agent?.session?.id ?? agent?.id ?? '')
     if (sessionId === '') return null
-    const running = await memberTasks.inFlightForOrigin(sessionId)
-    if (!Array.isArray(running) || running.length === 0) return null
     const at = now()
     const last = lastInjection.get(sessionId)
     if (typeof last === 'number' && Number.isFinite(last) && at >= last && at - last < intervalMs) return null
+    const running = await memberTasks.inFlightForOrigin(sessionId)
+    if (!Array.isArray(running)) return null
+    // A long job can be worth reporting even when no member conversation is
+    // running, so the buffer, not the running list, decides that case.
+    const pendingJobs = (longJobs.get(sessionId)?.length ?? 0) > 0
+    if (running.length === 0 && !pendingJobs) return null
     const [tasks, scopes] = await Promise.all([
       memberTasks.listForOrigin(sessionId),
       readScopes(),
     ])
+    const selfScope = scopes[sessionId] ?? null
+    const taken = takeLongJobs(sessionId, at, last)
+    // Consuming the buffer at every snapshot keeps the window honest even when
+    // the option is off; only an explicit avoidLongJobs turns it into a hint.
+    const hintJobs = selfScope?.avoidLongJobs === true ? taken : []
+    if (running.length === 0 && hintJobs.length === 0) return null
     return {
-      text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope: scopes[sessionId] ?? null, scopes }),
+      text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes, longJobs: hintJobs }),
       at,
     }
+  }
+
+  /**
+   * Record one settled job that crossed the warn threshold.
+   * @param {string} sessionId session id.
+   * @param {{jobId?: string, kind?: string, label?: string, startedAt: number, finishedAt: number, durationMs: number}} job facts.
+   * @returns {void}
+   */
+  function recordLongJob(sessionId, job) {
+    if (!(job.durationMs > LONG_JOB_WARN_MS)) return
+    const list = longJobs.get(sessionId) ?? []
+    const label = String(job.label ?? '').replace(/\s+/gu, ' ').trim().slice(0, 120)
+    list.push({
+      jobId: typeof job.jobId === 'string' ? job.jobId : '',
+      kind: typeof job.kind === 'string' ? job.kind : '',
+      label: label === '' ? String(job.jobId ?? 'job') : label,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
+      durationMs: job.durationMs,
+    })
+    if (list.length > LONG_JOBS_MAX) list.splice(0, list.length - LONG_JOBS_MAX)
+    longJobs.set(sessionId, list)
+  }
+
+  /**
+   * Take the long jobs settled in (last snapshot, now] and clear the buffer.
+   * @param {string} sessionId session id.
+   * @param {number} at current snapshot time.
+   * @param {number|undefined} last previous snapshot time.
+   * @returns {object[]} long jobs for this snapshot.
+   */
+  function takeLongJobs(sessionId, at, last) {
+    const list = longJobs.get(sessionId)
+    if (!Array.isArray(list) || list.length === 0) return []
+    longJobs.delete(sessionId)
+    const floor = typeof last === 'number' && Number.isFinite(last) ? last : 0
+    return list.filter(job => Number.isFinite(job.finishedAt) && job.finishedAt <= at && job.finishedAt > floor)
   }
 
   /**
@@ -515,6 +599,22 @@ export function createMemberContext({
     if (closed || session === undefined || event === undefined) return
     const sessionId = String(session.id ?? '')
     if (sessionId === '' || isMemberSession(sessionId)) return
+    if (event.type === 'job/settled') {
+      const data = event.data ?? {}
+      const startedAt = Number(data.startedAt)
+      const finishedAt = Number.isFinite(Number(data.finishedAt)) ? Number(data.finishedAt) : Number(event.time)
+      if (Number.isFinite(startedAt) && Number.isFinite(finishedAt)) {
+        recordLongJob(sessionId, {
+          jobId: data.jobId,
+          kind: data.kind,
+          label: data.label,
+          startedAt,
+          finishedAt,
+          durationMs: finishedAt - startedAt,
+        })
+      }
+      return
+    }
     if (event.type === 'turn/start') {
       turns.set(sessionId, Number.isSafeInteger(event.data?.turn) ? event.data.turn : null)
       generations.set(sessionId, (generations.get(sessionId) ?? 0) + 1)
@@ -543,6 +643,7 @@ export function createMemberContext({
       lastPushSignature.delete(id)
       turns.delete(id)
       generations.delete(id)
+      longJobs.delete(id)
     }))
   }
 
@@ -564,6 +665,7 @@ export function createMemberContext({
       lastPushSignature.clear()
       turns.clear()
       generations.clear()
+      longJobs.clear()
     },
   }
 }

@@ -270,7 +270,7 @@ test('a snapshot shows the self identity, work scope, keep state and effective s
     selfId: 'session-a',
     selfScope: { identity: '网关', scope: '成员发现', keep: false, idlePushMs: 30_000, compressPercent: 12.5 },
   })
-  assert.match(text, /自身（会话 session-a）：身份：网关；工作范围：成员发现；保持目标：关闭（只对主对话生效）；静默推送：30 秒（只对主对话生效）；压缩阈值：12\.5%/u)
+  assert.match(text, /自身（会话 session-a）：身份：网关；工作范围：成员发现；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）；静默推送：30 秒（只对主对话生效）；压缩阈值：12\.5%/u)
   assert.doesNotMatch(text, /还没有身份\/工作范围/u)
 })
 
@@ -363,6 +363,106 @@ test('the same snapshot signature is not pushed twice and pays for no compaction
     await sleep(80)
     assert.equal(h.followups.length, 1, 'unchanged content must not repeat')
     assert.equal(compactions, 1, 'an unchanged snapshot must not compact again')
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('a long job since the last snapshot adds a delegation hint when avoidLongJobs is on', async () => {
+  let clock = 1_000_000
+  const h = harness({
+    tasks: [],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', avoidLongJobs: true } },
+    pushDelayMs: 15,
+    now: () => clock,
+  })
+  try {
+    h.emit('job/settled', {
+      jobId: 'bash-long',
+      kind: 'bash',
+      label: 'npm test',
+      startedAt: clock - 100_000,
+      finishedAt: clock,
+      status: 'completed',
+    })
+    const decision = await h.preStep(h.payload, h.next)
+    assert.equal(decision.messages.length, 1)
+    const text = decision.messages[0].content[0].text
+    assert.match(text, /避免耗时：开启（只对主对话生效）/u)
+    assert.match(text, /耗时提醒.*1 个 job 耗时超过 1 分钟/u)
+    assert.match(text, /bash：npm test（耗时 1 分 40 秒）/u)
+    assert.match(text, /推荐把这类耗时工作交给成员对话执行.*call_member/u)
+
+    // The window is consumed: a later snapshot has neither the job nor a hint.
+    clock += 61_000
+    const nextDecision = await h.preStep(h.payload, h.next)
+    assert.equal(nextDecision.messages.length, 0)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('long jobs do not add a hint when avoidLongJobs is off', async () => {
+  const h = harness({
+    tasks: [],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', avoidLongJobs: false } },
+    pushDelayMs: 15,
+  })
+  try {
+    h.emit('job/settled', {
+      jobId: 'bash-long',
+      kind: 'bash',
+      label: 'npm test',
+      startedAt: 900_000,
+      finishedAt: 1_000_000,
+    })
+    const decision = await h.preStep(h.payload, h.next)
+    assert.equal(decision.messages.length, 0, 'no running member conversation and no hint means no injection')
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('a job of exactly one minute is not called long', async () => {
+  const h = harness({
+    tasks: [],
+    scopes: { 'session-a': { avoidLongJobs: true } },
+    pushDelayMs: 15,
+  })
+  try {
+    h.emit('job/settled', {
+      jobId: 'bash-edge',
+      kind: 'bash',
+      label: 'edge',
+      startedAt: 940_000,
+      finishedAt: 1_000_000,
+    })
+    const decision = await h.preStep(h.payload, h.next)
+    assert.equal(decision.messages.length, 0)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('a long job with a running member conversation still injects the normal snapshot', async () => {
+  const h = harness({
+    tasks: [running],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', avoidLongJobs: true } },
+    pushDelayMs: 15,
+  })
+  try {
+    h.emit('job/settled', {
+      jobId: 'bash-long',
+      kind: 'bash',
+      label: 'audit',
+      startedAt: 900_000,
+      finishedAt: 1_000_000,
+    })
+    const decision = await h.preStep(h.payload, h.next)
+    assert.equal(decision.messages.length, 1)
+    const text = decision.messages[0].content[0].text
+    assert.match(text, /c1（B 10\.66\.66\.2/u)
+    assert.match(text, /bash：audit（耗时 1 分 40 秒）/u)
   } finally {
     h.context.dispose()
   }

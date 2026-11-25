@@ -574,7 +574,7 @@ test('registerTools exposes build, deploy, members, call_member, set_member_scop
     assert.equal(setScope.parameters.properties.action, undefined)
     assert.deepEqual(
       Object.keys(setScope.parameters.properties).sort(),
-      ['compressPercent', 'conversationId', 'identity', 'idlePushMs', 'keep', 'scope'].sort(),
+      ['avoidLongJobs', 'compressPercent', 'conversationId', 'identity', 'idlePushMs', 'keep', 'scope'].sort(),
     )
     const repack = tools.find(candidate => candidate.name === 'repack')
     assert.deepEqual(repack.parameters.required, ['package'])

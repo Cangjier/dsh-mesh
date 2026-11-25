@@ -53,7 +53,7 @@ import { repackArchive } from '../../code/build/repack.mjs'
 import { quickSystemInfo } from '../../code/shared/system-info.mjs'
 import { GeoLookup } from '../../code/shared/geo.mjs'
 import { detectReleaseOwner, fetchLatestManifest, latestManifestSources, latestManifestUrls, loadReleaseConfig, sanitizeReleaseConfig, saveReleaseConfig } from '../../code/shared/release.mjs'
-import { buildUpdateReasons, memberDeployment, packageInfo, planUpgrades } from './schedule.mjs'
+import { buildUpdateReasons, memberDeployment, packageInfo, planMemberUpgrade } from './schedule.mjs'
 import { autoUpgradeEnabled, pickBuildMember, pickProxyMember, pullBackEnabled } from './build-defaults.mjs'
 import { memberBuildTarget, pickArtifactForMember } from './build-artifacts.mjs'
 import { linkFor, resolveBuildEgress, resolveDeployLinkProxy } from './egress-plan.mjs'
@@ -1862,10 +1862,13 @@ export class MeshService {
   /**
    * One member's scheduled auto-upgrade.
    *
-   * The job is started and left detached; the scheduler records "started"
-   * instead of holding its tick open for an upload that may take minutes.
+   * The archive comes from the gateway cache when that copy is the newest one;
+   * otherwise the member downloads the matching `latest` release asset itself
+   * (Gitee first, GitHub through an egress member). The job is started and left
+   * detached; the scheduler records "started" instead of holding its tick open
+   * for a download that may take minutes.
    * @param {string} memberId member id.
-   * @returns {Promise<{status: string, member?: string, package?: string, jobId?: string, reason?: string}>} outcome.
+   * @returns {Promise<{status: string, member?: string, package?: string, source?: 'local'|'release', jobId?: string, reason?: string}>} outcome.
    */
   async scheduledUpgradeMember(memberId) {
     if (this.running.size > 0) return { status: 'skipped', reason: '编译任务还在运行', member: memberId }
@@ -1877,23 +1880,21 @@ export class MeshService {
     const deployJobs = await this.deployJobs(50)
     this.#applyInferredDeployment(member, deployJobs)
     const packages = (await this.packages()).packages
-    const plan = planUpgrades([member], packages)
-    if (plan.upgrades.length === 0) {
-      return { status: 'skipped', member: member.name, reason: plan.skipped[0]?.reason ?? '当前部署已是最新' }
+    const release = await this.#scheduledRelease()
+    const candidate = planMemberUpgrade(member, packages, release)
+    if (candidate.package === undefined) {
+      return { status: 'skipped', member: member.name, reason: candidate.reason }
     }
-    const entry = plan.upgrades[0]
     try {
-      const result = await this.upgradeMember({ member: entry.member.id, package: entry.package.name })
-      this.logLine(`scheduled upgrade ${entry.member.name} -> ${entry.package.name} (${result.job.id})`)
-      return { status: 'started', member: entry.member.name, package: entry.package.name, jobId: result.job.id }
+      return { status: 'started', ...(await this.#startScheduledUpgrade(member, candidate)) }
     } catch (error) {
       return { status: 'failed', member: member.name, reason: error instanceof Error ? error.message : String(error) }
     }
   }
 
   /**
-   * One scheduled upgrade: bring every member that is behind to the newest
-   * package for its OS, peers before the local gateway.
+   * One scheduled upgrade: bring every member that is behind to its newest
+   * source, peers before the local gateway.
    *
    * Each member keeps its own detached job; a failure on one member does not
    * stop the others, and the local install is started last because upgrading
@@ -1907,28 +1908,36 @@ export class MeshService {
     const deployJobs = await this.deployJobs(50)
     for (const member of everyone) this.#applyInferredDeployment(member, deployJobs)
     const packages = (await this.packages()).packages
-    const plan = planUpgrades(everyone, packages)
-    const skipped = plan.skipped.map(entry => ({ member: entry.member.name, reason: entry.reason }))
-    if (plan.upgrades.length === 0) {
-      return { status: 'skipped', reason: '所有成员都已经是可用的最新部署', skipped }
-    }
+    const release = await this.#scheduledRelease()
+    const ordered = [
+      ...everyone.filter(member => member.id !== 'local' && member.kind !== 'self'),
+      ...everyone.filter(member => member.id === 'local' || member.kind === 'self'),
+    ]
     const upgraded = []
     const failed = []
-    for (const entry of plan.upgrades) {
+    const skipped = []
+    for (const member of ordered) {
+      const candidate = planMemberUpgrade(member, packages, release)
+      if (candidate.package === undefined) {
+        skipped.push({ member: member.name, reason: candidate.reason })
+        continue
+      }
       try {
-        const result = await this.upgradeMember({ member: entry.member.id, package: entry.package.name })
-        upgraded.push({ member: entry.member.name, package: entry.package.name, job: result.job.id })
-        this.logLine(`scheduled upgrade ${entry.member.name} -> ${entry.package.name} (${result.job.id})`)
+        const result = await this.#startScheduledUpgrade(member, candidate)
+        upgraded.push({ member: result.member, package: result.package, source: result.source, job: result.jobId })
         // The local job restarts this process, so waiting would only be cut
         // short; the detached runner finishes the upgrade either way.
-        if (entry.member.id === 'local') continue
-        const final = await this.waitDeploy(result.job.id, { timeoutMs: 20 * 60_000 }).catch(() => null)
+        if (member.id === 'local' || member.kind === 'self') continue
+        const final = await this.waitDeploy(result.jobId, { timeoutMs: 20 * 60_000 }).catch(() => null)
         if (final !== null && final.status === 'failed') {
-          failed.push({ member: entry.member.name, reason: final.error ?? '升级失败' })
+          failed.push({ member: member.name, reason: final.error ?? '升级失败' })
         }
       } catch (error) {
-        failed.push({ member: entry.member.name, reason: error instanceof Error ? error.message : String(error) })
+        failed.push({ member: member.name, reason: error instanceof Error ? error.message : String(error) })
       }
+    }
+    if (upgraded.length === 0 && failed.length === 0) {
+      return { status: 'skipped', reason: '所有成员都已经是可用的最新部署', skipped }
     }
     return {
       status: failed.length === 0 ? 'done' : 'failed',
@@ -1936,6 +1945,43 @@ export class MeshService {
       failed,
       skipped,
       reason: failed.length === 0 ? undefined : `${String(failed.length)} 个成员升级失败`,
+    }
+  }
+
+  /**
+   * Start one scheduled upgrade from a planned candidate.
+   *
+   * A release candidate carries only the target: `upgradeMember` resolves the
+   * asset and its manifest URLs again (30 s cache), so the archive name and
+   * SHA-256 cannot go stale between planning and downloading.
+   * @param {object} member target member.
+   * @param {{source: 'local'|'release', package: object, target: string|null}} candidate planned source.
+   * @returns {Promise<{member: string, package: string, source: 'local'|'release', jobId: string}>} started job.
+   */
+  async #startScheduledUpgrade(member, candidate) {
+    const request = candidate.source === 'release'
+      ? { member: member.id, release: { target: candidate.target, refresh: true } }
+      : { member: member.id, package: candidate.package.name }
+    const result = await this.upgradeMember(request)
+    const via = candidate.source === 'release' ? 'latest' : 'gateway cache'
+    this.logLine(`scheduled upgrade ${member.name} -> ${candidate.package.name} via ${via} (${result.job.id})`)
+    return { member: member.name, package: candidate.package.name, source: candidate.source, jobId: result.job.id }
+  }
+
+  /**
+   * The published `latest` release for a scheduled upgrade.
+   *
+   * A deployment without release settings, or one whose manifest cannot be
+   * read, simply has no release candidates; the gateway cache still works.
+   * @returns {Promise<object|null>} normalized release, or null.
+   */
+  async #scheduledRelease() {
+    try {
+      const release = await this.latestRelease({ refresh: true })
+      return release !== null && typeof release === 'object' && release.ok === true ? release : null
+    } catch (error) {
+      this.logLine(`scheduled upgrade cannot read the latest release: ${error instanceof Error ? error.message : String(error)}`)
+      return null
     }
   }
 

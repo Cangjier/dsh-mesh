@@ -9248,7 +9248,194 @@ async function collectSystemInfo(options = {}) {
 }
 
 // src/lib/schedule.mjs
+import path21 from "node:path";
+
+// src/lib/build-artifacts.mjs
+function memberBuildTarget(member) {
+  const platform = String(member?.system?.platform ?? "").trim().toLowerCase();
+  const arch = String(member?.system?.arch ?? "").trim().toLowerCase();
+  if (arch !== "x64" && arch !== "arm64") return null;
+  if (platform.startsWith("linux")) return `linux-${arch}`;
+  if (platform.startsWith("win")) return `win-${arch}`;
+  return null;
+}
+function pickArtifactForMember(artifacts, member) {
+  const target = memberBuildTarget(member);
+  if (target === null) return null;
+  const list = Array.isArray(artifacts) ? artifacts : [];
+  return list.find((artifact) => artifact !== null && typeof artifact === "object" && artifact.target === target) ?? null;
+}
+
+// src/lib/package-sources.mjs
 import path20 from "node:path";
+var PACKAGE_ARCHIVE_RE = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u;
+var DEPLOYABLE_ARCHIVE_RE = /^dsh-mesh-(?!plugin[-.])(.+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u;
+var RELEASE_TARGET_RE = /^(linux|win)-(x64|arm64)$/u;
+function packagePlatformFromName(name) {
+  const match = DEPLOYABLE_ARCHIVE_RE.exec(String(name ?? ""));
+  if (match === null) return null;
+  const os11 = match[2].startsWith("win") ? "windows" : "linux";
+  const arch = match[3];
+  return {
+    version: match[1],
+    os: os11,
+    arch,
+    target: `${os11 === "windows" ? "win" : "linux"}-${arch}`
+  };
+}
+function packageTargetFromName(name) {
+  const match = PACKAGE_ARCHIVE_RE.exec(String(name ?? ""));
+  if (match === null) return null;
+  const os11 = match[3].startsWith("win") ? "windows" : "linux";
+  const arch = match[4];
+  return {
+    version: match[1],
+    buildStamp: match[2],
+    os: os11,
+    arch,
+    target: `${os11 === "windows" ? "win" : "linux"}-${arch}`
+  };
+}
+function normalizeLatestManifest(manifest, options = {}) {
+  const assets = [];
+  const entries = manifest?.assets !== null && typeof manifest?.assets === "object" ? manifest.assets : {};
+  for (const [target, entry] of Object.entries(entries)) {
+    if (!RELEASE_TARGET_RE.test(target)) continue;
+    if (entry === null || typeof entry !== "object") continue;
+    const name = typeof entry.archive === "string" ? entry.archive.trim() : "";
+    const parsed = packageTargetFromName(name);
+    if (parsed === null || parsed.target !== target) continue;
+    const bytes = Number(entry.bytes);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) continue;
+    const sha256 = typeof entry.sha256 === "string" ? entry.sha256.trim().toLowerCase() : "";
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) continue;
+    const providers = [];
+    if (typeof entry.github?.url === "string" && entry.github.url !== "") providers.push("github");
+    if (Array.isArray(entry.gitee?.parts) && entry.gitee.parts.length > 0 && Array.isArray(entry.gitee?.urls) && entry.gitee.urls.length > 0) providers.push("gitee");
+    assets.push({ target, os: parsed.os, arch: parsed.arch, name, bytes, sha256, providers });
+  }
+  assets.sort((left, right) => left.target.localeCompare(right.target));
+  return {
+    ok: assets.length > 0,
+    configured: true,
+    provider: typeof options.provider === "string" && options.provider !== "" ? options.provider : null,
+    version: typeof manifest?.version === "string" ? manifest.version : null,
+    buildStamp: typeof manifest?.buildStamp === "string" ? manifest.buildStamp : null,
+    publishedAt: typeof manifest?.publishedAt === "string" ? manifest.publishedAt : null,
+    assets,
+    manifestUrls: Array.isArray(options.manifestUrls) ? options.manifestUrls.filter((url) => typeof url === "string") : [],
+    ...assets.length === 0 ? { error: "\u53D1\u5E03\u6E05\u5355\u91CC\u6CA1\u6709\u53EF\u7528\u7684\u90E8\u7F72\u5305" } : {}
+  };
+}
+function selectLatestAsset(release, target) {
+  const wanted = normalizeTarget(target);
+  if (wanted === "") return null;
+  const assets = Array.isArray(release?.assets) ? release.assets : [];
+  return assets.find((asset) => asset.target === wanted) ?? null;
+}
+function normalizeTarget(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  const match = /^(linux|win(?:dows)?|win32)-(x64|arm64)$/u.exec(text);
+  if (match === null) return "";
+  return `${match[1].startsWith("linux") ? "linux" : "win"}-${match[2]}`;
+}
+function packageRoots(home, os11) {
+  const base = String(home ?? "").replace(/[\\/]+$/u, "");
+  if (base === "") return [];
+  const join = os11 === "windows" ? path20.win32.join : path20.posix.join;
+  return [join(base, ".dsh", "packages"), join(base, ".dsh", "mesh", "upgrade")];
+}
+function isAllowedPackagePath(candidate, home, os11) {
+  const text = String(candidate ?? "").trim();
+  if (text === "") return false;
+  const p = os11 === "windows" ? path20.win32 : path20.posix;
+  const normalized = p.normalize(text);
+  if (packageTargetFromName(p.basename(normalized)) === null) return false;
+  const roots = packageRoots(home, os11).map((root) => p.normalize(root));
+  const comparand = os11 === "windows" ? normalized.toLowerCase() : normalized;
+  return roots.some((root) => {
+    const prefix = os11 === "windows" ? root.toLowerCase() : root;
+    return comparand === prefix || comparand.startsWith(`${prefix}${p.sep}`);
+  });
+}
+function parseTargetPackageList(stdout) {
+  const packages = [];
+  for (const line of String(stdout ?? "").split(/\r?\n/u)) {
+    const text = line.trim();
+    if (text === "") continue;
+    const [file, rawBytes, rawMtime, rawSha] = text.split("	");
+    if (file === void 0 || rawBytes === void 0) continue;
+    const parsed = packageTargetFromName(file.split(/[\\/]/u).pop() ?? "");
+    if (parsed === null) continue;
+    const bytes = Number(rawBytes);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) continue;
+    const sha256 = typeof rawSha === "string" && /^[a-f0-9]{64}$/u.test(rawSha.trim()) ? rawSha.trim().toLowerCase() : null;
+    const mtime = normalizeMtime(rawMtime);
+    packages.push({ name: file.split(/[\\/]/u).pop() ?? file, path: file, bytes, mtime, sha256, ...parsed });
+  }
+  packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
+  return packages;
+}
+function normalizeMtime(value) {
+  const text = String(value ?? "").trim();
+  if (text === "") return "";
+  if (/^\d+$/u.test(text)) {
+    const seconds = Number.parseInt(text, 10);
+    return Number.isSafeInteger(seconds) && seconds > 0 ? new Date(seconds * 1e3).toISOString() : "";
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : "";
+}
+function listPackagesScript(os11, home = "") {
+  const homeDir = String(home ?? "").trim();
+  if (os11 === "windows") {
+    const base2 = homeDir === "" ? "$env:USERPROFILE" : powershellQuote(homeDir);
+    return `$ErrorActionPreference = 'SilentlyContinue'
+$base = ${base2}
+$roots = @(
+  (Join-Path $base '.dsh\\packages'),
+  (Join-Path $base '.dsh\\mesh\\upgrade')
+)
+$rows = @()
+foreach ($root in $roots) {
+  if (-not (Test-Path -LiteralPath $root)) { continue }
+  Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.Name -match '^dsh-mesh-.*\\.(7z|zip|tar\\.gz|tgz)$' } | ForEach-Object {
+    $sha = ''
+    $side = "$($_.FullName).sha256"
+    if (Test-Path -LiteralPath $side) {
+      $first = Get-Content -LiteralPath $side -TotalCount 1
+      if ($first) { $sha = ($first -split '\\s+')[0] }
+    }
+    $rows += ($_.FullName + [char]9 + $_.Length + [char]9 + $_.LastWriteTimeUtc.ToString('o') + [char]9 + $sha)
+  }
+}
+$rows | ForEach-Object { Write-Output $_ }
+`;
+  }
+  const base = homeDir === "" ? '"$HOME"' : shellQuote(homeDir);
+  return `BASE=${base}
+for root in "$BASE/.dsh/packages" "$BASE/.dsh/mesh/upgrade"; do
+  [ -d "$root" ] || continue
+  find "$root" -maxdepth 3 -type f \\( -name 'dsh-mesh-*.7z' -o -name 'dsh-mesh-*.tar.gz' -o -name 'dsh-mesh-*.tgz' -o -name 'dsh-mesh-*.zip' \\) -print0 2>/dev/null |
+  while IFS= read -r -d '' file; do
+    bytes=$(stat -c %s -- "$file" 2>/dev/null || echo 0)
+    mtime=$(stat -c %Y -- "$file" 2>/dev/null || echo 0)
+    sha=''
+    side="$file.sha256"
+    if [ -f "$side" ]; then sha=$(sed -n '1s/[[:space:]].*//p' "$side" 2>/dev/null || true); fi
+    printf '%s\\t%s\\t%s\\t%s\\n' "$file" "$bytes" "$mtime" "$sha"
+  done
+done
+`;
+}
+function shellQuote(value) {
+  return `'${String(value).replace(/'/gu, `'\\''`)}'`;
+}
+function powershellQuote(value) {
+  return `'${String(value).replace(/'/gu, "''")}'`;
+}
+
+// src/lib/schedule.mjs
 var SCHEDULE_FORMAT = 3;
 var DEFAULT_BUILD_SCHEDULE = Object.freeze({ enabled: false, time: "04:00" });
 var DEFAULT_UPGRADE_SCHEDULE = Object.freeze({ enabled: false, time: "06:00" });
@@ -9390,36 +9577,29 @@ function memberOs(member) {
   const target = String(memberDeployment(member)?.target?.os ?? "").toLowerCase();
   return target.startsWith("win") ? "windows" : "linux";
 }
-function planUpgrades(members, packages) {
-  const latest = latestPackagesByOs(packages);
-  const upgrades = [];
-  const skipped2 = [];
-  const rows = (Array.isArray(members) ? members : []).filter(Boolean);
-  const ordered = [
-    ...rows.filter((member) => member.id !== "local" && member.kind !== "self"),
-    ...rows.filter((member) => member.id === "local" || member.kind === "self")
-  ];
-  for (const member of ordered) {
-    const deployment = memberDeployment(member);
-    if (deployment === null) {
-      skipped2.push({ member, reason: "\u8BFB\u4E0D\u5230\u5F53\u524D\u90E8\u7F72" });
-      continue;
-    }
-    if (member.online === false) {
-      skipped2.push({ member, reason: "\u79BB\u7EBF" });
-      continue;
-    }
-    const os11 = memberOs(member);
-    const candidate = latest[os11];
-    if (candidate === void 0) {
-      skipped2.push({ member, reason: `\u6CA1\u6709 ${os11 === "windows" ? "Windows" : "Linux"} \u90E8\u7F72\u5305` });
-      continue;
-    }
-    const decision = shouldUpgrade(deployment, candidate);
-    if (decision.needed) upgrades.push({ member, package: candidate });
-    else skipped2.push({ member, reason: decision.reason });
+function planMemberUpgrade(member, packages, release) {
+  const deployment = memberDeployment(member);
+  if (deployment === null) return { reason: "\u8BFB\u4E0D\u5230\u5F53\u524D\u90E8\u7F72" };
+  if (member?.online === false) return { reason: "\u79BB\u7EBF" };
+  const os11 = memberOs(member);
+  const local = latestPackagesByOs(packages)[os11] ?? null;
+  const target = memberBuildTarget(member);
+  const asset = release !== null && release?.ok === true && target !== null ? selectLatestAsset(release, target) : null;
+  let chosen = local === null ? null : { source: "local", package: local, target: null };
+  if (asset !== null) {
+    const candidate = { source: "release", package: asset, target: asset.target };
+    if (chosen === null || newerPackage(candidate.package, chosen.package)) chosen = candidate;
   }
-  return { upgrades, skipped: skipped2 };
+  if (chosen === null) return { reason: `\u6CA1\u6709 ${os11 === "windows" ? "Windows" : "Linux"} \u90E8\u7F72\u5305` };
+  const decision = shouldUpgrade(deployment, chosen.package);
+  if (!decision.needed) return { reason: decision.reason };
+  return { ...chosen, reason: decision.reason };
+}
+function newerPackage(candidate, current) {
+  const next = packageInfo(candidate?.name);
+  const previous = packageInfo(current?.name);
+  if (next === null || previous === null) return false;
+  return compareBuildStamps(next.buildStamp, previous.buildStamp) > 0;
 }
 function buildUpdateReasons(input) {
   const latest = input.latestManifest;
@@ -9450,7 +9630,7 @@ function buildUpdateReasons(input) {
   return reasons;
 }
 function scheduleFile(dataDir) {
-  return path20.join(dataDir, "schedule.json");
+  return path21.join(dataDir, "schedule.json");
 }
 
 // src/lib/build-defaults.mjs
@@ -9523,22 +9703,6 @@ function pickProxyMember(members) {
     if (rtt !== 0) return rtt;
     return compareBuildCapacity(left, right);
   })[0]?.id ?? null;
-}
-
-// src/lib/build-artifacts.mjs
-function memberBuildTarget(member) {
-  const platform = String(member?.system?.platform ?? "").trim().toLowerCase();
-  const arch = String(member?.system?.arch ?? "").trim().toLowerCase();
-  if (arch !== "x64" && arch !== "arm64") return null;
-  if (platform.startsWith("linux")) return `linux-${arch}`;
-  if (platform.startsWith("win")) return `win-${arch}`;
-  return null;
-}
-function pickArtifactForMember(artifacts, member) {
-  const target = memberBuildTarget(member);
-  if (target === null) return null;
-  const list = Array.isArray(artifacts) ? artifacts : [];
-  return list.find((artifact) => artifact !== null && typeof artifact === "object" && artifact.target === target) ?? null;
 }
 
 // src/lib/egress-plan.mjs
@@ -9702,175 +9866,6 @@ function formatMemberMesh(mesh) {
   if (typeof tokens.github === "string" && tokens.github.trim() !== "") lines.push(`GitHub token: ${tokens.github.trim()}`);
   if (typeof tokens.gitee === "string" && tokens.gitee.trim() !== "") lines.push(`Gitee token: ${tokens.gitee.trim()}`);
   return lines.join("\n");
-}
-
-// src/lib/package-sources.mjs
-import path21 from "node:path";
-var PACKAGE_ARCHIVE_RE = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u;
-var DEPLOYABLE_ARCHIVE_RE = /^dsh-mesh-(?!plugin[-.])(.+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u;
-var RELEASE_TARGET_RE = /^(linux|win)-(x64|arm64)$/u;
-function packagePlatformFromName(name) {
-  const match = DEPLOYABLE_ARCHIVE_RE.exec(String(name ?? ""));
-  if (match === null) return null;
-  const os11 = match[2].startsWith("win") ? "windows" : "linux";
-  const arch = match[3];
-  return {
-    version: match[1],
-    os: os11,
-    arch,
-    target: `${os11 === "windows" ? "win" : "linux"}-${arch}`
-  };
-}
-function packageTargetFromName(name) {
-  const match = PACKAGE_ARCHIVE_RE.exec(String(name ?? ""));
-  if (match === null) return null;
-  const os11 = match[3].startsWith("win") ? "windows" : "linux";
-  const arch = match[4];
-  return {
-    version: match[1],
-    buildStamp: match[2],
-    os: os11,
-    arch,
-    target: `${os11 === "windows" ? "win" : "linux"}-${arch}`
-  };
-}
-function normalizeLatestManifest(manifest, options = {}) {
-  const assets = [];
-  const entries = manifest?.assets !== null && typeof manifest?.assets === "object" ? manifest.assets : {};
-  for (const [target, entry] of Object.entries(entries)) {
-    if (!RELEASE_TARGET_RE.test(target)) continue;
-    if (entry === null || typeof entry !== "object") continue;
-    const name = typeof entry.archive === "string" ? entry.archive.trim() : "";
-    const parsed = packageTargetFromName(name);
-    if (parsed === null || parsed.target !== target) continue;
-    const bytes = Number(entry.bytes);
-    if (!Number.isSafeInteger(bytes) || bytes <= 0) continue;
-    const sha256 = typeof entry.sha256 === "string" ? entry.sha256.trim().toLowerCase() : "";
-    if (!/^[a-f0-9]{64}$/u.test(sha256)) continue;
-    const providers = [];
-    if (typeof entry.github?.url === "string" && entry.github.url !== "") providers.push("github");
-    if (Array.isArray(entry.gitee?.parts) && entry.gitee.parts.length > 0 && Array.isArray(entry.gitee?.urls) && entry.gitee.urls.length > 0) providers.push("gitee");
-    assets.push({ target, os: parsed.os, arch: parsed.arch, name, bytes, sha256, providers });
-  }
-  assets.sort((left, right) => left.target.localeCompare(right.target));
-  return {
-    ok: assets.length > 0,
-    configured: true,
-    provider: typeof options.provider === "string" && options.provider !== "" ? options.provider : null,
-    version: typeof manifest?.version === "string" ? manifest.version : null,
-    buildStamp: typeof manifest?.buildStamp === "string" ? manifest.buildStamp : null,
-    publishedAt: typeof manifest?.publishedAt === "string" ? manifest.publishedAt : null,
-    assets,
-    manifestUrls: Array.isArray(options.manifestUrls) ? options.manifestUrls.filter((url) => typeof url === "string") : [],
-    ...assets.length === 0 ? { error: "\u53D1\u5E03\u6E05\u5355\u91CC\u6CA1\u6709\u53EF\u7528\u7684\u90E8\u7F72\u5305" } : {}
-  };
-}
-function selectLatestAsset(release, target) {
-  const wanted = normalizeTarget(target);
-  if (wanted === "") return null;
-  const assets = Array.isArray(release?.assets) ? release.assets : [];
-  return assets.find((asset) => asset.target === wanted) ?? null;
-}
-function normalizeTarget(value) {
-  const text = String(value ?? "").trim().toLowerCase();
-  const match = /^(linux|win(?:dows)?|win32)-(x64|arm64)$/u.exec(text);
-  if (match === null) return "";
-  return `${match[1].startsWith("linux") ? "linux" : "win"}-${match[2]}`;
-}
-function packageRoots(home, os11) {
-  const base = String(home ?? "").replace(/[\\/]+$/u, "");
-  if (base === "") return [];
-  const join = os11 === "windows" ? path21.win32.join : path21.posix.join;
-  return [join(base, ".dsh", "packages"), join(base, ".dsh", "mesh", "upgrade")];
-}
-function isAllowedPackagePath(candidate, home, os11) {
-  const text = String(candidate ?? "").trim();
-  if (text === "") return false;
-  const p = os11 === "windows" ? path21.win32 : path21.posix;
-  const normalized = p.normalize(text);
-  if (packageTargetFromName(p.basename(normalized)) === null) return false;
-  const roots = packageRoots(home, os11).map((root) => p.normalize(root));
-  const comparand = os11 === "windows" ? normalized.toLowerCase() : normalized;
-  return roots.some((root) => {
-    const prefix = os11 === "windows" ? root.toLowerCase() : root;
-    return comparand === prefix || comparand.startsWith(`${prefix}${p.sep}`);
-  });
-}
-function parseTargetPackageList(stdout) {
-  const packages = [];
-  for (const line of String(stdout ?? "").split(/\r?\n/u)) {
-    const text = line.trim();
-    if (text === "") continue;
-    const [file, rawBytes, rawMtime, rawSha] = text.split("	");
-    if (file === void 0 || rawBytes === void 0) continue;
-    const parsed = packageTargetFromName(file.split(/[\\/]/u).pop() ?? "");
-    if (parsed === null) continue;
-    const bytes = Number(rawBytes);
-    if (!Number.isSafeInteger(bytes) || bytes <= 0) continue;
-    const sha256 = typeof rawSha === "string" && /^[a-f0-9]{64}$/u.test(rawSha.trim()) ? rawSha.trim().toLowerCase() : null;
-    const mtime = normalizeMtime(rawMtime);
-    packages.push({ name: file.split(/[\\/]/u).pop() ?? file, path: file, bytes, mtime, sha256, ...parsed });
-  }
-  packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
-  return packages;
-}
-function normalizeMtime(value) {
-  const text = String(value ?? "").trim();
-  if (text === "") return "";
-  if (/^\d+$/u.test(text)) {
-    const seconds = Number.parseInt(text, 10);
-    return Number.isSafeInteger(seconds) && seconds > 0 ? new Date(seconds * 1e3).toISOString() : "";
-  }
-  const parsed = Date.parse(text);
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : "";
-}
-function listPackagesScript(os11, home = "") {
-  const homeDir = String(home ?? "").trim();
-  if (os11 === "windows") {
-    const base2 = homeDir === "" ? "$env:USERPROFILE" : powershellQuote(homeDir);
-    return `$ErrorActionPreference = 'SilentlyContinue'
-$base = ${base2}
-$roots = @(
-  (Join-Path $base '.dsh\\packages'),
-  (Join-Path $base '.dsh\\mesh\\upgrade')
-)
-$rows = @()
-foreach ($root in $roots) {
-  if (-not (Test-Path -LiteralPath $root)) { continue }
-  Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.Name -match '^dsh-mesh-.*\\.(7z|zip|tar\\.gz|tgz)$' } | ForEach-Object {
-    $sha = ''
-    $side = "$($_.FullName).sha256"
-    if (Test-Path -LiteralPath $side) {
-      $first = Get-Content -LiteralPath $side -TotalCount 1
-      if ($first) { $sha = ($first -split '\\s+')[0] }
-    }
-    $rows += ($_.FullName + [char]9 + $_.Length + [char]9 + $_.LastWriteTimeUtc.ToString('o') + [char]9 + $sha)
-  }
-}
-$rows | ForEach-Object { Write-Output $_ }
-`;
-  }
-  const base = homeDir === "" ? '"$HOME"' : shellQuote(homeDir);
-  return `BASE=${base}
-for root in "$BASE/.dsh/packages" "$BASE/.dsh/mesh/upgrade"; do
-  [ -d "$root" ] || continue
-  find "$root" -maxdepth 3 -type f \\( -name 'dsh-mesh-*.7z' -o -name 'dsh-mesh-*.tar.gz' -o -name 'dsh-mesh-*.tgz' -o -name 'dsh-mesh-*.zip' \\) -print0 2>/dev/null |
-  while IFS= read -r -d '' file; do
-    bytes=$(stat -c %s -- "$file" 2>/dev/null || echo 0)
-    mtime=$(stat -c %Y -- "$file" 2>/dev/null || echo 0)
-    sha=''
-    side="$file.sha256"
-    if [ -f "$side" ]; then sha=$(sed -n '1s/[[:space:]].*//p' "$side" 2>/dev/null || true); fi
-    printf '%s\\t%s\\t%s\\t%s\\n' "$file" "$bytes" "$mtime" "$sha"
-  done
-done
-`;
-}
-function shellQuote(value) {
-  return `'${String(value).replace(/'/gu, `'\\''`)}'`;
-}
-function powershellQuote(value) {
-  return `'${String(value).replace(/'/gu, "''")}'`;
 }
 
 // src/lib/service.mjs
@@ -11452,37 +11447,38 @@ var MeshService = class {
   /**
    * One member's scheduled auto-upgrade.
    *
-   * The job is started and left detached; the scheduler records "started"
-   * instead of holding its tick open for an upload that may take minutes.
+   * The archive comes from the gateway cache when that copy is the newest one;
+   * otherwise the member downloads the matching `latest` release asset itself
+   * (Gitee first, GitHub through an egress member). The job is started and left
+   * detached; the scheduler records "started" instead of holding its tick open
+   * for a download that may take minutes.
    * @param {string} memberId member id.
-   * @returns {Promise<{status: string, member?: string, package?: string, jobId?: string, reason?: string}>} outcome.
+   * @returns {Promise<{status: string, member?: string, package?: string, source?: 'local'|'release', jobId?: string, reason?: string}>} outcome.
    */
   async scheduledUpgradeMember(memberId) {
     if (this.running.size > 0) return { status: "skipped", reason: "\u7F16\u8BD1\u4EFB\u52A1\u8FD8\u5728\u8FD0\u884C", member: memberId };
     const snapshot = await this.members();
     const everyone = [snapshot.local, ...snapshot.members].filter(Boolean);
-    const member = everyone.find((candidate) => candidate.id === memberId);
+    const member = everyone.find((candidate2) => candidate2.id === memberId);
     if (member === void 0) return { status: "skipped", reason: "\u6210\u5458\u4E0D\u5728\u5F53\u524D\u5217\u8868", member: memberId };
     if (member.online === false) return { status: "skipped", reason: "\u79BB\u7EBF", member: member.name };
     const deployJobs = await this.deployJobs(50);
     this.#applyInferredDeployment(member, deployJobs);
     const packages = (await this.packages()).packages;
-    const plan = planUpgrades([member], packages);
-    if (plan.upgrades.length === 0) {
-      return { status: "skipped", member: member.name, reason: plan.skipped[0]?.reason ?? "\u5F53\u524D\u90E8\u7F72\u5DF2\u662F\u6700\u65B0" };
+    const release = await this.#scheduledRelease();
+    const candidate = planMemberUpgrade(member, packages, release);
+    if (candidate.package === void 0) {
+      return { status: "skipped", member: member.name, reason: candidate.reason };
     }
-    const entry = plan.upgrades[0];
     try {
-      const result = await this.upgradeMember({ member: entry.member.id, package: entry.package.name });
-      this.logLine(`scheduled upgrade ${entry.member.name} -> ${entry.package.name} (${result.job.id})`);
-      return { status: "started", member: entry.member.name, package: entry.package.name, jobId: result.job.id };
+      return { status: "started", ...await this.#startScheduledUpgrade(member, candidate) };
     } catch (error) {
       return { status: "failed", member: member.name, reason: error instanceof Error ? error.message : String(error) };
     }
   }
   /**
-   * One scheduled upgrade: bring every member that is behind to the newest
-   * package for its OS, peers before the local gateway.
+   * One scheduled upgrade: bring every member that is behind to its newest
+   * source, peers before the local gateway.
    *
    * Each member keeps its own detached job; a failure on one member does not
    * stop the others, and the local install is started last because upgrading
@@ -11496,26 +11492,34 @@ var MeshService = class {
     const deployJobs = await this.deployJobs(50);
     for (const member of everyone) this.#applyInferredDeployment(member, deployJobs);
     const packages = (await this.packages()).packages;
-    const plan = planUpgrades(everyone, packages);
-    const skipped2 = plan.skipped.map((entry) => ({ member: entry.member.name, reason: entry.reason }));
-    if (plan.upgrades.length === 0) {
-      return { status: "skipped", reason: "\u6240\u6709\u6210\u5458\u90FD\u5DF2\u7ECF\u662F\u53EF\u7528\u7684\u6700\u65B0\u90E8\u7F72", skipped: skipped2 };
-    }
+    const release = await this.#scheduledRelease();
+    const ordered = [
+      ...everyone.filter((member) => member.id !== "local" && member.kind !== "self"),
+      ...everyone.filter((member) => member.id === "local" || member.kind === "self")
+    ];
     const upgraded = [];
     const failed = [];
-    for (const entry of plan.upgrades) {
+    const skipped2 = [];
+    for (const member of ordered) {
+      const candidate = planMemberUpgrade(member, packages, release);
+      if (candidate.package === void 0) {
+        skipped2.push({ member: member.name, reason: candidate.reason });
+        continue;
+      }
       try {
-        const result = await this.upgradeMember({ member: entry.member.id, package: entry.package.name });
-        upgraded.push({ member: entry.member.name, package: entry.package.name, job: result.job.id });
-        this.logLine(`scheduled upgrade ${entry.member.name} -> ${entry.package.name} (${result.job.id})`);
-        if (entry.member.id === "local") continue;
-        const final = await this.waitDeploy(result.job.id, { timeoutMs: 20 * 6e4 }).catch(() => null);
+        const result = await this.#startScheduledUpgrade(member, candidate);
+        upgraded.push({ member: result.member, package: result.package, source: result.source, job: result.jobId });
+        if (member.id === "local" || member.kind === "self") continue;
+        const final = await this.waitDeploy(result.jobId, { timeoutMs: 20 * 6e4 }).catch(() => null);
         if (final !== null && final.status === "failed") {
-          failed.push({ member: entry.member.name, reason: final.error ?? "\u5347\u7EA7\u5931\u8D25" });
+          failed.push({ member: member.name, reason: final.error ?? "\u5347\u7EA7\u5931\u8D25" });
         }
       } catch (error) {
-        failed.push({ member: entry.member.name, reason: error instanceof Error ? error.message : String(error) });
+        failed.push({ member: member.name, reason: error instanceof Error ? error.message : String(error) });
       }
+    }
+    if (upgraded.length === 0 && failed.length === 0) {
+      return { status: "skipped", reason: "\u6240\u6709\u6210\u5458\u90FD\u5DF2\u7ECF\u662F\u53EF\u7528\u7684\u6700\u65B0\u90E8\u7F72", skipped: skipped2 };
     }
     return {
       status: failed.length === 0 ? "done" : "failed",
@@ -11524,6 +11528,39 @@ var MeshService = class {
       skipped: skipped2,
       reason: failed.length === 0 ? void 0 : `${String(failed.length)} \u4E2A\u6210\u5458\u5347\u7EA7\u5931\u8D25`
     };
+  }
+  /**
+   * Start one scheduled upgrade from a planned candidate.
+   *
+   * A release candidate carries only the target: `upgradeMember` resolves the
+   * asset and its manifest URLs again (30 s cache), so the archive name and
+   * SHA-256 cannot go stale between planning and downloading.
+   * @param {object} member target member.
+   * @param {{source: 'local'|'release', package: object, target: string|null}} candidate planned source.
+   * @returns {Promise<{member: string, package: string, source: 'local'|'release', jobId: string}>} started job.
+   */
+  async #startScheduledUpgrade(member, candidate) {
+    const request = candidate.source === "release" ? { member: member.id, release: { target: candidate.target, refresh: true } } : { member: member.id, package: candidate.package.name };
+    const result = await this.upgradeMember(request);
+    const via = candidate.source === "release" ? "latest" : "gateway cache";
+    this.logLine(`scheduled upgrade ${member.name} -> ${candidate.package.name} via ${via} (${result.job.id})`);
+    return { member: member.name, package: candidate.package.name, source: candidate.source, jobId: result.job.id };
+  }
+  /**
+   * The published `latest` release for a scheduled upgrade.
+   *
+   * A deployment without release settings, or one whose manifest cannot be
+   * read, simply has no release candidates; the gateway cache still works.
+   * @returns {Promise<object|null>} normalized release, or null.
+   */
+  async #scheduledRelease() {
+    try {
+      const release = await this.latestRelease({ refresh: true });
+      return release !== null && typeof release === "object" && release.ok === true ? release : null;
+    } catch (error) {
+      this.logLine(`scheduled upgrade cannot read the latest release: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
   }
   /**
    * The release publishing settings the panel may see (tokens masked).

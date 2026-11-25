@@ -148,6 +148,10 @@
   Gitee 的清单和分片永远直连；`code/shared/release.mjs` 的 `GiteeRelease` 也强制忽略代理；
 - plan 里不包含任何 token。
 
+定时「自动升级」复用这套下载流程：如果网关 `~/.dsh/packages` 里没有该成员平台的最新包，
+或者 `latest` Release 里有更新的构建，就按目标平台选 Release 资产，由成员自己下载
+（Gitee 优先，GitHub 经有外网能力的成员代理），不再因为夜间编译把包留在编译机上而跳过。
+
 `code/deploy/engine.mjs` 的「获取安装包」步骤：
 
 1. 如果目标上已有大小匹配的包，直接跳过；

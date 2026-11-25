@@ -15,6 +15,7 @@ import {
   normalizeSchedules,
   packageInfo,
   parseClock,
+  planMemberUpgrade,
   planUpgrades,
   shouldUpgrade,
   upgradeEntryFor,
@@ -30,9 +31,22 @@ function member(id, options = {}) {
     name: options.name ?? id,
     online: options.online ?? true,
     kind: options.kind ?? (id === 'local' ? 'self' : 'peer'),
-    system: { platform: options.platform ?? 'linux' },
+    system: { platform: options.platform ?? 'linux', arch: options.arch ?? 'x64' },
     deployment: options.deployment ?? { version: '0.2.2-rc.3', buildStamp: '20261116D' },
     gate: options.gate ?? null,
+  }
+}
+
+/** One normalized `latest` release asset. */
+function releaseAsset(name) {
+  return {
+    target: /win/iu.test(name) ? 'win-x64' : 'linux-x64',
+    os: /win/iu.test(name) ? 'windows' : 'linux',
+    arch: 'x64',
+    name,
+    bytes: 1024,
+    sha256: 'a'.repeat(64),
+    providers: ['gitee', 'github'],
   }
 }
 
@@ -164,6 +178,41 @@ test('upgrade planning puts peers first, skips current members, and matches the 
   assert.equal(plan.upgrades[0].package.name, 'dsh-mesh-0.2.2-rc.3-20261117A-linux-x64.tar.gz')
   assert.equal(plan.upgrades[1].package.name, 'dsh-mesh-0.2.2-rc.3-20261117A-linux-x64.tar.gz')
   assert.deepEqual(plan.skipped.map(entry => entry.member.id), ['10.66.66.4'])
+})
+
+test('a scheduled upgrade falls back to the latest release when no local package matches', () => {
+  const release = {
+    ok: true,
+    assets: [releaseAsset('dsh-mesh-0.2.3-alpha.2-20261125A-linux-x64.7z')],
+  }
+  const candidate = planMemberUpgrade(member('10.66.66.3'), [], release)
+  assert.equal(candidate.source, 'release')
+  assert.equal(candidate.target, 'linux-x64')
+  assert.equal(candidate.package.name, 'dsh-mesh-0.2.3-alpha.2-20261125A-linux-x64.7z')
+  assert.equal(candidate.reason, '20261116D → 20261125A')
+})
+
+test('a local package newer than the release stays the upgrade source', () => {
+  const local = { name: 'dsh-mesh-0.2.3-alpha.2-20261126A-linux-x64.7z', mtime: '2026-11-26T04:00:00Z', target: 'linux' }
+  const release = {
+    ok: true,
+    assets: [releaseAsset('dsh-mesh-0.2.3-alpha.2-20261125A-linux-x64.7z')],
+  }
+  const candidate = planMemberUpgrade(member('10.66.66.3'), [local], release)
+  assert.equal(candidate.source, 'local')
+  assert.equal(candidate.package, local)
+  assert.equal(candidate.target, null)
+})
+
+test('the release candidate must match the member target and be newer', () => {
+  const windowsOnly = { ok: true, assets: [releaseAsset('dsh-mesh-0.2.3-alpha.2-20261125A-win-x64.7z')] }
+  assert.equal(planMemberUpgrade(member('10.66.66.3'), [], windowsOnly).reason, '没有 Linux 部署包')
+  const arm = member('10.66.66.3', { arch: 'arm64' })
+  assert.equal(planMemberUpgrade(arm, [], { ok: true, assets: [releaseAsset('dsh-mesh-0.2.3-alpha.2-20261125A-linux-x64.7z')] }).reason, '没有 Linux 部署包')
+  const current = member('10.66.66.3', { deployment: { version: '0.2.3-alpha.2', buildStamp: '20261125A' } })
+  assert.equal(planMemberUpgrade(current, [], { ok: true, assets: [releaseAsset('dsh-mesh-0.2.3-alpha.2-20261125A-linux-x64.7z')] }).reason, '已经是这个部署包')
+  assert.equal(planMemberUpgrade(member('10.66.66.3', { online: false }), [], null).reason, '离线')
+  assert.equal(planMemberUpgrade(member('10.66.66.3'), [], null).reason, '没有 Linux 部署包')
 })
 
 test('build update reasons mention each source that moved', () => {

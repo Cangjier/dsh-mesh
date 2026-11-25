@@ -20,6 +20,8 @@
  */
 
 import path from 'node:path'
+import { memberBuildTarget } from './build-artifacts.mjs'
+import { selectLatestAsset } from './package-sources.mjs'
 
 /** Current persisted `schedule.json` format: opt-in clocks. */
 export const SCHEDULE_FORMAT = 3
@@ -308,6 +310,61 @@ export function planUpgrades(members, packages) {
     else skipped.push({ member, reason: decision.reason })
   }
   return { upgrades, skipped }
+}
+
+/**
+ * Pick one member's upgrade source from the gateway cache and the published
+ * `latest` release.
+ *
+ * Scheduled upgrades used to require a matching archive in `~/.dsh/packages`.
+ * A member build leaves its archives on the build host by default, so a Linux
+ * member could stay behind while the nightly build sat on a Windows machine.
+ * The release is the fallback: the target member downloads the archive itself
+ * (Gitee first, GitHub with an egress proxy) instead of the gateway moving it.
+ *
+ * A local package still wins when it is the newest one, because it needs no
+ * download. The release asset is matched by the member's target (OS *and*
+ * architecture), so an arm64 member never receives an x64 archive.
+ * @param {object} member member row (local or peer).
+ * @param {{name: string, mtime?: string, target?: string}[]} packages packages in the gateway cache.
+ * @param {object|null} release normalized `latestRelease()` result, or null when unavailable.
+ * @returns {{source?: 'local'|'release', package?: object, target?: string|null, reason: string}} candidate, or the skip reason.
+ */
+export function planMemberUpgrade(member, packages, release) {
+  const deployment = memberDeployment(member)
+  if (deployment === null) return { reason: '读不到当前部署' }
+  if (member?.online === false) return { reason: '离线' }
+  const os = memberOs(member)
+  const local = latestPackagesByOs(packages)[os] ?? null
+  const target = memberBuildTarget(member)
+  const asset = release !== null && release?.ok === true && target !== null
+    ? selectLatestAsset(release, target)
+    : null
+  let chosen = local === null ? null : { source: 'local', package: local, target: null }
+  if (asset !== null) {
+    const candidate = { source: 'release', package: asset, target: asset.target }
+    if (chosen === null || newerPackage(candidate.package, chosen.package)) chosen = candidate
+  }
+  if (chosen === null) return { reason: `没有 ${os === 'windows' ? 'Windows' : 'Linux'} 部署包` }
+  const decision = shouldUpgrade(deployment, chosen.package)
+  if (!decision.needed) return { reason: decision.reason }
+  return { ...chosen, reason: decision.reason }
+}
+
+/**
+ * Whether one candidate archive is a newer build than another.
+ *
+ * A package name without a build stamp cannot be ordered, so the current
+ * choice is kept instead of guessing.
+ * @param {object} candidate archive under consideration.
+ * @param {object} current archive already chosen.
+ * @returns {boolean} whether the candidate is newer.
+ */
+function newerPackage(candidate, current) {
+  const next = packageInfo(candidate?.name)
+  const previous = packageInfo(current?.name)
+  if (next === null || previous === null) return false
+  return compareBuildStamps(next.buildStamp, previous.buildStamp) > 0
 }
 
 /**

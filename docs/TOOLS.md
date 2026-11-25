@@ -400,10 +400,10 @@ call_member { "member": "10.66.66.3", "prompt": "检查磁盘" }
 （会话id、`进行中` / `空闲` / `异常中止`、工作区、轮次），当前会话 `current: true`。
 
 **身份与工作范围**：两个值按**会话 id** 合并保存到 `$DSH_HOME/mesh/member-scopes.json`
-（`{ "<conversationId>": { identity, scope, keep, idlePushMs, compressPercent } }`，只存显式设置过的字段；
-自身用当前主对话 session id，`keep` / `idlePushMs` 只对自身有意义，`compressPercent` 对自身和成员会话都生效）。新建对话时本次有效 scope 随 `mesh.profile = { name, identity, scope }`
-进入成员的系统上下文；继续已有对话时合并该会话的 scope，并在投递的 prompt 前加一行
-`【成员身份】你的身份：…；负责范围：…。`（只写已设置的部分）。返回的 `text` 显示
+（`{ "<conversationId>": { identity, scope, note, keep, avoidLongJobs, idlePushMs, compressPercent } }`，只存显式设置过的字段；
+自身用当前主对话 session id，`keep` / `idlePushMs` 只对自身有意义，`compressPercent` 对自身和成员会话都生效）。身份/范围随最终 prompt 注入，不再写成员的系统上下文：新建对话时把本次有效 scope 作为
+`【成员身份】你的身份：…；负责范围：…。` 前缀放进 prompt；继续已有对话时合并该会话的 scope，
+只有本次显式传 identity/scope 才追加这个前缀（只写已设置的部分）。返回的 `text` 显示
 `身份：…；负责范围：…`；完全没有设置时提示用 `call_member` 的 `identity`/`scope` 或
 `set_member_scope` 补齐，`data.profile` 是本次有效 profile（缺失为 `null`）。
 仓库不再有“成员机器档案/继承”的概念。
@@ -441,18 +441,20 @@ $DSH_HOME/mesh/member-tasks/<内部 task id>.log
 3. 从 hub 的 release.json 取 GitHub/Gitee token，原值随请求下发。
 ```
 
-注入给成员会话的运行时上下文只有：
+每次投递的最终 prompt 最前面都会带一个环境块（不是系统上下文）：
 
 ```text
+【成员环境】
 本机代理端口 8080；经代理出网实测：延迟 118 ms，下行 42.3 Mbps。
 GitHub token: ghp_...
 Gitee token: ...
 ```
 
+- 新建对话时先实测一次出网；后续继续该对话时复用任务记录的出网结果，token 每次重新读取。
 - 不做额外配置：不写环境变量、不起 SSH 隧道、不扫描别的端口，也从不建议别的代理。
 - 没有组网直连时不会出现出网那一行；token 也没有就什么都不注入。
 - 探针失败写一行失败原因；同一行也会出现在 `call_member` 的返回里。
-- 这段上下文不进对话历史；DSH 重启恢复会话后需要重新发起才会再有。
+- 环境块进入 prompt/transcript（以便成员重启或上下文压缩后仍能看到），不再占系统上下文。
 
 同一时机还会**禁用该会话的 `ask_user_question`**：成员任务没有可应答的用户，提问要么落到成员
 自己的 Web 界面、要么等到工具超时，而发起方只拿得到轮次结束时的文本。会话会被注入一条规则：

@@ -9845,28 +9845,6 @@ function formatEgressLine(mesh) {
   const reason = String(egress.error ?? "").trim();
   return `${where}\uFF1B\u7ECF\u4EE3\u7406\u51FA\u7F51\u5B9E\u6D4B\u5931\u8D25${reason === "" ? "" : `\uFF1A${reason}`}\u3002`;
 }
-function formatMemberMesh(mesh) {
-  if (mesh === null || typeof mesh !== "object") return "";
-  const lines = [];
-  const profile = mesh.profile !== null && typeof mesh.profile === "object" ? mesh.profile : null;
-  if (profile !== null) {
-    const identity = typeof profile.identity === "string" && profile.identity.trim() !== "" ? profile.identity.trim() : null;
-    const scope = typeof profile.scope === "string" && profile.scope.trim() !== "" ? profile.scope.trim() : null;
-    if (identity !== null || scope !== null) {
-      const name = typeof profile.name === "string" ? profile.name.trim() : "";
-      const parts = [];
-      if (name !== "") parts.push(`\u4F60\u662F\u6210\u5458 ${name}`);
-      if (identity !== null) parts.push(`\u8EAB\u4EFD\uFF1A${identity}`);
-      if (scope !== null) parts.push(`\u8D1F\u8D23\u8303\u56F4\uFF1A${scope}`);
-      lines.push(`${parts.join("\uFF1B")}\u3002`);
-    }
-  }
-  if (mesh.link === true && Number.isInteger(mesh.proxyPort)) lines.push(formatEgressLine(mesh));
-  const tokens = mesh.tokens !== null && typeof mesh.tokens === "object" ? mesh.tokens : {};
-  if (typeof tokens.github === "string" && tokens.github.trim() !== "") lines.push(`GitHub token: ${tokens.github.trim()}`);
-  if (typeof tokens.gitee === "string" && tokens.gitee.trim() !== "") lines.push(`Gitee token: ${tokens.gitee.trim()}`);
-  return lines.join("\n");
-}
 
 // src/lib/service.mjs
 var HERE2 = path22.dirname(fileURLToPath2(import.meta.url));
@@ -13386,6 +13364,16 @@ function profilePromptPrefix(profile) {
   if (profile.scope !== null) parts.push(`\u8D1F\u8D23\u8303\u56F4\uFF1A${profile.scope}`);
   return parts.length === 0 ? "" : `\u3010\u6210\u5458\u8EAB\u4EFD\u3011${parts.join("\uFF1B")}\u3002`;
 }
+function environmentPrompt(egressLine, tokens) {
+  const lines = [];
+  const egress = typeof egressLine === "string" ? egressLine.trim() : "";
+  if (egress !== "") lines.push(egress);
+  const github = typeof tokens?.github === "string" ? tokens.github.trim() : "";
+  if (github !== "") lines.push(`GitHub token: ${github}`);
+  const gitee = typeof tokens?.gitee === "string" ? tokens.gitee.trim() : "";
+  if (gitee !== "") lines.push(`Gitee token: ${gitee}`);
+  return lines.length === 0 ? "" : ["\u3010\u6210\u5458\u73AF\u5883\u3011", ...lines].join("\n");
+}
 function describeMemberTask(task, currentConversationId) {
   return {
     conversationId: String(task.conversationId ?? ""),
@@ -13753,8 +13741,7 @@ var MemberTaskService = class {
    * @returns {Promise<object>} create-request `mesh` field.
    */
   async #meshFor(target) {
-    const tokens = typeof this.service.releaseTokens === "function" ? await this.service.releaseTokens().catch(() => ({})) : {};
-    const tokenPair = { github: tokens.github ?? null, gitee: tokens.gitee ?? null };
+    const tokenPair = await this.#tokenPair();
     const link3 = typeof this.service.directLinkFor === "function" ? await this.service.directLinkFor(target.ip).catch(() => null) : null;
     if (link3 === null) return { link: false, proxyPort: null, egress: null, tokens: tokenPair };
     const probe = typeof this.service.probeMemberEgress === "function" ? await this.service.probeMemberEgress(target.ip, link3.port).catch(() => ({ ok: false, error: "probe failed" })) : { ok: false, error: "probe unavailable" };
@@ -13764,6 +13751,14 @@ var MemberTaskService = class {
       egress: probe?.ok === true ? { ok: true, latencyMs: probe.latencyMs ?? null, downMbps: probe.downMbps ?? null } : { ok: false, error: typeof probe?.error === "string" ? probe.error : null },
       tokens: tokenPair
     };
+  }
+  /**
+   * The git token pair the mesh's package management holds.
+   * @returns {Promise<{github: string|null, gitee: string|null}>} tokens.
+   */
+  async #tokenPair() {
+    const tokens = typeof this.service.releaseTokens === "function" ? await this.service.releaseTokens().catch(() => ({})) : {};
+    return { github: tokens.github ?? null, gitee: tokens.gitee ?? null };
   }
   /**
    * Wait out a member runtime that is still booting.
@@ -13815,18 +13810,19 @@ var MemberTaskService = class {
     const target = await this.#resolveMember(member);
     const initialProfile = profileFromPatch(scopePatch, target.name);
     const mesh = await this.#meshFor(target);
-    if (initialProfile !== null) mesh.profile = initialProfile;
     const egressLine = mesh.link === true ? formatEgressLine(mesh) : "";
+    const profilePrefix = initialProfile === null ? "" : profilePromptPrefix(initialProfile);
+    const environment = environmentPrompt(egressLine, mesh.tokens);
+    const deliveredPrompt = [profilePrefix, environment, prompt].filter((part) => part !== "").join("\n");
     const explicitWorkspace = typeof workspace === "string" && workspace.trim() !== "";
     const explicitCwd = typeof cwd === "string" && cwd !== "";
     const targetWorkspace = explicitWorkspace ? workspace.trim() : explicitCwd ? "" : await callerWorkspaceName(this.ctx, agent);
     const taskWorkspace = explicitWorkspace ? workspace.trim() : explicitCwd ? path26.basename(path26.resolve(cwd)) || "unknown" : targetWorkspace || "unknown";
     const payload = {
-      prompt,
+      prompt: deliveredPrompt,
       // The member's panel lists these; without a title it would show a UUID.
       title: truncate(prompt, 80),
       initiator: { ...this.identity ?? { id: "local" }, source: "call_member" },
-      mesh,
       ...targetWorkspace !== "" ? { workspace: targetWorkspace } : {},
       ...explicitCwd ? { cwd } : {},
       // Only a caller that was told about the workspace conflict sends this;
@@ -14550,18 +14546,17 @@ var MemberTaskService = class {
         throw new Error(`\u6210\u5458\u4F1A\u8BDD ${task.conversationId} \u5DF2\u5F52\u6863\uFF0C\u4E0D\u80FD\u7EE7\u7EED\u6295\u9012\uFF1B\u8981\u6062\u590D\u8BF7\u5728\u6210\u5458 Web UI \u53D6\u6D88\u5F52\u6863\u3002`);
       }
     }
-    let deliveredPrompt = prompt;
     if (hasScopePatch) {
       if (typeof this.service.setMemberScope !== "function") throw new Error("member scopes are not available");
       const saved = await this.service.setMemberScope(task.conversationId, { identity: request.identity, scope: request.scope });
       task.profile = profileFromScope(saved?.scope ?? null, target?.name ?? task.member);
-      const prefix = profilePromptPrefix(task.profile);
-      if (prefix !== "") deliveredPrompt = `${prefix}
-${prompt}`;
     } else if (typeof this.service.memberScope === "function") {
       const stored = await this.service.memberScope(task.conversationId).catch(() => null);
       if (stored !== null) task.profile = profileFromScope(stored, target?.name ?? task.member);
     }
+    const prefix = hasScopePatch ? profilePromptPrefix(task.profile) : "";
+    const environment = environmentPrompt(task.egressLine, await this.#tokenPair());
+    const deliveredPrompt = [prefix, environment, prompt].filter((part) => part !== "").join("\n");
     task.lastCompaction = null;
     await this.#refreshContext(task, signal);
     const threshold = await this.#compressThreshold(task);
@@ -14643,6 +14638,7 @@ ${prompt}`;
       throw new Error("send by conversationId needs member: no local task tracks this conversation");
     }
     const target = await this.#resolveMember(named);
+    const mesh = await this.#meshFor(target);
     return {
       task: {
         id: `member-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
@@ -14677,6 +14673,8 @@ ${prompt}`;
         originSessionId: String(request.agent?.session?.id ?? ""),
         /** Filled when this delivery sets or inherits a member profile. */
         profile: null,
+        /** One-line egress report measured when the conversation was adopted. */
+        egressLine: mesh.link === true ? formatEgressLine(mesh) : "",
         context: null,
         lastCompaction: null,
         adopted: true
@@ -17131,7 +17129,6 @@ var MEMBER_SUBAGENT_RULE = [
 ].join("\n");
 var INTERACTION_CONTEXT_ORDER = 125;
 var SUBAGENT_CONTEXT_ORDER = 128;
-var ENVIRONMENT_CONTEXT_ORDER = 130;
 var MAX_EVENTS = 5e3;
 var DEFAULT_WORKSPACE2 = "default-workspace";
 var EMBEDDED_INTEROP_MARKER = "dsh-mesh-embedded-interop-v1";
@@ -17675,16 +17672,15 @@ data: ${JSON.stringify(payload)}
     }
     try {
       const composition = await resolveAgentPreset();
-      const environment = typeof conversation.meshContext === "string" ? conversation.meshContext : "";
       const handle2 = await ctx.agents.resume({
         resumeSessionId: conversation.sessionId,
         // Resume re-runs setup on the restored session, so the denied question
-        // tool and the environment note come back with it.
+        // tool and the interaction rules come back with it.
         setup: async (agentCtx) => {
           if (composition.presets !== void 0 && composition.id !== "") {
             await composition.presets.mount(agentCtx, composition.id);
           }
-          applyMemberEnvironment(agentCtx, environment);
+          applyMemberSetup(agentCtx);
         }
       });
       handles.set(conversation.id, handle2);
@@ -17731,7 +17727,7 @@ data: ${JSON.stringify(payload)}
       log(`could not title ${conversation.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  function applyMemberEnvironment(agentCtx, text) {
+  function applyMemberSetup(agentCtx) {
     if (agentCtx === null || typeof agentCtx !== "object") return;
     const tools = agentCtx.tools;
     if (tools !== void 0 && tools !== null && typeof tools.restrict === "function") {
@@ -17756,16 +17752,8 @@ data: ${JSON.stringify(payload)}
           interpolate: false,
           text: MEMBER_SUBAGENT_RULE
         });
-        if (text !== "") {
-          systemPrompt.context({
-            name: "mesh:environment",
-            order: ENVIRONMENT_CONTEXT_ORDER,
-            interpolate: false,
-            text
-          });
-        }
       } catch (error) {
-        log(`could not inject the member environment: ${error instanceof Error ? error.message : String(error)}`);
+        log(`could not inject the member interaction rules: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   }
@@ -17862,8 +17850,6 @@ data: ${JSON.stringify(payload)}
     bySession.set(id, conversation);
     markMemberSession(id);
     const composition = await resolveAgentPreset();
-    const environment = formatMemberMesh(request.mesh);
-    conversation.meshContext = environment;
     let handle2 = null;
     try {
       handle2 = await ctx.agents.create({
@@ -17881,7 +17867,7 @@ data: ${JSON.stringify(payload)}
             await composition.presets.mount(agentCtx, composition.id);
           }
           applyPreset(agent);
-          applyMemberEnvironment(agentCtx, environment);
+          applyMemberSetup(agentCtx);
         }
       });
       handles.set(id, handle2);

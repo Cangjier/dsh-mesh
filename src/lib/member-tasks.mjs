@@ -246,6 +246,27 @@ function profilePromptPrefix(profile) {
 }
 
 /**
+ * The environment preamble delivered with every member prompt.
+ *
+ * The proxy/egress facts and git tokens used to ride in the member's system
+ * context once, at creation. They are now part of the prompt on every delivery
+ * so a continued conversation keeps them without a context injection.
+ * @param {string} egressLine measured egress line, or ''.
+ * @param {{github?: string|null, gitee?: string|null}|null} tokens token pair.
+ * @returns {string} block, or '' when there is nothing to say.
+ */
+function environmentPrompt(egressLine, tokens) {
+  const lines = []
+  const egress = typeof egressLine === 'string' ? egressLine.trim() : ''
+  if (egress !== '') lines.push(egress)
+  const github = typeof tokens?.github === 'string' ? tokens.github.trim() : ''
+  if (github !== '') lines.push(`GitHub token: ${github}`)
+  const gitee = typeof tokens?.gitee === 'string' ? tokens.gitee.trim() : ''
+  if (gitee !== '') lines.push(`Gitee token: ${gitee}`)
+  return lines.length === 0 ? '' : ['【成员环境】', ...lines].join('\n')
+}
+
+/**
  * One model-facing summary of a tracked conversation.
  * @param {object} task task record.
  * @param {string} [currentConversationId] the conversation this call is about.
@@ -732,10 +753,7 @@ export class MemberTaskService {
    * @returns {Promise<object>} create-request `mesh` field.
    */
   async #meshFor(target) {
-    const tokens = typeof this.service.releaseTokens === 'function'
-      ? await this.service.releaseTokens().catch(() => ({}))
-      : {}
-    const tokenPair = { github: tokens.github ?? null, gitee: tokens.gitee ?? null }
+    const tokenPair = await this.#tokenPair()
     const link = typeof this.service.directLinkFor === 'function'
       ? await this.service.directLinkFor(target.ip).catch(() => null)
       : null
@@ -751,6 +769,17 @@ export class MemberTaskService {
         : { ok: false, error: typeof probe?.error === 'string' ? probe.error : null },
       tokens: tokenPair,
     }
+  }
+
+  /**
+   * The git token pair the mesh's package management holds.
+   * @returns {Promise<{github: string|null, gitee: string|null}>} tokens.
+   */
+  async #tokenPair() {
+    const tokens = typeof this.service.releaseTokens === 'function'
+      ? await this.service.releaseTokens().catch(() => ({}))
+      : {}
+    return { github: tokens.github ?? null, gitee: tokens.gitee ?? null }
   }
 
   /**
@@ -816,8 +845,10 @@ export class MemberTaskService {
     // result rides along in the create request, so the target conversation
     // starts with what was actually measured, not a guess.
     const mesh = await this.#meshFor(target)
-    if (initialProfile !== null) mesh.profile = initialProfile
     const egressLine = mesh.link === true ? formatEgressLine(mesh) : ''
+    const profilePrefix = initialProfile === null ? '' : profilePromptPrefix(initialProfile)
+    const environment = environmentPrompt(egressLine, mesh.tokens)
+    const deliveredPrompt = [profilePrefix, environment, prompt].filter(part => part !== '').join('\n')
     const explicitWorkspace = typeof workspace === 'string' && workspace.trim() !== ''
     const explicitCwd = typeof cwd === 'string' && cwd !== ''
     // Precedence: an explicitly named workspace, then an explicit cwd (which
@@ -833,11 +864,10 @@ export class MemberTaskService {
       ? workspace.trim()
       : explicitCwd ? (path.basename(path.resolve(cwd)) || 'unknown') : (targetWorkspace || 'unknown')
     const payload = {
-      prompt,
+      prompt: deliveredPrompt,
       // The member's panel lists these; without a title it would show a UUID.
       title: truncate(prompt, 80),
       initiator: { ...(this.identity ?? { id: 'local' }), source: 'call_member' },
-      mesh,
       ...(targetWorkspace !== '' ? { workspace: targetWorkspace } : {}),
       ...(explicitCwd ? { cwd } : {}),
       // Only a caller that was told about the workspace conflict sends this;
@@ -1611,19 +1641,21 @@ export class MemberTaskService {
         throw new Error(`成员会话 ${task.conversationId} 已归档，不能继续投递；要恢复请在成员 Web UI 取消归档。`)
       }
     }
-    let deliveredPrompt = prompt
     if (hasScopePatch) {
       if (typeof this.service.setMemberScope !== 'function') throw new Error('member scopes are not available')
       const saved = await this.service.setMemberScope(task.conversationId, { identity: request.identity, scope: request.scope })
       task.profile = profileFromScope(saved?.scope ?? null, target?.name ?? task.member)
-      const prefix = profilePromptPrefix(task.profile)
-      if (prefix !== '') deliveredPrompt = `${prefix}\n${prompt}`
     } else if (typeof this.service.memberScope === 'function') {
       // No new setting this time, but an adopted conversation may already have
       // one from set_member_scope; show it instead of calling it missing.
       const stored = await this.service.memberScope(task.conversationId).catch(() => null)
       if (stored !== null) task.profile = profileFromScope(stored, target?.name ?? task.member)
     }
+    // Keep the old rule: a continuation names the identity only when this
+    // call passes identity/scope; the environment block is always present.
+    const prefix = hasScopePatch ? profilePromptPrefix(task.profile) : ''
+    const environment = environmentPrompt(task.egressLine, await this.#tokenPair())
+    const deliveredPrompt = [prefix, environment, prompt].filter(part => part !== '').join('\n')
     // A compaction record belongs to one delivery; the next one starts clean.
     task.lastCompaction = null
     // The read also detects a member whose reply counter restarted; the cursor
@@ -1718,6 +1750,7 @@ export class MemberTaskService {
       throw new Error('send by conversationId needs member: no local task tracks this conversation')
     }
     const target = await this.#resolveMember(named)
+    const mesh = await this.#meshFor(target)
     return {
       task: {
         id: `member-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
@@ -1752,6 +1785,8 @@ export class MemberTaskService {
         originSessionId: String(request.agent?.session?.id ?? ''),
         /** Filled when this delivery sets or inherits a member profile. */
         profile: null,
+        /** One-line egress report measured when the conversation was adopted. */
+        egressLine: mesh.link === true ? formatEgressLine(mesh) : '',
         context: null,
         lastCompaction: null,
         adopted: true,

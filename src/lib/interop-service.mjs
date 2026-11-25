@@ -30,7 +30,6 @@ import {
   titleFromPrompt,
 } from '../../code/shared/conversation-meta.mjs'
 import { applySessionEvent, repliesSince, summarizeReplies } from '../../code/shared/conversation-replies.mjs'
-import { formatMemberMesh } from './egress-probe.mjs'
 import { clearMemberSessions, markMemberSession, unmarkMemberSession } from './member-sessions.mjs'
 import { collectSystemInfo } from '../../code/shared/system-info.mjs'
 
@@ -71,7 +70,6 @@ const MEMBER_SUBAGENT_RULE = [
 const INTERACTION_CONTEXT_ORDER = 125
 /** Sits between the interaction rule and the measured mesh facts. */
 const SUBAGENT_CONTEXT_ORDER = 128
-const ENVIRONMENT_CONTEXT_ORDER = 130
 
 /** How many events one conversation keeps for late `/events` readers. */
 const MAX_EVENTS = 5000
@@ -901,16 +899,15 @@ export function createInteropService(options) {
     }
     try {
       const composition = await resolveAgentPreset()
-      const environment = typeof conversation.meshContext === 'string' ? conversation.meshContext : ''
       const handle = await ctx.agents.resume({
         resumeSessionId: conversation.sessionId,
         // Resume re-runs setup on the restored session, so the denied question
-        // tool and the environment note come back with it.
+        // tool and the interaction rules come back with it.
         setup: async (agentCtx) => {
           if (composition.presets !== undefined && composition.id !== '') {
             await composition.presets.mount(agentCtx, composition.id)
           }
-          applyMemberEnvironment(agentCtx, environment)
+          applyMemberSetup(agentCtx)
         },
       })
       handles.set(conversation.id, handle)
@@ -984,19 +981,18 @@ export function createInteropService(options) {
    * @returns {Promise<Record<string, any>>} conversation.
    */
   /**
-   * Deny the question tool and register the environment context on one agent.
+   * Deny the question tool and register the interaction rules on one agent.
    *
    * Both registrations belong to the agent's scope, so they end with the
    * conversation and never affect another agent. The preset mount has already
    * run, which is what puts `ask_user_question` in the inherited layer that
    * `tools.restrict()` filters. A failure is logged, not thrown: a preset
-   * without the tool needs no restriction, and losing the note must not lose
+   * without the tool needs no restriction, and losing the rule must not lose
    * the task.
    * @param {any} agentCtx scoped setup context.
-   * @param {string} text formatted mesh environment.
    * @returns {void}
    */
-  function applyMemberEnvironment(agentCtx, text) {
+  function applyMemberSetup(agentCtx) {
     if (agentCtx === null || typeof agentCtx !== 'object') return
     const tools = agentCtx.tools
     if (tools !== undefined && tools !== null && typeof tools.restrict === 'function') {
@@ -1021,16 +1017,8 @@ export function createInteropService(options) {
           interpolate: false,
           text: MEMBER_SUBAGENT_RULE,
         })
-        if (text !== '') {
-          systemPrompt.context({
-            name: 'mesh:environment',
-            order: ENVIRONMENT_CONTEXT_ORDER,
-            interpolate: false,
-            text,
-          })
-        }
       } catch (error) {
-        log(`could not inject the member environment: ${error instanceof Error ? error.message : String(error)}`)
+        log(`could not inject the member interaction rules: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
   }
@@ -1185,8 +1173,6 @@ export function createInteropService(options) {
     bySession.set(id, conversation)
     markMemberSession(id)
     const composition = await resolveAgentPreset()
-    const environment = formatMemberMesh(request.mesh)
-    conversation.meshContext = environment
     let handle = null
     try {
       handle = await ctx.agents.create({
@@ -1204,7 +1190,7 @@ export function createInteropService(options) {
             await composition.presets.mount(agentCtx, composition.id)
           }
           applyPreset(agent)
-          applyMemberEnvironment(agentCtx, environment)
+          applyMemberSetup(agentCtx)
         },
       })
       handles.set(id, handle)

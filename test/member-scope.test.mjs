@@ -597,8 +597,8 @@ test('call_member persists a new conversation scope, injects it into mesh, and s
       identity: '开发',
       scope: 'dsh-mesh 插件开发与构建',
     })
-    assert.deepEqual(member.created[0].mesh.profile, result.data.profile)
-    assert.equal(member.created[0].prompt, '实现功能', 'the scope rides in mesh, not the prompt')
+    assert.equal('mesh' in member.created[0], false, 'mesh facts no longer ride in the create request')
+    assert.equal(member.created[0].prompt, '【成员身份】你的身份：开发；负责范围：dsh-mesh 插件开发与构建。\n实现功能')
     assert.deepEqual(await service.memberScope('conv-new'), {
       identity: '开发',
       scope: 'dsh-mesh 插件开发与构建',
@@ -607,6 +607,50 @@ test('call_member persists a new conversation scope, injects it into mesh, and s
     assert.deepEqual(task.profile, result.data.profile)
     const saved = JSON.parse(await readFile(path.join(dataDir, 'member-tasks', `${task.id}.json`), 'utf8'))
     assert.deepEqual(saved.profile, result.data.profile)
+  } finally {
+    await service?.memberTasks.dispose()
+    await member.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('call_member injects the environment block into every prompt instead of the context', async () => {
+  const member = await fakeMember()
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-scope-env-'))
+  const dataDir = path.join(dir, 'mesh')
+  let service
+  try {
+    service = buildService(member.port, dataDir)
+    service.releaseTokens = async () => ({ github: 'ghp_live', gitee: null })
+    service.directLinkFor = async () => ({ port: 8080 })
+    service.probeMemberEgress = async () => ({ ok: true, latencyMs: 118, downMbps: 42.3 })
+    const call = register(service).find(tool => tool.name === 'call_member')
+
+    await call.execute(
+      { member: '10.66.66.2', prompt: '第一件事', identity: '开发', scope: '插件' },
+      { agent: mainAgent },
+    )
+    assert.equal(member.created[0].prompt, [
+      '【成员身份】你的身份：开发；负责范围：插件。',
+      '【成员环境】',
+      '本机代理端口 8080；经代理出网实测：延迟 118 ms，下行 42.3 Mbps。',
+      'GitHub token: ghp_live',
+      '第一件事',
+    ].join('\n'))
+    assert.equal('mesh' in member.created[0], false)
+
+    await call.execute(
+      { member: '10.66.66.2', conversationId: 'conv-new', prompt: '第二件事' },
+      { agent: mainAgent },
+    )
+    assert.equal(member.messages.length, 1)
+    const continuation = member.messages[0].content
+    assert.equal(continuation, [
+      '【成员环境】',
+      '本机代理端口 8080；经代理出网实测：延迟 118 ms，下行 42.3 Mbps。',
+      'GitHub token: ghp_live',
+      '第二件事',
+    ].join('\n'), 'the environment is re-injected; no identity prefix without scope args')
   } finally {
     await service?.memberTasks.dispose()
     await member.close()
@@ -624,7 +668,8 @@ test('call_member without identity/scope asks for them next time', async () => {
     const call = register(service).find(tool => tool.name === 'call_member')
     const result = await call.execute({ member: '10.66.66.2', prompt: '新任务' }, { agent: mainAgent })
     assert.equal(result.data.profile, null)
-    assert.equal('profile' in member.created[0].mesh, false)
+    assert.equal('mesh' in member.created[0], false)
+    assert.equal(member.created[0].prompt, '新任务')
     assert.match(result.text, /该会话还没有身份\/工作范围：下次 call_member 带 identity 和 scope 参数，或用 set_member_scope 设置。/u)
   } finally {
     await service?.memberTasks.dispose()

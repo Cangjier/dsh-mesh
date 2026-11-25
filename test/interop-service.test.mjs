@@ -562,7 +562,7 @@ test('a launch creates a host agent, titles it and prompts it', async () => {
   }
 })
 
-test('a new conversation denies the question tool and carries the measured mesh facts', async () => {
+test('a new conversation denies the question tool and ignores mesh facts for context', async () => {
   const restricted = []
   const contexts = []
   const agentCtx = {
@@ -584,14 +584,14 @@ test('a new conversation denies the question tool and carries the measured mesh 
     // The question tool has no answerer in a task conversation, so the preset's
     // contribution is filtered out for this agent only.
     assert.deepEqual(restricted, [{ deny: ['ask_user_question'] }])
-    assert.deepEqual(contexts.map(entry => entry.name), ['mesh:interaction', 'mesh:subagent', 'mesh:environment'])
+    assert.deepEqual(contexts.map(entry => entry.name), ['mesh:interaction', 'mesh:subagent'])
     assert.match(contexts[0].text, /禁用了 ask_user_question/u)
     assert.match(contexts[1].text, /35%/u)
     assert.match(contexts[1].text, /新的子代理/u)
     assert.equal(contexts[0].interpolate, false)
     assert.equal(contexts[1].interpolate, false)
-    assert.equal(contexts[2].text, '本机代理端口 8080；经代理出网实测：延迟 118 ms，下行 42.3 Mbps。\nGitHub token: ghp_test_token')
-    assert.equal(contexts[2].interpolate, false)
+    // Proxy/token facts now travel in the prompt, never in system context.
+    assert.equal(contexts.some(entry => /ghp_test_token|代理端口/.test(entry.text)), false)
   } finally {
     await service.dispose()
     await rm(dir, { recursive: true, force: true })

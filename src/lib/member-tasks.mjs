@@ -2265,6 +2265,23 @@ export class MemberTaskService {
   }
 
   /**
+   * The latest identity/scope stored for one conversation.
+   *
+   * The scope store wins because `set_member_scope` can change it after the
+   * task's profile snapshot was written; the snapshot is the fallback for a
+   * member from an older release or an unreadable store.
+   * @param {object} task tracked task.
+   * @returns {Promise<{name: string|null, identity: string|null, scope: string|null}|null>} profile.
+   */
+  async #latestProfile(task) {
+    let scope = null
+    if (typeof this.service?.memberScope === 'function') {
+      scope = await this.service.memberScope(task.conversationId).catch(() => null)
+    }
+    return (scope === null ? null : profileFromScope(scope, task.member)) ?? memberTaskProfile(task)
+  }
+
+  /**
    * Write one terminal outcome back into the conversation that delegated.
    * @param {object} task terminal task.
    * @param {object[]} replies unread replies this delivery owns; empty means a
@@ -2298,26 +2315,34 @@ export class MemberTaskService {
       .filter(text => text !== '')
       .join('\n\n')
       .trim()
+    // The human label is the latest identity from the main conversation's
+    // scope record; the machine name and conversation id are the stable
+    // identifier. Fixed layout: header, member, identifier, blank, result.
+    const profile = await this.#latestProfile(task)
+    const memberLabel = profile?.identity ?? task.member
+    const identifier = `${task.member} (${task.memberIp}) 的对话 ${task.conversationId}`
+    const resultLine = resultText !== ''
+      ? truncate(resultText, 8000)
+      : typeof task.lastText === 'string' && task.lastText !== ''
+        ? '（结果已由先前的等待返回，这里不再重复正文。）'
+        : '（成员没有返回文本结果）'
     const text = task.status === 'completed'
       ? [
-        `[成员任务完成] ${task.member} (${task.memberIp}) 的对话 ${task.conversationId} 已完成。`,
-        `任务：${truncate(task.prompt, 300)}`,
-        resultText !== ''
-          ? ['结果：', truncate(resultText, 8000)].join('\n')
-          : '结果已经通过 wait_member 返回，这条只是完成提示，不重复回复正文。',
+        '[成员任务完成]',
+        `成员：${memberLabel}`,
+        `标识符：${identifier}`,
         '',
-        `会话id: ${task.conversationId}`,
+        resultLine,
       ].join('\n')
       : [
-        `[成员任务失败] ${task.member} (${task.memberIp}) 的对话 ${task.conversationId} 失败。`,
-        `任务：${truncate(task.prompt, 300)}`,
+        '[成员任务失败]',
+        `成员：${memberLabel}`,
+        `标识符：${identifier}`,
         `错误：${task.error ?? 'unknown'}`,
         ...(resultText !== '' ? ['', '中断前的回复：', truncate(resultText, 8000)] : []),
         ...(task.interrupted === true
           ? ['', `目标的 DSH 重启（或运行时退出）打断了这一轮。对话和上下文还在：用 call_member 带 conversationId ${task.conversationId} 继续，或新开一个任务。`]
           : []),
-        '',
-        `会话id: ${task.conversationId}`,
       ].join('\n')
     try {
       const message = {

@@ -193,6 +193,8 @@ test('a completed member conversation notifies the originating agent', async () 
       local: { id: 'local', name: 'member-b', ip: '127.0.0.1' },
       members: [],
     }),
+    // The latest positioning, changed after the task started.
+    memberScope: async () => ({ identity: '前端开发1', scope: 'web/**' }),
   }
   const ctx = {
     get: name => name === 'agents' ? { get: id => id === 'session-A' ? agent : undefined } : undefined,
@@ -206,6 +208,9 @@ test('a completed member conversation notifies the originating agent', async () 
       agent,
       notify: true,
     })
+    // A continuation moved the conversation on: the completion notice must
+    // use this delivery, not the creation prompt.
+    task.lastPrompt = '【成员身份】你的身份：前端开发1；负责范围：web/**。\n最新的前端任务'
     // The workspace name crosses the interop boundary as-is; the member
     // resolves it below its own ~/.dsh/workspaces.
     assert.equal(created[0].workspace, 'demo')
@@ -220,8 +225,9 @@ test('a completed member conversation notifies the originating agent', async () 
     assert.equal(final.lastText, 'MEMBER DONE')
     assert.equal(messages.length, 1)
     assert.equal(messages[0].role, 'user')
-    assert.match(messages[0].content[0].text, /成员任务完成/)
-    assert.match(messages[0].content[0].text, /MEMBER DONE/)
+    assert.match(messages[0].content[0].text, /^\[成员任务完成\]\n成员：前端开发1\n标识符：member-b \(127\.0\.0\.1\) 的对话 conv-1\n\nMEMBER DONE$/u)
+    assert.doesNotMatch(messages[0].content[0].text, /do the member job/u)
+    assert.doesNotMatch(messages[0].content[0].text, /最新的前端任务/u)
   } finally {
     await tasks.dispose()
     await new Promise(resolve => server.close(resolve))
@@ -574,7 +580,7 @@ test('registerTools exposes build, deploy, members, call_member, set_member_scop
     assert.equal(setScope.parameters.properties.action, undefined)
     assert.deepEqual(
       Object.keys(setScope.parameters.properties).sort(),
-      ['avoidLongJobs', 'compressPercent', 'conversationId', 'identity', 'idlePushMs', 'keep', 'scope'].sort(),
+      ['avoidLongJobs', 'compressPercent', 'conversationId', 'identity', 'idlePushMs', 'keep', 'note', 'scope'].sort(),
     )
     const repack = tools.find(candidate => candidate.name === 'repack')
     assert.deepEqual(repack.parameters.required, ['package'])

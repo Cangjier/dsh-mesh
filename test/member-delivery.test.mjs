@@ -225,7 +225,7 @@ test('a progress reply taken by wait_member is never delivered a second time', a
     assert.equal(agent.messages.length, 1, 'the fallback still tells the caller the task finished, once')
     const text = agent.messages[0].content[0].text
     assert.match(text, /\[成员任务完成\]/u)
-    assert.match(text, /已经通过 wait_member 返回/u)
+    assert.match(text, /结果已由先前的等待返回，这里不再重复正文/u)
     assert.doesNotMatch(text, /第一轮进展/u, 'a reply wait_member already returned must not be repeated')
     assert.equal(agent.steered.length, 0)
     assert.equal(task.deliveredSeq, 1)

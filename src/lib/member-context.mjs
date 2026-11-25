@@ -248,9 +248,12 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
     const explicitCompress = typeof stored?.compressPercent === 'number' && Number.isFinite(stored.compressPercent)
       ? `；压缩阈值：${formatMemberPercent(stored.compressPercent)}`
       : ''
+    const noteText = typeof stored?.note === 'string' && stored.note.trim() !== ''
+      ? `；备注：${stored.note.trim().length > 120 ? `${stored.note.trim().slice(0, 120)}…` : stored.note.trim()}`
+      : ''
     const turn = entry.turns !== null && entry.turns > 0 ? `第 ${String(entry.turns)} 轮` : ''
     lines.push(
-      `- ${entry.conversationId}（${entry.member} ${entry.memberIp}，工作区 ${entry.workspace}，${entry.statusLabel}${turn === '' ? '' : `，${turn}`}）身份：${profile?.identity ?? '未设置'}；工作范围：${profile?.scope ?? '未设置'}${explicitCompress}`,
+      `- ${entry.conversationId}（${entry.member} ${entry.memberIp}，工作区 ${entry.workspace}，${entry.statusLabel}${turn === '' ? '' : `，${turn}`}）身份：${profile?.identity ?? '未设置'}；工作范围：${profile?.scope ?? '未设置'}${explicitCompress}${noteText}`,
     )
   }
   const longJobs = Array.isArray(options.longJobs) ? options.longJobs : []

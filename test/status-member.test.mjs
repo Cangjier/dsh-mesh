@@ -113,7 +113,21 @@ test('status_member reports live status and the last two user messages', async (
     assert.equal(result.data.reasoning, '先检查磁盘，再看日志。')
     assert.equal(result.data.workspace, 'dsh-mesh')
     assert.match(result.text, /工作区：dsh-mesh/u)
+    assert.match(result.text, /备注：未设置/u)
     assert.match(result.text, /本对话跟踪的成员会话（共 1 个/u)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('status_member shows the main-only note for a conversation', async () => {
+  const { tool, service, cleanup } = await harness()
+  try {
+    service.memberScopes = async () => ({ 'conv-1': { note: '只读复核，不要改内核文件' } })
+    const result = await tool.execute({ conversationId: 'conv-1' }, {})
+    assert.equal(result.ok, true)
+    assert.match(result.text, /备注：只读复核，不要改内核文件/u)
+    assert.equal(result.data.note, '只读复核，不要改内核文件')
   } finally {
     await cleanup()
   }

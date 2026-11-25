@@ -16,7 +16,7 @@
 | `repack` | 用当前仓库刷新已有离线包 | `package` | `false` |
 | `members` | 只读成员发现 | 无 | `true` |
 | `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `cwd` / `workspace` / `force` / `identity` / `scope` | `false` |
-| `set_member_scope` | 设置成员会话或自身的身份/工作范围、推送延迟与压缩阈值 | `conversationId` / `identity` / `scope` / `keep` / `avoidLongJobs` / `idlePushMs` / `compressPercent` | `false` |
+| `set_member_scope` | 设置成员会话或自身的身份/工作范围、备注、推送延迟与压缩阈值 | `conversationId` / `identity` / `scope` / `note` / `keep` / `avoidLongJobs` / `idlePushMs` / `compressPercent` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
 | `status_member` | 目标会话状态 + 身份/工作范围 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区/身份/工作范围，已归档的不列出）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
 | `remove_member` | 在目标成员上归档一个对话并停止本机跟踪 | `conversationId` | `false` |
@@ -612,7 +612,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
   `form: "snapshot"` 和 `sections`；
 - 没有进行中的会话、或距上次注入不足 60 秒时不注入；
 - 身份/工作范围优先取 `member-scopes.json`（按 conversationId），回退任务 profile 快照；已归档的会话不进入快照；
-- 自身行显示有效配置：保持目标（`keep`，默认关闭，需显式开启）、避免耗时（`avoidLongJobs`，默认关闭）、静默推送（`idlePushMs`，默认 300000 = 5 分钟）和压缩阈值
+- 成员行在设置了备注时追加 `；备注：…`（备注只在主对话可见，不注入成员）；自身行显示有效配置：保持目标（`keep`，默认关闭，需显式开启）、避免耗时（`avoidLongJobs`，默认关闭）、静默推送（`idlePushMs`，默认 300000 = 5 分钟）和压缩阈值
   （`compressPercent`，默认 35%）；成员行只在显式设置过 `compressPercent` 时显示该阈值；
 - 缺成员会话身份/工作范围时聚合提示 `call_member` / `set_member_scope`；自身缺失时提示
   `set_member_scope`（省略 conversationId 或传 `self`）；全齐时不提示；
@@ -699,7 +699,8 @@ status_member { "conversationIds": ["<会话id1>", "<会话id2>"] }
 - 只跟踪本机发起/继续过的会话；没有记录时明确报错，不猜成员。
 - 已归档的会话不列出：本机归档过的直接过滤；成员 UI 里归档的，读取到 `archived` 后同步标记并移出列表（显式再查时只回一行「已归档，不再列出」）。
 - 每个被查会话带 `workspace` 和「工作区：…」行，以及「身份：…；工作范围：…」行（缺失标
-  `未设置`）；身份/工作范围优先取 `member-scopes.json`，回退任务 profile 快照。
+  `未设置`）；身份/工作范围优先取 `member-scopes.json`，回退任务 profile 快照。成员会话的
+  `note`（备注）以「备注：…」行显示，`data.note` 同步返回；备注只存在本机，不发给成员。
 - 返回值另附全量会话列表，`data.conversations` 是全量摘要（id、状态标签、工作区、identity、
   scope），`data.requested` 才是本次被查会话的详情，`data.count` 是全量数量。状态标签统一为
   进行中 / 空闲 / 异常中止；实时状态优先。只要有会话缺 identity 或 scope，就在全量列表末尾
@@ -712,12 +713,17 @@ status_member { "conversationIds": ["<会话id1>", "<会话id2>"] }
 set_member_scope { "identity": "开发", "scope": "插件开发" }
 set_member_scope { "conversationId": "self", "keep": true, "idlePushMs": 300000 }
 set_member_scope { "conversationId": "self", "avoidLongJobs": true }
+set_member_scope { "conversationId": "<成员会话id>", "note": "只读复核，不要改内核文件" }
 set_member_scope { "compressPercent": 35 }
 set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "scope": "跨平台验收", "compressPercent": 10 }
 ```
 
 - `conversationId` 省略、`self`、`local` 或等于当前会话 id → 设置“自身”；其他值作为成员会话 id。
-- `identity` / `scope` 只传要改的字段，空字符串清除；identity ≤40 字符，scope ≤120 字符。
+- `identity` / `scope` / `note` 只传要改的字段，空字符串清除；identity ≤40 字符，scope ≤120 字符，
+  note ≤500 字符。
+- `note`（备注）只对成员会话生效：只写本机的 `member-scopes.json`，**不注入成员系统上下文、
+  不随 `call_member` 投递**；只在主对话的 `status_member` 和成员上下文快照里可见。设置自身
+  时忽略，返回文字会说明。
 - `keep` 默认 false，只对自身生效：需要主动推送时显式传 `keep: true`；给自身设置
   identity/scope 不会顺带开启它。设置成员会话时忽略，返回文字会说明。
 - `avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，下一次状态快照会检查距上一次快照

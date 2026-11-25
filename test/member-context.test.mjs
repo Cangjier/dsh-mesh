@@ -281,6 +281,17 @@ test('a snapshot shows the default 5-minute push delay, 35% threshold and keep o
   assert.match(text, /静默推送：5 分钟（只对主对话生效）；压缩阈值：35%/u)
 })
 
+test('a member line shows the main-only note when the scope carries one', () => {
+  const text = formatMemberStatusSnapshot([
+    { ...running, conversationId: 'c1' },
+  ], {
+    now: 1_000_000,
+    selfId: 'session-a',
+    scopes: { c1: { note: '只读复核，不要改内核文件' } },
+  })
+  assert.match(text, /c1（B 10\.66\.66\.2，工作区 dsh-mesh，进行中，第 2 轮）身份：未设置；工作范围：未设置；备注：只读复核，不要改内核文件/u)
+})
+
 test('a member line only shows an explicitly configured compression threshold', () => {
   const text = formatMemberStatusSnapshot([
     { ...running, conversationId: 'c1' },

@@ -179,13 +179,14 @@ test('scope readers apply defaults and drop unusable stored values', async () =>
     const service = new MeshService({ dataDir, config: {}, log: () => {} })
     await mkdir(dataDir, { recursive: true })
     await writeFile(path.join(dataDir, 'member-scopes.json'), JSON.stringify({
-      good: { identity: '开发', avoidLongJobs: true, idlePushMs: 1_000, compressPercent: 75 },
+      good: { identity: '开发', avoidLongJobs: true, note: '只读复核', idlePushMs: 1_000, compressPercent: 75 },
       badIdle: { identity: '测试', idlePushMs: 'soon' },
       badPercent: { compressPercent: 0 },
       onlyJunk: { idlePushMs: 1, compressPercent: 101, keep: 'yes', avoidLongJobs: 'yes' },
+      badNote: { note: 'x'.repeat(501) },
     }), 'utf8')
     assert.deepEqual(await service.memberScopes(), {
-      good: { identity: '开发', avoidLongJobs: true, idlePushMs: 1_000, compressPercent: 75 },
+      good: { identity: '开发', avoidLongJobs: true, note: '只读复核', idlePushMs: 1_000, compressPercent: 75 },
       badIdle: { identity: '测试' },
     })
   } finally {
@@ -301,7 +302,7 @@ test('set_member_scope on self stores idlePushMs and compressPercent and shows e
     )
     await assert.rejects(
       () => set.execute({}, { agent: mainAgent }),
-      /identity, scope, keep, avoidLongJobs, idlePushMs, or compressPercent is required/u,
+      /identity, scope, note, keep, avoidLongJobs, idlePushMs, or compressPercent is required/u,
     )
   } finally {
     await service?.memberTasks.dispose()
@@ -379,11 +380,73 @@ test('set_member_scope updates a tracked member conversation and ignores keep', 
 
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-9', idlePushMs: 5_000 }, { agent: mainAgent }),
-      /keep, avoidLongJobs, and idlePushMs only apply to the current session/u,
+      /keep, avoidLongJobs, and idlePushMs only apply to the current session; set identity, scope, note, or compressPercent/u,
     )
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-9', compressPercent: 0 }, { agent: mainAgent }),
       /compressPercent is out of range/u,
+    )
+  } finally {
+    await service?.memberTasks.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('set_member_scope stores a main-only note for a member conversation', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-scope-note-'))
+  const dataDir = path.join(dir, 'mesh')
+  let service
+  try {
+    service = new MeshService({ dataDir, config: {}, log: () => {} })
+    const tools = register(service)
+    service.memberTasks.tasks.set('task-note', {
+      id: 'task-note',
+      conversationId: 'conv-note',
+      member: 'B',
+      memberIp: '10.66.66.2',
+      baseUrl: 'http://127.0.0.1:1',
+      originSessionId: 'main-1',
+      status: 'completed',
+      workspace: 'dsh-mesh',
+      createdAt: '2026-11-24T00:00:00.000Z',
+      updatedAt: '2026-11-24T00:00:00.000Z',
+      profile: { name: 'B', identity: '测试', scope: '跨平台验收' },
+    })
+    const set = tools.find(tool => tool.name === 'set_member_scope')
+
+    const saved = await set.execute(
+      { conversationId: 'conv-note', identity: '测试', note: '只做只读复核，不要改内核文件' },
+      { agent: mainAgent },
+    )
+    assert.equal(saved.ok, true)
+    assert.match(saved.text, /备注：只做只读复核，不要改内核文件/u)
+    assert.deepEqual(await service.memberScope('conv-note'), {
+      identity: '测试',
+      note: '只做只读复核，不要改内核文件',
+    })
+    assert.equal(saved.data.note, '只做只读复核，不要改内核文件')
+
+    // The note is main-conversation metadata: it must never leak into the
+    // profile snapshot that is injected into / prefixed onto the member.
+    const profile = service.memberTasks.tasks.get('task-note').profile
+    assert.equal('note' in profile, false, 'the note must not enter the member profile snapshot')
+    assert.equal(profile.identity, '测试')
+
+    const cleared = await set.execute({ conversationId: 'conv-note', note: '' }, { agent: mainAgent })
+    assert.deepEqual(await service.memberScope('conv-note'), { identity: '测试' })
+    assert.match(cleared.text, /备注：未设置/u)
+
+    const selfIgnored = await set.execute({ note: '主对话自己的备注' }, { agent: mainAgent })
+    assert.match(selfIgnored.text, /note 只对成员会话生效，设置自身时已忽略/u)
+    assert.equal(selfIgnored.data.ignoredNote, true)
+
+    await assert.rejects(
+      () => set.execute({ conversationId: 'conv-note', note: 123 }, { agent: mainAgent }),
+      /note must be a string/u,
+    )
+    await assert.rejects(
+      () => set.execute({ conversationId: 'conv-note', note: 'x'.repeat(501) }, { agent: mainAgent }),
+      /note is too long/u,
     )
   } finally {
     await service?.memberTasks.dispose()
@@ -487,10 +550,10 @@ test('set_member_scope saves an untracked conversation and rejects invalid input
     assert.match(untracked.text, /本机未跟踪该会话，只保存设置/u)
     assert.deepEqual(await service.memberScope('conv-other'), { scope: '外部会话' })
 
-    await assert.rejects(() => set.execute({}, { agent: mainAgent }), /identity, scope, keep, avoidLongJobs, idlePushMs, or compressPercent is required/u)
+    await assert.rejects(() => set.execute({}, { agent: mainAgent }), /identity, scope, note, keep, avoidLongJobs, idlePushMs, or compressPercent is required/u)
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-other', keep: false }, { agent: mainAgent }),
-      /keep, avoidLongJobs, and idlePushMs only apply to the current session/u,
+      /keep, avoidLongJobs, and idlePushMs only apply to the current session; set identity, scope, note, or compressPercent/u,
     )
     await assert.rejects(
       () => set.execute({ identity: 'a'.repeat(41) }, { agent: mainAgent }),

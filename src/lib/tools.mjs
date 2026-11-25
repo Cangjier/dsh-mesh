@@ -20,6 +20,7 @@ import {
   DEFAULT_MEMBER_IDLE_PUSH_MS,
   MEMBER_IDLE_PUSH_MAX_MS,
   MEMBER_IDLE_PUSH_MIN_MS,
+  MEMBER_NOTE_MAX,
   effectiveCompressPercent,
   effectiveMemberIdlePushMs,
   normalizeMemberScopePatch,
@@ -355,8 +356,9 @@ export function registerTools(ctx, toolsCtx, service) {
       '设置一个成员会话或当前主对话（自身）的身份、工作范围，以及状态推送和自动压缩参数。',
       '',
       '`conversationId` 省略、`self`、`local` 或等于当前会话 id 时设置“自身”；其他值作为成员会话 id。',
-      '`identity` / `scope` 是可选的字符串，只传要改的字段；空字符串表示清除。',
-      'identity 最长 40 字符，scope 最长 120 字符。',
+      '`identity` / `scope` / `note` 是可选的字符串，只传要改的字段；空字符串表示清除。',
+      'identity 最长 40 字符，scope 最长 120 字符，note（备注）最长 500 字符。',
+      '`note` 仅对成员会话生效：它不会注入成员的系统上下文，也不会随 call_member 投递，只在主对话的 status_member 和成员上下文里可见；设置自身时忽略。',
       '`keep` 默认 false，只对自身/主对话生效：显式传 keep=true 时，turn 结束后主对话空闲时会主动收到成员状态快照；不传 keep 不改变已保存的值，从未设置过即为关闭。',
       '`avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，主对话下一次状态快照会检查距上一次快照之间结束、耗时超过 1 分钟的 job，并在注入里列出这些 job 并建议交给成员对话执行。设置成员会话时忽略。',
       `\`idlePushMs\`：静默推送延迟（整数毫秒，${String(MEMBER_IDLE_PUSH_MIN_MS)}–${String(MEMBER_IDLE_PUSH_MAX_MS)}，默认 ${String(DEFAULT_MEMBER_IDLE_PUSH_MS)} 即 5 分钟），只对自身/主对话生效；设置成员会话时忽略。`,
@@ -381,6 +383,10 @@ export function registerTools(ctx, toolsCtx, service) {
         scope: {
           type: 'string',
           description: '负责/工作范围（例如 dsh-mesh 插件开发与构建、跨平台验收），最长 120 字符；空字符串清除。',
+        },
+        note: {
+          type: 'string',
+          description: '备注，仅对成员会话生效，最长 500 字符；只存本机、只在主对话可见，不会注入或投递给成员；空字符串清除。设置自身时忽略。',
         },
         keep: {
           type: 'boolean',
@@ -419,20 +425,22 @@ export function registerTools(ctx, toolsCtx, service) {
       const isSelf = rawId === '' || rawId === 'self' || rawId === 'local' || (selfId !== '' && rawId === selfId)
       const hasIdentity = args.identity !== undefined
       const hasScope = args.scope !== undefined
+      const hasNote = args.note !== undefined
       const hasKeep = args.keep !== undefined
       const hasAvoidLongJobs = args.avoidLongJobs !== undefined
       const hasIdlePushMs = args.idlePushMs !== undefined
       const hasCompressPercent = args.compressPercent !== undefined
-      if (!hasIdentity && !hasScope && !hasKeep && !hasAvoidLongJobs && !hasIdlePushMs && !hasCompressPercent) {
-        throw new Error('identity, scope, keep, avoidLongJobs, idlePushMs, or compressPercent is required')
+      if (!hasIdentity && !hasScope && !hasNote && !hasKeep && !hasAvoidLongJobs && !hasIdlePushMs && !hasCompressPercent) {
+        throw new Error('identity, scope, note, keep, avoidLongJobs, idlePushMs, or compressPercent is required')
       }
       if (isSelf && selfId === '') throw new Error('cannot set the current session scope: no current session')
-      if (!isSelf && !hasIdentity && !hasScope && !hasCompressPercent) {
-        throw new Error('keep, avoidLongJobs, and idlePushMs only apply to the current session; set identity, scope, or compressPercent for a member conversation')
+      if (!isSelf && !hasIdentity && !hasScope && !hasNote && !hasCompressPercent) {
+        throw new Error('keep, avoidLongJobs, and idlePushMs only apply to the current session; set identity, scope, note, or compressPercent for a member conversation')
       }
       const patch = {
         ...(hasIdentity ? { identity: args.identity } : {}),
         ...(hasScope ? { scope: args.scope } : {}),
+        ...(!isSelf && hasNote ? { note: args.note } : {}),
         ...(isSelf && hasKeep ? { keep: args.keep } : {}),
         ...(isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {}),
         ...(isSelf && hasIdlePushMs ? { idlePushMs: args.idlePushMs } : {}),
@@ -457,6 +465,7 @@ export function registerTools(ctx, toolsCtx, service) {
           : `已设置成员会话 ${targetId} 的身份/工作范围与压缩阈值。`,
         `身份：${scope?.identity ?? '未设置'}`,
         `工作范围：${scope?.scope ?? '未设置'}`,
+        ...(!isSelf ? [`备注：${scope?.note ?? '未设置'}`] : []),
         ...(isSelf
           ? [
               `保持目标：${scope?.keep === true ? '开启' : '关闭'}（只对主对话生效）`,
@@ -468,6 +477,7 @@ export function registerTools(ctx, toolsCtx, service) {
         ...(!isSelf && (hasKeep || hasAvoidLongJobs || hasIdlePushMs)
           ? ['keep / avoidLongJobs / idlePushMs 只对主对话自身生效，设置成员会话时已忽略。']
           : []),
+        ...(isSelf && hasNote ? ['note 只对成员会话生效，设置自身时已忽略。'] : []),
         ...(!isSelf && !tracked ? ['本机未跟踪该会话，只保存设置。'] : []),
       ]
       return {
@@ -482,8 +492,10 @@ export function registerTools(ctx, toolsCtx, service) {
           compressPercent: compressThreshold,
           avoidLongJobs: scope?.avoidLongJobs === true,
           tracked,
+          note: !isSelf ? (scope?.note ?? null) : null,
           ignoredKeep: !isSelf && hasKeep,
           ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
+          ignoredNote: isSelf && hasNote,
           ignoredIdlePushMs: !isSelf && hasIdlePushMs,
         },
       }
@@ -1319,6 +1331,7 @@ function describeStatus(found, memberTasks, scopes = {}) {
   const liveWorkspace = typeof live?.workspace === 'string' ? live.workspace.trim() : ''
   const stored = scopes[String(task.conversationId ?? '')]
   const profile = stored !== undefined ? memberTaskProfile({ profile: stored }) : memberTaskProfile(task)
+  const note = typeof stored?.note === 'string' && stored.note.trim() !== '' ? stored.note.trim() : null
   return {
     conversationId: task.conversationId,
     member: task.member,
@@ -1327,6 +1340,7 @@ function describeStatus(found, memberTasks, scopes = {}) {
     profile,
     identity: profile?.identity ?? null,
     scope: profile?.scope ?? null,
+    note,
     status: liveStatus === '' ? task.status : liveStatus,
     liveStatus,
     statusLabel: memberStatusLabel(liveStatus, task),
@@ -1363,6 +1377,7 @@ function formatStatusBlock(entry) {
     `本机任务：${entry.taskStatus}${entry.turns === null ? '' : `，轮次 ${String(entry.turns)}`}`,
     `工作区：${entry.workspace ?? 'unknown'}`,
     `身份：${entry.identity ?? '未设置'}；工作范围：${entry.scope ?? '未设置'}`,
+    `备注：${entry.note ?? '未设置'}`,
     formatContextLine(entry.context),
     entry.messages.length === 0 ? '最近两次用户消息：(没有记录)' : '最近两次用户消息（旧→新）：',
     ...entry.messages.map((message, index) => `${String(index + 1)}. ${typeof message.at === 'string' && message.at !== '' ? `[${message.at}] ` : ''}${truncateText(message.text, 1200)}`),

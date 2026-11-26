@@ -245,6 +245,15 @@ function memberGroupOf(row: MemberConversationRow): string {
 }
 
 /**
+ * How many conversations of one group are running right now.
+ * @param rows conversations of one role.
+ * @returns running (or starting) count.
+ */
+function groupRunning(rows: MemberConversationRow[]): number {
+  return rows.filter(row => row.status === 'running' || row.status === 'starting').length
+}
+
+/**
  * Group rows by role, keeping the order in which each role first appeared.
  * @param rows conversation rows.
  * @returns one entry per role.
@@ -374,7 +383,12 @@ export function MemberConversationsSection({ sessionId, ctx }: { sessionId: stri
           ? rows.map(renderRow)
           : grouped.map(group => (
             <div key={group.title} className="dsh-mesh-group">
-              <div className="dsh-mesh-group-title">{`${group.title}（${String(group.rows.length)}）`}</div>
+              <div
+                className="dsh-mesh-group-title"
+                title={`${String(groupRunning(group.rows))} 个进行中 / 共 ${String(group.rows.length)} 个`}
+              >
+                {`${group.title} ${String(groupRunning(group.rows))}/${String(group.rows.length)}`}
+              </div>
               {group.rows.map(renderRow)}
             </div>
           ))}

@@ -88,6 +88,12 @@ export function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() })
           return
         }
+        if (method === 'GET' && path === '/member-conversations') {
+          // The header chip reads this; it asks for one main conversation's
+          // members, never the whole host's task table.
+          writeJson(response, 200, await service.memberConversations(url.searchParams.get('session') ?? ''))
+          return
+        }
         if (method === 'GET' && path === '/schedule') {
           if (scheduler === null) {
             writeJson(response, 503, { ok: false, error: { code: 'unavailable', message: '定时任务还没有启动。' } })

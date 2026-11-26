@@ -203,8 +203,11 @@ function formatMemberConversationLine(task, scopes = {}) {
   const noteText = typeof stored?.note === 'string' && stored.note.trim() !== ''
     ? `；备注：${stored.note.trim().length > 120 ? `${stored.note.trim().slice(0, 120)}…` : stored.note.trim()}`
     : ''
-  const turn = entry.turns !== null && entry.turns > 0 ? `第 ${String(entry.turns)} 轮` : ''
-  return `- ${entry.conversationId}（${entry.member} ${entry.memberIp}，工作区 ${entry.workspace}，${entry.statusLabel}${turn === '' ? '' : `，${turn}`}）身份：${profile?.identity ?? '未设置'}；工作范围：${profile?.scope ?? '未设置'}${explicitCompress}${noteText}`
+  const turn = entry.turns !== null && entry.turns > 0 ? `，第 ${String(entry.turns)} 轮` : ''
+  // Identity and workspace lead the line: a main conversation with several
+  // parallel member conversations scans by identity (and secondarily by
+  // workspace), not by an opaque conversation id.
+  return `- 身份：${profile?.identity ?? '未设置'}；工作区：${entry.workspace}；会话：${entry.conversationId}（${entry.member} ${entry.memberIp}，${entry.statusLabel}${turn}）；工作范围：${profile?.scope ?? '未设置'}${explicitCompress}${noteText}`
 }
 
 /**
@@ -214,7 +217,8 @@ function formatMemberConversationLine(task, scopes = {}) {
  * @returns {string} the bullet line.
  */
 function formatSelfLine(selfId, selfScope) {
-  return `- 自身（会话 ${selfId === '' ? 'unknown' : selfId}）：身份：${selfScope?.identity ?? '未设置'}；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === true ? '开启' : '关闭'}（只对主对话生效）；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
+  // Same head order as a member line: the identity answers "who am I" first.
+  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === true ? '开启' : '关闭'}（只对主对话生效）；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
 }
 
 /**

@@ -63,6 +63,8 @@ import {
 import { WireGuardPanel } from './wireguard'
 import { PackagesPanel } from './packages'
 import { AutoUpgradeModal } from './schedule'
+import { MemberConversationsChip } from './members'
+import { useThemeMode } from './theme'
 import { EN as WIREGUARD_EN, dictionary as wireguardDictionary } from './wireguard/i18n'
 
 const NS = 'dsh-mesh'
@@ -89,12 +91,6 @@ function memberTableMinWidth(screens: Partial<Record<'sm' | 'md' | 'lg', boolean
   if (screens.md !== false) return 770
   if (screens.sm !== false) return 650
   return 460
-}
-
-function useThemeMode(ctx: any): 'light' | 'dark' {
-  const [snapshot, setSnapshot] = useState<any>(() => ctx.theme.getTheme())
-  useEffect(() => ctx.on('theme/change', (next: any) => setSnapshot(next)), [ctx])
-  return snapshot?.active?.colorScheme === 'dark' ? 'dark' : 'light'
 }
 
 function errorText(error: unknown): string {
@@ -1734,4 +1730,14 @@ export function apply(ctx: any) {
     order: 21,
     label: () => t('panel.label'),
   }, SidebarIcon))
+  // The conversation header carries this Session's member conversations: a
+  // hover list for a quick look and a detail dialog on click. The entry hides
+  // itself while the Session tracks none, so an ordinary conversation keeps
+  // the header it had.
+  ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+    name: 'conversation.session.header.utilities',
+    id: 'mesh-members',
+    order: 20,
+    label: () => '成员对话',
+  }, (props: any) => <MemberConversationsChip {...props} ctx={ctx} />))
 }

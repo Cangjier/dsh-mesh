@@ -118,8 +118,8 @@ test('a step with running member conversations carries one status snapshot', asy
     assert.equal(message.source.form, 'snapshot')
     const text = message.content[0].text
     assert.match(text, /本对话跟踪 2 个成员会话，其中 1 个进行中/u)
-    assert.match(text, /c1（B 10\.66\.66\.2，工作区 dsh-mesh，进行中，第 2 轮）/u)
-    assert.match(text, /c2（B 10\.66\.66\.2，工作区 unknown，空闲，第 4 轮）/u)
+    assert.match(text, /工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）/u)
+    assert.match(text, /工作区：unknown；会话：c2（B 10\.66\.66\.2，空闲，第 4 轮）/u)
     assert.match(text, /^\[成员上下文\]/u)
     assert.doesNotMatch(text, /wait_member/u)
   } finally {
@@ -226,11 +226,11 @@ test('the snapshot formatter covers every documented state', () => {
     { ...running, conversationId: 'd', status: 'failed' },
     { ...running, conversationId: 'e', status: 'interrupted' },
   ], { now: 1_000_000 })
-  assert.match(text, /a（B 10\.66\.66\.2，工作区 dsh-mesh，进行中/u)
-  assert.match(text, /b（B 10\.66\.66\.2，工作区 dsh-mesh，进行中/u)
-  assert.match(text, /c（B 10\.66\.66\.2，工作区 dsh-mesh，空闲/u)
-  assert.match(text, /d（B 10\.66\.66\.2，工作区 dsh-mesh，异常中止/u)
-  assert.match(text, /e（B 10\.66\.66\.2，工作区 dsh-mesh，异常中止/u)
+  assert.match(text, /工作区：dsh-mesh；会话：a（B 10\.66\.66\.2，进行中/u)
+  assert.match(text, /工作区：dsh-mesh；会话：b（B 10\.66\.66\.2，进行中/u)
+  assert.match(text, /工作区：dsh-mesh；会话：c（B 10\.66\.66\.2，空闲/u)
+  assert.match(text, /工作区：dsh-mesh；会话：d（B 10\.66\.66\.2，异常中止/u)
+  assert.match(text, /工作区：dsh-mesh；会话：e（B 10\.66\.66\.2，异常中止/u)
 })
 
 test('a snapshot shows each conversation identity and work scope', () => {
@@ -238,8 +238,8 @@ test('a snapshot shows each conversation identity and work scope', () => {
     { ...running, conversationId: 'c1', profile: { name: 'B', identity: '开发', scope: '插件开发' } },
     { ...settled, conversationId: 'c2', profile: { name: 'B', identity: '测试', scope: null } },
   ], { now: 1_000_000 })
-  assert.match(text, /c1（B 10\.66\.66\.2，工作区 dsh-mesh，进行中，第 2 轮）身份：开发；工作范围：插件开发/u)
-  assert.match(text, /c2（B 10\.66\.66\.2，工作区 unknown，空闲，第 4 轮）身份：测试；工作范围：未设置/u)
+  assert.match(text, /身份：开发；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）；工作范围：插件开发/u)
+  assert.match(text, /身份：测试；工作区：unknown；会话：c2（B 10\.66\.66\.2，空闲，第 4 轮）；工作范围：未设置/u)
   assert.equal(text.match(/下次 call_member 带 identity 和 scope 参数/gu)?.length, 1, 'one aggregate hint, not one per line')
   assert.match(text, /还有成员会话没有身份\/工作范围：c2（B）/u)
 })
@@ -254,7 +254,7 @@ test('a fully profiled snapshot carries no profile hint', () => {
 
 test('an old conversation without a profile snapshot is reported as missing', () => {
   const text = formatMemberStatusSnapshot([{ ...running, conversationId: 'legacy' }], { now: 1_000_000 })
-  assert.match(text, /legacy（B 10\.66\.66\.2，工作区 dsh-mesh，进行中，第 2 轮）身份：未设置；工作范围：未设置/u)
+  assert.match(text, /身份：未设置；工作区：dsh-mesh；会话：legacy（B 10\.66\.66\.2，进行中，第 2 轮）；工作范围：未设置/u)
   assert.match(text, /还有成员会话没有身份\/工作范围：legacy（B）/u)
   assert.equal(text.match(/下次 call_member 带 identity 和 scope 参数/gu)?.length, 1)
 })
@@ -270,7 +270,7 @@ test('a snapshot shows the self identity, work scope, keep state and effective s
     selfId: 'session-a',
     selfScope: { identity: '网关', scope: '成员发现', keep: false, compressPercent: 12.5 },
   })
-  assert.match(text, /自身（会话 session-a）：身份：网关；工作范围：成员发现；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）；压缩阈值：12\.5%/u)
+  assert.match(text, /身份：网关（自身，会话 session-a）；工作范围：成员发现；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）；压缩阈值：12\.5%/u)
   assert.doesNotMatch(text, /还没有身份\/工作范围/u)
   assert.doesNotMatch(text, /静默推送/u, 'the quiet push delay is gone')
 })
@@ -289,7 +289,7 @@ test('a member line shows the main-only note when the scope carries one', () => 
     selfId: 'session-a',
     scopes: { c1: { note: '只读复核，不要改内核文件' } },
   })
-  assert.match(text, /c1（B 10\.66\.66\.2，工作区 dsh-mesh，进行中，第 2 轮）身份：未设置；工作范围：未设置；备注：只读复核，不要改内核文件/u)
+  assert.match(text, /身份：未设置；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）；工作范围：未设置；备注：只读复核，不要改内核文件/u)
 })
 
 test('a member line only shows an explicitly configured compression threshold', () => {
@@ -300,13 +300,13 @@ test('a member line only shows an explicitly configured compression threshold', 
     now: 1_000_000,
     scopes: { c1: { compressPercent: 10 } },
   })
-  assert.match(text, /c1（B 10\.66\.66\.2，工作区 dsh-mesh，进行中，第 2 轮）身份：未设置；工作范围：未设置；压缩阈值：10%/u)
+  assert.match(text, /身份：未设置；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）；工作范围：未设置；压缩阈值：10%/u)
   assert.doesNotMatch(text, /c2（B[^\n]*压缩阈值/u, 'the default 35% is not repeated on every member line')
 })
 
 test('a snapshot asks for the self scope and marks missing fields', () => {
   const text = formatMemberStatusSnapshot([], { now: 1_000_000, selfId: 'session-a' })
-  assert.match(text, /自身（会话 session-a）：身份：未设置；工作范围：未设置；保持目标：关闭（只对主对话生效）/u)
+  assert.match(text, /身份：未设置（自身，会话 session-a）；工作范围：未设置；保持目标：关闭（只对主对话生效）/u)
   assert.match(text, /自身还没有身份\/工作范围：用 set_member_scope（省略 conversationId 或传 self）设置自身身份和工作范围。/u)
 })
 
@@ -320,7 +320,7 @@ test('a stored scope wins over the task profile snapshot', () => {
     selfScope: { identity: '网关', scope: '成员发现' },
     scopes: { c1: { identity: '新身份', scope: '新范围' } },
   })
-  assert.match(text, /c1（B 10\.66\.66\.2，工作区 dsh-mesh，进行中，第 2 轮）身份：新身份；工作范围：新范围/u)
+  assert.match(text, /身份：新身份；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）；工作范围：新范围/u)
 })
 
 /** Let one turn-end review and its async reads finish. */
@@ -360,8 +360,8 @@ test('a main turn end pushes the dispatch instruction at once', async () => {
     assert.match(text, /`.coder\/issues\/open\.md`、`.coder\/plan\/todo\.md`、`.coder\/plan\/goal\.md`/u)
     assert.match(text, /判断是否可以激活部分现有空闲成员对话/u)
     assert.match(text, /只考虑空闲成员会话；进行中\/异常中止的一律跳过，禁止重启、归档或新建同名会话——派活必须带原 conversationId 继续/u)
-    assert.match(text, /自身（会话 session-a）：身份：网关；工作范围：成员发现/u)
-    assert.match(text, /c1（B 10\.66\.66\.2，工作区 dsh-mesh，进行中，第 2 轮）/u)
+    assert.match(text, /身份：网关（自身，会话 session-a）；工作范围：成员发现/u)
+    assert.match(text, /工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）/u)
     assert.equal(h.context.lastInjection.has('session-a'), true)
     assert.equal(h.context.reviewPending.has('session-a'), true)
   } finally {
@@ -377,8 +377,8 @@ test('the dispatch instruction lists the idle and running conversations for the 
     scopes: { c2: { note: '队列无限，空闲时派活' } },
   })
   assert.match(text, /当前成员会话（本对话跟踪 2 个，其中 1 个进行中；快照 1970-01-01T00:16:40\.000Z）：/u)
-  assert.match(text, /c1（B 10\.66\.66\.2，工作区 dsh-mesh，进行中，第 2 轮）/u)
-  assert.match(text, /c2（B 10\.66\.66\.2，工作区 unknown，空闲，第 4 轮）.*备注：队列无限，空闲时派活/u)
+  assert.match(text, /工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）/u)
+  assert.match(text, /身份：未设置；工作区：unknown；会话：c2（B 10\.66\.66\.2，空闲，第 4 轮）.*备注：队列无限，空闲时派活/u)
   assert.match(text, /由本对话用 call_member 决定是否派活/u)
 })
 

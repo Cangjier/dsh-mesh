@@ -5,6 +5,7 @@
 这个仓库现在同时是：
 
 - **运行时 DSH 插件**：侧边栏「DSH 成员」面板、成员发现/切换、模型可见的 `build` / `deploy` / `members` / `call_member` / `set_member_scope` / `wait_member` / `status_member` / `remove_member` 工具。
+- **成员对话一眼可见**：会话头部有「[图标] N个成员对话」入口——悬停列出本对话每条成员对话的身份、状态（进行中 / 空闲 / 异常中止）和所属成员（如 3、4），点开是完整详情（工作区、工作范围、轮次、会话 id、压缩阈值、备注、最初任务）；没有成员对话时入口不出现。详见 [Step 029](docs/Step%20029%20成员对话概览入口与成员上下文行首格式.md)。
 - **可观察的部署**：点「部署」后按钮变为「正在部署」，随时点开查看获取安装包（Release 下载或网关上传）的进度（字节、速度、剩余时间）、获取/解压准备/切换重启三步状态与远端脚本日志尾部，结束后直接给出成功或失败原因。进度与日志走 **SSE 推送**（`/api/dsh-mesh/events`、`/__gate/hysteria/events`），面板里没有定时轮询。
 - **网关**：`code/gate/`，负责密码门、反向代理、成员 cluster 认证、目标 cookie。
 - **构建引擎**：`code/build/`，从 DSH GitHub 源码确定性地应用覆盖层、构建 Web 前端、按目标系统和架构打包。
@@ -148,12 +149,12 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.7z \
 - 新工具 `call_member`：没有 `action`；没有 `conversationId` 就新建对话，有就继续那个对话，只发起并立即返回会话id。目标对话正在运行时，消息用 `agent.steer()` 直接插入当前 turn，不等这一轮结束；空闲时按普通 `followup` 开一轮。回执里带 `steered` / `delivery`，`call_member` 的返回会说明这次是怎么投递的。
 - `wait_member` 只有两种输入：`conversationIds` 指定会话，或 `all: true` 等本对话所有「进行中」的会话（推荐，工具描述和所有提示都推荐它）；两者互斥，同时传会报错。任意一个先有新回复或进入终态就立刻返回，其余会话在结果里列出。没有进行中的会话时 `all: true` 直接返回 ok 并附上所有会话状态，不报错。
 - `call_member` / `wait_member` 返回本对话跟踪的**所有成员会话**（按 `originSessionId`，不是成员上的全部对话）：会话id、进行中/空闲/异常中止、工作区名、轮次；当前会话带 `current` 标记，`call_member` 另给 `currentConversationId`。状态映射：running/starting=进行中，completed=空闲，failed/interrupted=异常中止。
-- **60 秒状态注入**：本对话有进行中的成员会话、或（开启「避免耗时」后）上次快照以来有超过 1 分钟的已结束 job 时，`agent/pre-step` 在每个 step 前把一份状态快照附加到 `decision.messages`（同一会话最多每 60 秒一次）：首行汇总、自身（会话id/身份/工作范围/保持目标/避免耗时）、每个成员会话id/状态/工作区/轮次/身份/工作范围（缺失标 `未设置`）。缺身份/工作范围时按“成员会话”和“自身”分别聚合提示；全部齐全时不出现提示。快照不新开 turn、不调用 `followup`/`steer`，source kind 不是 `user`；读取失败吞掉，不影响 agent loop。
+- **60 秒状态注入**：本对话有进行中的成员会话、或（开启「避免耗时」后）上次快照以来有超过 1 分钟的已结束 job 时，`agent/pre-step` 在每个 step 前把一份状态快照附加到 `decision.messages`（同一会话最多每 60 秒一次）：首行汇总、自身（会话id/身份/工作范围/保持目标/避免耗时）、每个成员会话一行，**身份和工作区在行首**，随后是会话 id/成员/状态/轮次/工作范围（缺失标 `未设置`）。缺身份/工作范围时按“成员会话”和“自身”分别聚合提示；全部齐全时不出现提示。快照不新开 turn、不调用 `followup`/`steer`，source kind 不是 `user`；读取失败吞掉，不影响 agent loop。
 - **一个工作区只允许一个对话**：新建对话时，解析出的目标目录里只要已经有对话——**进行中、空闲、异常中止、出错都算**——成员就返回 `409 workspace_occupied`，消息里给出那条对话的会话id，`call_member` 以 `ok:false` 直接返回说明（不创建对话），并明确建议 `call_member { "member": …, "conversationId": "<那条对话>", "prompt": … }` 继续它。没有 `force` 之类的覆盖开关；要并行工作就换一个 `workspace` 名（归档后该工作区名会重新可用）。继续已有 `conversationId` 永远不触发这个拦截。
 - 新建对话前，`call_member` 先从组网直连配置找到目标成员的本地代理端口，用 SSH 在目标成员上跑 mjs 探针实测该端口的出网延迟和下行带宽，把**一行结果 + 代理端口 + hub 的 git token 原值**随每一次投递的最终 prompt 注入（不再写成员的系统上下文）；组网里没有该成员的直连配置就不报出网信息。并**禁用该会话的 `ask_user_question`**——成员任务没有可应答的用户，需要信息时会在回复里提问并停下，用 `call_member` 带同一个 `conversationId` 回答。禁用规则在会话 setup 时应用，并在**每次投递消息前**对当前 live agent 重新应用一次（去重）：成员自己的 Web UI 恢复会话时只挂 preset、不跑 interop 的 setup，不补这一步就会留下一个无人应答的 `ask_user_question`，整轮永久挂起。详见 [Step 025](docs/Step%20025%20成员任务的出网实测与token注入.md)。
 - **会话身份、工作范围与推送/压缩配置**：`call_member` 的可选参数 `identity`（身份/角色，≤40 字符）和 `scope`（负责范围，≤120 字符）按**会话**合并保存到 `$DSH_HOME/mesh/member-scopes.json`（记录形如 `{ "<conversationId>": { identity, scope, note, keep, avoidLongJobs, compressPercent } }`，只存显式设置过的字段，默认值读取时应用；自身用当前主对话 session id）。身份/范围随最终 prompt 注入：新建对话时把本次身份/范围作为 `【成员身份】…` 前缀放进 prompt；继续已有对话时合并设置，只有本次显式传 identity/scope 才追加该前缀（与之前一致）。这些信息不再写入成员的系统上下文。任意时候可用 `set_member_scope` 单独设置成员会话或自身（省略 `conversationId` / `self` / `local` 即自身），不给成员发消息：`keep` / `avoidLongJobs` 只对主对话自身有效，设置成员会话时忽略；`compressPercent` 对两者都生效。成员会话还可设 `note`（备注，≤500 字符）：只存本机，**不注入成员系统上下文、不随投递发送**，只在主对话的 `status_member` 和成员上下文快照里可见。`compressPercent` 目前只能设置数值，不支持直接清除；要恢复默认请设回 `35`。`members` 恢复为只读成员发现，不再显示会话身份。
 - **工作区归属**：显式 `workspace` 优先；显式 `cwd` 保持原语义（不带工作区名，但会话仍按该目录归组，标题取目录名）；两者都没有时用调用方会话当前所属工作区的标题（自动派生的名称会额外拒绝 `: * ? < > |`，避免 Windows 成员建不出目录）。目标成员创建会话后把它挂到 `ctx.workspaceRegistry`；默认分支（含调用方兜底显式发送的 `default-workspace`）优先复用已有的同名记录，所以不会新增第二个「默认工作区」（旧版本已写入的重复记录需手动清理），也不会再留在「未分组」。任务记录同时保存工作区名：新建时取显式 workspace / 显式 cwd 的目录名 / 调用方工作区，继续投递时用成员实时 projection 的 `workspace` 刷新，旧记录缺失时回退 `unknown`。详见 [Step 026](docs/Step%20026%20成员任务的工作区归属.md)。
-- `conversationId` 是唯一对外的继续投递凭据（内部 task id 不再出现在工具参数里）；**`call_member` 不再有 `compress` 参数**。继续投递前会读取该会话的压缩阈值（`set_member_scope` 的 `compressPercent`，默认 35%）：上下文占比**严格超过阈值**就先让成员压缩再投递（压缩要求对话空闲，目标还在跑时拒绝投递），不超过就直接投递。`wait_member` 在 `state=done` 时返回会话id和上下文占用（只显示占比）；超过该会话阈值时说明“下次投递前会自动压缩”，不引导传任何压缩参数。
+- `conversationId` 是唯一对外的继续投递凭据（内部 task id 不再出现在工具参数里）；**`call_member` 不再有 `compress` 参数**。继续投递前会读取该会话的压缩阈值（`set_member_scope` 的 `compressPercent`，默认 35%）：上下文占比**严格超过阈值**就先让成员压缩再投递（压缩要求对话空闲，目标还在跑时拒绝投递），不超过就直接投递；目标对话正在运行时跳过压缩、直接 `steer` 插入（压缩要空闲），压缩失败也只记日志再照常投递。`wait_member` 在 `state=done` 时返回会话id和上下文占用（只显示占比）；超过该会话阈值时说明“下次投递前会自动压缩”，不引导传任何压缩参数。
 - A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话；后台轮询 B 的 `/wait`，`wait_member` 按轮取回。
 - **重启不丢结果**：插件停止前仍在跑的任务会被重新接回监控（24 小时内），成员完成后照常投递；原对话当时不在线会重试几次。
 - **子代理上下文预算**：注入给成员会话的规则要求控制子代理的上下文占比——某个子代理超过 35% 时尽量改用新的子代理（交接已有结论），不再继续用旧的；DSH 在子代理一轮结束时就会卸载它，父对话既量不到也压不了。
@@ -331,6 +332,8 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 025 成员任务的出网实测与 token 注入](docs/Step%20025%20成员任务的出网实测与token注入.md) | 按组网直连配置在目标成员上 SSH 跑 mjs 测延迟/带宽、一行结果与 token 注入、禁用 `ask_user_question` |
 | [Step 026 成员任务的工作区归属](docs/Step%20026%20成员任务的工作区归属.md) | 成员任务挂到 `workspaceRegistry`、调用方工作区名过界、默认 `default-workspace` 与显式 cwd |
 | [Step 027 成员任务状态、工作区独占与结果不重复投递](docs/Step%20027%20成员任务状态、工作区并发保护与结果不重复投递.md) | `wait_member` 的 `all`、会话状态/工作区列表、pre-step 注入、工作区独占（409 `workspace_occupied`）、`remove_member` 的完全删除、steer 与结果去重 |
+| [Step 028 自动升级前的停止通知与重启后恢复](docs/Step%20028%20自动升级前的停止通知与重启后恢复.md) | 升级前十分钟通知 A/B/C 三类运行中会话、重启后两分钟恢复主对话与其他会话、成员对话交给发起方 |
+| [Step 029 成员对话概览入口与成员上下文行首格式](docs/Step%20029%20成员对话概览入口与成员上下文行首格式.md) | 会话头部的「N个成员对话」入口（悬停列表、详情弹窗、只读接口）、成员上下文快照以身份和工作区开头 |
 | [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、升级/取消、包内容 |
 | [Step 020 内嵌 interop 服务](docs/Step%20020%20内嵌interop服务.md) | 会话由 DSH Web 拥有、嵌入式 :8765、部署/回滚、冷读「已停止」根因 |
 
@@ -355,11 +358,13 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `code/interop-service/server.mjs` | 旧独立 HTTP 服务（回退用，默认不启动） |
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
 | `src/lib/member-context.mjs` | 成员会话状态快照：`agent/pre-step` 每 60 秒附加一次；主对话 `turn/end` 后若距上次 review 结束超过 10 分钟则 `followup` 一条派活指令（`keep` 控制是否开启），超过压缩阈值（默认 35%）先压缩 |
+| `src/lib/member-ui.mjs` | 会话头部「N个成员对话」的数据行：任务表 + `member-scopes.json` 合成 JSON 安全字段、成员短标签（IP 末段）、状态与计数 |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
 | `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `set_member_scope` / `wait_member` / `status_member` / `remove_member` 工具 |
 | `src/lib/member-sessions.mjs` | 标记 interop 创建的成员会话，主动推送时排除 |
 | `src/client/index.tsx` | 侧边栏「DSH 成员」面板 |
+| `src/client/members.tsx` | 会话头部「N个成员对话」入口：悬停列表、详情弹窗、10 秒轮询 |
 | `code/gate/server.mjs` | 网关：密码门、目标路由、反向代理、WebSocket |
 | `code/gate/members.mjs` | 成员发现、`/__gate/select`、cluster 代理、cookie 隔离 |
 | `code/gate/pages.mjs` | 登录页 / 扫码页 / 状态页 |

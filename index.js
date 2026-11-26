@@ -3,12 +3,12 @@ import { homedir as homedir4 } from "node:os";
 import path30 from "node:path";
 
 // src/lib/service.mjs
-import { mkdir as mkdir13, readFile as readFile16, readdir as readdir8, rm as rm14, stat as stat13, writeFile as writeFile13 } from "node:fs/promises";
+import { mkdir as mkdir14, readFile as readFile17, readdir as readdir9, rm as rm15, stat as stat13, writeFile as writeFile14 } from "node:fs/promises";
 import { existsSync as existsSync14, readFileSync as readFileSync5, realpathSync } from "node:fs";
 import { execFile as execFile3, spawn as spawn7 } from "node:child_process";
 import { createHash as createHash8 } from "node:crypto";
 import os10 from "node:os";
-import path24 from "node:path";
+import path25 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { promisify as promisify3 } from "node:util";
 
@@ -10143,3556 +10143,10 @@ function formatEgressLine(mesh) {
   return `${where}\uFF1B\u7ECF\u4EE3\u7406\u51FA\u7F51\u5B9E\u6D4B\u5931\u8D25${reason === "" ? "" : `\uFF1A${reason}`}\u3002`;
 }
 
-// src/lib/service.mjs
-var HERE2 = path24.dirname(fileURLToPath2(import.meta.url));
-var execFileAsync2 = promisify3(execFile3);
-var PROBE_GRACE_MS = 10 * 6e4;
-var PROBE_TIMEOUT_MS = 4500;
-var PROBE_RETRY_MS = 4500;
-var PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 6e4;
-var MEMBER_IDENTITY_MAX = 40;
-var MEMBER_SCOPE_MAX = 120;
-var UPGRADE_ANNOUNCE_WINDOW_MS = UPGRADE_LEAD_MS * 3;
-var DEFAULT_COMPRESS_PERCENT = 35;
-var MEMBER_NOTE_MAX = 500;
-function normalizeMemberScopePatch(patch = {}) {
-  if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
-    throw new Error("member scope must be an object");
-  }
-  const normalized = {};
-  if (patch.identity !== void 0) {
-    if (typeof patch.identity !== "string") throw new Error("identity must be a string");
-    const text = patch.identity.trim();
-    if (text.length > MEMBER_IDENTITY_MAX) {
-      throw new Error(`identity is too long: ${String(text.length)} > ${String(MEMBER_IDENTITY_MAX)} characters`);
-    }
-    normalized.identity = text === "" ? null : text;
-  }
-  if (patch.scope !== void 0) {
-    if (typeof patch.scope !== "string") throw new Error("scope must be a string");
-    const text = patch.scope.trim();
-    if (text.length > MEMBER_SCOPE_MAX) {
-      throw new Error(`scope is too long: ${String(text.length)} > ${String(MEMBER_SCOPE_MAX)} characters`);
-    }
-    normalized.scope = text === "" ? null : text;
-  }
-  if (patch.note !== void 0) {
-    if (typeof patch.note !== "string") throw new Error("note must be a string");
-    const text = patch.note.trim();
-    if (text.length > MEMBER_NOTE_MAX) {
-      throw new Error(`note is too long: ${String(text.length)} > ${String(MEMBER_NOTE_MAX)} characters`);
-    }
-    normalized.note = text === "" ? null : text;
-  }
-  if (patch.keep !== void 0) {
-    if (typeof patch.keep !== "boolean") throw new Error("keep must be a boolean");
-    normalized.keep = patch.keep;
-  }
-  if (patch.avoidLongJobs !== void 0) {
-    if (typeof patch.avoidLongJobs !== "boolean") throw new Error("avoidLongJobs must be a boolean");
-    normalized.avoidLongJobs = patch.avoidLongJobs;
-  }
-  if (patch.compressPercent !== void 0) {
-    const value = patch.compressPercent;
-    if (typeof value !== "number" || !Number.isFinite(value)) {
-      throw new Error("compressPercent must be a number");
-    }
-    if (value < 1 || value > 100) {
-      throw new Error(`compressPercent is out of range: ${String(value)} (1-100)`);
-    }
-    normalized.compressPercent = value;
-  }
-  return normalized;
-}
-function effectiveCompressPercent(scope) {
-  const value = scope?.compressPercent;
-  return typeof value === "number" && Number.isFinite(value) && value >= 1 && value <= 100 ? value : DEFAULT_COMPRESS_PERCENT;
-}
-function savedScopeText(value, max) {
-  if (typeof value !== "string") return null;
-  const text = value.trim();
-  return text === "" || text.length > max ? null : text;
-}
-function savedScopeNumber(value, valid) {
-  return typeof value === "number" && Number.isFinite(value) && valid(value) ? value : void 0;
-}
-function findRepositoryRoot(start) {
-  let current = start;
-  for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync14(path24.join(current, "build", "recipes.json")) && existsSync14(path24.join(current, "code", "build"))) {
-      return current;
-    }
-    const parent = path24.dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  return path24.resolve(start, "..", "..");
-}
-var REPOSITORY_ROOT = findRepositoryRoot(HERE2);
-function runSshProbe(args, source, timeoutMs = 3e4) {
-  return new Promise((resolve) => {
-    const child = spawn7("ssh", args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try {
-        child.kill("SIGKILL");
-      } catch {
-      }
-      resolve(value);
-    };
-    const timer = setTimeout(() => finish({ ok: false, error: "probe timed out" }), timeoutMs);
-    timer.unref?.();
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.once("error", (error) => finish({ ok: false, error: error instanceof Error ? error.message : String(error) }));
-    child.once("close", () => {
-      const line = String(stdout).trim().split(/\r?\n/u).filter(Boolean).pop() ?? "";
-      try {
-        const parsed = JSON.parse(line);
-        finish(parsed !== null && typeof parsed === "object" ? parsed : { ok: false, error: "probe returned no object" });
-      } catch {
-        finish({ ok: false, error: (String(stderr).trim() || "no probe output").slice(0, 160) });
-      }
-    });
-    child.stdin.on("error", () => {
-    });
-    child.stdin.end(source);
-  });
-}
-function packageVersion() {
-  try {
-    const parsed = JSON.parse(readFileSync5(path24.join(REPOSITORY_ROOT, "package.json"), "utf8"));
-    return typeof parsed.version === "string" ? parsed.version : "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-}
-function assertTestUpgradeTarget(target, options = {}) {
-  if (target === null || target === void 0) {
-    throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u9700\u8981\u4E00\u4E2A\u6210\u5458\uFF1A\u8BF7\u4ECE\u6210\u5458\u5217\u8868\u91CC\u9009\u4E00\u4E2A\u5DF2\u5B89\u88C5 DSH \u7684 Linux \u6210\u5458");
-  }
-  if (target.kind === "self" || target.id === "local") {
-    throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u8981\u5728\u522B\u7684\u6210\u5458\u4E0A\u8DD1\uFF1B\u672C\u673A\u5347\u7EA7\u8BF7\u76F4\u63A5\u7528\u300C\u5347\u7EA7\u300D");
-  }
-  const memberOs2 = /win/iu.test(target.system?.platform ?? "") ? "windows" : "linux";
-  if (options.packageOs !== void 0 && options.packageOs !== memberOs2) {
-    throw new Error(`\u9009\u7684\u662F ${options.packageOs === "windows" ? "Windows" : "Linux"} \u90E8\u7F72\u5305\uFF0C\u4F46\u6210\u5458 ${String(target.name ?? target.id)} \u662F ${memberOs2}\uFF1B\u6362\u4E00\u4E2A\u5339\u914D\u7684\u5305`);
-  }
-  if (target.dsh !== true) {
-    throw new Error(`\u6210\u5458 ${String(target.name ?? target.id)} \u8FD8\u6CA1\u6709\u5B89\u88C5 DSH\uFF0C\u6CA1\u6709\u53EF\u5347\u7EA7\u7684\u5B89\u88C5\uFF1B\u8BF7\u5148\u7528\u300C\u90E8\u7F72\u300D`);
-  }
-  return target;
-}
-var MeshService = class {
-  /**
-   * @param {{dataDir: string, config?: object, log?: (line: string) => void, spawnRunner?: Function, geoLookup?: object}} options service input.
-   */
-  constructor(options) {
-    this.dataDir = options.dataDir;
-    this.config = options.config ?? {};
-    this.logLine = options.log ?? (() => {
-    });
-    this.jobRoot = path24.join(this.dataDir, "build");
-    this.cacheDir = path24.join(this.dataDir, "cache");
-    this.version = packageVersion();
-    this.repositoryRoot = REPOSITORY_ROOT;
-    this.recipesPath = path24.join(REPOSITORY_ROOT, "build", "recipes.json");
-    this.overlayRoot = path24.join(REPOSITORY_ROOT, "build", "overlays");
-    this.home = path24.dirname(this.dataDir);
-    this.deployRoot = path24.join(this.dataDir, "deploy");
-    this.memberTagsFile = path24.join(this.dataDir, "member-tags.json");
-    this.memberScopesFile = path24.join(this.dataDir, "member-scopes.json");
-    this.announcedUpgrades = /* @__PURE__ */ new Map();
-    this.packagesDir = path24.join(os10.homedir(), ".dsh", "packages");
-    this.releaseConfigFile = path24.join(this.dataDir, "release.json");
-    this.latestReleaseCache = null;
-    const geoConfig = this.config.geo === false ? { enabled: false } : this.config.geo !== null && typeof this.config.geo === "object" ? this.config.geo : {};
-    this.geo = options.geoLookup ?? new GeoLookup({
-      enabled: geoConfig.enabled !== false,
-      cacheFile: path24.join(this.dataDir, "geo-cache.json"),
-      provider: typeof geoConfig.provider === "string" && geoConfig.provider !== "" ? geoConfig.provider : void 0,
-      timeoutMs: typeof geoConfig.timeoutMs === "number" ? geoConfig.timeoutMs : void 0,
-      fetchImpl: typeof geoConfig.fetchImpl === "function" ? geoConfig.fetchImpl : void 0,
-      log: (line) => this.logLine(`geo: ${line}`)
-    });
-    this.deploy = new DeployManager({
-      repositoryRoot: REPOSITORY_ROOT,
-      dataDir: this.deployRoot,
-      log: (line) => this.logLine(`deploy: ${line}`)
-    });
-    this.spawnRunner = options.spawnRunner ?? ((dir, id) => this.#spawnRunner(dir, id));
-    this.running = /* @__PURE__ */ new Map();
-    this.egress = new EgressProxy({ log: (line) => this.logLine(line) });
-    this.remoteBuilder = new RemoteBuilder({ packagesDir: this.packagesDir, log: (line) => this.logLine(line) });
-    this.systemCache = null;
-    this.probes = /* @__PURE__ */ new Map();
-    this.probeCacheFile = path24.join(this.dataDir, "probe-cache.json");
-    this.probeCacheLoaded = false;
-    this.fetchImpl = options.fetchImpl;
-  }
-  /**
-   * Seed the probe map from the last run.
-   *
-   * The map lives in memory, so a panel reload used to forget that a peer was
-   * installed and show 未部署 (with a tempting 部署 button) until the slow peer
-   * answered again. The file keeps that knowledge across restarts; entries age
-   * out after a week so an uninstalled member is eventually re-detected.
-   */
-  async #loadProbes() {
-    if (this.probeCacheLoaded) return;
-    this.probeCacheLoaded = true;
-    try {
-      const parsed = JSON.parse(await readFile16(this.probeCacheFile, "utf8"));
-      if (parsed === null || typeof parsed !== "object") return;
-      const now = Date.now();
-      for (const [ip, entry] of Object.entries(parsed)) {
-        if (this.probes.has(ip) || entry === null || typeof entry !== "object") continue;
-        const at = Number(entry.at);
-        if (!Number.isFinite(at)) continue;
-        const expiresAt = at + PROBE_CACHE_TTL_MS;
-        if (expiresAt <= now) continue;
-        this.probes.set(ip, {
-          port: Number.isInteger(entry.port) ? entry.port : null,
-          gate: entry.gate ?? null,
-          system: entry.system ?? null,
-          latencyMs: Number(entry.latencyMs) || 0,
-          at,
-          expiresAt
-        });
-      }
-    } catch {
-    }
-  }
-  /** Persist the probe map; a failed write is not worth reporting. */
-  async #saveProbes() {
-    try {
-      await mkdir13(path24.dirname(this.probeCacheFile), { recursive: true });
-      await writeFile13(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.probes)), "utf8");
-    } catch {
-    }
-  }
-  /** Cached local host inventory for the member table. */
-  async systemInfo() {
-    if (this.systemCache !== null && this.systemCache.expiresAt > Date.now()) return this.systemCache.value;
-    const value = quickSystemInfo();
-    this.systemCache = { value, expiresAt: Date.now() + 3e4 };
-    return value;
-  }
-  /** No child process is owned directly; jobs own their own. */
-  async dispose() {
-    this.egress.closeAll();
-    await this.deploy.dispose();
-  }
-  /**
-   * Local host and WireGuard facts.
-   * @returns {Promise<object>} status.
-   */
-  async status() {
-    const stateFile = path24.join(this.home, "wireguard", "state.json");
-    const { state, error } = await readWireGuardState({ file: stateFile });
-    const identity = state === null ? null : wireGuardIdentity(state);
-    return {
-      ok: true,
-      host: {
-        hostname: os10.hostname(),
-        platform: process.platform,
-        arch: process.arch,
-        version: this.version,
-        dataDir: this.dataDir,
-        repositoryRoot: this.repositoryRoot
-      },
-      wireguard: identity === null ? { available: false, error, stateFile } : {
-        available: true,
-        stateFile,
-        role: identity.role,
-        connected: identity.connected,
-        vpnCidr: identity.vpnCidr,
-        serverIp: identity.serverIp,
-        serverUrl: identity.serverUrl,
-        selfIp: identity.selfIp,
-        selfName: identity.selfName,
-        lastHandshakeAt: identity.lastHandshakeAt,
-        warnings: identity.warnings
-      },
-      gate: { url: typeof this.config.gateUrl === "string" ? this.config.gateUrl : "" },
-      build: {
-        source: typeof this.config.build?.source === "string" ? this.config.build.source : "",
-        ref: typeof this.config.build?.ref === "string" ? this.config.build.ref : "master",
-        targets: Array.isArray(this.config.build?.targets) ? this.config.build.targets : ["linux-x64", "win-x64"],
-        // Panel defaults: pull-back is opt-in, the post-build upgrade is on.
-        pullBack: pullBackEnabled(void 0, this.config),
-        autoUpgrade: autoUpgradeEnabled(void 0, this.config),
-        jobRoot: this.jobRoot
-      },
-      deploy: { jobRoot: this.deployRoot }
-    };
-  }
-  /**
-   * Discover members from this host. The gate has its own copy of this logic;
-   * this one keeps the panel useful when DSH is opened directly.
-   * @returns {Promise<object>} discovery snapshot.
-   */
-  /**
-   * Ask a Windows member to move its stack into the interactive session.
-   *
-   * The request travels as a cluster call, the same signed channel a member
-   * switch uses, so no new secret is introduced. The member's gate writes the
-   * supervisor command file and answers with the supervisor's status.
-   * @param {string} target member id, name or address.
-   * @returns {Promise<{ok: boolean, member: object, status: object|null}>} result.
-   */
-  async promoteSession(target) {
-    const wanted = String(target ?? "").trim();
-    if (wanted === "") throw new Error("member is required");
-    const snapshot = await this.members();
-    const all = [snapshot.local, ...Array.isArray(snapshot.members) ? snapshot.members : []].filter(Boolean);
-    const member = all.find((candidate) => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted);
-    if (member === void 0) throw new Error(`member not found: ${wanted}`);
-    const password = process.env.DSH_GATE_PASSWORD ?? "";
-    if (password === "") throw new Error("DSH_GATE_PASSWORD is not set; cannot sign the cluster request");
-    let host = String(member.ip ?? "");
-    if (host === "") throw new Error(`member ${member.id} has no VPN address`);
-    if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
-    const path31 = "/__gate/cluster/__gate/session/promote";
-    const response = await fetch(`http://${host}${path31}`, {
-      method: "POST",
-      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path31 }) }
-    });
-    const text = await response.text();
-    if (!response.ok) throw new Error(`member ${member.name} refused the request: HTTP ${String(response.status)} ${text.slice(0, 120)}`);
-    let parsed = null;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-    }
-    return { ok: true, member: { id: member.id, name: member.name, ip: member.ip }, status: parsed?.status ?? null };
-  }
-  async members() {
-    await this.#loadProbes();
-    const stateFile = path24.join(this.home, "wireguard", "state.json");
-    const { state, error } = await readWireGuardState({ file: stateFile });
-    const identity = state === null ? null : wireGuardIdentity(state);
-    const self = {
-      id: "local",
-      kind: "self",
-      name: identity?.selfName ?? os10.hostname(),
-      ip: identity?.selfIp ?? "",
-      online: true,
-      dsh: true,
-      port: null,
-      latencyMs: 0,
-      gate: null,
-      system: await this.systemInfo(),
-      error: null
-    };
-    const install = this.#localAppRoot();
-    if (install !== null) self.deployment = readDeployment(install.appRoot);
-    const snapshot = await discoverMembers({
-      state,
-      stateError: error,
-      self,
-      ports: Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080],
-      timeoutMs: PROBE_TIMEOUT_MS,
-      fetchImpl: this.fetchImpl,
-      geoLookup: this.geo
-    });
-    const tags = await this.memberTags();
-    self.tag = tags[self.id] ?? null;
-    const ports = Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080];
-    const now = Date.now();
-    let probed = false;
-    const members = await Promise.all(snapshot.members.map(async (member) => {
-      const tag = tags[member.id] ?? null;
-      const known = this.probes.get(member.ip);
-      if (member.dsh) {
-        this.probes.set(member.ip, {
-          port: member.port,
-          gate: member.gate,
-          system: member.system,
-          latencyMs: member.latencyMs,
-          at: now,
-          expiresAt: now + PROBE_GRACE_MS
-        });
-        probed = true;
-        return { ...member, tag };
-      }
-      if (known === void 0) return { ...member, tag };
-      const retryPorts = known.port === null ? ports : [known.port];
-      const retry = await probeMember(member.ip, {
-        ports: retryPorts,
-        timeoutMs: PROBE_RETRY_MS,
-        fetchImpl: this.fetchImpl
-      }).catch(() => null);
-      if (retry !== null && retry.ok) {
-        this.probes.set(member.ip, {
-          port: retry.port,
-          gate: retry.info,
-          system: retry.info?.system ?? null,
-          latencyMs: retry.latencyMs,
-          at: now,
-          expiresAt: now + PROBE_GRACE_MS
-        });
-        probed = true;
-        return {
-          ...member,
-          dsh: true,
-          port: retry.port,
-          latencyMs: retry.latencyMs,
-          gate: retry.info,
-          system: retry.info?.system ?? null,
-          error: null,
-          tag
-        };
-      }
-      if (known.expiresAt === void 0 || now > known.expiresAt) return { ...member, tag };
-      return {
-        ...member,
-        dsh: true,
-        port: known.port,
-        latencyMs: known.latencyMs,
-        gate: known.gate,
-        system: known.system,
-        error: null,
-        tag,
-        probeStale: true
-      };
-    }));
-    if (probed) void this.#saveProbes();
-    if (this.probes.size > 64) {
-      for (const [ip, cached] of this.probes) {
-        if (cached.expiresAt !== void 0 && now > cached.expiresAt) this.probes.delete(ip);
-      }
-    }
-    return { ...snapshot, self, members, local: self };
-  }
-  /**
-   * The direct link the mesh networking config gives one member, if any.
-   *
-   * Only the link's client has a local proxy: the server side supplies the
-   * egress. A member without a client link gets no proxy information at all —
-   * there is nothing configured to report, and nothing to set up.
-   * @param {string} ip member VPN address.
-   * @returns {Promise<{proxy: string, port: number}|null>} proxy facts, or null.
-   */
-  async directLinkFor(ip) {
-    const address = String(ip ?? "").trim();
-    if (address === "") return null;
-    const links = await this.#directLinks();
-    const link3 = links.find((item) => item !== null && typeof item === "object" && item?.client?.ip === address);
-    if (link3 === void 0) return null;
-    const proxy2 = typeof link3.httpProxy === "string" ? link3.httpProxy.trim() : "";
-    if (proxy2 === "") return null;
-    try {
-      const url = new URL(proxy2);
-      const port = Number(url.port) || (url.protocol === "https:" ? 443 : 80);
-      return Number.isInteger(port) && port > 0 && port < 65536 ? { proxy: proxy2, port } : null;
-    } catch {
-      return null;
-    }
-  }
-  /**
-   * SSH into one member and measure its local proxy egress.
-   *
-   * The probe is the shipped ES module (`egress-probe.mjs`), piped into the
-   * target's own Node over the mesh SSH key: the measurement runs on the
-   * machine that will use the proxy, through the same loopback listeners the
-   * agent would use. The result is a one-line report for `call_member`.
-   * @param {string} ip member VPN address.
-   * @param {number} port HTTP proxy port the mesh networking config advertises.
-   * @returns {Promise<{ok: boolean, port?: number, latencyMs?: number, downMbps?: number|null, error?: string}>} probe result.
-   */
-  async probeMemberEgress(ip, port) {
-    const address = String(ip ?? "").trim();
-    if (address === "") return { ok: false, error: "member address is empty" };
-    if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, error: "proxy port is invalid" };
-    const { state } = await readWireGuardState({ file: path24.join(this.home, "wireguard", "state.json") });
-    const peer = state?.server?.peers?.find((candidate) => candidate?.ip === address);
-    if (peer === void 0 || peer === null) return { ok: false, error: "member is not in the WireGuard state" };
-    const digest = createHash8("sha256").update(String(peer.publicKey ?? "")).digest("hex");
-    const key = path24.join(this.home, "wireguard", "ssh", `${digest}.key`);
-    if (!existsSync14(key)) return { ok: false, error: "no SSH key for this member" };
-    const windows = String(peer.platform ?? "").toLowerCase().startsWith("win");
-    const remote = windows ? `"%USERPROFILE%\\.dsh\\runtime\\node\\node.exe" --input-type=module - ${String(port)}` : `~/.dsh/runtime/node/bin/node --input-type=module - ${String(port)}`;
-    const user = typeof peer.sshUser === "string" && peer.sshUser !== "" ? peer.sshUser : "root";
-    return await runSshProbe([
-      "-o",
-      "BatchMode=yes",
-      "-o",
-      "ConnectTimeout=8",
-      "-o",
-      "StrictHostKeyChecking=accept-new",
-      "-i",
-      key,
-      `${user}@${address}`,
-      remote
-    ], EGRESS_PROBE_SOURCE);
-  }
-  /**
-   * The git tokens the mesh's package management holds, for the injected
-   * context of a member conversation.
-   * @returns {Promise<{github: string|null, gitee: string|null}>} token values.
-   */
-  async releaseTokens() {
-    const release = await loadReleaseConfig({ file: this.releaseConfigFile });
-    const read = (value) => typeof value === "string" && value.trim() !== "" ? value.trim() : null;
-    return { github: read(release.github?.token), gitee: read(release.gitee?.token) };
-  }
-  /**
-   * User labels for members, keyed by member id.
-   * @returns {Promise<Record<string, string>>} tags.
-   */
-  async memberTags() {
-    try {
-      const parsed = JSON.parse(await readFile16(this.memberTagsFile, "utf8"));
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-      const tags = {};
-      for (const [id, tag] of Object.entries(parsed)) {
-        if (typeof id === "string" && typeof tag === "string" && tag.trim() !== "") tags[id] = tag.trim().slice(0, 32);
-      }
-      return tags;
-    } catch {
-      return {};
-    }
-  }
-  /**
-   * Set or clear one member's label.
-   * @param {string} id member id.
-   * @param {string} tag label; empty removes it.
-   * @returns {Promise<{ok: boolean, tags: Record<string, string>}>} saved tags.
-   */
-  async setMemberTag(id, tag) {
-    if (typeof id !== "string" || id.trim() === "") throw new Error("member id is required");
-    const memberId = id.trim();
-    const label = typeof tag === "string" ? tag.trim().slice(0, 32) : "";
-    const tags = await this.memberTags();
-    if (label === "") delete tags[memberId];
-    else tags[memberId] = label;
-    await mkdir13(this.dataDir, { recursive: true });
-    await writeFile13(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
-`, "utf8");
-    return { ok: true, tags };
-  }
-  /**
-   * Identity, work scope, keep flag and compaction settings for
-   * conversations, keyed by conversation id.
-   *
-   * The file is only an optional hint book: a missing, unreadable, or damaged
-   * file is the same as "nothing set yet", never a startup failure. Only the
-   * fields that were actually set are stored; defaults are applied by readers
-   * ({@link effectiveCompressPercent}).
-   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, compressPercent?: number}>>} scopes.
-   */
-  async memberScopes() {
-    try {
-      const parsed = JSON.parse(await readFile16(this.memberScopesFile, "utf8"));
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-      const scopes = {};
-      for (const [rawId, value] of Object.entries(parsed)) {
-        if (rawId.trim() === "") continue;
-        if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
-        const identity = savedScopeText(value.identity, MEMBER_IDENTITY_MAX);
-        const scope = savedScopeText(value.scope, MEMBER_SCOPE_MAX);
-        const keep = typeof value.keep === "boolean" ? value.keep : void 0;
-        const avoidLongJobs = typeof value.avoidLongJobs === "boolean" ? value.avoidLongJobs : void 0;
-        const note = savedScopeText(value.note, MEMBER_NOTE_MAX);
-        const compressPercent = savedScopeNumber(value.compressPercent, (candidate) => candidate >= 1 && candidate <= 100);
-        if (identity === null && scope === null && keep === void 0 && avoidLongJobs === void 0 && note === null && compressPercent === void 0) continue;
-        scopes[rawId.trim()] = {
-          ...identity === null ? {} : { identity },
-          ...scope === null ? {} : { scope },
-          ...keep === void 0 ? {} : { keep },
-          ...avoidLongJobs === void 0 ? {} : { avoidLongJobs },
-          ...note === null ? {} : { note },
-          ...compressPercent === void 0 ? {} : { compressPercent }
-        };
-      }
-      return scopes;
-    } catch {
-      return {};
-    }
-  }
-  /**
-   * One conversation's scope, or null.
-   * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, compressPercent?: number}|null>} scope.
-   */
-  async memberScope(conversationId) {
-    const id = String(conversationId ?? "").trim();
-    if (id === "") return null;
-    const scopes = await this.memberScopes();
-    return scopes[id] ?? null;
-  }
-  /**
-   * Merge and save one conversation's identity/work scope and settings.
-   *
-   * Only the fields present in the patch change. An empty string clears that
-   * text field (the record is dropped when nothing remains). `keep` and
-   * `avoidLongJobs` are stored as given; only the self target is supposed to
-   * pass them. `note` is main-conversation-only metadata and is never injected
-   * or delivered to the member. `compressPercent` applies to both self and
-   * member conversations.
-   * @param {string} conversationId conversation or session id.
-   * @param {{identity?: unknown, scope?: unknown, keep?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] fields to change.
-   * @returns {Promise<{ok: boolean, scopes: Record<string, object>, scope: object|null}>} saved scopes.
-   */
-  async setMemberScope(conversationId, patch = {}) {
-    const id = String(conversationId ?? "").trim();
-    if (id === "") throw new Error("conversation id is required");
-    const normalized = normalizeMemberScopePatch(patch);
-    const scopes = await this.memberScopes();
-    const next = { ...scopes[id] ?? {} };
-    if (normalized.identity !== void 0) {
-      if (normalized.identity === null) delete next.identity;
-      else next.identity = normalized.identity;
-    }
-    if (normalized.scope !== void 0) {
-      if (normalized.scope === null) delete next.scope;
-      else next.scope = normalized.scope;
-    }
-    if (normalized.keep !== void 0) next.keep = normalized.keep;
-    if (normalized.avoidLongJobs !== void 0) next.avoidLongJobs = normalized.avoidLongJobs;
-    if (normalized.note !== void 0) {
-      if (normalized.note === null) delete next.note;
-      else next.note = normalized.note;
-    }
-    if (normalized.compressPercent !== void 0) next.compressPercent = normalized.compressPercent;
-    if (Object.keys(next).length === 0) delete scopes[id];
-    else scopes[id] = next;
-    await mkdir13(this.dataDir, { recursive: true });
-    await writeFile13(this.memberScopesFile, `${JSON.stringify(scopes, null, 2)}
-`, "utf8");
-    return { ok: true, scopes, scope: scopes[id] ?? null };
-  }
-  /**
-   * Remove the temporary files a build leaves behind.
-   *
-   * `state.json` and `build.log` are the postmortem, so they stay; the source
-   * worktree, work order and extracted package trees are only useful while the
-   * build runs. The job named by `keep` also keeps its smoke screenshots until
-   * the next build cleans them, so the panel's screenshot paths resolve.
-   *
-   * A successful job keeps its archives under `dist/` — a member build's were
-   * already pulled into the packages directory, while a local build has no
-   * other copy. A failed or planned job keeps nothing but the log and state: a
-   * partial archive is not a deliverable.
-   *
-   * `needs-fix` and `learned` jobs are skipped: their worktree is the input the
-   * repair/resume flow works on. `keepDist` disables the pruning entirely for
-   * callers that want the whole tree (`--keep-dist`).
-   * @param {{keep?: string, keepDist?: boolean}} [options] unused compatibility fields.
-   * @returns {Promise<string[]>} ids whose temporary files were removed.
-   */
-  async cleanupBuilds(options = {}) {
-    if (!existsSync14(this.jobRoot)) return [];
-    const entries = await readdir8(this.jobRoot, { withFileTypes: true });
-    const removed = [];
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const dir = path24.join(this.jobRoot, entry.name);
-      let state;
-      try {
-        state = await readState(dir);
-      } catch {
-        continue;
-      }
-      if (this.running.has(state.id) && state.id !== options.keep) continue;
-      if (state.status === "created" || state.status === "needs-fix" || state.status === "learned") continue;
-      await rm14(path24.join(dir, "src"), { recursive: true, force: true });
-      if (state.id !== options.keep) await rm14(path24.join(dir, "smoke"), { recursive: true, force: true });
-      await rm14(path24.join(dir, "work-order"), { recursive: true, force: true });
-      if (options.keepDist !== true) {
-        if (state.status === "done") await this.#pruneDist(path24.join(dir, "dist"));
-        else await rm14(path24.join(dir, "dist"), { recursive: true, force: true });
-      }
-      removed.push(state.id);
-    }
-    return removed;
-  }
-  /**
-   * Remove the extracted package trees from a `dist/` directory.
-   *
-   * Archives and their `.sha256` sidecars are files and stay untouched; the
-   * per-target package directories (an `app/` + `runtime/` copy each) are the
-   * part that costs a gigabyte per target.
-   * @param {string} distDir job `dist/` directory.
-   * @returns {Promise<void>} completion.
-   */
-  async #pruneDist(distDir) {
-    const entries = await readdir8(distDir, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      await rm14(path24.join(distDir, entry.name), { recursive: true, force: true });
-    }
-  }
-  /**
-   * Direct (hysteria2) links that the gate has configured.
-   *
-   * The gate owns the link jobs and writes `links.json` beside the mesh data
-   * directory. Build and deploy read it instead of asking the operator to
-   * restate the link as a proxy URL, which is what kept the two features from
-   * ever using it.
-   * @returns {Promise<object[]>} live link records.
-   */
-  async #directLinks() {
-    try {
-      const raw = JSON.parse(await readFile16(path24.join(this.home, "hysteria", "links.json"), "utf8"));
-      return Array.isArray(raw.links) ? raw.links : [];
-    } catch {
-      return [];
-    }
-  }
-  /**
-   * The direct link whose client is this member, if any.
-   *
-   * A link only helps traffic that originates on its client: the client's
-   * packets enter the hysteria2 tunnel, the server supplies the internet
-   * egress. The server side gains nothing.
-   * @param {object|null} member member snapshot.
-   * @returns {Promise<object|null>} link record.
-   */
-  async #linkFor(member) {
-    return linkFor(await this.#directLinks(), member);
-  }
-  /**
-   * Decide how a build reaches the internet.
-   *
-   * The direct link wins when the build host is its client, because the link
-   * is a faster path to the same egress member. `proxy` and `proxyMember`
-   * remain explicit overrides; `direct: true` forces the build host's own
-   * network.
-   * @param {{member: object|null, proxyUrl: string, proxyMember: object|null, direct?: boolean}} options build request pieces.
-   * @returns {Promise<{kind: 'link'|'proxyMember'|'explicit'|'direct', url?: string, link?: object, proxyMember?: object, reason: string}>} egress plan.
-   */
-  async #resolveBuildEgress(options) {
-    return resolveBuildEgress({ links: await this.#directLinks(), ...options });
-  }
-  /**
-   * Start one build job in the background.
-   *
-   * `member` chooses the build host: empty or `local` runs the engine here,
-   * anything else runs the same engine on that member over SSH. The archives
-   * stay on that member unless `pullBack` is on, and a successful member build
-   * upgrades the member from its own archive. `proxyMember` borrows another
-   * member's internet access for the downloads; `proxy` is an explicit HTTP
-   * proxy URL that both the engine and npm use.
-   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean, member?: string, proxy?: string, proxyMember?: string, pullBack?: boolean, autoUpgrade?: boolean}} request build request.
-   * @returns {Promise<object>} the initial job state.
-   */
-  async startBuild(request = {}) {
-    const defaults = await this.status();
-    const source = (typeof request.source === "string" && request.source !== "" ? request.source : defaults.build.source) || DEFAULT_SOURCE;
-    const ref = (typeof request.ref === "string" && request.ref !== "" ? request.ref : defaults.build.ref) || DEFAULT_REF;
-    const targets = Array.isArray(request.targets) && request.targets.length > 0 ? request.targets : defaults.build.targets;
-    const memberId = typeof request.member === "string" ? request.member.trim() : "";
-    const proxyMemberId = typeof request.proxyMember === "string" ? request.proxyMember.trim() : "";
-    const proxyUrl = typeof request.proxy === "string" ? request.proxy.trim() : "";
-    const pullBack = pullBackEnabled(request, this.config);
-    const autoUpgrade = autoUpgradeEnabled(request, this.config);
-    if (this.running.size > 0) {
-      throw Object.assign(new Error("a build is already running; wait for it to finish"), { status: 409 });
-    }
-    const snapshot = await this.members();
-    const everyone = [snapshot.local, ...snapshot.members].filter((candidate) => candidate !== null && candidate !== void 0);
-    let member = null;
-    if (memberId !== "" && memberId !== "local") {
-      const found = everyone.find((candidate) => candidate.id === memberId || candidate.name === memberId || candidate.ip === memberId);
-      if (found === void 0) throw new Error(`member not found: ${memberId}`);
-      if (found.id !== "local") {
-        if (found.online === false) throw new Error(`member ${found.name} is offline`);
-        const platform = String(found.system?.platform ?? "").toLowerCase();
-        if (platform !== "" && !platform.startsWith("linux") && !platform.startsWith("win")) {
-          throw new Error(`member build needs Linux or Windows; ${found.name} runs ${String(found.system?.platform)}`);
-        }
-        member = found;
-      }
-    }
-    if (request.planOnly === true && member !== null) throw new Error("plan-only builds run on the local host");
-    let proxyMember = null;
-    if (proxyMemberId === "auto") {
-      const link3 = await this.#linkFor(member);
-      proxyMember = link3 === null ? null : everyone.find((candidate) => candidate.ip === link3.server?.ip) ?? null;
-      if (proxyMember === null) {
-        const picked = pickProxyMember(everyone);
-        proxyMember = picked === null ? null : everyone.find((candidate) => candidate.id === picked) ?? null;
-      }
-    } else if (proxyMemberId !== "") {
-      proxyMember = everyone.find((candidate) => candidate.id === proxyMemberId || candidate.name === proxyMemberId || candidate.ip === proxyMemberId) ?? null;
-      if (proxyMember === null) throw new Error(`proxy member not found: ${proxyMemberId}`);
-    }
-    if (proxyMember !== null && proxyMember.id === "local") {
-      throw new Error("the local host cannot proxy its own build; pick a member");
-    }
-    if (proxyMember !== null && String(proxyMember.system?.platform ?? "").toLowerCase().startsWith("win")) {
-      throw new Error(`proxy member must be Linux; ${proxyMember.name} runs ${String(proxyMember.system?.platform)}`);
-    }
-    const egressPlan = await this.#resolveBuildEgress({
-      member,
-      proxyUrl,
-      proxyMember,
-      direct: request.direct === true
-    });
-    const buildStamp = await nextBuildStamp({
-      stateFile: path24.join(this.dataDir, "build-stamp.json"),
-      packagesDir: this.packagesDir
-    });
-    const job = await createJob({
-      root: this.jobRoot,
-      source,
-      ref,
-      targets,
-      member: member?.id ?? null,
-      proxy: egressPlan.kind === "link" || egressPlan.kind === "explicit" ? egressPlan.url : proxyMember !== null ? `member:${proxyMember.id}` : null,
-      mode: member === null ? "local" : "remote",
-      buildStamp
-    });
-    if (member !== null) {
-      await updateState(job.dir, {
-        memberName: member.name,
-        memberIp: member.ip,
-        percent: 0,
-        proxyMember: proxyMember?.id ?? null,
-        egress: egressPlan,
-        pullBack,
-        autoUpgrade
-      });
-    } else {
-      await updateState(job.dir, {
-        ...proxyMember !== null ? { proxyMember: proxyMember.id } : {},
-        egress: egressPlan,
-        percent: 0,
-        pullBack,
-        autoUpgrade
-      });
-    }
-    this.logLine(`mesh build job ${job.id} created (${member === null ? "local" : member.name}, egress: ${egressPlan.reason})`);
-    const promise = this.#runBuild(job, {
-      member,
-      proxyMember,
-      proxyUrl,
-      egressPlan,
-      planOnly: request.planOnly === true,
-      version: request.version,
-      buildStamp: job.state.buildStamp,
-      pullBack,
-      autoUpgrade
-    }).catch((error) => {
-      this.logLine(`mesh build job ${job.id} crashed: ${error instanceof Error ? error.message : String(error)}`);
-    }).finally(() => {
-      this.running.delete(job.id);
-    });
-    this.running.set(job.id, promise);
-    return { ...job.state, dir: job.dir, running: true };
-  }
-  /**
-   * Run one build job to completion, local or on a member.
-   * @param {{id: string, dir: string}} job new job.
-   * @param {{member: object|null, proxyMember: object|null, proxyUrl: string, planOnly: boolean, version?: string, pullBack?: boolean, autoUpgrade?: boolean}} options run options.
-   * @returns {Promise<void>}
-   */
-  async #runBuild(job, options) {
-    let egress = null;
-    let proxyUrl = options.proxyUrl !== "" ? options.proxyUrl : null;
-    const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile });
-    const publishConfigured = releaseConfig.enabled === true && (releaseConfig.github.enabled === true || releaseConfig.gitee.enabled === true);
-    if (publishConfigured) {
-      await appendLog(job.dir, `release publish target: ${[releaseConfig.github.enabled ? `GitHub ${releaseConfig.github.owner}/${releaseConfig.github.repo}` : "", releaseConfig.gitee.enabled ? `Gitee ${releaseConfig.gitee.owner}/${releaseConfig.gitee.repo}` : ""].filter(Boolean).join(" + ")} (tag ${releaseConfig.tag})`);
-    } else {
-      await appendLog(job.dir, "release publish is not configured; the build will not upload to GitHub/Gitee");
-    }
-    try {
-      if (options.egressPlan?.kind === "link") {
-        proxyUrl = options.egressPlan.url;
-        await appendLog(job.dir, `outbound proxy ${proxyUrl} via direct link: ${options.egressPlan.reason}`);
-        await updateState(job.dir, { proxy: proxyUrl, egress: options.egressPlan });
-      } else if ((options.egressPlan === void 0 || options.egressPlan?.kind === "proxyMember") && options.proxyMember !== null && (options.member === null || options.member.id !== options.proxyMember.id)) {
-        egress = await this.egress.start({ plan: await this.#memberSshPlan(options.proxyMember), member: options.proxyMember.name });
-        proxyUrl = egress.url;
-        await appendLog(job.dir, `outbound proxy ${proxyUrl} (${options.proxyMember.name})`);
-        await updateState(job.dir, { proxy: proxyUrl, proxyMember: options.proxyMember.id });
-      }
-      const full = this.config.build?.full !== false;
-      if (options.member === null) {
-        await runJob(job.dir, {
-          repositoryRoot: this.repositoryRoot,
-          recipesPath: this.recipesPath,
-          overlayRoot: this.overlayRoot,
-          cacheDir: this.cacheDir,
-          planOnly: options.planOnly,
-          version: options.version,
-          buildStamp: options.buildStamp,
-          proxy: proxyUrl,
-          publish: { config: releaseConfig, proxy: proxyUrl },
-          full,
-          nodeVersion: typeof this.config.build?.nodeVersion === "string" && this.config.build.nodeVersion !== "" ? this.config.build.nodeVersion : void 0,
-          smoke: this.config.build?.smoke === false ? false : void 0,
-          smokeRequired: this.config.build?.requireSmoke === true,
-          smokeChrome: typeof this.config.build?.chrome === "string" && this.config.build.chrome !== "" ? this.config.build.chrome : void 0
-        });
-        return;
-      }
-      const upgradeTarget = options.autoUpgrade === true ? memberBuildTarget(options.member) : null;
-      const final = await this.remoteBuilder.run(job.dir, {
-        plan: await this.#memberSshPlan(options.member),
-        memberName: options.member.name,
-        proxyUrl,
-        buildStamp: options.buildStamp,
-        heapMb: typeof this.config.build?.memberHeapMb === "number" ? this.config.build.memberHeapMb : void 0,
-        releaseConfig: publishConfigured ? releaseConfig : null,
-        pullBack: options.pullBack === true,
-        // Stage the host's own archive only when the upgrade will use it.
-        stageTarget: upgradeTarget,
-        full
-      });
-      await this.#autoUpgradeAfterBuild(job, final, {
-        member: options.member,
-        autoUpgrade: options.autoUpgrade === true,
-        full,
-        upgradeTarget
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await appendLog(job.dir, `build failed to start: ${message}`).catch(() => {
-      });
-      await updateState(job.dir, { status: "failed", phase: "failed", error: message, percent: 0 }).catch(() => {
-      });
-      throw error;
-    } finally {
-      egress?.close();
-      await this.cleanupBuilds({ keep: job.id }).catch((error) => {
-        this.logLine(`mesh build cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
-    }
-  }
-  /**
-   * Start the post-build upgrade on the member that ran the build.
-   *
-   * The archive was staged on that machine by the remote builder, so the
-   * upgrade plan points at it directly: no release download and no upload from
-   * the gateway. The job is the same detached upgrade every other entry point
-   * starts, so restarting the member's DSH/gate cannot interrupt it. The build
-   * has already succeeded at this point; an upgrade that cannot start is
-   * recorded on the build (`autoUpgradeResult`) and never turns it red.
-   * @param {{id: string, dir: string}} job build job.
-   * @param {object} state final build state.
-   * @param {{member: object|null, autoUpgrade: boolean, full: boolean, upgradeTarget: string|null}} options upgrade input.
-   * @returns {Promise<void>} completion.
-   */
-  async #autoUpgradeAfterBuild(job, state, options) {
-    if (state?.status !== "done" || options.autoUpgrade !== true) return;
-    const member = options.member;
-    const record = async (patch) => {
-      const result = {
-        at: (/* @__PURE__ */ new Date()).toISOString(),
-        member: member?.id ?? null,
-        memberName: member?.name ?? null,
-        ...patch
-      };
-      await updateState(job.dir, { autoUpgradeResult: result }).catch(() => {
-      });
-      return result;
-    };
-    if (member === null || member === void 0) {
-      await record({ status: "skipped", reason: "\u672C\u673A\u7F16\u8BD1\u4E0D\u81EA\u52A8\u5347\u7EA7" });
-      return;
-    }
-    if (options.full === false) {
-      await appendLog(job.dir, "auto-upgrade skipped: a web-only package cannot upgrade an install").catch(() => {
-      });
-      await record({ status: "skipped", reason: "\u53EA Web \u5305\u4E0D\u80FD\u7528\u4E8E\u5347\u7EA7" });
-      return;
-    }
-    if (member.dsh !== true) {
-      await appendLog(job.dir, `auto-upgrade skipped: ${member.name} has no DSH install`).catch(() => {
-      });
-      await record({ status: "skipped", reason: "\u7F16\u8BD1\u673A\u8FD8\u6CA1\u6709\u5B89\u88C5 DSH\uFF0C\u6CA1\u6709\u53EF\u5347\u7EA7\u7684\u5B89\u88C5" });
-      return;
-    }
-    if (options.upgradeTarget === null) {
-      await appendLog(job.dir, "auto-upgrade skipped: this build has no target for the build host").catch(() => {
-      });
-      await record({ status: "skipped", reason: "\u8FD9\u6B21\u7F16\u8BD1\u7684\u76EE\u6807\u5E73\u53F0\u4E0E\u7F16\u8BD1\u673A\u4E0D\u5339\u914D" });
-      return;
-    }
-    const artifact = pickArtifactForMember(state.artifacts, member);
-    if (artifact === null) {
-      await appendLog(job.dir, `auto-upgrade skipped: no ${options.upgradeTarget} artifact`).catch(() => {
-      });
-      await record({ status: "skipped", reason: `\u8FD9\u6B21\u7F16\u8BD1\u6CA1\u6709\u4EA7\u51FA ${options.upgradeTarget} \u5305` });
-      return;
-    }
-    if (typeof artifact.stagedArchive !== "string" || artifact.stagedArchive === "" || typeof artifact.sha256 !== "string" || artifact.sha256 === "" || !Number.isSafeInteger(artifact.bytes)) {
-      await appendLog(job.dir, "auto-upgrade skipped: the archive was not staged on the build host").catch(() => {
-      });
-      await record({ status: "skipped", reason: "\u4EA7\u7269\u6CA1\u6709\u6210\u529F\u6682\u5B58\u5230\u7F16\u8BD1\u673A\uFF0C\u65E0\u6CD5\u5728\u672C\u673A\u5347\u7EA7" });
-      return;
-    }
-    try {
-      const started = await this.startDeploy({
-        member: member.id,
-        mode: "upgrade",
-        packageOnTarget: {
-          path: artifact.stagedArchive,
-          bytes: artifact.bytes,
-          sha256: artifact.sha256
-        }
-      });
-      const result = await record({
-        status: "started",
-        jobId: started.job.id,
-        release: started.job.release ?? null,
-        package: artifact.stagedArchive
-      });
-      await appendLog(job.dir, `auto-upgrade started on ${member.name}: ${result.jobId} (${artifact.stagedArchive})`).catch(() => {
-      });
-      this.logLine(`mesh build ${job.id} auto-upgrade ${result.jobId} started on ${member.name}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const busy = Number(error?.status) === 409;
-      await appendLog(job.dir, `auto-upgrade could not start: ${message}`).catch(() => {
-      });
-      await record({ status: busy ? "skipped" : "failed", reason: message });
-      this.logLine(`mesh build ${job.id} auto-upgrade did not start: ${message}`);
-    }
-  }
-  /**
-   * SSH coordinates for one member.
-   * @param {object} member member snapshot.
-   * @returns {Promise<{host: string, user: string, port: number, identityFile?: string, appRoot?: string, os: string}>} plan.
-   */
-  async #memberSshPlan(member) {
-    if (member.ip === "") throw new Error(`member ${member.name} has no VPN address`);
-    let user = "root";
-    let identityFile;
-    let port = 22;
-    const { state } = await readWireGuardState({ file: path24.join(this.home, "wireguard", "state.json") });
-    const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
-    if (peer !== void 0 && peer !== null) {
-      if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
-      if (Number.isSafeInteger(peer.sshPort)) port = peer.sshPort;
-      if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
-        const digest = createHash8("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path24.join(this.home, "wireguard", "ssh", `${digest}.key`);
-        if (existsSync14(candidate)) identityFile = candidate;
-      }
-    }
-    const platform = String(member.system?.platform ?? "").toLowerCase();
-    return {
-      host: member.ip,
-      user,
-      port,
-      identityFile,
-      appRoot: typeof member.system?.appRoot === "string" ? member.system.appRoot : void 0,
-      os: platform.startsWith("win") ? "windows" : "linux"
-    };
-  }
-  /**
-   * Run one build to completion.
-   *
-   * Without `jobId` this starts a fresh build. With `jobId` it treats the
-   * job's worktree as the DSH-adapted result: if the job stopped at
-   * `needs-fix`, it learns the corrected files into the overlay set first,
-   * then resumes the same job. There is no separate learn/resume command.
-   * Older jobs are cleaned only after the current job finishes, so a running
-   * build never loses its own worktree or package.
-   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean, jobId?: string}} request build request.
-   * @returns {Promise<object>} final job with log tail.
-   */
-  async build(request = {}) {
-    if (typeof request.jobId === "string" && request.jobId !== "") {
-      const state = await this.job(request.jobId);
-      if (state.status === "needs-fix") await this.learn(request.jobId);
-      const resumed = await this.resumeBuild(request.jobId);
-      const running2 = this.running.get(resumed.id);
-      if (running2 !== void 0) await running2;
-      const final2 = await this.job(resumed.id);
-      await this.cleanupBuilds({ keep: resumed.id, keepDist: request.keepDist === true });
-      return final2;
-    }
-    const job = await this.startBuild(request);
-    const running = this.running.get(job.id);
-    if (running !== void 0) await running;
-    const final = await this.job(job.id);
-    await this.cleanupBuilds({ keep: job.id, keepDist: request.keepDist === true });
-    return final;
-  }
-  /**
-   * Continue a job from its corrected worktree. This is what follows the
-   * automatic learn step: the overlays have been updated, and the worktree
-   * already contains the fix, so nothing is downloaded again.
-   * @param {string} id job id.
-   * @returns {Promise<object>} the job state, running in the background.
-   */
-  async resumeBuild(id) {
-    const dir = this._jobDir(id);
-    if (this.running.has(id)) throw new Error("this job is already running");
-    const state = await readState(dir);
-    this.logLine(`mesh build job ${id} resumed`);
-    const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile });
-    const promise = runJob(dir, {
-      repositoryRoot: this.repositoryRoot,
-      publish: { config: releaseConfig, proxy: null },
-      recipesPath: this.recipesPath,
-      overlayRoot: this.overlayRoot,
-      cacheDir: this.cacheDir,
-      reuseWorktree: true,
-      buildStamp: state.buildStamp,
-      full: this.config.build?.full !== false,
-      nodeVersion: typeof this.config.build?.nodeVersion === "string" && this.config.build.nodeVersion !== "" ? this.config.build.nodeVersion : void 0,
-      smoke: this.config.build?.smoke === false ? false : void 0,
-      smokeRequired: this.config.build?.requireSmoke === true,
-      smokeChrome: typeof this.config.build?.chrome === "string" && this.config.build.chrome !== "" ? this.config.build.chrome : void 0
-    }).catch((error) => {
-      this.logLine(`mesh build job ${id} crashed: ${error instanceof Error ? error.message : String(error)}`);
-    }).finally(() => {
-      this.running.delete(id);
-    });
-    this.running.set(id, promise);
-    return { ...state, running: true };
-  }
-  /**
-   * Read one job with its log tail and work-order paths.
-   * @param {string} id job id.
-   * @returns {Promise<object>} job detail.
-   */
-  async job(id) {
-    const dir = this._jobDir(id);
-    const state = await readState(dir);
-    return {
-      ...state,
-      logFile: path24.join(dir, "build.log"),
-      stateFile: path24.join(dir, "state.json"),
-      logTail: await readLogTail(dir, 60),
-      running: this.running.has(id),
-      workOrderMarkdown: state.workOrder?.markdown ?? null,
-      workOrderPrompt: state.workOrder?.prompt ?? null
-    };
-  }
-  /**
-   * List known jobs, newest first.
-   * @returns {Promise<object[]>} jobs.
-   */
-  async jobs() {
-    if (!existsSync14(this.jobRoot)) return [];
-    const entries = await readdir8(this.jobRoot, { withFileTypes: true });
-    const jobs = [];
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      try {
-        const state = await readState(path24.join(this.jobRoot, entry.name));
-        jobs.push(this.#summary(state));
-      } catch {
-      }
-    }
-    return jobs.sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
-  }
-  /**
-   * The list projection of one job, or null when it does not exist.
-   *
-   * The panel's event stream pushes this shape, so it is the same object
-   * `jobs()` returns and the client can merge it into its table.
-   * @param {string} id job id.
-   * @returns {Promise<object|null>} summary.
-   */
-  async buildSummary(id) {
-    let dir;
-    try {
-      dir = this._jobDir(id);
-    } catch {
-      return null;
-    }
-    try {
-      return this.#summary(await readState(dir));
-    } catch {
-      return null;
-    }
-  }
-  /** Project a job state onto the fields the panel lists. */
-  #summary(state) {
-    return {
-      id: state.id,
-      status: state.status,
-      phase: state.phase,
-      source: state.source,
-      ref: state.ref,
-      targets: state.targets,
-      updatedAt: state.updatedAt,
-      createdAt: state.createdAt,
-      member: state.member ?? null,
-      memberName: state.memberName ?? null,
-      mode: state.mode ?? "local",
-      proxy: state.proxy ?? null,
-      proxyMember: state.proxyMember ?? null,
-      percent: typeof state.percent === "number" ? state.percent : null,
-      currentTarget: state.currentTarget ?? null,
-      version: state.version ?? null,
-      error: state.error ?? null,
-      publish: state.publish ?? null,
-      pullBack: state.pullBack ?? null,
-      pulledBack: state.pulledBack ?? null,
-      remoteDirKept: state.remoteDirKept ?? null,
-      autoUpgrade: state.autoUpgrade ?? null,
-      autoUpgradeResult: state.autoUpgradeResult ?? null
-    };
-  }
-  /**
-   * Read one job's log tail.
-   * @param {string} id job id.
-   * @param {number} [lines] number of lines.
-   * @returns {Promise<string[]>} lines.
-   */
-  async log(id, lines = 80) {
-    return readLogTail(this._jobDir(id), lines);
-  }
-  /**
-   * Learn overlays from a corrected worktree.
-   * @param {string} id job id.
-   * @returns {Promise<object>} updated state.
-   */
-  async learn(id) {
-    return learnJob(this._jobDir(id), {
-      repositoryRoot: this.repositoryRoot,
-      recipesPath: this.recipesPath,
-      overlayRoot: this.overlayRoot
-    });
-  }
-  /**
-   * Read the recipe manifest summary.
-   * @returns {Promise<object>} recipes.
-   */
-  async recipes() {
-    const parsed = JSON.parse(await readFile16(this.recipesPath, "utf8"));
-    return {
-      source: parsed.source,
-      ref: parsed.ref,
-      tree: parsed.tree ?? null,
-      steps: (parsed.steps ?? []).map((step) => ({
-        id: step.id,
-        title: step.title,
-        doc: step.doc,
-        files: (step.files ?? []).map((file) => ({ path: file.path, baseSha256: file.baseSha256 ?? null }))
-      }))
-    };
-  }
-  /**
-   * The newest package published under the configured `latest` tag.
-   *
-   * Gitee is probed first because a domestic gateway usually reaches it
-   * directly; GitHub is the fallback and may be slow or blocked. The result is
-   * cached for a few seconds so opening the dialog and then starting the
-   * upgrade do not read the manifest twice.
-   * @param {{refresh?: boolean}} [options] refresh forces a new read.
-   * @returns {Promise<object>} normalized release.
-   */
-  async latestRelease(options = {}) {
-    const config = await loadReleaseConfig({ file: this.releaseConfigFile });
-    const sources = latestManifestSources(config);
-    const manifests = [];
-    if (typeof sources.gitee === "string" && sources.gitee !== "") manifests.push({ provider: "gitee", url: sources.gitee });
-    if (typeof sources.github === "string" && sources.github !== "") manifests.push({ provider: "github", url: sources.github });
-    const urls = manifests.map((entry) => entry.url);
-    if (urls.length === 0) {
-      return { ok: false, configured: false, assets: [], manifestUrls: [], manifests: [], error: "\u8FD8\u6CA1\u6709\u914D\u7F6E Release \u53D1\u5E03" };
-    }
-    const cached = this.latestReleaseCache;
-    if (options.refresh !== true && cached !== null && Date.now() - cached.at < 3e4) return cached.value;
-    try {
-      const found = await fetchLatestManifest({ urls, timeoutMs: 15e3 });
-      let provider = "github";
-      try {
-        provider = /(?:^|\.)gitee\.com$/iu.test(new URL(found.url).hostname) ? "gitee" : "github";
-      } catch {
-      }
-      const value = { ...normalizeLatestManifest(found.manifest, { provider, manifestUrls: urls }), manifests };
-      this.latestReleaseCache = { at: Date.now(), value };
-      return value;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (cached !== null) return { ...cached.value, stale: true, error: message };
-      return { ok: false, configured: true, assets: [], manifestUrls: urls, manifests, error: message };
-    }
-  }
-  /**
-   * Archives already present on one member.
-   *
-   * The gateway lists its own `~/.dsh/packages` (plus the build staging it may
-   * have). A peer is asked over SSH; both `~/.dsh/packages` and
-   * `~/.dsh/mesh/upgrade` are scanned, because a build host leaves its archive
-   * in the latter rather than pulling it back to the gateway.
-   * @param {string} memberId member id, name, or VPN address.
-   * @returns {Promise<{ok: boolean, member: string, packages: object[], error?: string}>} listing.
-   */
-  async memberPackages(memberId) {
-    const wanted = typeof memberId === "string" ? memberId.trim() : "";
-    if (wanted === "") throw new Error("member is required");
-    const snapshot = await this.members();
-    const all = [snapshot.local, ...snapshot.members].filter(Boolean);
-    const member = all.find((candidate) => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted);
-    if (member === void 0) throw new Error(`member not found: ${wanted}`);
-    if (member.id === "local" || member.kind === "self") {
-      return { ok: true, member: member.id, packages: await this.#localTargetPackages() };
-    }
-    try {
-      return { ok: true, member: member.id, packages: await this.#remoteTargetPackages(member) };
-    } catch (error) {
-      return { ok: false, member: member.id, packages: [], error: error instanceof Error ? error.message : String(error) };
-    }
-  }
-  /**
-   * Read archives from the gateway's own package cache and build staging.
-   * @returns {Promise<object[]>} packages.
-   */
-  async #localTargetPackages() {
-    const packages = [];
-    const seen = /* @__PURE__ */ new Set();
-    const walk = async (dir, depth) => {
-      if (depth < 0) return;
-      const entries = await readdir8(dir, { withFileTypes: true }).catch(() => []);
-      for (const entry of entries) {
-        const file = path24.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          if (depth > 0) await walk(file, depth - 1);
-          continue;
-        }
-        if (!entry.isFile()) continue;
-        const parsed = packageTargetFromName(entry.name);
-        if (parsed === null || seen.has(file)) continue;
-        const info = await stat13(file).catch(() => null);
-        if (info === null) continue;
-        seen.add(file);
-        const sidecar = await readFile16(`${file}.sha256`, "utf8").catch(() => "");
-        const sha256 = /^([a-f0-9]{64})\b/iu.exec(sidecar)?.[1]?.toLowerCase() ?? null;
-        packages.push({ name: entry.name, path: file, bytes: info.size, mtime: info.mtime.toISOString(), sha256, ...parsed });
-      }
-    };
-    await walk(this.packagesDir, 0);
-    await walk(path24.join(this.dataDir, "upgrade"), 2);
-    packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
-    return packages;
-  }
-  /**
-   * The home a member's service runs under.
-   *
-   * The SSH user and the service user can differ; the member reports its own
-   * home, so prefer that over the SSH login's `$HOME`.
-   * @param {object} member member snapshot.
-   * @param {{user: string, os: 'linux'|'windows'}} plan SSH plan.
-   * @returns {string} home directory.
-   */
-  #memberHome(member, plan) {
-    const reported = typeof member.system?.home === "string" ? member.system.home.trim() : "";
-    if (reported !== "") return reported;
-    if (plan.os === "windows") return `C:\\Users\\${plan.user}`;
-    return plan.user === "root" ? "/root" : `/home/${plan.user}`;
-  }
-  /**
-   * Ask a peer for its archives over SSH.
-   * @param {object} member member snapshot.
-   * @returns {Promise<object[]>} packages.
-   */
-  async #remoteTargetPackages(member) {
-    const plan = await this.#memberSshPlan(member);
-    const runner = new SshRunner({ ...plan, os: plan.os });
-    const script = listPackagesScript(plan.os, this.#memberHome(member, plan));
-    let stdout = "";
-    if (plan.os === "windows") {
-      const encoded = Buffer.from(script, "utf16le").toString("base64");
-      ({ stdout } = await runner.runProcess("ssh", [
-        ...runner.sshOptions(),
-        runner.target(),
-        `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
-      ]));
-    } else {
-      ;
-      ({ stdout } = await runner.runProcess("ssh", [
-        ...runner.sshOptions(),
-        runner.target(),
-        "bash -s"
-      ], script));
-    }
-    return parseTargetPackageList(stdout);
-  }
-  /**
-   * Validate one archive the operator picked from the target member.
-   *
-   * The path must be under that member's package cache or build staging, the
-   * archive name must match the target's platform, and the digest is computed
-   * here instead of trusted from the browser.
-   * @param {object} member target member.
-   * @param {{path?: string, bytes?: number, sha256?: string}} request selected package.
-   * @returns {Promise<{path: string, bytes: number, sha256: string, name: string, os: 'linux'|'windows'}>} verified package.
-   */
-  async #resolveTargetPackage(member, request) {
-    const file = typeof request?.path === "string" ? request.path.trim() : "";
-    if (file === "") throw new Error("targetPackage.path is required");
-    const plan = await this.#memberSshPlan(member);
-    const os11 = plan.os === "windows" ? "windows" : "linux";
-    const home = this.#memberHome(member, plan);
-    if (!isAllowedPackagePath(file, home, os11)) {
-      throw new Error("\u76EE\u6807\u5305\u4E0D\u5728\u8BE5\u6210\u5458\u7684 ~/.dsh/packages \u6216 ~/.dsh/mesh/upgrade \u76EE\u5F55\u5185");
-    }
-    const name = file.split(/[\\/]/u).pop() ?? "";
-    const parsed = packageTargetFromName(name);
-    if (parsed === null) throw new Error(`\u4E0D\u662F\u53EF\u8BC6\u522B\u7684\u90E8\u7F72\u5305\uFF1A${name}`);
-    if (parsed.os !== os11) throw new Error(`\u5305\u5E73\u53F0 ${parsed.os} \u4E0E\u6210\u5458 ${os11} \u4E0D\u5339\u914D`);
-    const memberTarget = memberBuildTarget(member);
-    if (memberTarget !== null && memberTarget !== parsed.target) {
-      throw new Error(`\u5305\u5E73\u53F0 ${parsed.target} \u4E0E\u6210\u5458 ${memberTarget} \u4E0D\u5339\u914D`);
-    }
-    let bytes = 0;
-    let sha256 = "";
-    if (member.id === "local" || member.kind === "self") {
-      const info = await stat13(file).catch(() => null);
-      if (info === null || !info.isFile()) throw new Error(`\u76EE\u6807\u5305\u4E0D\u5B58\u5728\uFF1A${file}`);
-      bytes = info.size;
-      sha256 = await sha256File(file);
-    } else {
-      const runner = new SshRunner({ ...plan, os: os11 });
-      const size = await runner.remoteSize(file);
-      if (size === null) throw new Error(`\u76EE\u6807\u5305\u4E0D\u5B58\u5728\uFF1A${file}`);
-      bytes = size;
-      if (os11 === "windows") {
-        const { stdout } = await runner.runProcess("ssh", [
-          ...runner.sshOptions(),
-          runner.target(),
-          `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath ${powershellQuote(file)}).Hash"`
-        ]);
-        sha256 = String(stdout).trim().toLowerCase();
-      } else {
-        const { stdout } = await runner.runProcess("ssh", [
-          ...runner.sshOptions(),
-          runner.target(),
-          `sha256sum -- ${shellQuote(file)}`
-        ]);
-        sha256 = String(stdout).trim().split(/\s+/u)[0]?.toLowerCase() ?? "";
-      }
-    }
-    if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error(`\u65E0\u6CD5\u8BA1\u7B97\u76EE\u6807\u5305\u7684\u6821\u9A8C\u548C\uFF1A${name}`);
-    if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error(`\u76EE\u6807\u5305\u662F\u7A7A\u6587\u4EF6\uFF1A${name}`);
-    if (Number.isSafeInteger(Number(request?.bytes)) && Number(request.bytes) > 0 && Number(request.bytes) !== bytes) {
-      throw new Error(`\u76EE\u6807\u5305\u5927\u5C0F\u53D8\u4E86\uFF1A\u671F\u671B ${String(request.bytes)}\uFF0C\u5B9E\u9645 ${String(bytes)}`);
-    }
-    const expected = typeof request?.sha256 === "string" ? request.sha256.trim().toLowerCase() : "";
-    if (expected !== "" && expected !== sha256) throw new Error("\u76EE\u6807\u5305\u7684\u6821\u9A8C\u548C\u4E0E\u5217\u8868\u4E0D\u4E00\u81F4\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5");
-    return { path: file, bytes, sha256, name, os: os11 };
-  }
-  /**
-   * Local deployment packages. The fixed directory is `~/.dsh/packages`.
-   *
-   * Only archives that name a `dsh-mesh` deployment target are offered. The
-   * directory is a plain cache that other flows write to as well (a plugin
-   * bundle, for instance, is a `.tgz` too), and an archive without a platform
-   * cannot be deployed: extracted on a member it has no runtime to start.
-   * Filtering here keeps such a file out of the panel list and out of the
-   * scheduled upgrade candidates.
-   * @returns {Promise<object>} package list.
-   */
-  async packages() {
-    const entries = await readdir8(this.packagesDir, { withFileTypes: true }).catch(() => []);
-    const packages = [];
-    for (const entry of entries) {
-      if (!entry.isFile()) continue;
-      const parsed = packagePlatformFromName(entry.name);
-      if (parsed === null) continue;
-      const file = path24.join(this.packagesDir, entry.name);
-      const info = await stat13(file).catch(() => null);
-      if (info === null) continue;
-      packages.push({
-        name: entry.name,
-        path: file,
-        bytes: info.size,
-        mtime: info.mtime.toISOString(),
-        target: parsed.os
-      });
-    }
-    packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
-    return { ok: true, dir: this.packagesDir, packages };
-  }
-  /**
-   * The newest build that actually finished.
-   *
-   * A failed or needs-fix job must not become the baseline for the update
-   * check, or one bad night would suppress the retry for every following day.
-   * @returns {Promise<object|null>} job state with artifacts, or null.
-   */
-  async #latestDoneBuild() {
-    for (const job of await this.jobs()) {
-      if (job.status !== "done") continue;
-      try {
-        return await readState(this._jobDir(job.id));
-      } catch {
-      }
-    }
-    return null;
-  }
-  /**
-   * Resolve the remote revisions the next build would use.
-   *
-   * The ETags come from codeload HEAD requests and are recorded in the package
-   * manifest, so the daily check never downloads a tarball just to answer
-   * "is there anything new?".
-   * @param {string} source DSH source.
-   * @param {string} ref DSH ref.
-   * @returns {Promise<object>} current source state.
-   */
-  async #currentBuildSources(source, ref) {
-    const extra = await readExtraPlugins(this.repositoryRoot);
-    const extraPlugins = await Promise.all(extra.map(async (plugin) => ({
-      name: plugin.name,
-      repo: plugin.repo,
-      ref: plugin.ref,
-      etag: await remoteRevision(plugin.repo, plugin.ref)
-    })));
-    return {
-      source,
-      ref,
-      sourceEtag: await remoteRevision(source, ref),
-      pluginFingerprint: await pluginFingerprint(this.repositoryRoot),
-      extraPlugins
-    };
-  }
-  /**
-   * One scheduled build: build only when DSH, dsh-mesh, or a bundled plugin
-   * changed since the newest finished build.
-   *
-   * Returns immediately after starting the job; the build itself is the same
-   * background job the panel starts.
-   * @returns {Promise<{status: string, reason?: string, jobId?: string}>} outcome.
-   */
-  async scheduledBuild() {
-    if (this.running.size > 0) return { status: "skipped", reason: "\u5DF2\u6709\u7F16\u8BD1\u4EFB\u52A1\u5728\u8FD0\u884C" };
-    const jobs = await this.jobs();
-    if (jobs.some((job2) => job2.status === "running" || job2.status === "created")) {
-      return { status: "skipped", reason: "\u5DF2\u6709\u7F16\u8BD1\u4EFB\u52A1\u5728\u8FD0\u884C" };
-    }
-    const defaults = await this.status();
-    const source = defaults.build.source || DEFAULT_SOURCE;
-    const ref = defaults.build.ref || DEFAULT_REF;
-    const targets = defaults.build.targets;
-    const latest = await this.#latestDoneBuild();
-    const latestManifest = latest?.artifacts?.[0]?.manifest ?? null;
-    const current = await this.#currentBuildSources(source, ref);
-    const reasons = buildUpdateReasons({ latestManifest, current });
-    if (reasons.length === 0) {
-      return { status: "skipped", reason: "DSH\u3001dsh-mesh\u3001xl \u90FD\u6CA1\u6709\u66F4\u65B0" };
-    }
-    const snapshot = await this.members();
-    const everyone = [snapshot.local, ...snapshot.members].filter(Boolean);
-    const member = pickBuildMember(everyone);
-    const proxyMember = pickProxyMember(everyone);
-    const job = await this.startBuild({
-      source,
-      ref,
-      targets,
-      ...member !== "local" ? { member } : {},
-      ...proxyMember !== null ? { proxyMember } : {}
-    });
-    this.logLine(`scheduled build ${job.id} started: ${reasons.join("\uFF1B")}`);
-    return {
-      status: "started",
-      jobId: job.id,
-      reason: reasons.join("\uFF1B"),
-      member: member === "local" ? "local" : member,
-      proxyMember: proxyMember ?? null
-    };
-  }
-  /**
-   * Fill in a member's deployment from the newest successful deploy job.
-   *
-   * Old gates do not report their release; this is the same fallback the
-   * member table uses, so a member that never reported a version is still
-   * compared instead of being skipped forever.
-   * @param {object} member member row.
-   * @param {object[]} deployJobs recent deploy jobs.
-   * @returns {void}
-   */
-  #applyInferredDeployment(member, deployJobs) {
-    if (memberDeployment(member) !== null) return;
-    const job = deployJobs.find((candidate) => candidate.status === "succeeded" && candidate.package !== void 0 && (candidate.member === member.id || candidate.target?.host === member.ip));
-    const parsed = packageInfo(path24.basename(job?.package ?? ""));
-    if (parsed === null) return;
-    member.deployment = { version: parsed.version, buildStamp: parsed.buildStamp, inferred: true };
-  }
-  /**
-   * Announce one member's imminent auto-upgrade to its running conversations.
-   *
-   * The member owns those conversations, so the gateway only asks: it POSTs
-   * `/v1/upgrade/prepare`, the member classifies its running agents (leader /
-   * member / plain) and injects the matching stop message. A member older than
-   * this release has no such endpoint; that is reported, not retried, and the
-   * upgrade still runs.
-   *
-   * Nothing is announced when the member is already on the newest build: the
-   * upgrade tick would only skip it, and stopping conversations for nothing
-   * would be worse than the missed notice.
-   * @param {string} memberId member id.
-   * @returns {Promise<{status: string, member?: string, reason?: string, announced?: number, counts?: object}>} outcome.
-   */
-  async scheduledPrepareUpgrade(memberId) {
-    const snapshot = await this.members();
-    const everyone = [snapshot.local, ...snapshot.members].filter(Boolean);
-    const member = everyone.find((candidate2) => candidate2.id === memberId);
-    if (member === void 0) return { status: "skipped", reason: "\u6210\u5458\u4E0D\u5728\u5F53\u524D\u5217\u8868", member: memberId };
-    if (member.online === false) return { status: "skipped", reason: "\u79BB\u7EBF", member: member.name };
-    if (member.id === "local" || member.kind === "self") return { status: "skipped", reason: "\u672C\u673A\u6CA1\u6709\u81EA\u52A8\u5347\u7EA7", member: member.name };
-    const deployJobs = await this.deployJobs(50);
-    this.#applyInferredDeployment(member, deployJobs);
-    const packages = (await this.packages()).packages;
-    const release = await this.#scheduledRelease();
-    const candidate = planMemberUpgrade(member, packages, release);
-    if (candidate.package === void 0) {
-      return { status: "skipped", member: member.name, reason: candidate.reason };
-    }
-    return this.#announceUpgrade(member);
-  }
-  /**
-   * Ask one member to stop the conversations an upgrade will interrupt.
-   * @param {object} member member row.
-   * @returns {Promise<{status: string, member: string, reason?: string, announced?: number, counts?: object}>} outcome.
-   */
-  async #announceUpgrade(member) {
-    if (member.dsh !== true || typeof member.ip !== "string" || member.ip === "") {
-      return { status: "skipped", member: member.name, reason: "\u6210\u5458\u6CA1\u6709\u5728\u8FD0\u884C\u7684 DSH" };
-    }
-    let response;
-    try {
-      response = await memberInteropRequest(this, {
-        address: member.ip,
-        path: "/v1/upgrade/prepare",
-        body: {},
-        timeoutMs: 2e4
-      });
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      this.logLine(`scheduled upgrade ${member.name}: could not announce the restart: ${reason}`);
-      return { status: "failed", member: member.name, reason };
-    }
-    if (response.unsupported) {
-      this.logLine(`scheduled upgrade ${member.name}: the member's release has no /v1/upgrade/prepare; its conversations are not stopped`);
-      return { status: "unsupported", member: member.name, reason: "\u6210\u5458\u7248\u672C\u8FC7\u65E7\uFF0C\u4E0D\u652F\u6301\u5347\u7EA7\u524D\u505C\u6B62\u901A\u77E5" };
-    }
-    if (!response.ok) {
-      const reason = response.data?.error?.message ?? `HTTP ${String(response.status)}`;
-      this.logLine(`scheduled upgrade ${member.name}: the announcement was refused: ${reason}`);
-      return { status: "failed", member: member.name, reason };
-    }
-    const announced = Number.isSafeInteger(response.data?.announced) ? response.data.announced : 0;
-    const counts = response.data?.counts ?? {};
-    this.announcedUpgrades.set(member.id, { at: (/* @__PURE__ */ new Date()).toISOString(), counts });
-    this.logLine(`scheduled upgrade ${member.name}: announced to ${String(announced)} running conversation(s) (leader ${String(counts.leader ?? 0)}, member ${String(counts.member ?? 0)}, plain ${String(counts.plain ?? 0)})`);
-    return {
-      status: response.data?.already === true ? "already" : "announced",
-      member: member.name,
-      announced,
-      counts
-    };
-  }
-  /**
-   * Make sure the stop messages went out before an upgrade starts.
-   *
-   * The scheduler normally announced ten minutes earlier. When this process
-   * was not alive for that tick (a restart inside the window), the
-   * announcement happens now and the upgrade still proceeds: the alternative —
-   * skipping the upgrade — would silently drop a scheduled deployment.
-   * @param {object} member member row.
-   * @returns {Promise<void>} completion.
-   */
-  async #ensureUpgradeAnnounced(member) {
-    if (member.dsh !== true || typeof member.ip !== "string" || member.ip === "") return;
-    const previous = this.announcedUpgrades.get(member.id);
-    if (previous !== void 0) {
-      const at = Date.parse(previous.at);
-      if (Number.isFinite(at) && Date.now() - at <= UPGRADE_ANNOUNCE_WINDOW_MS) return;
-    }
-    const result = await this.#announceUpgrade(member).catch((error) => ({
-      status: "failed",
-      member: member.name,
-      reason: error instanceof Error ? error.message : String(error)
-    }));
-    if (result.status === "announced" || result.status === "already") {
-      this.logLine(`scheduled upgrade ${member.name}: the stop messages went out at the upgrade tick (the ten-minute lead was missed)`);
-    }
-  }
-  /**
-   * One member's scheduled auto-upgrade.
-   *
-   * The archive comes from the gateway cache when that copy is the newest one;
-   * otherwise the member downloads the matching `latest` release asset itself
-   * (Gitee first, GitHub through an egress member). The job is started and left
-   * detached; the scheduler records "started" instead of holding its tick open
-   * for a download that may take minutes.
-   * @param {string} memberId member id.
-   * @returns {Promise<{status: string, member?: string, package?: string, source?: 'local'|'release', jobId?: string, reason?: string}>} outcome.
-   */
-  async scheduledUpgradeMember(memberId) {
-    if (this.running.size > 0) return { status: "skipped", reason: "\u7F16\u8BD1\u4EFB\u52A1\u8FD8\u5728\u8FD0\u884C", member: memberId };
-    const snapshot = await this.members();
-    const everyone = [snapshot.local, ...snapshot.members].filter(Boolean);
-    const member = everyone.find((candidate2) => candidate2.id === memberId);
-    if (member === void 0) return { status: "skipped", reason: "\u6210\u5458\u4E0D\u5728\u5F53\u524D\u5217\u8868", member: memberId };
-    if (member.online === false) return { status: "skipped", reason: "\u79BB\u7EBF", member: member.name };
-    const deployJobs = await this.deployJobs(50);
-    this.#applyInferredDeployment(member, deployJobs);
-    const packages = (await this.packages()).packages;
-    const release = await this.#scheduledRelease();
-    const candidate = planMemberUpgrade(member, packages, release);
-    if (candidate.package === void 0) {
-      return { status: "skipped", member: member.name, reason: candidate.reason };
-    }
-    try {
-      await this.#ensureUpgradeAnnounced(member);
-      return { status: "started", ...await this.#startScheduledUpgrade(member, candidate) };
-    } catch (error) {
-      return { status: "failed", member: member.name, reason: error instanceof Error ? error.message : String(error) };
-    }
-  }
-  /**
-   * One scheduled upgrade: bring every member that is behind to its newest
-   * source, peers before the local gateway.
-   *
-   * Each member keeps its own detached job; a failure on one member does not
-   * stop the others, and the local install is started last because upgrading
-   * it restarts this process.
-   * @returns {Promise<{status: string, reason?: string, upgraded?: object[], failed?: object[], skipped?: object[]}>} outcome.
-   */
-  async scheduledUpgrade() {
-    if (this.running.size > 0) return { status: "skipped", reason: "\u7F16\u8BD1\u4EFB\u52A1\u8FD8\u5728\u8FD0\u884C" };
-    const snapshot = await this.members();
-    const everyone = [snapshot.local, ...snapshot.members].filter(Boolean);
-    const deployJobs = await this.deployJobs(50);
-    for (const member of everyone) this.#applyInferredDeployment(member, deployJobs);
-    const packages = (await this.packages()).packages;
-    const release = await this.#scheduledRelease();
-    const ordered = [
-      ...everyone.filter((member) => member.id !== "local" && member.kind !== "self"),
-      ...everyone.filter((member) => member.id === "local" || member.kind === "self")
-    ];
-    const upgraded = [];
-    const failed = [];
-    const skipped2 = [];
-    for (const member of ordered) {
-      const candidate = planMemberUpgrade(member, packages, release);
-      if (candidate.package === void 0) {
-        skipped2.push({ member: member.name, reason: candidate.reason });
-        continue;
-      }
-      try {
-        const result = await this.#startScheduledUpgrade(member, candidate);
-        upgraded.push({ member: result.member, package: result.package, source: result.source, job: result.jobId });
-        if (member.id === "local" || member.kind === "self") continue;
-        const final = await this.waitDeploy(result.jobId, { timeoutMs: 20 * 6e4 }).catch(() => null);
-        if (final !== null && final.status === "failed") {
-          failed.push({ member: member.name, reason: final.error ?? "\u5347\u7EA7\u5931\u8D25" });
-        }
-      } catch (error) {
-        failed.push({ member: member.name, reason: error instanceof Error ? error.message : String(error) });
-      }
-    }
-    if (upgraded.length === 0 && failed.length === 0) {
-      return { status: "skipped", reason: "\u6240\u6709\u6210\u5458\u90FD\u5DF2\u7ECF\u662F\u53EF\u7528\u7684\u6700\u65B0\u90E8\u7F72", skipped: skipped2 };
-    }
-    return {
-      status: failed.length === 0 ? "done" : "failed",
-      upgraded,
-      failed,
-      skipped: skipped2,
-      reason: failed.length === 0 ? void 0 : `${String(failed.length)} \u4E2A\u6210\u5458\u5347\u7EA7\u5931\u8D25`
-    };
-  }
-  /**
-   * Start one scheduled upgrade from a planned candidate.
-   *
-   * A release candidate carries only the target: `upgradeMember` resolves the
-   * asset and its manifest URLs again (30 s cache), so the archive name and
-   * SHA-256 cannot go stale between planning and downloading.
-   * @param {object} member target member.
-   * @param {{source: 'local'|'release', package: object, target: string|null}} candidate planned source.
-   * @returns {Promise<{member: string, package: string, source: 'local'|'release', jobId: string}>} started job.
-   */
-  async #startScheduledUpgrade(member, candidate) {
-    const request = candidate.source === "release" ? { member: member.id, release: { target: candidate.target, refresh: true } } : { member: member.id, package: candidate.package.name };
-    const result = await this.upgradeMember(request);
-    const via = candidate.source === "release" ? "latest" : "gateway cache";
-    this.logLine(`scheduled upgrade ${member.name} -> ${candidate.package.name} via ${via} (${result.job.id})`);
-    return { member: member.name, package: candidate.package.name, source: candidate.source, jobId: result.job.id };
-  }
-  /**
-   * The published `latest` release for a scheduled upgrade.
-   *
-   * A deployment without release settings, or one whose manifest cannot be
-   * read, simply has no release candidates; the gateway cache still works.
-   * @returns {Promise<object|null>} normalized release, or null.
-   */
-  async #scheduledRelease() {
-    try {
-      const release = await this.latestRelease({ refresh: true });
-      return release !== null && typeof release === "object" && release.ok === true ? release : null;
-    } catch (error) {
-      this.logLine(`scheduled upgrade cannot read the latest release: ${error instanceof Error ? error.message : String(error)}`);
-      return null;
-    }
-  }
-  /**
-   * The release publishing settings the panel may see (tokens masked).
-   * @returns {Promise<object>} sanitized config and the manifest URLs.
-   */
-  async releaseSettings() {
-    const config = await this.#healReleaseOwners(await loadReleaseConfig({ file: this.releaseConfigFile }));
-    const sanitized = sanitizeReleaseConfig(config);
-    const urls = latestManifestUrls(config);
-    return {
-      ok: true,
-      config: sanitized,
-      manifestUrls: urls,
-      configured: sanitized.github.enabled || sanitized.gitee.enabled
-    };
-  }
-  /**
-   * Save the release publishing settings.
-   * @param {{config?: object}} request settings.
-   * @returns {Promise<object>} sanitized config after the save.
-   */
-  /**
-   * Fill a stored config's missing owners from its tokens.
-   *
-   * A token-only setup stores the owner as soon as it is known; a config that
-   * predates that (or a save whose provider was unreachable) still shows the
-   * owner here, so the panel never asks the operator for an account name.
-   * Failures are ignored: publishing retries the lookup through its proxy.
-   * @param {object} config loaded config.
-   * @returns {Promise<object>} config, possibly with owners filled in.
-   */
-  async #healReleaseOwners(config) {
-    const missing = ["github", "gitee"].filter((provider) => config?.[provider]?.enabled === true && String(config[provider].owner ?? "") === "");
-    if (missing.length === 0) return config;
-    const owners = {};
-    for (const provider of missing) {
-      try {
-        owners[provider] = await detectReleaseOwner(provider, { token: config[provider].token });
-        this.logLine(`release ${provider} owner detected from token: ${owners[provider]}`);
-      } catch {
-      }
-    }
-    if (Object.keys(owners).length === 0) return config;
-    return await saveReleaseConfig({
-      file: this.releaseConfigFile,
-      input: {
-        enabled: config.enabled,
-        tag: config.tag,
-        partBytes: config.partBytes,
-        github: { owner: owners.github ?? config.github.owner, repo: config.github.repo },
-        gitee: { owner: owners.gitee ?? config.gitee.owner, repo: config.gitee.repo, branch: config.gitee.branch }
-      }
-    });
-  }
-  async saveReleaseSettings(request) {
-    const input = request?.config !== null && typeof request?.config === "object" ? request.config : request;
-    const resolved = await this.#resolveReleaseOwners(input);
-    const config = await saveReleaseConfig({ file: this.releaseConfigFile, input: resolved.input });
-    this.logLine(`release settings saved (tag ${config.tag}, github ${config.github.enabled ? "on" : "off"}, gitee ${config.gitee.enabled ? "on" : "off"})`);
-    return {
-      ok: true,
-      config: sanitizeReleaseConfig(config),
-      manifestUrls: latestManifestUrls(config),
-      configured: config.github.enabled || config.gitee.enabled,
-      warnings: resolved.warnings
-    };
-  }
-  /**
-   * Fill the owner half of a token-only release config from the provider.
-   *
-   * The panel deliberately asks for nothing but a token; the account name is
-   * whatever the token belongs to. An invalid token fails the save, so the
-   * operator sees it immediately instead of at the end of a build; an
-   * unreachable provider only warns, because publishing retries the lookup
-   * through the build's egress proxy.
-   * @param {object} input raw panel input.
-   * @returns {Promise<{input: object, warnings: string[]}>} input with owners and any warnings.
-   */
-  async #resolveReleaseOwners(input) {
-    const warnings = [];
-    const next = { ...input };
-    for (const provider of ["github", "gitee"]) {
-      const entry = input?.[provider];
-      if (entry === null || typeof entry !== "object") continue;
-      const token = typeof entry.token === "string" ? entry.token.trim() : "";
-      if (token === "" || String(entry.owner ?? "").trim() !== "") continue;
-      try {
-        const owner = await detectReleaseOwner(provider, { token });
-        next[provider] = { ...entry, owner };
-        this.logLine(`release ${provider} owner detected from token: ${owner}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (/HTTP 401|HTTP 403|无效或缺少/iu.test(message)) throw error;
-        warnings.push(`${provider} \u8D26\u53F7\u6682\u65F6\u65E0\u6CD5\u8BC6\u522B\uFF08${message}\uFF09\uFF1B\u53D1\u5E03\u65F6\u4F1A\u518D\u8BD5\u4E00\u6B21`);
-      }
-    }
-    return { input: next, warnings };
-  }
-  /**
-   * Delete one package (and its `.sha256` sidecar) from the packages directory.
-   * @param {{name: string}} request package file name.
-   * @returns {Promise<{ok: boolean, removed: string[]}>} removed files.
-   */
-  async removePackage(request) {
-    const name = typeof request?.name === "string" ? request.name.trim() : "";
-    if (name === "" || name !== path24.basename(name) || name.startsWith(".")) {
-      throw new Error("package name is invalid");
-    }
-    if (!/\.(?:7z|zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`);
-    const file = path24.join(this.packagesDir, name);
-    const info = await stat13(file).catch(() => null);
-    if (info === null || !info.isFile()) throw new Error(`package not found: ${name}`);
-    const removed = [];
-    await rm14(file, { force: true });
-    removed.push(file);
-    const sidecar = `${file}.sha256`;
-    if (existsSync14(sidecar)) {
-      await rm14(sidecar, { force: true });
-      removed.push(sidecar);
-    }
-    this.logLine(`removed package ${name}`);
-    return { ok: true, removed };
-  }
-  /**
-   * Resolve a package path from an absolute path, `~/.dsh/packages/<name>`,
-   * or the repository `dist/<name>`.
-   * @param {string} input package path or filename.
-   * @returns {Promise<string>} absolute package path.
-   */
-  async resolvePackage(input) {
-    const raw = typeof input === "string" ? input.trim() : "";
-    if (raw === "") throw new Error("package is required");
-    const candidates = path24.isAbsolute(raw) ? [raw] : [path24.join(this.packagesDir, raw), path24.join(this.repositoryRoot, "dist", raw)];
-    for (const file of candidates) {
-      const info = await stat13(file).catch(() => null);
-      if (info?.isFile()) return file;
-    }
-    throw new Error(`package not found: ${raw}`);
-  }
-  /**
-   * Resolve a target and start a deployment or upgrade job.
-   *
-   * The job itself runs in a detached process (`code/deploy/runner.mjs`) so a
-   * member — including this gateway — can restart dsh-web and the gateway while
-   * its own upgrade keeps going. This method only writes the job directory and
-   * returns; `waitDeploy()` is what the model tool uses to block.
-   * @param {{host?: string, member?: string, package?: string, packageOnTarget?: {path: string, bytes: number, sha256: string}, release?: {target: string, sha256?: string, refresh?: boolean}, targetPackage?: {path: string, bytes?: number, sha256?: string}, mode?: 'install'|'upgrade'}} request target and package source.
-   * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string, layout: string}>} queued job.
-   */
-  async startDeploy(request) {
-    const mode = request.mode === "upgrade" ? "upgrade" : request.mode === "test" ? "test" : "install";
-    const test = request.test === true || mode === "test";
-    if (test) throw new Error("\u6307\u9488\u5E03\u5C40\u6CA1\u6709\u5355\u72EC\u7684\u300C\u6D4B\u8BD5\u5347\u7EA7\u300D\uFF1A\u76F4\u63A5\u8FD0\u884C\u300C\u5347\u7EA7\u300D\uFF0C\u5065\u5EB7\u68C0\u67E5\u5931\u8D25\u4F1A\u81EA\u52A8\u56DE\u9000\u5230\u4E0A\u4E00\u4E2A release");
-    const host = typeof request.host === "string" ? request.host.trim() : "";
-    const memberId = typeof request.member === "string" ? request.member.trim() : "";
-    let packageOnTarget = request.packageOnTarget !== null && typeof request.packageOnTarget === "object" ? request.packageOnTarget : null;
-    const releaseRequest = request.release !== null && typeof request.release === "object" ? request.release : null;
-    const targetPackageRequest = request.targetPackage !== null && typeof request.targetPackage === "object" ? request.targetPackage : null;
-    if (releaseRequest !== null && targetPackageRequest !== null) {
-      throw new Error("\u4E00\u6B21\u5347\u7EA7\u53EA\u80FD\u9009\u62E9\u4E00\u4E2A\u5305\u6765\u6E90");
-    }
-    const snapshot = await this.members();
-    const all = [snapshot.local, ...snapshot.members].filter(Boolean);
-    const member = memberId !== "" ? all.find((candidate) => candidate.id === memberId) : all.find((candidate) => candidate.id === host || candidate.name === host || candidate.ip === host);
-    if (memberId !== "" && member === void 0) throw new Error(`member not found: ${memberId}`);
-    const busy = await this.#activeDeployFor(member?.id ?? null, member?.ip ?? host);
-    if (busy !== null) {
-      throw Object.assign(
-        new Error(`\u8BE5\u76EE\u6807\u5DF2\u6709\u6B63\u5728\u8FDB\u884C\u7684${busy.mode === "upgrade" ? "\u5347\u7EA7" : busy.mode === "test" ? "\u6D4B\u8BD5\u5347\u7EA7" : "\u90E8\u7F72"}\u4EFB\u52A1\uFF1A${busy.id}`),
-        { status: 409 }
-      );
-    }
-    let packagePath = "";
-    let os11 = "linux";
-    let packageDescriptor = null;
-    let acquire = null;
-    let downloadRequest = request;
-    if (targetPackageRequest !== null) {
-      if (member === void 0) throw new Error("\u76EE\u6807\u6210\u5458\u5DF2\u6709\u5305\u9700\u8981\u4E00\u4E2A\u6210\u5458");
-      const resolved = await this.#resolveTargetPackage(member, targetPackageRequest);
-      packagePath = resolved.path;
-      os11 = resolved.os;
-      packageOnTarget = { path: resolved.path, bytes: resolved.bytes, sha256: resolved.sha256, keep: true };
-    } else if (releaseRequest !== null) {
-      if (member === void 0) throw new Error("latest tag \u9700\u8981\u6307\u5B9A\u4E00\u4E2A\u6210\u5458");
-      if (mode === "install") {
-        throw new Error("\u65B0\u6210\u5458\u5B89\u88C5\u8BF7\u4F7F\u7528\u672C\u673A\u90E8\u7F72\u5305\u6216\u76EE\u6807\u6210\u5458\u5DF2\u6709\u5305\uFF1Blatest tag \u53EA\u7528\u4E8E\u5347\u7EA7");
-      }
-      const target = typeof releaseRequest.target === "string" ? releaseRequest.target.trim() : "";
-      if (target === "") throw new Error("release.target is required");
-      const memberTarget = memberBuildTarget(member);
-      if (memberTarget !== null && memberTarget !== target) {
-        throw new Error(`\u5305\u5E73\u53F0 ${target} \u4E0E\u6210\u5458 ${memberTarget} \u4E0D\u5339\u914D`);
-      }
-      const latest = await this.latestRelease({ refresh: releaseRequest.refresh === true });
-      if (latest.ok !== true) throw new Error(latest.error ?? "\u53D1\u5E03\u6E05\u5355\u4E0D\u53EF\u7528");
-      const asset = selectLatestAsset(latest, target);
-      if (asset === null) throw new Error(`latest tag \u91CC\u6CA1\u6709 ${target} \u7684\u90E8\u7F72\u5305`);
-      const manifests = latest.manifests ?? latest.manifestUrls;
-      if (member.id === "local" || member.kind === "self") {
-        const link3 = request.direct === true ? null : resolveDeployLinkProxy({
-          links: await this.#directLinks(),
-          target: member,
-          wanted: typeof request.proxyMember === "string" ? request.proxyMember : ""
-        });
-        acquire = {
-          name: asset.name,
-          bytes: asset.bytes,
-          sha256: asset.sha256,
-          manifests,
-          prefer: "gitee",
-          ...link3 === null || typeof link3.url !== "string" || link3.url === "" ? {} : { proxy: link3.url }
-        };
-        packagePath = path24.join(this.packagesDir, asset.name);
-        os11 = asset.os;
-      } else {
-        packagePath = asset.name;
-        os11 = asset.os;
-        packageDescriptor = { name: asset.name, bytes: asset.bytes, sha256: asset.sha256, local: false };
-        downloadRequest = {
-          ...request,
-          release: { ...releaseRequest, manifests, prefer: "gitee" }
-        };
-      }
-    } else if (packageOnTarget !== null) {
-      packagePath = String(packageOnTarget.path ?? "").trim();
-      if (packagePath === "") throw new Error("packageOnTarget.path is required");
-      os11 = /win(?:dows)?/iu.test(path24.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
-    } else {
-      packagePath = await this.resolvePackage(request.package);
-      const parsed = packagePlatformFromName(path24.basename(packagePath));
-      if (parsed === null) throw new Error(`\u4E0D\u662F dsh-mesh \u90E8\u7F72\u5305\uFF1A${path24.basename(packagePath)}`);
-      os11 = parsed.os;
-    }
-    if (member !== void 0) {
-      const identity = { id: member.id, name: member.name, ip: member.ip };
-      if (test) assertTestUpgradeTarget(member, { packageOs: os11 });
-      if (member.kind === "self" || member.id === "local") {
-        return this.#startLocalJob({ member, packagePath, os: os11, mode, identity, ...acquire === null ? {} : { acquire } });
-      }
-      const deployRequest = await this.#memberDeployRequest(member, packagePath, os11);
-      const download3 = mode === "install" || packageOnTarget !== null ? null : await this.#deployDownload(downloadRequest, member, all);
-      const job2 = await this.#startEngineJob({
-        request: {
-          ...deployRequest,
-          member: member.id,
-          test,
-          download: download3,
-          ...packageOnTarget === null ? {} : { packageOnTarget },
-          ...packageDescriptor === null ? {} : { packageDescriptor }
-        },
-        member: member.id,
-        mode
-      });
-      return { ok: true, job: job2, member: identity, packagePath, layout: "pointer" };
-    }
-    if (host === "") throw new Error("host is required");
-    if (test) throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u9700\u8981\u4E00\u4E2A\u6210\u5458\uFF08\u8981\u5728\u6210\u5458\u7684\u5B89\u88C5\u4E0A\u6F14\u7EC3\uFF09\uFF0C\u4E0D\u80FD\u76F4\u63A5\u7ED9\u88F8 SSH \u4E3B\u673A");
-    if (packageDescriptor !== null) throw new Error("latest tag \u9700\u8981\u4E00\u4E2A\u5DF2\u53D1\u73B0\u7684\u6210\u5458\uFF0C\u4E0D\u80FD\u76F4\u63A5\u7ED9\u88F8 SSH \u4E3B\u673A");
-    const appRoot = os11 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
-    const download2 = mode === "install" || packageOnTarget !== null ? null : await this.#deployDownload(request, null, all);
-    const job = await this.#startEngineJob({
-      request: { host, package: packagePath, os: os11, appRoot, download: download2, ...packageOnTarget === null ? {} : { packageOnTarget } },
-      member: null,
-      mode
-    });
-    return { ok: true, job, member: null, packagePath, layout: "pointer" };
-  }
-  /**
-   * Deploy one local package to a discovered member, without waiting.
-   * Kept for the panel API, which returns a job id immediately.
-   * @param {{member?: string, package?: string, release?: object, targetPackage?: object, mode?: 'install'|'upgrade'}} request member id/ip and package source.
-   * @returns {Promise<object>} started deploy job.
-   */
-  async deployMember(request) {
-    const result = await this.startDeploy({
-      member: request.member,
-      package: request.package,
-      mode: request.mode,
-      ...request.release === void 0 ? {} : { release: request.release },
-      ...request.targetPackage === void 0 ? {} : { targetPackage: request.targetPackage }
-    });
-    return {
-      ok: true,
-      job: result.job,
-      member: result.member,
-      layout: result.layout,
-      packagesDir: this.packagesDir
-    };
-  }
-  /**
-   * Upgrade one member (or this machine) from a chosen deployment package.
-   *
-   * Same flow as a first deploy; the difference is that an installed member is
-   * upgraded by the package instead of being installed from scratch, and the
-   * panel labels the job as an upgrade.
-   * @param {{member?: string, package?: string, release?: object, targetPackage?: object}} request member id/ip and package source.
-   * @returns {Promise<object>} queued job.
-   */
-  async upgradeMember(request) {
-    const result = await this.startDeploy({
-      member: request.member,
-      package: request.package,
-      mode: "upgrade",
-      ...request.release === void 0 ? {} : { release: request.release },
-      ...request.targetPackage === void 0 ? {} : { targetPackage: request.targetPackage },
-      ...typeof request.proxyMember === "string" ? { proxyMember: request.proxyMember } : {},
-      ...request.direct === true ? { direct: true } : {}
-    });
-    return {
-      ok: true,
-      job: result.job,
-      member: result.member,
-      layout: result.layout,
-      packagesDir: this.packagesDir
-    };
-  }
-  /**
-   * Test-upgrade one package on another member.
-   *
-   * The job does what a member upgrade does — upload, extract, switch, restart,
-   * health check, rollback on failure — and, before touching the member, runs
-   * the flat upgrade the gateway runs on itself against a sandbox built from
-   * the member's current version. That way the local path is exercised on a
-   * machine that is not this one.
-   * @param {{member?: string, package?: string}} request member id/ip and package filename.
-   * @returns {Promise<object>} queued job.
-   */
-  async testUpgradeMember(request) {
-    const result = await this.startDeploy({
-      member: request.member,
-      package: request.package,
-      mode: "test",
-      test: true,
-      ...typeof request.proxyMember === "string" ? { proxyMember: request.proxyMember } : {},
-      ...request.direct === true ? { direct: true } : {}
-    });
-    return {
-      ok: true,
-      job: result.job,
-      member: result.member,
-      layout: result.layout,
-      packagesDir: this.packagesDir
-    };
-  }
-  /**
-   * Deploy one package to an SSH host, synchronously.
-   *
-   * The host may be a discovered member id/name/IP, in which case the member's
-   * OS, install root and WireGuard SSH metadata are used; otherwise the host is
-   * treated as a plain SSH target and the package platform decides the OS.
-   * @param {{host?: string, package?: string, mode?: 'install'|'upgrade'}} request target host and package.
-   * @returns {Promise<{job: object|null, logFile: string, log: string, member?: object}>} final result.
-   */
-  async deployPackage(request) {
-    const started = await this.startDeploy({ host: request.host, package: request.package, mode: request.mode });
-    const job = await this.waitDeploy(started.job.id);
-    return {
-      job,
-      member: started.member,
-      logFile: path24.join(this.deployRoot, started.job.id, "deploy.log"),
-      log: await this.deployLogs(started.job.id, 80)
-    };
-  }
-  /**
-   * The job currently using one target, if any.
-   * @param {string|null} memberId member id.
-   * @param {string} host VPN address or SSH host.
-   * @returns {Promise<object|null>} active job.
-   */
-  async #activeDeployFor(memberId, host) {
-    for (const job of await this.deploy.list(20)) {
-      if (job.status !== "running" && job.status !== "queued") continue;
-      if (memberId !== null && memberId !== "" && job.member === memberId) return job;
-      if (typeof host === "string" && host !== "" && job.target?.host === host) return job;
-    }
-    return null;
-  }
-  /**
-   * Wait for one detached deploy job to settle.
-   * @param {string} id job id.
-   * @param {{timeoutMs?: number}} [options] budget; 30 minutes by default.
-   * @returns {Promise<object|null>} final job state.
-   */
-  async waitDeploy(id, options = {}) {
-    const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 30 * 60 * 1e3;
-    const deadline = Date.now() + timeoutMs;
-    for (; ; ) {
-      const job = await this.deployStatus(id);
-      if (job !== null && job.status !== "running" && job.status !== "queued") return job;
-      if (Date.now() >= deadline) return job;
-      await new Promise((resolve) => setTimeout(resolve, 1e3));
-    }
-  }
-  /**
-   * Start one job for a member or a plain SSH host.
-   *
-   * The plan is built here, once: the queued job needs its release name and
-   * size, and the runner must not hash a 300 MB package a second time.
-   * @param {{request: object, member: string|null, mode: 'install'|'upgrade'}} input job input.
-   * @returns {Promise<object>} queued job state.
-   */
-  async #startEngineJob(input) {
-    const plan = await buildDeployPlan({
-      ...input.request,
-      gatePassword: typeof input.request.gatePassword === "string" ? input.request.gatePassword : process.env.DSH_GATE_PASSWORD,
-      repositoryRoot: this.repositoryRoot
-    });
-    return this.#queueJob({
-      mode: input.mode,
-      member: input.member,
-      plan,
-      request: { kind: "engine", plan, options: { ...input.request, plan, mode: input.mode } }
-    });
-  }
-  /**
-   * Start the local upgrade.
-   *
-   * The host runs the same in-place orchestrator as a member: the package's
-   * `upgrade-local.mjs` moves the tree into `releases/<id>`, rewrites the
-   * pointer and restarts the launcher-backed units.
-   * @param {{member: object, packagePath: string, os: string, mode: 'install'|'upgrade', identity: object, acquire?: object}} input target.
-   * @returns {Promise<object>} queued job and its layout.
-   */
-  async #startLocalJob(input) {
-    const install = this.#localAppRoot();
-    if (install === null) {
-      throw new Error("\u672C\u673A\u6CA1\u6709\u53EF\u8BC6\u522B\u7684 dsh-mesh \u5B89\u88C5\u76EE\u5F55\uFF08\u627E\u4E0D\u5230 dsh-mesh.json\uFF09\uFF0C\u65E0\u6CD5\u5347\u7EA7\u672C\u673A");
-    }
-    if (input.os === "windows") {
-      throw new Error("\u672C\u673A\u662F Linux \u7F51\u5173\uFF0C\u4E0D\u80FD\u5B89\u88C5 Windows \u90E8\u7F72\u5305");
-    }
-    const job = await this.#queueJob({
-      mode: input.mode,
-      member: "local",
-      plan: null,
-      request: {
-        kind: "inplace",
-        inplace: {
-          package: input.packagePath,
-          appRoot: install.appRoot,
-          ...input.acquire === void 0 ? {} : { acquire: input.acquire }
-        }
-      },
-      target: { host: "127.0.0.1", user: os10.userInfo().username, port: null, os: "linux", appRoot: install.appRoot },
-      services: ["dsh-web-app.service", "dsh-web-gate.service", "dsh-wireguard-control.service"],
-      packagePath: input.packagePath,
-      release: typeof input.acquire?.name === "string" ? input.acquire.name : path24.basename(input.packagePath)
-    });
-    return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: "pointer" };
-  }
-  /**
-   * Write one queued job directory and spawn its detached runner.
-   * @param {{mode: string, member: string|null, plan: object|null, request: object, target?: object, services?: string[], packagePath?: string, release?: string}} job job input.
-   * @returns {Promise<object>} queued job state.
-   */
-  async #queueJob(job) {
-    const id = newJobId();
-    const dir = path24.join(this.deployRoot, id);
-    await mkdir13(dir, { recursive: true });
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const bytes = job.plan?.package?.bytes ?? (await stat13(job.packagePath).catch(() => null))?.size ?? 0;
-    const state = {
-      id,
-      mode: job.mode,
-      createdAt: now,
-      updatedAt: now,
-      member: job.member,
-      target: job.plan === null ? job.target : { host: job.plan.host, user: job.plan.user ?? null, port: job.plan.port, os: job.plan.os, appRoot: job.plan.appRoot },
-      release: job.plan?.release ?? job.release ?? "local",
-      package: job.plan?.package?.path ?? job.packagePath ?? null,
-      packageOnTarget: job.plan?.packageOnTarget === true,
-      services: job.plan === null ? job.services ?? [] : job.plan.services.map((service) => service.name),
-      status: "queued",
-      phase: "starting",
-      error: null,
-      steps: initialDeploySteps({ test: job.plan?.test === true, os: job.plan?.os }),
-      progress: { label: "\u542F\u52A8\u72EC\u7ACB\u5347\u7EA7\u8FDB\u7A0B", percent: 0, bytes: 0, totalBytes: bytes, speed: 0, indeterminate: false }
-    };
-    await writeDeployState(dir, state);
-    const requestFile = jobPaths(dir).request;
-    await writeFile13(requestFile, `${JSON.stringify({ ...job.request, id, member: job.member }, null, 2)}
-`, { encoding: "utf8", mode: 384 });
-    const spawned = await this.spawnRunner(dir, id);
-    await appendDeployLog(dir, `job queued; runner ${spawned.mode}${spawned.unit === null ? "" : ` (${spawned.unit})`}`);
-    this.logLine(`mesh ${job.mode} job ${id} queued for ${state.target.host} via ${spawned.mode}`);
-    return state;
-  }
-  /**
-   * Start the detached runner for one job.
-   *
-   * `systemd-run` is preferred: a service restart kills its whole cgroup, so a
-   * plain detached child of dsh-web would not survive the very restart it is
-   * deploying. The transient unit puts the runner in its own cgroup; when
-   * systemd is unavailable the plain detached spawn still survives the parent.
-   * @param {string} dir job directory.
-   * @param {string} id job id.
-   * @returns {Promise<{mode: string, unit: string|null}>} how it was started.
-   */
-  async #spawnRunner(dir, id) {
-    const script = path24.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
-    if (!existsSync14(script)) throw new Error(`deploy runner is missing: ${script}`);
-    const node = process.execPath;
-    const unit = `dsh-mesh-job-${id.replace(/^deploy-/u, "")}`;
-    const systemdRun = ["/usr/bin/systemd-run", "/bin/systemd-run"].find((file) => existsSync14(file));
-    if (systemdRun !== void 0 && process.platform === "linux" && process.getuid?.() === 0) {
-      const result = await new Promise((resolve) => {
-        const child2 = spawn7(systemdRun, [
-          "--unit",
-          unit,
-          "--collect",
-          "--description",
-          `dsh-mesh ${id}`,
-          "--setenv",
-          `DSH_MESH_JOB_UNIT=${unit}`,
-          node,
-          script,
-          "--job",
-          dir
-        ], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
-        let stderr = "";
-        child2.stderr.on("data", (chunk) => {
-          stderr += String(chunk);
-        });
-        child2.once("error", (error) => resolve({ ok: false, detail: error.message }));
-        child2.once("exit", (code) => resolve({ ok: code === 0, detail: stderr.trim() }));
-      });
-      if (result.ok) return { mode: "systemd-run", unit };
-      await appendDeployLog(dir, `systemd-run failed, falling back to a detached process: ${result.detail}`);
-    }
-    const child = spawn7(node, [script, "--job", dir], {
-      cwd: this.repositoryRoot,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true,
-      env: { ...process.env, DSH_MESH_JOB_UNIT: "" }
-    });
-    child.unref();
-    return { mode: "detached", unit: null };
-  }
-  /**
-   * Locate the install that owns this plugin.
-   * @returns {{appRoot: string, layout: 'pointer'}|null} install, or null in a source checkout.
-   */
-  #localAppRoot() {
-    const inspect = (candidate2) => {
-      try {
-        if (existsSync14(path24.join(candidate2, "dsh-mesh.json")) && existsSync14(path24.join(candidate2, "releases"))) {
-          return { appRoot: candidate2, layout: "pointer" };
-        }
-      } catch {
-      }
-      return null;
-    };
-    let candidate = path24.resolve(this.repositoryRoot, "..");
-    for (let depth = 0; depth < 5; depth += 1) {
-      const found = inspect(candidate);
-      if (found !== null) return found;
-      const parent = path24.dirname(candidate);
-      if (parent === candidate) break;
-      candidate = parent;
-    }
-    candidate = path24.resolve(this.home);
-    for (let depth = 0; depth < 5; depth += 1) {
-      const found = inspect(candidate);
-      if (found !== null) return found;
-      const parent = path24.dirname(candidate);
-      if (parent === candidate) break;
-      candidate = parent;
-    }
-    return null;
-  }
-  /**
-   * Empty one finished build job's log.
-   * @param {string} id job id.
-   * @returns {Promise<{ok: boolean, id: string}>} result.
-   */
-  async clearBuildLog(id) {
-    const dir = this._jobDir(id);
-    const state = await readState(dir).catch(() => null);
-    if (state === null) throw new Error(`build job not found: ${id}`);
-    if (this.running.has(state.id) || state.status === "running") {
-      throw new Error("\u7F16\u8BD1\u8FD8\u5728\u8FD0\u884C\uFF0C\u7ED3\u675F\u540E\u518D\u6E05\u7A7A\u65E5\u5FD7");
-    }
-    await writeFile13(path24.join(dir, "build.log"), "", "utf8");
-    return { ok: true, id: state.id };
-  }
-  /**
-   * Drop every finished build job: its record, its log and its worktree.
-   *
-   * Truncating `build.log` alone looked like a no-op in the panel, because the
-   * row stayed in the table. The bulk action now deletes the job directory, so
-   * the list really goes back to empty; the archives themselves were already
-   * copied to `~/.dsh/packages`, which this never touches. A running or queued
-   * job is left alone.
-   * @returns {Promise<{ok: boolean, cleared: string[]}>} cleared job ids.
-   */
-  async clearFinishedBuilds() {
-    const cleared = [];
-    const entries = await readdir8(this.jobRoot, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const dir = path24.join(this.jobRoot, entry.name);
-      const state = await readState(dir).catch(() => null);
-      if (state === null) continue;
-      if (this.running.has(state.id) || state.status === "running" || state.status === "queued") continue;
-      await rm14(dir, { recursive: true, force: true });
-      cleared.push(state.id);
-    }
-    return { ok: true, cleared };
-  }
-  /**
-   * Decide how an upgrade should obtain its package from a release.
-   *
-   * The default is the same policy the build panel uses: a foreign Linux
-   * member with external access hosts the HTTP proxy, so the target's download
-   * leaves through that network instead of the gateway's. A caller can pick a
-   * different member with `proxyMember`, or skip the proxy with `direct: true`
-   * (the member's own network is then used).
-   * @param {{proxyMember?: string, direct?: boolean}} request deploy request.
-   * @param {object|null} target the member being upgraded, when it is one.
-   * @param {object[]} everyone local + peer rows.
-   * @returns {Promise<object|null>} download spec for the deploy plan.
-   */
-  async #deployDownload(request, target, everyone) {
-    const explicit = Array.isArray(request.release?.manifests) ? request.release.manifests : null;
-    const manifests = [];
-    if (explicit !== null) {
-      for (const entry of explicit) {
-        if (typeof entry === "string" && entry !== "") {
-          let provider = "github";
-          try {
-            provider = /(?:^|\.)gitee\.com$/iu.test(new URL(entry).hostname) ? "gitee" : "github";
-          } catch {
-          }
-          manifests.push({ provider, url: entry });
-        } else if (entry !== null && typeof entry === "object" && typeof entry.url === "string" && entry.url !== "") {
-          manifests.push({ provider: entry.provider === "gitee" ? "gitee" : "github", url: entry.url });
-        }
-      }
-    } else {
-      const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile });
-      const sources = latestManifestSources(releaseConfig);
-      if (sources.github !== null) manifests.push({ provider: "github", url: sources.github });
-      if (sources.gitee !== null) manifests.push({ provider: "gitee", url: sources.gitee });
-    }
-    const prefer = request.release?.prefer === "gitee" ? "gitee" : void 0;
-    if (manifests.length === 0) return null;
-    if (request.direct === true || request.proxyMember === "none") return { manifests, proxy: null, ...prefer === void 0 ? {} : { prefer } };
-    const wanted = typeof request.proxyMember === "string" ? request.proxyMember.trim() : "";
-    const linkProxy = resolveDeployLinkProxy({ links: await this.#directLinks(), target, wanted });
-    if (linkProxy !== null) return { manifests, proxy: linkProxy, ...prefer === void 0 ? {} : { prefer } };
-    let proxyMember = null;
-    if (wanted !== "" && wanted !== "auto") {
-      proxyMember = everyone.find((candidate) => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted) ?? null;
-      if (proxyMember === null) throw new Error(`download proxy member not found: ${wanted}`);
-      if (proxyMember.id === "local" || proxyMember.kind === "self") throw new Error("the gateway cannot proxy a member download; pick another member");
-      const platform = String(proxyMember.system?.platform ?? "").toLowerCase();
-      if (platform !== "" && !platform.startsWith("linux")) throw new Error(`download proxy member must be Linux; ${proxyMember.name} runs ${String(proxyMember.system?.platform)}`);
-    } else {
-      const picked = pickProxyMember(everyone);
-      proxyMember = picked === null ? null : everyone.find((candidate) => candidate.id === picked) ?? null;
-    }
-    if (proxyMember === null) return { manifests, proxy: null, ...prefer === void 0 ? {} : { prefer } };
-    const plan = await this.#memberSshPlan(proxyMember);
-    return {
-      manifests,
-      proxy: {
-        kind: "ssh",
-        host: plan.host,
-        user: plan.user,
-        port: plan.port,
-        identityFile: plan.identityFile,
-        appRoot: plan.appRoot,
-        name: proxyMember.name
-      },
-      ...prefer === void 0 ? {} : { prefer }
-    };
-  }
-  /**
-   * Build the deployment request for a discovered member.
-   * @param {object} member member snapshot.
-   * @param {string} packagePath package file.
-   * @param {'linux'|'windows'} os target OS.
-   * @returns {Promise<object>} deploy request.
-   */
-  async #memberDeployRequest(member, packagePath, os11) {
-    if (member.ip === "") throw new Error(`member ${member.id} has no VPN address`);
-    let user = "root";
-    let identityFile;
-    const { state } = await readWireGuardState({ file: path24.join(this.home, "wireguard", "state.json") });
-    const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
-    if (peer !== void 0 && peer !== null) {
-      if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
-      if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
-        const digest = createHash8("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path24.join(this.home, "wireguard", "ssh", `${digest}.key`);
-        if (existsSync14(candidate)) identityFile = candidate;
-      }
-    }
-    const system = member.system;
-    let appRoot = normalizeInstallRoot(system?.appRoot) || void 0;
-    let serviceUser = typeof system?.user === "string" && system.user.trim() !== "" ? system.user.trim() : void 0;
-    if (appRoot === void 0) {
-      try {
-        const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os: os11 });
-        appRoot = detected.appRoot;
-        serviceUser = serviceUser ?? detected.serviceUser;
-      } catch {
-      }
-    }
-    if (appRoot === void 0 && typeof system?.home === "string" && system.home.trim() !== "") {
-      const home = system.home.trim().replace(/[\\/]+$/u, "");
-      appRoot = os11 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
-    }
-    if (appRoot === void 0) {
-      const home = os11 === "windows" ? `C:\\Users\\${user}` : user === "root" ? "/root" : `/home/${user}`;
-      appRoot = os11 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
-    }
-    return {
-      host: member.ip,
-      user,
-      identityFile,
-      os: os11,
-      appRoot,
-      serviceUser,
-      package: packagePath
-    };
-  }
-  /**
-   * Refresh a prebuilt package from this repository, in place.
-   *
-   * The DSH app, the browser bundles and the Node runtime inside the package
-   * stay as they are; only the gateway, the scripts and the plugin files are
-   * replaced, then the archive and its checksum are rewritten.
-   * @param {{package: string}} request package name (in the packages dir) or path.
-   * @returns {Promise<object>} summary.
-   */
-  async repackPackage(request) {
-    const packagePath = await this.resolvePackage(request.package);
-    const summary = await repackArchive(packagePath, {
-      repositoryRoot: this.repositoryRoot,
-      log: (line) => this.logLine(`repack: ${line}`)
-    });
-    return { ok: true, ...summary };
-  }
-  /**
-   * Plan an SSH deployment without touching the network.
-   * @param {object} request deploy options.
-   * @returns {Promise<object>} plan.
-   */
-  async deployPlan(request) {
-    return this.deploy.plan(request);
-  }
-  /**
-   * Start an SSH deployment.
-   * @param {object} request deploy options.
-   * @returns {Promise<object>} job.
-   */
-  async deployStart(request) {
-    return this.deploy.start(request);
-  }
-  /**
-   * Read one deployment job.
-   * @param {string} id job id.
-   * @returns {Promise<object|null>} job state.
-   */
-  async deployStatus(id) {
-    return this.deploy.status(id);
-  }
-  /**
-   * Cancel one queued or running deployment job and clean up after it.
-   *
-   * The job is owned by a detached runner, so this stops the runner (and, on
-   * the member, only the staging/temp files that job made) instead of waiting
-   * for the next phase. A job already switching services is refused.
-   * @param {string} id job id.
-   * @returns {Promise<object|null>} cancelled job, or null when unknown.
-   */
-  async cancelDeploy(id) {
-    const job = await this.deploy.cancel(id);
-    this.logLine(`mesh cancel ${typeof id === "string" ? id : ""}: ${job === null ? "unknown job" : job.status}`);
-    return job;
-  }
-  /**
-   * List recent deployment jobs, newest first.
-   * @param {number} [limit] maximum count.
-   * @returns {Promise<object[]>} jobs.
-   */
-  async deployJobs(limit = 20) {
-    return this.deploy.list(limit);
-  }
-  /**
-   * Read one deployment job's log tail.
-   * @param {string} id job id.
-   * @param {number} [lines] line count.
-   * @returns {Promise<string>} log tail.
-   */
-  async deployLogs(id, lines = 80) {
-    return this.deploy.logs(id, lines);
-  }
-  /**
-   * Roll a deployment back to the previous release.
-   * @param {object} request deploy target options.
-   * @returns {Promise<object>} job.
-   */
-  async deployRollback(request) {
-    return this.deploy.rollback(request);
-  }
-  /**
-   * Roll one discovered member back to the release it ran before the last
-   * deploy.
-   *
-   * This is the escape hatch for "the upgrade came up broken": the panel that
-   * started the upgrade is still alive (it is a different machine), so it can
-   * put the member back without a shell. The local gateway rolls back through
-   * `rollback-local.mjs`.
-   * @param {{member: string}} request member id, VPN address, or name.
-   * @returns {Promise<object>} rollback job.
-   */
-  async rollbackMember({ member = "" } = {}) {
-    if (member === "") throw new Error("which member should roll back?");
-    const snapshot = await this.members();
-    const everyone = [snapshot.local, ...snapshot.members].filter((entry) => entry !== null && entry !== void 0);
-    const found = everyone.find((entry) => entry.id === member || entry.name === member || entry.ip === member);
-    if (found === void 0) throw new Error(`member not found: ${member}`);
-    if (found.kind === "self") {
-      throw new Error("\u672C\u673A\u56DE\u6EDA\u8BF7\u6267\u884C\uFF1Anode <\u5B89\u88C5\u6839>/rollback-local.mjs --root <\u5B89\u88C5\u6839>");
-    }
-    if (found.dsh !== true) {
-      throw new Error(`\u6210\u5458 ${found.name} \u7684\u7F51\u5173\u6CA1\u6709\u5E94\u7B54\uFF0C\u65E0\u6CD5\u5728\u7EBF\u56DE\u6EDA\uFF1BSSH \u4E0A\u53BB\u6267\u884C code/deploy/cli.mjs rollback`);
-    }
-    const os11 = String(found.system?.platform ?? "").toLowerCase().startsWith("win") ? "windows" : "linux";
-    const request = await this.#memberDeployRequest(found, "", os11);
-    const rolled = await this.deploy.rollback({ ...request, os: os11, skipPackage: true });
-    return { ok: true, job: rolled.job ?? rolled, member: found };
-  }
-  /**
-   * Resolve and validate one job directory.
-   * @param {string} id job id.
-   * @returns {string} path.
-   */
-  _jobDir(id) {
-    if (typeof id !== "string" || !/^[A-Za-z0-9._-]+$/u.test(id)) throw new Error("invalid job id");
-    const dir = path24.resolve(this.jobRoot, id);
-    if (!dir.startsWith(`${path24.resolve(this.jobRoot)}${path24.sep}`)) throw new Error("invalid job id");
-    return dir;
-  }
-};
-
-// code/shared/event-stream.mjs
-import { mkdirSync, readdirSync, watch } from "node:fs";
-import path25 from "node:path";
-var HEARTBEAT_MS = 15e3;
-var DEBOUNCE_MS = 120;
-var EventHub = class {
-  /**
-   * @param {{log?: (line: string) => void, heartbeatMs?: number}} [options] options.
-   */
-  constructor(options = {}) {
-    this.log = options.log ?? (() => {
-    });
-    this.heartbeatMs = Number.isSafeInteger(options.heartbeatMs) ? options.heartbeatMs : HEARTBEAT_MS;
-    this.clients = /* @__PURE__ */ new Set();
-  }
-  /** How many panels are currently subscribed. */
-  get size() {
-    return this.clients.size;
-  }
-  /**
-   * Turn one HTTP response into a long-lived event stream.
-   *
-   * The caller must not write to the response afterwards. The returned
-   * unsubscribe function is idempotent, so both request and response `close`
-   * handlers can call it.
-   * @param {import('node:http').IncomingMessage} request request.
-   * @param {import('node:http').ServerResponse} response response.
-   * @returns {() => void} unsubscribe.
-   */
-  subscribe(request, response) {
-    response.writeHead(200, {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-transform",
-      connection: "keep-alive",
-      "x-accel-buffering": "no"
-    });
-    try {
-      response.write("retry: 3000\n\n");
-      response.write(`event: ready
-data: ${JSON.stringify({ type: "ready" })}
-
-`);
-    } catch {
-      try {
-        response.end();
-      } catch {
-      }
-      return () => {
-      };
-    }
-    this.clients.add(response);
-    let closed = false;
-    const close = () => {
-      if (closed) return;
-      closed = true;
-      clearInterval(heartbeat);
-      this.clients.delete(response);
-    };
-    const heartbeat = setInterval(() => {
-      try {
-        response.write(": ping\n\n");
-      } catch {
-        close();
-      }
-    }, this.heartbeatMs);
-    heartbeat.unref?.();
-    request.once("close", close);
-    response.once("close", close);
-    return close;
-  }
-  /**
-   * Send one named event to every subscriber.
-   * @param {string} type event name.
-   * @param {object} payload JSON payload.
-   * @returns {void}
-   */
-  send(type, payload) {
-    if (this.clients.size === 0) return;
-    const frame = `event: ${type}
-data: ${JSON.stringify(payload)}
-
-`;
-    for (const client of [...this.clients]) {
-      try {
-        client.write(frame);
-      } catch {
-        this.clients.delete(client);
-      }
-    }
-  }
-  /** Close every stream, e.g. when the plugin is unloaded. */
-  close() {
-    for (const client of [...this.clients]) {
-      try {
-        client.end();
-      } catch {
-      }
-    }
-    this.clients.clear();
-  }
-};
-var JobDirectoryWatcher = class {
-  /**
-   * @param {{root: string, onChange: (dir: string, file: string) => void, log?: (line: string) => void}} options options.
-   */
-  constructor(options) {
-    this.root = options.root;
-    this.onChange = options.onChange;
-    this.log = options.log ?? (() => {
-    });
-    this.watchers = /* @__PURE__ */ new Map();
-    this.pending = /* @__PURE__ */ new Map();
-    this.rootWatcher = null;
-    this.timer = null;
-    this.started = false;
-  }
-  /** Start watching. Safe to call twice. */
-  start() {
-    if (this.started) return;
-    this.started = true;
-    try {
-      mkdirSync(this.root, { recursive: true });
-      this.rootWatcher = watch(this.root, { persistent: false }, (_event, file) => {
-        this.#scan();
-        this.#queue("", String(file ?? ""));
-      });
-      this.rootWatcher.on("error", (error) => this.#fail(error));
-    } catch (error) {
-      this.#fail(error);
-      return;
-    }
-    this.#scan();
-  }
-  /** Stop every watcher and drop pending callbacks. */
-  stop() {
-    this.started = false;
-    if (this.timer !== null) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
-    this.pending.clear();
-    this.rootWatcher?.close();
-    this.rootWatcher = null;
-    for (const watcher of this.watchers.values()) watcher.close();
-    this.watchers.clear();
-  }
-  /** Add a watcher for every immediate subdirectory not seen yet. */
-  #scan() {
-    let entries = [];
-    try {
-      entries = readdirSync(this.root, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory() || this.watchers.has(entry.name)) continue;
-      try {
-        const watcher = watch(path25.join(this.root, entry.name), { persistent: false }, (_event, file) => {
-          this.#queue(entry.name, String(file ?? ""));
-        });
-        watcher.on("error", () => {
-          this.watchers.delete(entry.name);
-        });
-        this.watchers.set(entry.name, watcher);
-      } catch {
-      }
-    }
-  }
-  /** Batch one change and deliver it after a short debounce. */
-  #queue(dir, file) {
-    this.pending.set(`${dir}\0${file}`, { dir, file });
-    if (this.timer !== null) return;
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      const changes = [...this.pending.values()];
-      this.pending.clear();
-      for (const change of changes) {
-        try {
-          this.onChange(change.dir, change.file);
-        } catch (error) {
-          this.log(`event watcher callback failed: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-    }, DEBOUNCE_MS);
-    this.timer.unref?.();
-  }
-  /** Report a watcher that could not even be created. */
-  #fail(error) {
-    this.log(`cannot watch ${this.root}: ${error instanceof Error ? error.message : String(error)}`);
-    this.rootWatcher?.close();
-    this.rootWatcher = null;
-  }
-};
-
-// src/lib/job-events.mjs
-import path26 from "node:path";
-var LOG_THROTTLE_MS = 400;
-var LOG_LINES = 300;
-var JOB_ID = /^[A-Za-z0-9._-]+$/u;
-function startJobEvents(options) {
-  const { service, hub } = options;
-  const log = options.log ?? (() => {
-  });
-  const logTimers = /* @__PURE__ */ new Map();
-  const reading = /* @__PURE__ */ new Map();
-  if (typeof service.dataDir !== "string" || service.dataDir === "") {
-    log("job events disabled: the service has no dataDir");
-    return { close() {
-    } };
-  }
-  const watchers = [
-    new JobDirectoryWatcher({
-      root: path26.join(service.dataDir, "build"),
-      log,
-      onChange: (dir, file) => handle("build", dir, file)
-    }),
-    new JobDirectoryWatcher({
-      root: path26.join(service.dataDir, "deploy"),
-      log,
-      onChange: (dir, file) => handle("deploy", dir, file)
-    })
-  ];
-  for (const watcher of watchers) watcher.start();
-  function handle(kind, dir, file) {
-    const id = dir !== "" ? dir : file;
-    if (typeof id !== "string" || id === "" || !JOB_ID.test(id)) return;
-    if (dir === "") {
-      void emit(kind, id);
-      return;
-    }
-    if (file === "" || file === "state.json" || file === "job.json") {
-      void emit(kind, id);
-      return;
-    }
-    if (file.endsWith(".log")) scheduleLog(kind, id);
-  }
-  async function emit(kind, id) {
-    const key = `${kind}:${id}`;
-    if (reading.get(key) === true) return;
-    reading.set(key, true);
-    try {
-      const job = kind === "build" ? await service.buildSummary(id) : await service.deployStatus(id);
-      if (job === null || job === void 0) return;
-      hub.send(kind, { type: kind, id, job });
-    } catch (error) {
-      log(`job event for ${key} failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      reading.delete(key);
-    }
-  }
-  function scheduleLog(kind, id) {
-    const key = `${kind}:${id}`;
-    if (logTimers.has(key)) return;
-    const timer = setTimeout(() => {
-      logTimers.delete(key);
-      void sendLog(kind, id);
-    }, LOG_THROTTLE_MS);
-    timer.unref?.();
-    logTimers.set(key, timer);
-  }
-  async function sendLog(kind, id) {
-    try {
-      const tail = kind === "build" ? await service.log(id, LOG_LINES) : await service.deployLogs(id, LOG_LINES);
-      const lines = Array.isArray(tail) ? tail.filter((line) => typeof line === "string") : typeof tail === "string" && tail.trim() !== "" ? tail.trimEnd().split(/\r?\n/u) : [];
-      hub.send(`${kind}-log`, { type: `${kind}-log`, id, lines });
-    } catch (error) {
-      log(`job log for ${kind}:${id} failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return {
-    close() {
-      for (const watcher of watchers) watcher.stop();
-      for (const timer of logTimers.values()) clearTimeout(timer);
-      logTimers.clear();
-      reading.clear();
-    }
-  };
-}
-
-// src/lib/http-api.mjs
-var API_PREFIX = "/api/dsh-mesh";
-var AGENT_HEADER = "x-dsh-mesh";
-var MAX_BODY_BYTES = 64 * 1024;
-function writeJson(response, status, value) {
-  const body = JSON.stringify(value);
-  response.writeHead(status, {
-    "content-type": "application/json; charset=utf-8",
-    "content-length": Buffer.byteLength(body),
-    "cache-control": "no-store",
-    "x-content-type-options": "nosniff"
-  });
-  response.end(body);
-}
-async function readJson2(request) {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
-    if (size > MAX_BODY_BYTES) throw new Error("request body is too large");
-    chunks.push(buffer);
-  }
-  if (size === 0) return {};
-  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("request body must be a JSON object");
-  return parsed;
-}
-function registerApi(ctx, service, scheduler = null) {
-  const hub = new EventHub({ log: (line) => ctx.logger?.info?.(`mesh events: ${line}`) });
-  const jobEvents = startJobEvents({ service, hub, log: (line) => ctx.logger?.warn?.(`mesh events: ${line}`) });
-  ctx.effect(() => () => {
-    jobEvents.close();
-    hub.close();
-  }, "mesh events");
-  ctx.effect(() => ctx.webServer.register({
-    kind: "prefix",
-    path: API_PREFIX,
-    handler: async (request, response) => {
-      try {
-        const method = request.method ?? "GET";
-        const url = new URL(request.url ?? "/", "http://local.invalid");
-        const path31 = url.pathname.slice(API_PREFIX.length) || "/";
-        if (method === "GET" && path31 === "/status") {
-          writeJson(response, 200, await service.status());
-          return;
-        }
-        if (method === "GET" && path31 === "/members") {
-          writeJson(response, 200, await service.members());
-          return;
-        }
-        if (method === "GET" && path31 === "/member-tags") {
-          writeJson(response, 200, { ok: true, tags: await service.memberTags() });
-          return;
-        }
-        if (method === "GET" && path31 === "/schedule") {
-          if (scheduler === null) {
-            writeJson(response, 503, { ok: false, error: { code: "unavailable", message: "\u5B9A\u65F6\u4EFB\u52A1\u8FD8\u6CA1\u6709\u542F\u52A8\u3002" } });
-            return;
-          }
-          const member = url.searchParams.get("member") ?? "";
-          writeJson(response, 200, { ok: true, schedule: scheduler.status(member === "" ? void 0 : member) });
-          return;
-        }
-        if (method === "POST" && path31 === "/packages/delete") {
-          const body = await readJson2(request);
-          writeJson(response, 200, await service.removePackage({ name: typeof body.name === "string" ? body.name : "" }));
-          return;
-        }
-        if (method === "GET" && path31 === "/events") {
-          hub.subscribe(request, response);
-          return;
-        }
-        if (method === "GET" && path31 === "/jobs") {
-          writeJson(response, 200, { ok: true, jobs: await service.jobs() });
-          return;
-        }
-        if (method === "GET" && path31 === "/packages") {
-          writeJson(response, 200, await service.packages());
-          return;
-        }
-        if (method === "GET" && path31 === "/release/latest") {
-          writeJson(response, 200, await service.latestRelease({
-            refresh: url.searchParams.get("refresh") === "1"
-          }));
-          return;
-        }
-        if (method === "GET" && path31 === "/member-packages") {
-          writeJson(response, 200, await service.memberPackages(url.searchParams.get("member") ?? ""));
-          return;
-        }
-        if (method === "GET" && path31 === "/release") {
-          writeJson(response, 200, await service.releaseSettings());
-          return;
-        }
-        if (method === "GET" && path31 === "/deploy/jobs") {
-          writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) });
-          return;
-        }
-        if (method === "GET") {
-          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path31);
-          if (deployRead !== null) {
-            const lines = Number.parseInt(url.searchParams.get("lines") ?? "200", 10);
-            const job = await service.deployStatus(deployRead[1]);
-            if (job === null) {
-              writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown deploy job." } });
-              return;
-            }
-            const tail = await service.deployLogs(deployRead[1], Number.isSafeInteger(lines) ? Math.min(Math.max(lines, 1), 500) : 200);
-            writeJson(response, 200, {
-              ok: true,
-              job,
-              // Match the build log endpoint: the panel expects an array.
-              lines: tail.trimEnd() === "" ? [] : tail.trimEnd().split(/\r?\n/u)
-            });
-            return;
-          }
-          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path31);
-          if (read !== null) {
-            if (read[2] === "/log") {
-              const lines = Number.parseInt(url.searchParams.get("lines") ?? "80", 10);
-              writeJson(response, 200, {
-                ok: true,
-                lines: await service.log(read[1], Number.isSafeInteger(lines) ? Math.min(Math.max(lines, 1), 500) : 80)
-              });
-              return;
-            }
-            writeJson(response, 200, { ok: true, job: await service.job(read[1]) });
-            return;
-          }
-        }
-        if (method !== "POST") {
-          writeJson(response, 405, { ok: false, error: { code: "method_not_allowed", message: "Use GET or POST." } });
-          return;
-        }
-        if (request.headers[AGENT_HEADER] !== "1") {
-          writeJson(response, 403, { ok: false, error: { code: "forbidden", message: `Missing the ${AGENT_HEADER} header.` } });
-          return;
-        }
-        if (method === "POST" && path31 === "/release") {
-          const body = await readJson2(request);
-          writeJson(response, 200, await service.saveReleaseSettings(body));
-          return;
-        }
-        if (path31 === "/deploy") {
-          const body = await readJson2(request);
-          const result = await service.deployMember({
-            member: typeof body.member === "string" ? body.member : void 0,
-            package: typeof body.package === "string" ? body.package : void 0,
-            release: body.release !== null && typeof body.release === "object" ? body.release : void 0,
-            targetPackage: body.targetPackage !== null && typeof body.targetPackage === "object" ? body.targetPackage : void 0
-          });
-          writeJson(response, 202, result);
-          return;
-        }
-        if (path31 === "/session/promote") {
-          const body = await readJson2(request);
-          writeJson(response, 200, await service.promoteSession(String(body.member ?? "")));
-          return;
-        }
-        if (path31 === "/member-tags") {
-          const body = await readJson2(request);
-          writeJson(response, 200, await service.setMemberTag(
-            typeof body.id === "string" ? body.id : "",
-            typeof body.tag === "string" ? body.tag : ""
-          ));
-          return;
-        }
-        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path31);
-        if (clearLog !== null) {
-          writeJson(response, 200, await service.clearBuildLog(clearLog[1]));
-          return;
-        }
-        if (path31 === "/build/logs/clear") {
-          writeJson(response, 200, await service.clearFinishedBuilds());
-          return;
-        }
-        if (path31 === "/deploy/cancel") {
-          const body = await readJson2(request);
-          const job = await service.cancelDeploy(typeof body.id === "string" ? body.id : "");
-          if (job === null) {
-            writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown deploy job." } });
-            return;
-          }
-          writeJson(response, 200, { ok: true, job });
-          return;
-        }
-        if (path31 === "/deploy/rollback") {
-          const body = await readJson2(request);
-          writeJson(response, 202, await service.rollbackMember({
-            member: typeof body.member === "string" ? body.member : ""
-          }));
-          return;
-        }
-        if (path31 === "/upgrade" || path31 === "/test-upgrade") {
-          const body = await readJson2(request);
-          const request_ = {
-            member: typeof body.member === "string" ? body.member : void 0,
-            package: typeof body.package === "string" ? body.package : void 0,
-            // The two extra package sources: the public latest tag and an
-            // archive already on the target member.
-            ...body.release !== null && typeof body.release === "object" ? { release: body.release } : {},
-            ...body.targetPackage !== null && typeof body.targetPackage === "object" ? { targetPackage: body.targetPackage } : {},
-            // Upgrade downloads default to the external proxy; the panel can
-            // pick a different member or ask for a direct download.
-            ...typeof body.proxyMember === "string" && body.proxyMember.trim() !== "" ? { proxyMember: body.proxyMember.trim() } : {},
-            ...body.direct === true ? { direct: true } : {}
-          };
-          const test = path31 === "/test-upgrade" || body.test === true;
-          writeJson(response, 202, test ? await service.testUpgradeMember(request_) : await service.upgradeMember(request_));
-          return;
-        }
-        if (path31 === "/schedule") {
-          if (scheduler === null) {
-            writeJson(response, 503, { ok: false, error: { code: "unavailable", message: "\u5B9A\u65F6\u4EFB\u52A1\u8FD8\u6CA1\u6709\u542F\u52A8\u3002" } });
-            return;
-          }
-          const body = await readJson2(request);
-          const member = typeof body.member === "string" ? body.member.trim() : "";
-          const patch = member === "" ? {
-            build: body.build !== null && typeof body.build === "object" ? {
-              ...typeof body.build.enabled === "boolean" ? { enabled: body.build.enabled } : {},
-              ...typeof body.build.time === "string" ? { time: body.build.time } : {}
-            } : void 0
-          } : {
-            member,
-            upgrade: body.upgrade !== null && typeof body.upgrade === "object" ? {
-              ...typeof body.upgrade.enabled === "boolean" ? { enabled: body.upgrade.enabled } : {},
-              ...typeof body.upgrade.time === "string" ? { time: body.upgrade.time } : {}
-            } : void 0
-          };
-          writeJson(response, 200, { ok: true, schedule: await scheduler.update(patch) });
-          return;
-        }
-        if (path31 === "/build") {
-          const body = await readJson2(request);
-          const job = await service.startBuild({
-            source: typeof body.source === "string" ? body.source : void 0,
-            ref: typeof body.ref === "string" ? body.ref : void 0,
-            targets: Array.isArray(body.targets) ? body.targets.filter((value) => typeof value === "string") : void 0,
-            planOnly: body.planOnly === true,
-            version: typeof body.version === "string" ? body.version : void 0,
-            member: typeof body.member === "string" ? body.member : void 0,
-            proxy: typeof body.proxy === "string" ? body.proxy : void 0,
-            proxyMember: typeof body.proxyMember === "string" ? body.proxyMember : void 0,
-            direct: body.direct === true,
-            pullBack: typeof body.pullBack === "boolean" ? body.pullBack : void 0,
-            autoUpgrade: typeof body.autoUpgrade === "boolean" ? body.autoUpgrade : void 0
-          });
-          writeJson(response, 202, { ok: true, job });
-          return;
-        }
-        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path31);
-        if (resume !== null) {
-          writeJson(response, 202, { ok: true, job: await service.resumeBuild(resume[1]) });
-          return;
-        }
-        const match = /^\/build\/([^/]+)\/learn$/u.exec(path31);
-        if (match !== null) {
-          writeJson(response, 200, { ok: true, job: await service.learn(match[1]) });
-          return;
-        }
-        writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown mesh endpoint." } });
-      } catch (error) {
-        writeJson(response, 400, {
-          ok: false,
-          error: {
-            code: "request_failed",
-            message: error instanceof Error ? error.message : String(error)
-          }
-        });
-      }
-    }
-  }), "mesh local api");
-}
-
-// src/lib/scheduler.mjs
-import { mkdir as mkdir14, readFile as readFile17, writeFile as writeFile14 } from "node:fs/promises";
-import path27 from "node:path";
-var TICK_TOLERANCE_MS = 9e4;
-var DUPLICATE_WINDOW_MS = 10 * 6e4;
-var Scheduler = class {
-  /**
-   * @param {object} options scheduler input.
-   * @param {{ scheduledBuild: () => Promise<object>, scheduledUpgradeMember: (memberId: string) => Promise<object> }} options.service mesh service.
-   * @param {string} options.file `schedule.json` path.
-   * @param {() => Promise<string[]>} [options.members] current member id provider.
-   * @param {(line: string) => void} [options.log] logger.
-   * @param {() => number} [options.now] clock (tests).
-   * @param {typeof setTimeout} [options.setTimeout] timer factory (tests).
-   * @param {typeof clearTimeout} [options.clearTimeout] timer canceller (tests).
-   * @param {boolean} [options.autoStart] arm on construction; default true.
-   */
-  constructor(options) {
-    this.service = options.service;
-    this.file = options.file;
-    this.memberIdProvider = typeof options.members === "function" ? options.members : null;
-    this.log = typeof options.log === "function" ? options.log : () => {
-    };
-    this.now = typeof options.now === "function" ? options.now : Date.now;
-    this.setTimer = options.setTimeout ?? setTimeout;
-    this.clearTimer = options.clearTimeout ?? clearTimeout;
-    this.schedule = normalizeSchedules({});
-    this.upgrades = /* @__PURE__ */ new Map();
-    this.last = { build: null, upgrades: {}, prepares: {} };
-    this.runningUpgrades = /* @__PURE__ */ new Set();
-    this.runningBuild = false;
-    this.memberIds = [];
-    this.timer = null;
-    this.disposed = false;
-    this.loading = null;
-    if (options.autoStart !== false) void this.start();
-  }
-  /**
-   * Read the persisted schedule, discover members, and arm the timer.
-   * @returns {Promise<void>} when armed.
-   */
-  async start() {
-    await this.#load();
-    await this.#refreshMembers();
-    this.#arm();
-  }
-  /**
-   * Merge one client update and re-arm immediately.
-   *
-   * Either the build clock (`{build}`) or one member's auto-upgrade
-   * (`{member, upgrade}`) is updated per call.
-   * @param {{build?: {enabled?: boolean, time?: string}, member?: string, upgrade?: {enabled?: boolean, time?: string}}} patch schedule patch.
-   * @returns {Promise<object>} new status (build or the member's entry).
-   */
-  async update(patch) {
-    const memberId = typeof patch?.member === "string" ? patch.member.trim() : "";
-    if (memberId !== "") {
-      const entry = normalizeUpgradeSchedule({
-        ...upgradeEntryFor(this.schedule, memberId),
-        ...patch?.upgrade ?? {}
-      });
-      this.upgrades.set(memberId, entry);
-      if (!this.memberIds.includes(memberId)) this.memberIds.push(memberId);
-    } else if (patch?.build !== void 0) {
-      this.schedule.build = normalizeBuildSchedule({ ...this.schedule.build, ...patch.build ?? {} });
-    }
-    this.schedule = {
-      ...this.schedule,
-      upgrades: Object.fromEntries(this.upgrades)
-    };
-    await this.#save();
-    this.#arm();
-    this.log(`schedule saved: build ${this.schedule.build.time} ${this.schedule.build.enabled ? "on" : "off"}${memberId === "" ? "" : `, upgrade ${memberId} ${this.upgrades.get(memberId)?.time} ${this.upgrades.get(memberId)?.enabled ? "on" : "off"}`}`);
-    return this.status(memberId === "" ? void 0 : memberId);
-  }
-  /**
-   * The panel's read model.
-   * @param {string} [memberId] when set, include that member's auto-upgrade.
-   * @returns {object} status.
-   */
-  status(memberId) {
-    const at = new Date(this.now());
-    const result = {
-      ok: true,
-      build: this.#statusEntry(this.schedule.build, "build", void 0, at)
-    };
-    if (typeof memberId === "string" && memberId !== "") {
-      result.upgrade = this.#statusEntry(upgradeEntryFor(this.schedule, memberId), "upgrade", memberId, at);
-    }
-    return result;
-  }
-  /** Stop the timer. */
-  dispose() {
-    this.disposed = true;
-    if (this.timer !== null) this.clearTimer(this.timer);
-    this.timer = null;
-  }
-  /** Build one status row with next occurrence and last outcome. */
-  #statusEntry(entry, kind, memberId, at) {
-    const last = kind === "build" ? this.last.build : this.last.upgrades[memberId] ?? null;
-    return {
-      enabled: entry.enabled,
-      time: entry.time,
-      next: entry.enabled ? nextRunAt(at, entry.time).toISOString() : null,
-      last,
-      // The announcement runs one lead time before the upgrade itself, so the
-      // panel can show that the member's conversations were told to stop.
-      ...kind === "build" ? {} : { prepare: this.last.prepares?.[memberId] ?? null },
-      running: kind === "build" ? this.runningBuild : this.runningUpgrades.has(memberId),
-      ...memberId === void 0 ? {} : { member: memberId }
-    };
-  }
-  /** Read the schedule file once. */
-  async #load() {
-    if (this.loading !== null) return this.loading;
-    this.loading = (async () => {
-      try {
-        const parsed = JSON.parse(await readFile17(this.file, "utf8"));
-        const normalized = migrateSchedules(parsed);
-        this.schedule = normalized;
-        this.upgrades = new Map(Object.entries(normalized.upgrades));
-        if (parsed?.last !== null && typeof parsed?.last === "object") {
-          this.last = {
-            build: typeof parsed.last.build === "object" ? parsed.last.build : null,
-            upgrades: parsed.last.upgrades !== null && typeof parsed.last.upgrades === "object" ? parsed.last.upgrades : {},
-            prepares: parsed.last.prepares !== null && typeof parsed.last.prepares === "object" ? parsed.last.prepares : {}
-          };
-        }
-        if (parsed?.format !== SCHEDULE_FORMAT) await this.#save();
-      } catch {
-      }
-    })();
-    return this.loading;
-  }
-  /** Persist the current settings and last outcomes. */
-  async #save() {
-    try {
-      await mkdir14(path27.dirname(this.file), { recursive: true });
-      await writeFile14(this.file, `${JSON.stringify({
-        format: SCHEDULE_FORMAT,
-        build: this.schedule.build,
-        upgrade: this.schedule.upgrade,
-        upgrades: Object.fromEntries(this.upgrades),
-        last: this.last
-      }, null, 2)}
-`, "utf8");
-    } catch (error) {
-      this.log(`cannot save schedule: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  /** Ask the service who exists now; a failure keeps the previous list. */
-  async #refreshMembers() {
-    if (this.memberIdProvider === null) return;
-    try {
-      const ids = await this.memberIdProvider();
-      const unique = [...new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === "string" && id !== ""))];
-      if (unique.length > 0) this.memberIds = unique;
-    } catch {
-    }
-  }
-  /** One timer for the nearest enabled occurrence. */
-  #arm() {
-    if (this.disposed) return;
-    if (this.timer !== null) this.clearTimer(this.timer);
-    this.timer = null;
-    const at = new Date(this.now());
-    const candidates = [];
-    if (this.schedule.build.enabled) {
-      candidates.push({ kind: "build", memberId: void 0, at: nextRunAt(at, this.schedule.build.time) });
-    }
-    const ids = [.../* @__PURE__ */ new Set([...this.memberIds, ...this.upgrades.keys()])];
-    for (const memberId of ids) {
-      const entry = upgradeEntryFor(this.schedule, memberId);
-      if (!entry.enabled) continue;
-      const upgradeAt = nextRunAt(at, entry.time);
-      candidates.push({ kind: "upgrade", memberId, at: upgradeAt });
-      const prepareAt = new Date(upgradeAt.getTime() - UPGRADE_LEAD_MS);
-      if (prepareAt.getTime() > at.getTime() + 1e3) {
-        candidates.push({ kind: "prepare", memberId, at: prepareAt });
-      }
-    }
-    if (candidates.length === 0) return;
-    candidates.sort((left, right) => left.at.getTime() - right.at.getTime());
-    const next = candidates[0];
-    const delay2 = Math.max(0, next.at.getTime() - at.getTime());
-    this.timer = this.setTimer(() => {
-      this.timer = null;
-      void this.#tick();
-    }, delay2);
-    if (typeof this.timer?.unref === "function") this.timer.unref();
-    this.log(`next ${next.kind}${next.memberId === void 0 ? "" : ` ${next.memberId}`} at ${next.at.toISOString()}`);
-  }
-  /** Run every occurrence due in this tick, then re-arm. */
-  async #tick() {
-    if (this.disposed) return;
-    await this.#refreshMembers();
-    const at = new Date(this.now());
-    try {
-      if (this.schedule.build.enabled && this.#isDue(this.schedule.build.time, at)) {
-        if (!this.#recentlyRan(this.last.build)) await this.#runBuild();
-      }
-      for (const memberId of [.../* @__PURE__ */ new Set([...this.memberIds, ...this.upgrades.keys()])]) {
-        const entry = upgradeEntryFor(this.schedule, memberId);
-        if (!entry.enabled) continue;
-        const prepareDue = [new Date(at.getTime() - 24 * 60 * 6e4), at].some((reference) => {
-          const upgradeAt = nextRunAt(reference, entry.time);
-          return this.#isDueTime(new Date(upgradeAt.getTime() - UPGRADE_LEAD_MS), at);
-        });
-        if (prepareDue && !this.#recentlyRan(this.last.prepares?.[memberId])) {
-          await this.#runPrepare(memberId);
-        }
-        if (!this.#isDue(entry.time, at)) continue;
-        if (this.runningUpgrades.has(memberId)) continue;
-        if (this.#recentlyRan(this.last.upgrades[memberId])) continue;
-        await this.#runUpgrade(memberId);
-      }
-    } finally {
-      this.#arm();
-    }
-  }
-  /** Whether a daily clock occurrence is within the tick window. */
-  #isDue(time, at) {
-    const base = new Date(at.getTime() - 24 * 60 * 6e4);
-    const due = nextRunAt(base, time);
-    return Math.abs(due.getTime() - at.getTime()) <= TICK_TOLERANCE_MS;
-  }
-  /** Whether one exact instant is within the tick window. */
-  #isDueTime(due, at) {
-    return Math.abs(due.getTime() - at.getTime()) <= TICK_TOLERANCE_MS;
-  }
-  /** Whether this kind already ran within the duplicate window. */
-  #recentlyRan(last) {
-    const at = last?.at;
-    return typeof at === "string" && Math.abs(this.now() - Date.parse(at)) < DUPLICATE_WINDOW_MS;
-  }
-  /**
-   * Run the pre-upgrade announcement and record the outcome.
-   *
-   * Independent of the upgrade tick on purpose: a failure only means the
-   * conversations were not stopped in time, and the upgrade still runs.
-   * @param {string} memberId member id.
-   * @returns {Promise<void>} when recorded.
-   */
-  async #runPrepare(memberId) {
-    const at = new Date(this.now()).toISOString();
-    try {
-      this.log(`prepare ${memberId} tick at ${at}`);
-      const result = await this.service.scheduledPrepareUpgrade(memberId);
-      this.last.prepares ??= {};
-      this.last.prepares[memberId] = { at, ...result !== null && typeof result === "object" ? result : { status: "unknown" } };
-      await this.#save();
-      this.log(`prepare ${memberId}: ${String(this.last.prepares[memberId].status ?? "unknown")}${this.last.prepares[memberId].reason ? ` (${String(this.last.prepares[memberId].reason)})` : ""}`);
-    } catch (error) {
-      this.last.prepares ??= {};
-      this.last.prepares[memberId] = { at, status: "failed", reason: error instanceof Error ? error.message : String(error) };
-      await this.#save();
-      this.log(`prepare ${memberId} failed: ${String(this.last.prepares[memberId].reason)}`);
-    }
-  }
-  /** Run the build hook and record the outcome. */
-  async #runBuild() {
-    if (this.runningBuild) return;
-    this.runningBuild = true;
-    const at = new Date(this.now()).toISOString();
-    try {
-      this.log(`build tick at ${at}`);
-      const result = await this.service.scheduledBuild();
-      this.last.build = { at, ...result !== null && typeof result === "object" ? result : { status: "unknown" } };
-      await this.#save();
-      this.log(`build: ${String(this.last.build.status ?? "unknown")}${this.last.build.reason ? ` (${String(this.last.build.reason)})` : ""}`);
-    } catch (error) {
-      this.last.build = { at, status: "failed", reason: error instanceof Error ? error.message : String(error) };
-      await this.#save();
-      this.log(`build failed: ${String(this.last.build.reason)}`);
-    } finally {
-      this.runningBuild = false;
-    }
-  }
-  /** Run one member's upgrade hook and record the outcome. */
-  async #runUpgrade(memberId) {
-    if (this.runningUpgrades.has(memberId)) return;
-    this.runningUpgrades.add(memberId);
-    const at = new Date(this.now()).toISOString();
-    try {
-      this.log(`upgrade ${memberId} tick at ${at}`);
-      const result = await this.service.scheduledUpgradeMember(memberId);
-      this.last.upgrades[memberId] = { at, ...result !== null && typeof result === "object" ? result : { status: "unknown" } };
-      await this.#save();
-      this.log(`upgrade ${memberId}: ${String(this.last.upgrades[memberId].status ?? "unknown")}${this.last.upgrades[memberId].reason ? ` (${String(this.last.upgrades[memberId].reason)})` : ""}`);
-    } catch (error) {
-      this.last.upgrades[memberId] = { at, status: "failed", reason: error instanceof Error ? error.message : String(error) };
-      await this.#save();
-      this.log(`upgrade ${memberId} failed: ${String(this.last.upgrades[memberId].reason)}`);
-    } finally {
-      this.runningUpgrades.delete(memberId);
-    }
-  }
-};
-
-// src/lib/wireguard-api.mjs
-import { request as httpRequest } from "node:http";
-var API_PREFIX2 = "/api/dsh-wireguard";
-function proxy(request, response) {
-  const port = Number(process.env.DSH_WIREGUARD_CONTROL_PORT ?? "51821");
-  return new Promise((resolve) => {
-    const upstream = httpRequest({
-      host: "127.0.0.1",
-      port: Number.isSafeInteger(port) && port > 0 ? port : 51821,
-      method: request.method,
-      path: request.url,
-      headers: { ...request.headers, host: `127.0.0.1:${String(port)}` }
-    }, (answer) => {
-      response.writeHead(answer.statusCode ?? 502, answer.headers);
-      answer.pipe(response);
-      answer.once("end", resolve);
-    });
-    upstream.once("error", () => {
-      if (!response.headersSent) {
-        const body = JSON.stringify({
-          ok: false,
-          error: {
-            code: "control_panel_unavailable",
-            message: "The standalone WireGuard control service is not reachable on 51821."
-          }
-        });
-        response.writeHead(503, {
-          "content-type": "application/json; charset=utf-8",
-          "content-length": Buffer.byteLength(body),
-          "cache-control": "no-store"
-        });
-        response.end(body);
-      }
-      resolve();
-    });
-    request.pipe(upstream);
-  });
-}
-function registerWireGuardApi(ctx) {
-  ctx.effect(() => ctx.webServer.register({
-    kind: "prefix",
-    path: API_PREFIX2,
-    handler: proxy
-  }), "mesh wireguard api");
-}
-
 // src/lib/member-tasks.mjs
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { mkdir as mkdir15, readFile as readFile18, readdir as readdir9, rename as rename10, rm as rm15, writeFile as writeFile15 } from "node:fs/promises";
-import path28 from "node:path";
+import { mkdir as mkdir13, readFile as readFile16, readdir as readdir8, rename as rename10, rm as rm14, writeFile as writeFile13 } from "node:fs/promises";
+import path24 from "node:path";
 var CONVERSATION_ID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 var CONNECTION_ERROR_CODES = /* @__PURE__ */ new Set(["ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "EPIPE"]);
 var CONNECT_RETRY_CODES = /* @__PURE__ */ new Set(["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"]);
@@ -13847,7 +10301,7 @@ var MemberTaskService = class {
     this.dataDir = options.dataDir;
     this.logLine = options.log ?? (() => {
     });
-    this.taskRoot = path28.join(this.dataDir, "member-tasks");
+    this.taskRoot = path24.join(this.dataDir, "member-tasks");
     this.tasks = /* @__PURE__ */ new Map();
     this.monitors = /* @__PURE__ */ new Map();
     this.deliveryGraceMs = Number.isSafeInteger(options.deliveryGraceMs) && options.deliveryGraceMs >= 0 ? options.deliveryGraceMs : DELIVERY_GRACE_MS;
@@ -13894,17 +10348,17 @@ var MemberTaskService = class {
   async #ensureLoaded() {
     if (this.loaded) return;
     this.loaded = true;
-    await mkdir15(this.taskRoot, { recursive: true });
+    await mkdir13(this.taskRoot, { recursive: true });
     let files = [];
     try {
-      files = await readdir9(this.taskRoot);
+      files = await readdir8(this.taskRoot);
     } catch {
     }
     const resumable = [];
     for (const file of files) {
       if (!file.endsWith(".json")) continue;
       try {
-        const task = JSON.parse(await readFile18(path28.join(this.taskRoot, file), "utf8"));
+        const task = JSON.parse(await readFile16(path24.join(this.taskRoot, file), "utf8"));
         if (task?.id === void 0) continue;
         const stoppedAt = Date.parse(task.updatedAt);
         const recent = Number.isFinite(stoppedAt) && Date.now() - stoppedAt <= RESUME_WINDOW_MS;
@@ -13986,14 +10440,14 @@ var MemberTaskService = class {
    * @returns {Promise<void>} resolution after the rename.
    */
   async #writeTaskSnapshot(id, body) {
-    const file = path28.join(this.taskRoot, `${id}.json`);
+    const file = path24.join(this.taskRoot, `${id}.json`);
     const temporary = `${file}.${process.pid}.${randomUUID2()}.tmp`;
     try {
-      await mkdir15(this.taskRoot, { recursive: true });
-      await writeFile15(temporary, body, "utf8");
+      await mkdir13(this.taskRoot, { recursive: true });
+      await writeFile13(temporary, body, "utf8");
       await rename10(temporary, file);
     } catch (error) {
-      await rm15(temporary, { force: true }).catch(() => {
+      await rm14(temporary, { force: true }).catch(() => {
       });
       throw error;
     }
@@ -14002,7 +10456,7 @@ var MemberTaskService = class {
     const text = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
 `;
     try {
-      await writeFile15(path28.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
+      await writeFile13(path24.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
     } catch {
     }
     try {
@@ -14205,7 +10659,7 @@ var MemberTaskService = class {
     const explicitWorkspace = typeof workspace === "string" && workspace.trim() !== "";
     const explicitCwd = typeof cwd === "string" && cwd !== "";
     const targetWorkspace = explicitWorkspace ? workspace.trim() : explicitCwd ? "" : await callerWorkspaceName(this.ctx, agent);
-    const taskWorkspace = explicitWorkspace ? workspace.trim() : explicitCwd ? path28.basename(path28.resolve(cwd)) || "unknown" : targetWorkspace || "unknown";
+    const taskWorkspace = explicitWorkspace ? workspace.trim() : explicitCwd ? path24.basename(path24.resolve(cwd)) || "unknown" : targetWorkspace || "unknown";
     const payload = {
       prompt: deliveredPrompt,
       // The member's panel lists these; without a title it would show a UUID.
@@ -14714,8 +11168,8 @@ var MemberTaskService = class {
     this.#notifyWaiters(task);
     this.tasks.delete(task.id);
     await Promise.allSettled([
-      rm15(path28.join(this.taskRoot, `${task.id}.json`), { force: true }),
-      rm15(path28.join(this.taskRoot, `${task.id}.log`), { force: true })
+      rm14(path24.join(this.taskRoot, `${task.id}.json`), { force: true }),
+      rm14(path24.join(this.taskRoot, `${task.id}.log`), { force: true })
     ]);
     this.logLine(`member-task ${task.id}: removed ${task.conversationId} and its local record`);
   }
@@ -15747,7 +12201,7 @@ var MemberTaskService = class {
     const task = this.tasks.get(String(taskId));
     if (task === void 0) return "";
     try {
-      const text = await readFile18(path28.join(this.taskRoot, `${task.id}.log`), "utf8");
+      const text = await readFile16(path24.join(this.taskRoot, `${task.id}.log`), "utf8");
       return text.split("\n").slice(-Math.max(1, Math.min(lines, 500))).join("\n");
     } catch {
       return "";
@@ -15759,9 +12213,3624 @@ var MemberTaskService = class {
    * @returns {string} log path.
    */
   logPath(taskId) {
-    return path28.join(this.taskRoot, `${String(taskId)}.log`);
+    return path24.join(this.taskRoot, `${String(taskId)}.log`);
   }
 };
+
+// src/lib/member-ui.mjs
+var MEMBER_UI_PROMPT_MAX = 280;
+function memberShortLabel(task) {
+  const ip = String(task?.memberIp ?? "").trim();
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(ip);
+  if (octets !== null) return octets[4];
+  const name = String(task?.member ?? "").trim();
+  return name === "" ? "unknown" : name;
+}
+function memberConversationEntry(task, scopes = {}) {
+  const entry = describeMemberTask(task);
+  const stored = scopes[String(entry.conversationId ?? "")] ?? null;
+  const profile = stored !== null ? memberTaskProfile({ profile: stored }) : memberTaskProfile(task);
+  const note = typeof stored?.note === "string" && stored.note.trim() !== "" ? stored.note.trim() : null;
+  const compressPercent = typeof stored?.compressPercent === "number" && Number.isFinite(stored.compressPercent) ? stored.compressPercent : null;
+  const rawPrompt = typeof task?.prompt === "string" ? task.prompt : typeof task?.lastPrompt === "string" ? task.lastPrompt : "";
+  return {
+    conversationId: entry.conversationId,
+    member: entry.member,
+    memberIp: entry.memberIp,
+    memberName: profile?.name ?? (entry.member === "" ? null : entry.member),
+    memberLabel: memberShortLabel(task),
+    workspace: entry.workspace,
+    identity: profile?.identity ?? null,
+    scope: profile?.scope ?? null,
+    note,
+    compressPercent,
+    status: entry.status,
+    statusLabel: entry.statusLabel,
+    turns: entry.turns,
+    createdAt: typeof task?.createdAt === "string" ? task.createdAt : null,
+    updatedAt: typeof task?.updatedAt === "string" ? task.updatedAt : null,
+    lastSentAt: typeof task?.lastSentAt === "string" ? task.lastSentAt : null,
+    prompt: rawPrompt.length > MEMBER_UI_PROMPT_MAX ? `${rawPrompt.slice(0, MEMBER_UI_PROMPT_MAX)}\u2026` : rawPrompt
+  };
+}
+function memberConversationEntries(tasks, scopes = {}) {
+  return (Array.isArray(tasks) ? tasks : []).filter((task) => task !== null && typeof task === "object").map((task) => memberConversationEntry(task, scopes));
+}
+function memberConversationSummary(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  return {
+    total: list.length,
+    running: list.filter((entry) => entry?.status === "running" || entry?.status === "starting").length
+  };
+}
+
+// src/lib/service.mjs
+var HERE2 = path25.dirname(fileURLToPath2(import.meta.url));
+var execFileAsync2 = promisify3(execFile3);
+var PROBE_GRACE_MS = 10 * 6e4;
+var PROBE_TIMEOUT_MS = 4500;
+var PROBE_RETRY_MS = 4500;
+var PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 6e4;
+var MEMBER_IDENTITY_MAX = 40;
+var MEMBER_SCOPE_MAX = 120;
+var UPGRADE_ANNOUNCE_WINDOW_MS = UPGRADE_LEAD_MS * 3;
+var DEFAULT_COMPRESS_PERCENT = 35;
+var MEMBER_NOTE_MAX = 500;
+function normalizeMemberScopePatch(patch = {}) {
+  if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
+    throw new Error("member scope must be an object");
+  }
+  const normalized = {};
+  if (patch.identity !== void 0) {
+    if (typeof patch.identity !== "string") throw new Error("identity must be a string");
+    const text = patch.identity.trim();
+    if (text.length > MEMBER_IDENTITY_MAX) {
+      throw new Error(`identity is too long: ${String(text.length)} > ${String(MEMBER_IDENTITY_MAX)} characters`);
+    }
+    normalized.identity = text === "" ? null : text;
+  }
+  if (patch.scope !== void 0) {
+    if (typeof patch.scope !== "string") throw new Error("scope must be a string");
+    const text = patch.scope.trim();
+    if (text.length > MEMBER_SCOPE_MAX) {
+      throw new Error(`scope is too long: ${String(text.length)} > ${String(MEMBER_SCOPE_MAX)} characters`);
+    }
+    normalized.scope = text === "" ? null : text;
+  }
+  if (patch.note !== void 0) {
+    if (typeof patch.note !== "string") throw new Error("note must be a string");
+    const text = patch.note.trim();
+    if (text.length > MEMBER_NOTE_MAX) {
+      throw new Error(`note is too long: ${String(text.length)} > ${String(MEMBER_NOTE_MAX)} characters`);
+    }
+    normalized.note = text === "" ? null : text;
+  }
+  if (patch.keep !== void 0) {
+    if (typeof patch.keep !== "boolean") throw new Error("keep must be a boolean");
+    normalized.keep = patch.keep;
+  }
+  if (patch.avoidLongJobs !== void 0) {
+    if (typeof patch.avoidLongJobs !== "boolean") throw new Error("avoidLongJobs must be a boolean");
+    normalized.avoidLongJobs = patch.avoidLongJobs;
+  }
+  if (patch.compressPercent !== void 0) {
+    const value = patch.compressPercent;
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new Error("compressPercent must be a number");
+    }
+    if (value < 1 || value > 100) {
+      throw new Error(`compressPercent is out of range: ${String(value)} (1-100)`);
+    }
+    normalized.compressPercent = value;
+  }
+  return normalized;
+}
+function effectiveCompressPercent(scope) {
+  const value = scope?.compressPercent;
+  return typeof value === "number" && Number.isFinite(value) && value >= 1 && value <= 100 ? value : DEFAULT_COMPRESS_PERCENT;
+}
+function savedScopeText(value, max) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text === "" || text.length > max ? null : text;
+}
+function savedScopeNumber(value, valid) {
+  return typeof value === "number" && Number.isFinite(value) && valid(value) ? value : void 0;
+}
+function findRepositoryRoot(start) {
+  let current = start;
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (existsSync14(path25.join(current, "build", "recipes.json")) && existsSync14(path25.join(current, "code", "build"))) {
+      return current;
+    }
+    const parent = path25.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return path25.resolve(start, "..", "..");
+}
+var REPOSITORY_ROOT = findRepositoryRoot(HERE2);
+function runSshProbe(args, source, timeoutMs = 3e4) {
+  return new Promise((resolve) => {
+    const child = spawn7("ssh", args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.kill("SIGKILL");
+      } catch {
+      }
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish({ ok: false, error: "probe timed out" }), timeoutMs);
+    timer.unref?.();
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.once("error", (error) => finish({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    child.once("close", () => {
+      const line = String(stdout).trim().split(/\r?\n/u).filter(Boolean).pop() ?? "";
+      try {
+        const parsed = JSON.parse(line);
+        finish(parsed !== null && typeof parsed === "object" ? parsed : { ok: false, error: "probe returned no object" });
+      } catch {
+        finish({ ok: false, error: (String(stderr).trim() || "no probe output").slice(0, 160) });
+      }
+    });
+    child.stdin.on("error", () => {
+    });
+    child.stdin.end(source);
+  });
+}
+function packageVersion() {
+  try {
+    const parsed = JSON.parse(readFileSync5(path25.join(REPOSITORY_ROOT, "package.json"), "utf8"));
+    return typeof parsed.version === "string" ? parsed.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+function assertTestUpgradeTarget(target, options = {}) {
+  if (target === null || target === void 0) {
+    throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u9700\u8981\u4E00\u4E2A\u6210\u5458\uFF1A\u8BF7\u4ECE\u6210\u5458\u5217\u8868\u91CC\u9009\u4E00\u4E2A\u5DF2\u5B89\u88C5 DSH \u7684 Linux \u6210\u5458");
+  }
+  if (target.kind === "self" || target.id === "local") {
+    throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u8981\u5728\u522B\u7684\u6210\u5458\u4E0A\u8DD1\uFF1B\u672C\u673A\u5347\u7EA7\u8BF7\u76F4\u63A5\u7528\u300C\u5347\u7EA7\u300D");
+  }
+  const memberOs2 = /win/iu.test(target.system?.platform ?? "") ? "windows" : "linux";
+  if (options.packageOs !== void 0 && options.packageOs !== memberOs2) {
+    throw new Error(`\u9009\u7684\u662F ${options.packageOs === "windows" ? "Windows" : "Linux"} \u90E8\u7F72\u5305\uFF0C\u4F46\u6210\u5458 ${String(target.name ?? target.id)} \u662F ${memberOs2}\uFF1B\u6362\u4E00\u4E2A\u5339\u914D\u7684\u5305`);
+  }
+  if (target.dsh !== true) {
+    throw new Error(`\u6210\u5458 ${String(target.name ?? target.id)} \u8FD8\u6CA1\u6709\u5B89\u88C5 DSH\uFF0C\u6CA1\u6709\u53EF\u5347\u7EA7\u7684\u5B89\u88C5\uFF1B\u8BF7\u5148\u7528\u300C\u90E8\u7F72\u300D`);
+  }
+  return target;
+}
+var MeshService = class {
+  /**
+   * @param {{dataDir: string, config?: object, log?: (line: string) => void, spawnRunner?: Function, geoLookup?: object}} options service input.
+   */
+  constructor(options) {
+    this.dataDir = options.dataDir;
+    this.config = options.config ?? {};
+    this.logLine = options.log ?? (() => {
+    });
+    this.jobRoot = path25.join(this.dataDir, "build");
+    this.cacheDir = path25.join(this.dataDir, "cache");
+    this.version = packageVersion();
+    this.repositoryRoot = REPOSITORY_ROOT;
+    this.recipesPath = path25.join(REPOSITORY_ROOT, "build", "recipes.json");
+    this.overlayRoot = path25.join(REPOSITORY_ROOT, "build", "overlays");
+    this.home = path25.dirname(this.dataDir);
+    this.deployRoot = path25.join(this.dataDir, "deploy");
+    this.memberTagsFile = path25.join(this.dataDir, "member-tags.json");
+    this.memberScopesFile = path25.join(this.dataDir, "member-scopes.json");
+    this.announcedUpgrades = /* @__PURE__ */ new Map();
+    this.packagesDir = path25.join(os10.homedir(), ".dsh", "packages");
+    this.releaseConfigFile = path25.join(this.dataDir, "release.json");
+    this.latestReleaseCache = null;
+    const geoConfig = this.config.geo === false ? { enabled: false } : this.config.geo !== null && typeof this.config.geo === "object" ? this.config.geo : {};
+    this.geo = options.geoLookup ?? new GeoLookup({
+      enabled: geoConfig.enabled !== false,
+      cacheFile: path25.join(this.dataDir, "geo-cache.json"),
+      provider: typeof geoConfig.provider === "string" && geoConfig.provider !== "" ? geoConfig.provider : void 0,
+      timeoutMs: typeof geoConfig.timeoutMs === "number" ? geoConfig.timeoutMs : void 0,
+      fetchImpl: typeof geoConfig.fetchImpl === "function" ? geoConfig.fetchImpl : void 0,
+      log: (line) => this.logLine(`geo: ${line}`)
+    });
+    this.deploy = new DeployManager({
+      repositoryRoot: REPOSITORY_ROOT,
+      dataDir: this.deployRoot,
+      log: (line) => this.logLine(`deploy: ${line}`)
+    });
+    this.spawnRunner = options.spawnRunner ?? ((dir, id) => this.#spawnRunner(dir, id));
+    this.running = /* @__PURE__ */ new Map();
+    this.egress = new EgressProxy({ log: (line) => this.logLine(line) });
+    this.remoteBuilder = new RemoteBuilder({ packagesDir: this.packagesDir, log: (line) => this.logLine(line) });
+    this.systemCache = null;
+    this.probes = /* @__PURE__ */ new Map();
+    this.probeCacheFile = path25.join(this.dataDir, "probe-cache.json");
+    this.probeCacheLoaded = false;
+    this.fetchImpl = options.fetchImpl;
+  }
+  /**
+   * Seed the probe map from the last run.
+   *
+   * The map lives in memory, so a panel reload used to forget that a peer was
+   * installed and show 未部署 (with a tempting 部署 button) until the slow peer
+   * answered again. The file keeps that knowledge across restarts; entries age
+   * out after a week so an uninstalled member is eventually re-detected.
+   */
+  async #loadProbes() {
+    if (this.probeCacheLoaded) return;
+    this.probeCacheLoaded = true;
+    try {
+      const parsed = JSON.parse(await readFile17(this.probeCacheFile, "utf8"));
+      if (parsed === null || typeof parsed !== "object") return;
+      const now = Date.now();
+      for (const [ip, entry] of Object.entries(parsed)) {
+        if (this.probes.has(ip) || entry === null || typeof entry !== "object") continue;
+        const at = Number(entry.at);
+        if (!Number.isFinite(at)) continue;
+        const expiresAt = at + PROBE_CACHE_TTL_MS;
+        if (expiresAt <= now) continue;
+        this.probes.set(ip, {
+          port: Number.isInteger(entry.port) ? entry.port : null,
+          gate: entry.gate ?? null,
+          system: entry.system ?? null,
+          latencyMs: Number(entry.latencyMs) || 0,
+          at,
+          expiresAt
+        });
+      }
+    } catch {
+    }
+  }
+  /** Persist the probe map; a failed write is not worth reporting. */
+  async #saveProbes() {
+    try {
+      await mkdir14(path25.dirname(this.probeCacheFile), { recursive: true });
+      await writeFile14(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.probes)), "utf8");
+    } catch {
+    }
+  }
+  /** Cached local host inventory for the member table. */
+  async systemInfo() {
+    if (this.systemCache !== null && this.systemCache.expiresAt > Date.now()) return this.systemCache.value;
+    const value = quickSystemInfo();
+    this.systemCache = { value, expiresAt: Date.now() + 3e4 };
+    return value;
+  }
+  /** No child process is owned directly; jobs own their own. */
+  async dispose() {
+    this.egress.closeAll();
+    await this.deploy.dispose();
+  }
+  /**
+   * Local host and WireGuard facts.
+   * @returns {Promise<object>} status.
+   */
+  async status() {
+    const stateFile = path25.join(this.home, "wireguard", "state.json");
+    const { state, error } = await readWireGuardState({ file: stateFile });
+    const identity = state === null ? null : wireGuardIdentity(state);
+    return {
+      ok: true,
+      host: {
+        hostname: os10.hostname(),
+        platform: process.platform,
+        arch: process.arch,
+        version: this.version,
+        dataDir: this.dataDir,
+        repositoryRoot: this.repositoryRoot
+      },
+      wireguard: identity === null ? { available: false, error, stateFile } : {
+        available: true,
+        stateFile,
+        role: identity.role,
+        connected: identity.connected,
+        vpnCidr: identity.vpnCidr,
+        serverIp: identity.serverIp,
+        serverUrl: identity.serverUrl,
+        selfIp: identity.selfIp,
+        selfName: identity.selfName,
+        lastHandshakeAt: identity.lastHandshakeAt,
+        warnings: identity.warnings
+      },
+      gate: { url: typeof this.config.gateUrl === "string" ? this.config.gateUrl : "" },
+      build: {
+        source: typeof this.config.build?.source === "string" ? this.config.build.source : "",
+        ref: typeof this.config.build?.ref === "string" ? this.config.build.ref : "master",
+        targets: Array.isArray(this.config.build?.targets) ? this.config.build.targets : ["linux-x64", "win-x64"],
+        // Panel defaults: pull-back is opt-in, the post-build upgrade is on.
+        pullBack: pullBackEnabled(void 0, this.config),
+        autoUpgrade: autoUpgradeEnabled(void 0, this.config),
+        jobRoot: this.jobRoot
+      },
+      deploy: { jobRoot: this.deployRoot }
+    };
+  }
+  /**
+   * Discover members from this host. The gate has its own copy of this logic;
+   * this one keeps the panel useful when DSH is opened directly.
+   * @returns {Promise<object>} discovery snapshot.
+   */
+  /**
+   * Ask a Windows member to move its stack into the interactive session.
+   *
+   * The request travels as a cluster call, the same signed channel a member
+   * switch uses, so no new secret is introduced. The member's gate writes the
+   * supervisor command file and answers with the supervisor's status.
+   * @param {string} target member id, name or address.
+   * @returns {Promise<{ok: boolean, member: object, status: object|null}>} result.
+   */
+  async promoteSession(target) {
+    const wanted = String(target ?? "").trim();
+    if (wanted === "") throw new Error("member is required");
+    const snapshot = await this.members();
+    const all = [snapshot.local, ...Array.isArray(snapshot.members) ? snapshot.members : []].filter(Boolean);
+    const member = all.find((candidate) => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted);
+    if (member === void 0) throw new Error(`member not found: ${wanted}`);
+    const password = process.env.DSH_GATE_PASSWORD ?? "";
+    if (password === "") throw new Error("DSH_GATE_PASSWORD is not set; cannot sign the cluster request");
+    let host = String(member.ip ?? "");
+    if (host === "") throw new Error(`member ${member.id} has no VPN address`);
+    if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
+    const path31 = "/__gate/cluster/__gate/session/promote";
+    const response = await fetch(`http://${host}${path31}`, {
+      method: "POST",
+      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path31 }) }
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`member ${member.name} refused the request: HTTP ${String(response.status)} ${text.slice(0, 120)}`);
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+    }
+    return { ok: true, member: { id: member.id, name: member.name, ip: member.ip }, status: parsed?.status ?? null };
+  }
+  async members() {
+    await this.#loadProbes();
+    const stateFile = path25.join(this.home, "wireguard", "state.json");
+    const { state, error } = await readWireGuardState({ file: stateFile });
+    const identity = state === null ? null : wireGuardIdentity(state);
+    const self = {
+      id: "local",
+      kind: "self",
+      name: identity?.selfName ?? os10.hostname(),
+      ip: identity?.selfIp ?? "",
+      online: true,
+      dsh: true,
+      port: null,
+      latencyMs: 0,
+      gate: null,
+      system: await this.systemInfo(),
+      error: null
+    };
+    const install = this.#localAppRoot();
+    if (install !== null) self.deployment = readDeployment(install.appRoot);
+    const snapshot = await discoverMembers({
+      state,
+      stateError: error,
+      self,
+      ports: Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080],
+      timeoutMs: PROBE_TIMEOUT_MS,
+      fetchImpl: this.fetchImpl,
+      geoLookup: this.geo
+    });
+    const tags = await this.memberTags();
+    self.tag = tags[self.id] ?? null;
+    const ports = Array.isArray(this.config.memberPorts) ? this.config.memberPorts : [80, 8080];
+    const now = Date.now();
+    let probed = false;
+    const members = await Promise.all(snapshot.members.map(async (member) => {
+      const tag = tags[member.id] ?? null;
+      const known = this.probes.get(member.ip);
+      if (member.dsh) {
+        this.probes.set(member.ip, {
+          port: member.port,
+          gate: member.gate,
+          system: member.system,
+          latencyMs: member.latencyMs,
+          at: now,
+          expiresAt: now + PROBE_GRACE_MS
+        });
+        probed = true;
+        return { ...member, tag };
+      }
+      if (known === void 0) return { ...member, tag };
+      const retryPorts = known.port === null ? ports : [known.port];
+      const retry = await probeMember(member.ip, {
+        ports: retryPorts,
+        timeoutMs: PROBE_RETRY_MS,
+        fetchImpl: this.fetchImpl
+      }).catch(() => null);
+      if (retry !== null && retry.ok) {
+        this.probes.set(member.ip, {
+          port: retry.port,
+          gate: retry.info,
+          system: retry.info?.system ?? null,
+          latencyMs: retry.latencyMs,
+          at: now,
+          expiresAt: now + PROBE_GRACE_MS
+        });
+        probed = true;
+        return {
+          ...member,
+          dsh: true,
+          port: retry.port,
+          latencyMs: retry.latencyMs,
+          gate: retry.info,
+          system: retry.info?.system ?? null,
+          error: null,
+          tag
+        };
+      }
+      if (known.expiresAt === void 0 || now > known.expiresAt) return { ...member, tag };
+      return {
+        ...member,
+        dsh: true,
+        port: known.port,
+        latencyMs: known.latencyMs,
+        gate: known.gate,
+        system: known.system,
+        error: null,
+        tag,
+        probeStale: true
+      };
+    }));
+    if (probed) void this.#saveProbes();
+    if (this.probes.size > 64) {
+      for (const [ip, cached] of this.probes) {
+        if (cached.expiresAt !== void 0 && now > cached.expiresAt) this.probes.delete(ip);
+      }
+    }
+    return { ...snapshot, self, members, local: self };
+  }
+  /**
+   * The direct link the mesh networking config gives one member, if any.
+   *
+   * Only the link's client has a local proxy: the server side supplies the
+   * egress. A member without a client link gets no proxy information at all —
+   * there is nothing configured to report, and nothing to set up.
+   * @param {string} ip member VPN address.
+   * @returns {Promise<{proxy: string, port: number}|null>} proxy facts, or null.
+   */
+  async directLinkFor(ip) {
+    const address = String(ip ?? "").trim();
+    if (address === "") return null;
+    const links = await this.#directLinks();
+    const link3 = links.find((item) => item !== null && typeof item === "object" && item?.client?.ip === address);
+    if (link3 === void 0) return null;
+    const proxy2 = typeof link3.httpProxy === "string" ? link3.httpProxy.trim() : "";
+    if (proxy2 === "") return null;
+    try {
+      const url = new URL(proxy2);
+      const port = Number(url.port) || (url.protocol === "https:" ? 443 : 80);
+      return Number.isInteger(port) && port > 0 && port < 65536 ? { proxy: proxy2, port } : null;
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * SSH into one member and measure its local proxy egress.
+   *
+   * The probe is the shipped ES module (`egress-probe.mjs`), piped into the
+   * target's own Node over the mesh SSH key: the measurement runs on the
+   * machine that will use the proxy, through the same loopback listeners the
+   * agent would use. The result is a one-line report for `call_member`.
+   * @param {string} ip member VPN address.
+   * @param {number} port HTTP proxy port the mesh networking config advertises.
+   * @returns {Promise<{ok: boolean, port?: number, latencyMs?: number, downMbps?: number|null, error?: string}>} probe result.
+   */
+  async probeMemberEgress(ip, port) {
+    const address = String(ip ?? "").trim();
+    if (address === "") return { ok: false, error: "member address is empty" };
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, error: "proxy port is invalid" };
+    const { state } = await readWireGuardState({ file: path25.join(this.home, "wireguard", "state.json") });
+    const peer = state?.server?.peers?.find((candidate) => candidate?.ip === address);
+    if (peer === void 0 || peer === null) return { ok: false, error: "member is not in the WireGuard state" };
+    const digest = createHash8("sha256").update(String(peer.publicKey ?? "")).digest("hex");
+    const key = path25.join(this.home, "wireguard", "ssh", `${digest}.key`);
+    if (!existsSync14(key)) return { ok: false, error: "no SSH key for this member" };
+    const windows = String(peer.platform ?? "").toLowerCase().startsWith("win");
+    const remote = windows ? `"%USERPROFILE%\\.dsh\\runtime\\node\\node.exe" --input-type=module - ${String(port)}` : `~/.dsh/runtime/node/bin/node --input-type=module - ${String(port)}`;
+    const user = typeof peer.sshUser === "string" && peer.sshUser !== "" ? peer.sshUser : "root";
+    return await runSshProbe([
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=8",
+      "-o",
+      "StrictHostKeyChecking=accept-new",
+      "-i",
+      key,
+      `${user}@${address}`,
+      remote
+    ], EGRESS_PROBE_SOURCE);
+  }
+  /**
+   * The git tokens the mesh's package management holds, for the injected
+   * context of a member conversation.
+   * @returns {Promise<{github: string|null, gitee: string|null}>} token values.
+   */
+  async releaseTokens() {
+    const release = await loadReleaseConfig({ file: this.releaseConfigFile });
+    const read = (value) => typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+    return { github: read(release.github?.token), gitee: read(release.gitee?.token) };
+  }
+  /**
+   * User labels for members, keyed by member id.
+   * @returns {Promise<Record<string, string>>} tags.
+   */
+  async memberTags() {
+    try {
+      const parsed = JSON.parse(await readFile17(this.memberTagsFile, "utf8"));
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      const tags = {};
+      for (const [id, tag] of Object.entries(parsed)) {
+        if (typeof id === "string" && typeof tag === "string" && tag.trim() !== "") tags[id] = tag.trim().slice(0, 32);
+      }
+      return tags;
+    } catch {
+      return {};
+    }
+  }
+  /**
+   * Set or clear one member's label.
+   * @param {string} id member id.
+   * @param {string} tag label; empty removes it.
+   * @returns {Promise<{ok: boolean, tags: Record<string, string>}>} saved tags.
+   */
+  async setMemberTag(id, tag) {
+    if (typeof id !== "string" || id.trim() === "") throw new Error("member id is required");
+    const memberId = id.trim();
+    const label = typeof tag === "string" ? tag.trim().slice(0, 32) : "";
+    const tags = await this.memberTags();
+    if (label === "") delete tags[memberId];
+    else tags[memberId] = label;
+    await mkdir14(this.dataDir, { recursive: true });
+    await writeFile14(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
+`, "utf8");
+    return { ok: true, tags };
+  }
+  /**
+   * The member conversations one main conversation tracks, for the Web
+   * client's header chip.
+   *
+   * The browser only ever sees this flat row shape; the task table and the
+   * scope store stay host concerns. A conversation without an identity yet is
+   * still listed: the chip is exactly how an operator notices it.
+   * @param {string} sessionId origin (main) conversation id.
+   * @returns {Promise<{ok: boolean, total: number, running: number, conversations: object[]}>} rows and counts.
+   */
+  async memberConversations(sessionId) {
+    const id = String(sessionId ?? "").trim();
+    if (id === "") return { ok: true, total: 0, running: 0, conversations: [] };
+    const tasks = typeof this.memberTasks?.listForOrigin === "function" ? await this.memberTasks.listForOrigin(id).catch(() => []) : [];
+    const scopes = await this.memberScopes();
+    const conversations = memberConversationEntries(tasks, scopes);
+    return { ok: true, ...memberConversationSummary(conversations), conversations };
+  }
+  /**
+   * Identity, work scope, keep flag and compaction settings for
+   * conversations, keyed by conversation id.
+   *
+   * The file is only an optional hint book: a missing, unreadable, or damaged
+   * file is the same as "nothing set yet", never a startup failure. Only the
+   * fields that were actually set are stored; defaults are applied by readers
+   * ({@link effectiveCompressPercent}).
+   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, compressPercent?: number}>>} scopes.
+   */
+  async memberScopes() {
+    try {
+      const parsed = JSON.parse(await readFile17(this.memberScopesFile, "utf8"));
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      const scopes = {};
+      for (const [rawId, value] of Object.entries(parsed)) {
+        if (rawId.trim() === "") continue;
+        if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+        const identity = savedScopeText(value.identity, MEMBER_IDENTITY_MAX);
+        const scope = savedScopeText(value.scope, MEMBER_SCOPE_MAX);
+        const keep = typeof value.keep === "boolean" ? value.keep : void 0;
+        const avoidLongJobs = typeof value.avoidLongJobs === "boolean" ? value.avoidLongJobs : void 0;
+        const note = savedScopeText(value.note, MEMBER_NOTE_MAX);
+        const compressPercent = savedScopeNumber(value.compressPercent, (candidate) => candidate >= 1 && candidate <= 100);
+        if (identity === null && scope === null && keep === void 0 && avoidLongJobs === void 0 && note === null && compressPercent === void 0) continue;
+        scopes[rawId.trim()] = {
+          ...identity === null ? {} : { identity },
+          ...scope === null ? {} : { scope },
+          ...keep === void 0 ? {} : { keep },
+          ...avoidLongJobs === void 0 ? {} : { avoidLongJobs },
+          ...note === null ? {} : { note },
+          ...compressPercent === void 0 ? {} : { compressPercent }
+        };
+      }
+      return scopes;
+    } catch {
+      return {};
+    }
+  }
+  /**
+   * One conversation's scope, or null.
+   * @param {string} conversationId conversation or session id.
+   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, compressPercent?: number}|null>} scope.
+   */
+  async memberScope(conversationId) {
+    const id = String(conversationId ?? "").trim();
+    if (id === "") return null;
+    const scopes = await this.memberScopes();
+    return scopes[id] ?? null;
+  }
+  /**
+   * Merge and save one conversation's identity/work scope and settings.
+   *
+   * Only the fields present in the patch change. An empty string clears that
+   * text field (the record is dropped when nothing remains). `keep` and
+   * `avoidLongJobs` are stored as given; only the self target is supposed to
+   * pass them. `note` is main-conversation-only metadata and is never injected
+   * or delivered to the member. `compressPercent` applies to both self and
+   * member conversations.
+   * @param {string} conversationId conversation or session id.
+   * @param {{identity?: unknown, scope?: unknown, keep?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] fields to change.
+   * @returns {Promise<{ok: boolean, scopes: Record<string, object>, scope: object|null}>} saved scopes.
+   */
+  async setMemberScope(conversationId, patch = {}) {
+    const id = String(conversationId ?? "").trim();
+    if (id === "") throw new Error("conversation id is required");
+    const normalized = normalizeMemberScopePatch(patch);
+    const scopes = await this.memberScopes();
+    const next = { ...scopes[id] ?? {} };
+    if (normalized.identity !== void 0) {
+      if (normalized.identity === null) delete next.identity;
+      else next.identity = normalized.identity;
+    }
+    if (normalized.scope !== void 0) {
+      if (normalized.scope === null) delete next.scope;
+      else next.scope = normalized.scope;
+    }
+    if (normalized.keep !== void 0) next.keep = normalized.keep;
+    if (normalized.avoidLongJobs !== void 0) next.avoidLongJobs = normalized.avoidLongJobs;
+    if (normalized.note !== void 0) {
+      if (normalized.note === null) delete next.note;
+      else next.note = normalized.note;
+    }
+    if (normalized.compressPercent !== void 0) next.compressPercent = normalized.compressPercent;
+    if (Object.keys(next).length === 0) delete scopes[id];
+    else scopes[id] = next;
+    await mkdir14(this.dataDir, { recursive: true });
+    await writeFile14(this.memberScopesFile, `${JSON.stringify(scopes, null, 2)}
+`, "utf8");
+    return { ok: true, scopes, scope: scopes[id] ?? null };
+  }
+  /**
+   * Remove the temporary files a build leaves behind.
+   *
+   * `state.json` and `build.log` are the postmortem, so they stay; the source
+   * worktree, work order and extracted package trees are only useful while the
+   * build runs. The job named by `keep` also keeps its smoke screenshots until
+   * the next build cleans them, so the panel's screenshot paths resolve.
+   *
+   * A successful job keeps its archives under `dist/` — a member build's were
+   * already pulled into the packages directory, while a local build has no
+   * other copy. A failed or planned job keeps nothing but the log and state: a
+   * partial archive is not a deliverable.
+   *
+   * `needs-fix` and `learned` jobs are skipped: their worktree is the input the
+   * repair/resume flow works on. `keepDist` disables the pruning entirely for
+   * callers that want the whole tree (`--keep-dist`).
+   * @param {{keep?: string, keepDist?: boolean}} [options] unused compatibility fields.
+   * @returns {Promise<string[]>} ids whose temporary files were removed.
+   */
+  async cleanupBuilds(options = {}) {
+    if (!existsSync14(this.jobRoot)) return [];
+    const entries = await readdir9(this.jobRoot, { withFileTypes: true });
+    const removed = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const dir = path25.join(this.jobRoot, entry.name);
+      let state;
+      try {
+        state = await readState(dir);
+      } catch {
+        continue;
+      }
+      if (this.running.has(state.id) && state.id !== options.keep) continue;
+      if (state.status === "created" || state.status === "needs-fix" || state.status === "learned") continue;
+      await rm15(path25.join(dir, "src"), { recursive: true, force: true });
+      if (state.id !== options.keep) await rm15(path25.join(dir, "smoke"), { recursive: true, force: true });
+      await rm15(path25.join(dir, "work-order"), { recursive: true, force: true });
+      if (options.keepDist !== true) {
+        if (state.status === "done") await this.#pruneDist(path25.join(dir, "dist"));
+        else await rm15(path25.join(dir, "dist"), { recursive: true, force: true });
+      }
+      removed.push(state.id);
+    }
+    return removed;
+  }
+  /**
+   * Remove the extracted package trees from a `dist/` directory.
+   *
+   * Archives and their `.sha256` sidecars are files and stay untouched; the
+   * per-target package directories (an `app/` + `runtime/` copy each) are the
+   * part that costs a gigabyte per target.
+   * @param {string} distDir job `dist/` directory.
+   * @returns {Promise<void>} completion.
+   */
+  async #pruneDist(distDir) {
+    const entries = await readdir9(distDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      await rm15(path25.join(distDir, entry.name), { recursive: true, force: true });
+    }
+  }
+  /**
+   * Direct (hysteria2) links that the gate has configured.
+   *
+   * The gate owns the link jobs and writes `links.json` beside the mesh data
+   * directory. Build and deploy read it instead of asking the operator to
+   * restate the link as a proxy URL, which is what kept the two features from
+   * ever using it.
+   * @returns {Promise<object[]>} live link records.
+   */
+  async #directLinks() {
+    try {
+      const raw = JSON.parse(await readFile17(path25.join(this.home, "hysteria", "links.json"), "utf8"));
+      return Array.isArray(raw.links) ? raw.links : [];
+    } catch {
+      return [];
+    }
+  }
+  /**
+   * The direct link whose client is this member, if any.
+   *
+   * A link only helps traffic that originates on its client: the client's
+   * packets enter the hysteria2 tunnel, the server supplies the internet
+   * egress. The server side gains nothing.
+   * @param {object|null} member member snapshot.
+   * @returns {Promise<object|null>} link record.
+   */
+  async #linkFor(member) {
+    return linkFor(await this.#directLinks(), member);
+  }
+  /**
+   * Decide how a build reaches the internet.
+   *
+   * The direct link wins when the build host is its client, because the link
+   * is a faster path to the same egress member. `proxy` and `proxyMember`
+   * remain explicit overrides; `direct: true` forces the build host's own
+   * network.
+   * @param {{member: object|null, proxyUrl: string, proxyMember: object|null, direct?: boolean}} options build request pieces.
+   * @returns {Promise<{kind: 'link'|'proxyMember'|'explicit'|'direct', url?: string, link?: object, proxyMember?: object, reason: string}>} egress plan.
+   */
+  async #resolveBuildEgress(options) {
+    return resolveBuildEgress({ links: await this.#directLinks(), ...options });
+  }
+  /**
+   * Start one build job in the background.
+   *
+   * `member` chooses the build host: empty or `local` runs the engine here,
+   * anything else runs the same engine on that member over SSH. The archives
+   * stay on that member unless `pullBack` is on, and a successful member build
+   * upgrades the member from its own archive. `proxyMember` borrows another
+   * member's internet access for the downloads; `proxy` is an explicit HTTP
+   * proxy URL that both the engine and npm use.
+   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean, member?: string, proxy?: string, proxyMember?: string, pullBack?: boolean, autoUpgrade?: boolean}} request build request.
+   * @returns {Promise<object>} the initial job state.
+   */
+  async startBuild(request = {}) {
+    const defaults = await this.status();
+    const source = (typeof request.source === "string" && request.source !== "" ? request.source : defaults.build.source) || DEFAULT_SOURCE;
+    const ref = (typeof request.ref === "string" && request.ref !== "" ? request.ref : defaults.build.ref) || DEFAULT_REF;
+    const targets = Array.isArray(request.targets) && request.targets.length > 0 ? request.targets : defaults.build.targets;
+    const memberId = typeof request.member === "string" ? request.member.trim() : "";
+    const proxyMemberId = typeof request.proxyMember === "string" ? request.proxyMember.trim() : "";
+    const proxyUrl = typeof request.proxy === "string" ? request.proxy.trim() : "";
+    const pullBack = pullBackEnabled(request, this.config);
+    const autoUpgrade = autoUpgradeEnabled(request, this.config);
+    if (this.running.size > 0) {
+      throw Object.assign(new Error("a build is already running; wait for it to finish"), { status: 409 });
+    }
+    const snapshot = await this.members();
+    const everyone = [snapshot.local, ...snapshot.members].filter((candidate) => candidate !== null && candidate !== void 0);
+    let member = null;
+    if (memberId !== "" && memberId !== "local") {
+      const found = everyone.find((candidate) => candidate.id === memberId || candidate.name === memberId || candidate.ip === memberId);
+      if (found === void 0) throw new Error(`member not found: ${memberId}`);
+      if (found.id !== "local") {
+        if (found.online === false) throw new Error(`member ${found.name} is offline`);
+        const platform = String(found.system?.platform ?? "").toLowerCase();
+        if (platform !== "" && !platform.startsWith("linux") && !platform.startsWith("win")) {
+          throw new Error(`member build needs Linux or Windows; ${found.name} runs ${String(found.system?.platform)}`);
+        }
+        member = found;
+      }
+    }
+    if (request.planOnly === true && member !== null) throw new Error("plan-only builds run on the local host");
+    let proxyMember = null;
+    if (proxyMemberId === "auto") {
+      const link3 = await this.#linkFor(member);
+      proxyMember = link3 === null ? null : everyone.find((candidate) => candidate.ip === link3.server?.ip) ?? null;
+      if (proxyMember === null) {
+        const picked = pickProxyMember(everyone);
+        proxyMember = picked === null ? null : everyone.find((candidate) => candidate.id === picked) ?? null;
+      }
+    } else if (proxyMemberId !== "") {
+      proxyMember = everyone.find((candidate) => candidate.id === proxyMemberId || candidate.name === proxyMemberId || candidate.ip === proxyMemberId) ?? null;
+      if (proxyMember === null) throw new Error(`proxy member not found: ${proxyMemberId}`);
+    }
+    if (proxyMember !== null && proxyMember.id === "local") {
+      throw new Error("the local host cannot proxy its own build; pick a member");
+    }
+    if (proxyMember !== null && String(proxyMember.system?.platform ?? "").toLowerCase().startsWith("win")) {
+      throw new Error(`proxy member must be Linux; ${proxyMember.name} runs ${String(proxyMember.system?.platform)}`);
+    }
+    const egressPlan = await this.#resolveBuildEgress({
+      member,
+      proxyUrl,
+      proxyMember,
+      direct: request.direct === true
+    });
+    const buildStamp = await nextBuildStamp({
+      stateFile: path25.join(this.dataDir, "build-stamp.json"),
+      packagesDir: this.packagesDir
+    });
+    const job = await createJob({
+      root: this.jobRoot,
+      source,
+      ref,
+      targets,
+      member: member?.id ?? null,
+      proxy: egressPlan.kind === "link" || egressPlan.kind === "explicit" ? egressPlan.url : proxyMember !== null ? `member:${proxyMember.id}` : null,
+      mode: member === null ? "local" : "remote",
+      buildStamp
+    });
+    if (member !== null) {
+      await updateState(job.dir, {
+        memberName: member.name,
+        memberIp: member.ip,
+        percent: 0,
+        proxyMember: proxyMember?.id ?? null,
+        egress: egressPlan,
+        pullBack,
+        autoUpgrade
+      });
+    } else {
+      await updateState(job.dir, {
+        ...proxyMember !== null ? { proxyMember: proxyMember.id } : {},
+        egress: egressPlan,
+        percent: 0,
+        pullBack,
+        autoUpgrade
+      });
+    }
+    this.logLine(`mesh build job ${job.id} created (${member === null ? "local" : member.name}, egress: ${egressPlan.reason})`);
+    const promise = this.#runBuild(job, {
+      member,
+      proxyMember,
+      proxyUrl,
+      egressPlan,
+      planOnly: request.planOnly === true,
+      version: request.version,
+      buildStamp: job.state.buildStamp,
+      pullBack,
+      autoUpgrade
+    }).catch((error) => {
+      this.logLine(`mesh build job ${job.id} crashed: ${error instanceof Error ? error.message : String(error)}`);
+    }).finally(() => {
+      this.running.delete(job.id);
+    });
+    this.running.set(job.id, promise);
+    return { ...job.state, dir: job.dir, running: true };
+  }
+  /**
+   * Run one build job to completion, local or on a member.
+   * @param {{id: string, dir: string}} job new job.
+   * @param {{member: object|null, proxyMember: object|null, proxyUrl: string, planOnly: boolean, version?: string, pullBack?: boolean, autoUpgrade?: boolean}} options run options.
+   * @returns {Promise<void>}
+   */
+  async #runBuild(job, options) {
+    let egress = null;
+    let proxyUrl = options.proxyUrl !== "" ? options.proxyUrl : null;
+    const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile });
+    const publishConfigured = releaseConfig.enabled === true && (releaseConfig.github.enabled === true || releaseConfig.gitee.enabled === true);
+    if (publishConfigured) {
+      await appendLog(job.dir, `release publish target: ${[releaseConfig.github.enabled ? `GitHub ${releaseConfig.github.owner}/${releaseConfig.github.repo}` : "", releaseConfig.gitee.enabled ? `Gitee ${releaseConfig.gitee.owner}/${releaseConfig.gitee.repo}` : ""].filter(Boolean).join(" + ")} (tag ${releaseConfig.tag})`);
+    } else {
+      await appendLog(job.dir, "release publish is not configured; the build will not upload to GitHub/Gitee");
+    }
+    try {
+      if (options.egressPlan?.kind === "link") {
+        proxyUrl = options.egressPlan.url;
+        await appendLog(job.dir, `outbound proxy ${proxyUrl} via direct link: ${options.egressPlan.reason}`);
+        await updateState(job.dir, { proxy: proxyUrl, egress: options.egressPlan });
+      } else if ((options.egressPlan === void 0 || options.egressPlan?.kind === "proxyMember") && options.proxyMember !== null && (options.member === null || options.member.id !== options.proxyMember.id)) {
+        egress = await this.egress.start({ plan: await this.#memberSshPlan(options.proxyMember), member: options.proxyMember.name });
+        proxyUrl = egress.url;
+        await appendLog(job.dir, `outbound proxy ${proxyUrl} (${options.proxyMember.name})`);
+        await updateState(job.dir, { proxy: proxyUrl, proxyMember: options.proxyMember.id });
+      }
+      const full = this.config.build?.full !== false;
+      if (options.member === null) {
+        await runJob(job.dir, {
+          repositoryRoot: this.repositoryRoot,
+          recipesPath: this.recipesPath,
+          overlayRoot: this.overlayRoot,
+          cacheDir: this.cacheDir,
+          planOnly: options.planOnly,
+          version: options.version,
+          buildStamp: options.buildStamp,
+          proxy: proxyUrl,
+          publish: { config: releaseConfig, proxy: proxyUrl },
+          full,
+          nodeVersion: typeof this.config.build?.nodeVersion === "string" && this.config.build.nodeVersion !== "" ? this.config.build.nodeVersion : void 0,
+          smoke: this.config.build?.smoke === false ? false : void 0,
+          smokeRequired: this.config.build?.requireSmoke === true,
+          smokeChrome: typeof this.config.build?.chrome === "string" && this.config.build.chrome !== "" ? this.config.build.chrome : void 0
+        });
+        return;
+      }
+      const upgradeTarget = options.autoUpgrade === true ? memberBuildTarget(options.member) : null;
+      const final = await this.remoteBuilder.run(job.dir, {
+        plan: await this.#memberSshPlan(options.member),
+        memberName: options.member.name,
+        proxyUrl,
+        buildStamp: options.buildStamp,
+        heapMb: typeof this.config.build?.memberHeapMb === "number" ? this.config.build.memberHeapMb : void 0,
+        releaseConfig: publishConfigured ? releaseConfig : null,
+        pullBack: options.pullBack === true,
+        // Stage the host's own archive only when the upgrade will use it.
+        stageTarget: upgradeTarget,
+        full
+      });
+      await this.#autoUpgradeAfterBuild(job, final, {
+        member: options.member,
+        autoUpgrade: options.autoUpgrade === true,
+        full,
+        upgradeTarget
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await appendLog(job.dir, `build failed to start: ${message}`).catch(() => {
+      });
+      await updateState(job.dir, { status: "failed", phase: "failed", error: message, percent: 0 }).catch(() => {
+      });
+      throw error;
+    } finally {
+      egress?.close();
+      await this.cleanupBuilds({ keep: job.id }).catch((error) => {
+        this.logLine(`mesh build cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+  }
+  /**
+   * Start the post-build upgrade on the member that ran the build.
+   *
+   * The archive was staged on that machine by the remote builder, so the
+   * upgrade plan points at it directly: no release download and no upload from
+   * the gateway. The job is the same detached upgrade every other entry point
+   * starts, so restarting the member's DSH/gate cannot interrupt it. The build
+   * has already succeeded at this point; an upgrade that cannot start is
+   * recorded on the build (`autoUpgradeResult`) and never turns it red.
+   * @param {{id: string, dir: string}} job build job.
+   * @param {object} state final build state.
+   * @param {{member: object|null, autoUpgrade: boolean, full: boolean, upgradeTarget: string|null}} options upgrade input.
+   * @returns {Promise<void>} completion.
+   */
+  async #autoUpgradeAfterBuild(job, state, options) {
+    if (state?.status !== "done" || options.autoUpgrade !== true) return;
+    const member = options.member;
+    const record = async (patch) => {
+      const result = {
+        at: (/* @__PURE__ */ new Date()).toISOString(),
+        member: member?.id ?? null,
+        memberName: member?.name ?? null,
+        ...patch
+      };
+      await updateState(job.dir, { autoUpgradeResult: result }).catch(() => {
+      });
+      return result;
+    };
+    if (member === null || member === void 0) {
+      await record({ status: "skipped", reason: "\u672C\u673A\u7F16\u8BD1\u4E0D\u81EA\u52A8\u5347\u7EA7" });
+      return;
+    }
+    if (options.full === false) {
+      await appendLog(job.dir, "auto-upgrade skipped: a web-only package cannot upgrade an install").catch(() => {
+      });
+      await record({ status: "skipped", reason: "\u53EA Web \u5305\u4E0D\u80FD\u7528\u4E8E\u5347\u7EA7" });
+      return;
+    }
+    if (member.dsh !== true) {
+      await appendLog(job.dir, `auto-upgrade skipped: ${member.name} has no DSH install`).catch(() => {
+      });
+      await record({ status: "skipped", reason: "\u7F16\u8BD1\u673A\u8FD8\u6CA1\u6709\u5B89\u88C5 DSH\uFF0C\u6CA1\u6709\u53EF\u5347\u7EA7\u7684\u5B89\u88C5" });
+      return;
+    }
+    if (options.upgradeTarget === null) {
+      await appendLog(job.dir, "auto-upgrade skipped: this build has no target for the build host").catch(() => {
+      });
+      await record({ status: "skipped", reason: "\u8FD9\u6B21\u7F16\u8BD1\u7684\u76EE\u6807\u5E73\u53F0\u4E0E\u7F16\u8BD1\u673A\u4E0D\u5339\u914D" });
+      return;
+    }
+    const artifact = pickArtifactForMember(state.artifacts, member);
+    if (artifact === null) {
+      await appendLog(job.dir, `auto-upgrade skipped: no ${options.upgradeTarget} artifact`).catch(() => {
+      });
+      await record({ status: "skipped", reason: `\u8FD9\u6B21\u7F16\u8BD1\u6CA1\u6709\u4EA7\u51FA ${options.upgradeTarget} \u5305` });
+      return;
+    }
+    if (typeof artifact.stagedArchive !== "string" || artifact.stagedArchive === "" || typeof artifact.sha256 !== "string" || artifact.sha256 === "" || !Number.isSafeInteger(artifact.bytes)) {
+      await appendLog(job.dir, "auto-upgrade skipped: the archive was not staged on the build host").catch(() => {
+      });
+      await record({ status: "skipped", reason: "\u4EA7\u7269\u6CA1\u6709\u6210\u529F\u6682\u5B58\u5230\u7F16\u8BD1\u673A\uFF0C\u65E0\u6CD5\u5728\u672C\u673A\u5347\u7EA7" });
+      return;
+    }
+    try {
+      const started = await this.startDeploy({
+        member: member.id,
+        mode: "upgrade",
+        packageOnTarget: {
+          path: artifact.stagedArchive,
+          bytes: artifact.bytes,
+          sha256: artifact.sha256
+        }
+      });
+      const result = await record({
+        status: "started",
+        jobId: started.job.id,
+        release: started.job.release ?? null,
+        package: artifact.stagedArchive
+      });
+      await appendLog(job.dir, `auto-upgrade started on ${member.name}: ${result.jobId} (${artifact.stagedArchive})`).catch(() => {
+      });
+      this.logLine(`mesh build ${job.id} auto-upgrade ${result.jobId} started on ${member.name}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const busy = Number(error?.status) === 409;
+      await appendLog(job.dir, `auto-upgrade could not start: ${message}`).catch(() => {
+      });
+      await record({ status: busy ? "skipped" : "failed", reason: message });
+      this.logLine(`mesh build ${job.id} auto-upgrade did not start: ${message}`);
+    }
+  }
+  /**
+   * SSH coordinates for one member.
+   * @param {object} member member snapshot.
+   * @returns {Promise<{host: string, user: string, port: number, identityFile?: string, appRoot?: string, os: string}>} plan.
+   */
+  async #memberSshPlan(member) {
+    if (member.ip === "") throw new Error(`member ${member.name} has no VPN address`);
+    let user = "root";
+    let identityFile;
+    let port = 22;
+    const { state } = await readWireGuardState({ file: path25.join(this.home, "wireguard", "state.json") });
+    const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
+    if (peer !== void 0 && peer !== null) {
+      if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
+      if (Number.isSafeInteger(peer.sshPort)) port = peer.sshPort;
+      if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
+        const digest = createHash8("sha256").update(peer.publicKey).digest("hex");
+        const candidate = path25.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        if (existsSync14(candidate)) identityFile = candidate;
+      }
+    }
+    const platform = String(member.system?.platform ?? "").toLowerCase();
+    return {
+      host: member.ip,
+      user,
+      port,
+      identityFile,
+      appRoot: typeof member.system?.appRoot === "string" ? member.system.appRoot : void 0,
+      os: platform.startsWith("win") ? "windows" : "linux"
+    };
+  }
+  /**
+   * Run one build to completion.
+   *
+   * Without `jobId` this starts a fresh build. With `jobId` it treats the
+   * job's worktree as the DSH-adapted result: if the job stopped at
+   * `needs-fix`, it learns the corrected files into the overlay set first,
+   * then resumes the same job. There is no separate learn/resume command.
+   * Older jobs are cleaned only after the current job finishes, so a running
+   * build never loses its own worktree or package.
+   * @param {{source?: string, ref?: string, targets?: string[], planOnly?: boolean, version?: string, keepDist?: boolean, jobId?: string}} request build request.
+   * @returns {Promise<object>} final job with log tail.
+   */
+  async build(request = {}) {
+    if (typeof request.jobId === "string" && request.jobId !== "") {
+      const state = await this.job(request.jobId);
+      if (state.status === "needs-fix") await this.learn(request.jobId);
+      const resumed = await this.resumeBuild(request.jobId);
+      const running2 = this.running.get(resumed.id);
+      if (running2 !== void 0) await running2;
+      const final2 = await this.job(resumed.id);
+      await this.cleanupBuilds({ keep: resumed.id, keepDist: request.keepDist === true });
+      return final2;
+    }
+    const job = await this.startBuild(request);
+    const running = this.running.get(job.id);
+    if (running !== void 0) await running;
+    const final = await this.job(job.id);
+    await this.cleanupBuilds({ keep: job.id, keepDist: request.keepDist === true });
+    return final;
+  }
+  /**
+   * Continue a job from its corrected worktree. This is what follows the
+   * automatic learn step: the overlays have been updated, and the worktree
+   * already contains the fix, so nothing is downloaded again.
+   * @param {string} id job id.
+   * @returns {Promise<object>} the job state, running in the background.
+   */
+  async resumeBuild(id) {
+    const dir = this._jobDir(id);
+    if (this.running.has(id)) throw new Error("this job is already running");
+    const state = await readState(dir);
+    this.logLine(`mesh build job ${id} resumed`);
+    const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile });
+    const promise = runJob(dir, {
+      repositoryRoot: this.repositoryRoot,
+      publish: { config: releaseConfig, proxy: null },
+      recipesPath: this.recipesPath,
+      overlayRoot: this.overlayRoot,
+      cacheDir: this.cacheDir,
+      reuseWorktree: true,
+      buildStamp: state.buildStamp,
+      full: this.config.build?.full !== false,
+      nodeVersion: typeof this.config.build?.nodeVersion === "string" && this.config.build.nodeVersion !== "" ? this.config.build.nodeVersion : void 0,
+      smoke: this.config.build?.smoke === false ? false : void 0,
+      smokeRequired: this.config.build?.requireSmoke === true,
+      smokeChrome: typeof this.config.build?.chrome === "string" && this.config.build.chrome !== "" ? this.config.build.chrome : void 0
+    }).catch((error) => {
+      this.logLine(`mesh build job ${id} crashed: ${error instanceof Error ? error.message : String(error)}`);
+    }).finally(() => {
+      this.running.delete(id);
+    });
+    this.running.set(id, promise);
+    return { ...state, running: true };
+  }
+  /**
+   * Read one job with its log tail and work-order paths.
+   * @param {string} id job id.
+   * @returns {Promise<object>} job detail.
+   */
+  async job(id) {
+    const dir = this._jobDir(id);
+    const state = await readState(dir);
+    return {
+      ...state,
+      logFile: path25.join(dir, "build.log"),
+      stateFile: path25.join(dir, "state.json"),
+      logTail: await readLogTail(dir, 60),
+      running: this.running.has(id),
+      workOrderMarkdown: state.workOrder?.markdown ?? null,
+      workOrderPrompt: state.workOrder?.prompt ?? null
+    };
+  }
+  /**
+   * List known jobs, newest first.
+   * @returns {Promise<object[]>} jobs.
+   */
+  async jobs() {
+    if (!existsSync14(this.jobRoot)) return [];
+    const entries = await readdir9(this.jobRoot, { withFileTypes: true });
+    const jobs = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      try {
+        const state = await readState(path25.join(this.jobRoot, entry.name));
+        jobs.push(this.#summary(state));
+      } catch {
+      }
+    }
+    return jobs.sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
+  }
+  /**
+   * The list projection of one job, or null when it does not exist.
+   *
+   * The panel's event stream pushes this shape, so it is the same object
+   * `jobs()` returns and the client can merge it into its table.
+   * @param {string} id job id.
+   * @returns {Promise<object|null>} summary.
+   */
+  async buildSummary(id) {
+    let dir;
+    try {
+      dir = this._jobDir(id);
+    } catch {
+      return null;
+    }
+    try {
+      return this.#summary(await readState(dir));
+    } catch {
+      return null;
+    }
+  }
+  /** Project a job state onto the fields the panel lists. */
+  #summary(state) {
+    return {
+      id: state.id,
+      status: state.status,
+      phase: state.phase,
+      source: state.source,
+      ref: state.ref,
+      targets: state.targets,
+      updatedAt: state.updatedAt,
+      createdAt: state.createdAt,
+      member: state.member ?? null,
+      memberName: state.memberName ?? null,
+      mode: state.mode ?? "local",
+      proxy: state.proxy ?? null,
+      proxyMember: state.proxyMember ?? null,
+      percent: typeof state.percent === "number" ? state.percent : null,
+      currentTarget: state.currentTarget ?? null,
+      version: state.version ?? null,
+      error: state.error ?? null,
+      publish: state.publish ?? null,
+      pullBack: state.pullBack ?? null,
+      pulledBack: state.pulledBack ?? null,
+      remoteDirKept: state.remoteDirKept ?? null,
+      autoUpgrade: state.autoUpgrade ?? null,
+      autoUpgradeResult: state.autoUpgradeResult ?? null
+    };
+  }
+  /**
+   * Read one job's log tail.
+   * @param {string} id job id.
+   * @param {number} [lines] number of lines.
+   * @returns {Promise<string[]>} lines.
+   */
+  async log(id, lines = 80) {
+    return readLogTail(this._jobDir(id), lines);
+  }
+  /**
+   * Learn overlays from a corrected worktree.
+   * @param {string} id job id.
+   * @returns {Promise<object>} updated state.
+   */
+  async learn(id) {
+    return learnJob(this._jobDir(id), {
+      repositoryRoot: this.repositoryRoot,
+      recipesPath: this.recipesPath,
+      overlayRoot: this.overlayRoot
+    });
+  }
+  /**
+   * Read the recipe manifest summary.
+   * @returns {Promise<object>} recipes.
+   */
+  async recipes() {
+    const parsed = JSON.parse(await readFile17(this.recipesPath, "utf8"));
+    return {
+      source: parsed.source,
+      ref: parsed.ref,
+      tree: parsed.tree ?? null,
+      steps: (parsed.steps ?? []).map((step) => ({
+        id: step.id,
+        title: step.title,
+        doc: step.doc,
+        files: (step.files ?? []).map((file) => ({ path: file.path, baseSha256: file.baseSha256 ?? null }))
+      }))
+    };
+  }
+  /**
+   * The newest package published under the configured `latest` tag.
+   *
+   * Gitee is probed first because a domestic gateway usually reaches it
+   * directly; GitHub is the fallback and may be slow or blocked. The result is
+   * cached for a few seconds so opening the dialog and then starting the
+   * upgrade do not read the manifest twice.
+   * @param {{refresh?: boolean}} [options] refresh forces a new read.
+   * @returns {Promise<object>} normalized release.
+   */
+  async latestRelease(options = {}) {
+    const config = await loadReleaseConfig({ file: this.releaseConfigFile });
+    const sources = latestManifestSources(config);
+    const manifests = [];
+    if (typeof sources.gitee === "string" && sources.gitee !== "") manifests.push({ provider: "gitee", url: sources.gitee });
+    if (typeof sources.github === "string" && sources.github !== "") manifests.push({ provider: "github", url: sources.github });
+    const urls = manifests.map((entry) => entry.url);
+    if (urls.length === 0) {
+      return { ok: false, configured: false, assets: [], manifestUrls: [], manifests: [], error: "\u8FD8\u6CA1\u6709\u914D\u7F6E Release \u53D1\u5E03" };
+    }
+    const cached = this.latestReleaseCache;
+    if (options.refresh !== true && cached !== null && Date.now() - cached.at < 3e4) return cached.value;
+    try {
+      const found = await fetchLatestManifest({ urls, timeoutMs: 15e3 });
+      let provider = "github";
+      try {
+        provider = /(?:^|\.)gitee\.com$/iu.test(new URL(found.url).hostname) ? "gitee" : "github";
+      } catch {
+      }
+      const value = { ...normalizeLatestManifest(found.manifest, { provider, manifestUrls: urls }), manifests };
+      this.latestReleaseCache = { at: Date.now(), value };
+      return value;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (cached !== null) return { ...cached.value, stale: true, error: message };
+      return { ok: false, configured: true, assets: [], manifestUrls: urls, manifests, error: message };
+    }
+  }
+  /**
+   * Archives already present on one member.
+   *
+   * The gateway lists its own `~/.dsh/packages` (plus the build staging it may
+   * have). A peer is asked over SSH; both `~/.dsh/packages` and
+   * `~/.dsh/mesh/upgrade` are scanned, because a build host leaves its archive
+   * in the latter rather than pulling it back to the gateway.
+   * @param {string} memberId member id, name, or VPN address.
+   * @returns {Promise<{ok: boolean, member: string, packages: object[], error?: string}>} listing.
+   */
+  async memberPackages(memberId) {
+    const wanted = typeof memberId === "string" ? memberId.trim() : "";
+    if (wanted === "") throw new Error("member is required");
+    const snapshot = await this.members();
+    const all = [snapshot.local, ...snapshot.members].filter(Boolean);
+    const member = all.find((candidate) => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted);
+    if (member === void 0) throw new Error(`member not found: ${wanted}`);
+    if (member.id === "local" || member.kind === "self") {
+      return { ok: true, member: member.id, packages: await this.#localTargetPackages() };
+    }
+    try {
+      return { ok: true, member: member.id, packages: await this.#remoteTargetPackages(member) };
+    } catch (error) {
+      return { ok: false, member: member.id, packages: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  /**
+   * Read archives from the gateway's own package cache and build staging.
+   * @returns {Promise<object[]>} packages.
+   */
+  async #localTargetPackages() {
+    const packages = [];
+    const seen = /* @__PURE__ */ new Set();
+    const walk = async (dir, depth) => {
+      if (depth < 0) return;
+      const entries = await readdir9(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        const file = path25.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (depth > 0) await walk(file, depth - 1);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const parsed = packageTargetFromName(entry.name);
+        if (parsed === null || seen.has(file)) continue;
+        const info = await stat13(file).catch(() => null);
+        if (info === null) continue;
+        seen.add(file);
+        const sidecar = await readFile17(`${file}.sha256`, "utf8").catch(() => "");
+        const sha256 = /^([a-f0-9]{64})\b/iu.exec(sidecar)?.[1]?.toLowerCase() ?? null;
+        packages.push({ name: entry.name, path: file, bytes: info.size, mtime: info.mtime.toISOString(), sha256, ...parsed });
+      }
+    };
+    await walk(this.packagesDir, 0);
+    await walk(path25.join(this.dataDir, "upgrade"), 2);
+    packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
+    return packages;
+  }
+  /**
+   * The home a member's service runs under.
+   *
+   * The SSH user and the service user can differ; the member reports its own
+   * home, so prefer that over the SSH login's `$HOME`.
+   * @param {object} member member snapshot.
+   * @param {{user: string, os: 'linux'|'windows'}} plan SSH plan.
+   * @returns {string} home directory.
+   */
+  #memberHome(member, plan) {
+    const reported = typeof member.system?.home === "string" ? member.system.home.trim() : "";
+    if (reported !== "") return reported;
+    if (plan.os === "windows") return `C:\\Users\\${plan.user}`;
+    return plan.user === "root" ? "/root" : `/home/${plan.user}`;
+  }
+  /**
+   * Ask a peer for its archives over SSH.
+   * @param {object} member member snapshot.
+   * @returns {Promise<object[]>} packages.
+   */
+  async #remoteTargetPackages(member) {
+    const plan = await this.#memberSshPlan(member);
+    const runner = new SshRunner({ ...plan, os: plan.os });
+    const script = listPackagesScript(plan.os, this.#memberHome(member, plan));
+    let stdout = "";
+    if (plan.os === "windows") {
+      const encoded = Buffer.from(script, "utf16le").toString("base64");
+      ({ stdout } = await runner.runProcess("ssh", [
+        ...runner.sshOptions(),
+        runner.target(),
+        `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
+      ]));
+    } else {
+      ;
+      ({ stdout } = await runner.runProcess("ssh", [
+        ...runner.sshOptions(),
+        runner.target(),
+        "bash -s"
+      ], script));
+    }
+    return parseTargetPackageList(stdout);
+  }
+  /**
+   * Validate one archive the operator picked from the target member.
+   *
+   * The path must be under that member's package cache or build staging, the
+   * archive name must match the target's platform, and the digest is computed
+   * here instead of trusted from the browser.
+   * @param {object} member target member.
+   * @param {{path?: string, bytes?: number, sha256?: string}} request selected package.
+   * @returns {Promise<{path: string, bytes: number, sha256: string, name: string, os: 'linux'|'windows'}>} verified package.
+   */
+  async #resolveTargetPackage(member, request) {
+    const file = typeof request?.path === "string" ? request.path.trim() : "";
+    if (file === "") throw new Error("targetPackage.path is required");
+    const plan = await this.#memberSshPlan(member);
+    const os11 = plan.os === "windows" ? "windows" : "linux";
+    const home = this.#memberHome(member, plan);
+    if (!isAllowedPackagePath(file, home, os11)) {
+      throw new Error("\u76EE\u6807\u5305\u4E0D\u5728\u8BE5\u6210\u5458\u7684 ~/.dsh/packages \u6216 ~/.dsh/mesh/upgrade \u76EE\u5F55\u5185");
+    }
+    const name = file.split(/[\\/]/u).pop() ?? "";
+    const parsed = packageTargetFromName(name);
+    if (parsed === null) throw new Error(`\u4E0D\u662F\u53EF\u8BC6\u522B\u7684\u90E8\u7F72\u5305\uFF1A${name}`);
+    if (parsed.os !== os11) throw new Error(`\u5305\u5E73\u53F0 ${parsed.os} \u4E0E\u6210\u5458 ${os11} \u4E0D\u5339\u914D`);
+    const memberTarget = memberBuildTarget(member);
+    if (memberTarget !== null && memberTarget !== parsed.target) {
+      throw new Error(`\u5305\u5E73\u53F0 ${parsed.target} \u4E0E\u6210\u5458 ${memberTarget} \u4E0D\u5339\u914D`);
+    }
+    let bytes = 0;
+    let sha256 = "";
+    if (member.id === "local" || member.kind === "self") {
+      const info = await stat13(file).catch(() => null);
+      if (info === null || !info.isFile()) throw new Error(`\u76EE\u6807\u5305\u4E0D\u5B58\u5728\uFF1A${file}`);
+      bytes = info.size;
+      sha256 = await sha256File(file);
+    } else {
+      const runner = new SshRunner({ ...plan, os: os11 });
+      const size = await runner.remoteSize(file);
+      if (size === null) throw new Error(`\u76EE\u6807\u5305\u4E0D\u5B58\u5728\uFF1A${file}`);
+      bytes = size;
+      if (os11 === "windows") {
+        const { stdout } = await runner.runProcess("ssh", [
+          ...runner.sshOptions(),
+          runner.target(),
+          `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath ${powershellQuote(file)}).Hash"`
+        ]);
+        sha256 = String(stdout).trim().toLowerCase();
+      } else {
+        const { stdout } = await runner.runProcess("ssh", [
+          ...runner.sshOptions(),
+          runner.target(),
+          `sha256sum -- ${shellQuote(file)}`
+        ]);
+        sha256 = String(stdout).trim().split(/\s+/u)[0]?.toLowerCase() ?? "";
+      }
+    }
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error(`\u65E0\u6CD5\u8BA1\u7B97\u76EE\u6807\u5305\u7684\u6821\u9A8C\u548C\uFF1A${name}`);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error(`\u76EE\u6807\u5305\u662F\u7A7A\u6587\u4EF6\uFF1A${name}`);
+    if (Number.isSafeInteger(Number(request?.bytes)) && Number(request.bytes) > 0 && Number(request.bytes) !== bytes) {
+      throw new Error(`\u76EE\u6807\u5305\u5927\u5C0F\u53D8\u4E86\uFF1A\u671F\u671B ${String(request.bytes)}\uFF0C\u5B9E\u9645 ${String(bytes)}`);
+    }
+    const expected = typeof request?.sha256 === "string" ? request.sha256.trim().toLowerCase() : "";
+    if (expected !== "" && expected !== sha256) throw new Error("\u76EE\u6807\u5305\u7684\u6821\u9A8C\u548C\u4E0E\u5217\u8868\u4E0D\u4E00\u81F4\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5");
+    return { path: file, bytes, sha256, name, os: os11 };
+  }
+  /**
+   * Local deployment packages. The fixed directory is `~/.dsh/packages`.
+   *
+   * Only archives that name a `dsh-mesh` deployment target are offered. The
+   * directory is a plain cache that other flows write to as well (a plugin
+   * bundle, for instance, is a `.tgz` too), and an archive without a platform
+   * cannot be deployed: extracted on a member it has no runtime to start.
+   * Filtering here keeps such a file out of the panel list and out of the
+   * scheduled upgrade candidates.
+   * @returns {Promise<object>} package list.
+   */
+  async packages() {
+    const entries = await readdir9(this.packagesDir, { withFileTypes: true }).catch(() => []);
+    const packages = [];
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const parsed = packagePlatformFromName(entry.name);
+      if (parsed === null) continue;
+      const file = path25.join(this.packagesDir, entry.name);
+      const info = await stat13(file).catch(() => null);
+      if (info === null) continue;
+      packages.push({
+        name: entry.name,
+        path: file,
+        bytes: info.size,
+        mtime: info.mtime.toISOString(),
+        target: parsed.os
+      });
+    }
+    packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
+    return { ok: true, dir: this.packagesDir, packages };
+  }
+  /**
+   * The newest build that actually finished.
+   *
+   * A failed or needs-fix job must not become the baseline for the update
+   * check, or one bad night would suppress the retry for every following day.
+   * @returns {Promise<object|null>} job state with artifacts, or null.
+   */
+  async #latestDoneBuild() {
+    for (const job of await this.jobs()) {
+      if (job.status !== "done") continue;
+      try {
+        return await readState(this._jobDir(job.id));
+      } catch {
+      }
+    }
+    return null;
+  }
+  /**
+   * Resolve the remote revisions the next build would use.
+   *
+   * The ETags come from codeload HEAD requests and are recorded in the package
+   * manifest, so the daily check never downloads a tarball just to answer
+   * "is there anything new?".
+   * @param {string} source DSH source.
+   * @param {string} ref DSH ref.
+   * @returns {Promise<object>} current source state.
+   */
+  async #currentBuildSources(source, ref) {
+    const extra = await readExtraPlugins(this.repositoryRoot);
+    const extraPlugins = await Promise.all(extra.map(async (plugin) => ({
+      name: plugin.name,
+      repo: plugin.repo,
+      ref: plugin.ref,
+      etag: await remoteRevision(plugin.repo, plugin.ref)
+    })));
+    return {
+      source,
+      ref,
+      sourceEtag: await remoteRevision(source, ref),
+      pluginFingerprint: await pluginFingerprint(this.repositoryRoot),
+      extraPlugins
+    };
+  }
+  /**
+   * One scheduled build: build only when DSH, dsh-mesh, or a bundled plugin
+   * changed since the newest finished build.
+   *
+   * Returns immediately after starting the job; the build itself is the same
+   * background job the panel starts.
+   * @returns {Promise<{status: string, reason?: string, jobId?: string}>} outcome.
+   */
+  async scheduledBuild() {
+    if (this.running.size > 0) return { status: "skipped", reason: "\u5DF2\u6709\u7F16\u8BD1\u4EFB\u52A1\u5728\u8FD0\u884C" };
+    const jobs = await this.jobs();
+    if (jobs.some((job2) => job2.status === "running" || job2.status === "created")) {
+      return { status: "skipped", reason: "\u5DF2\u6709\u7F16\u8BD1\u4EFB\u52A1\u5728\u8FD0\u884C" };
+    }
+    const defaults = await this.status();
+    const source = defaults.build.source || DEFAULT_SOURCE;
+    const ref = defaults.build.ref || DEFAULT_REF;
+    const targets = defaults.build.targets;
+    const latest = await this.#latestDoneBuild();
+    const latestManifest = latest?.artifacts?.[0]?.manifest ?? null;
+    const current = await this.#currentBuildSources(source, ref);
+    const reasons = buildUpdateReasons({ latestManifest, current });
+    if (reasons.length === 0) {
+      return { status: "skipped", reason: "DSH\u3001dsh-mesh\u3001xl \u90FD\u6CA1\u6709\u66F4\u65B0" };
+    }
+    const snapshot = await this.members();
+    const everyone = [snapshot.local, ...snapshot.members].filter(Boolean);
+    const member = pickBuildMember(everyone);
+    const proxyMember = pickProxyMember(everyone);
+    const job = await this.startBuild({
+      source,
+      ref,
+      targets,
+      ...member !== "local" ? { member } : {},
+      ...proxyMember !== null ? { proxyMember } : {}
+    });
+    this.logLine(`scheduled build ${job.id} started: ${reasons.join("\uFF1B")}`);
+    return {
+      status: "started",
+      jobId: job.id,
+      reason: reasons.join("\uFF1B"),
+      member: member === "local" ? "local" : member,
+      proxyMember: proxyMember ?? null
+    };
+  }
+  /**
+   * Fill in a member's deployment from the newest successful deploy job.
+   *
+   * Old gates do not report their release; this is the same fallback the
+   * member table uses, so a member that never reported a version is still
+   * compared instead of being skipped forever.
+   * @param {object} member member row.
+   * @param {object[]} deployJobs recent deploy jobs.
+   * @returns {void}
+   */
+  #applyInferredDeployment(member, deployJobs) {
+    if (memberDeployment(member) !== null) return;
+    const job = deployJobs.find((candidate) => candidate.status === "succeeded" && candidate.package !== void 0 && (candidate.member === member.id || candidate.target?.host === member.ip));
+    const parsed = packageInfo(path25.basename(job?.package ?? ""));
+    if (parsed === null) return;
+    member.deployment = { version: parsed.version, buildStamp: parsed.buildStamp, inferred: true };
+  }
+  /**
+   * Announce one member's imminent auto-upgrade to its running conversations.
+   *
+   * The member owns those conversations, so the gateway only asks: it POSTs
+   * `/v1/upgrade/prepare`, the member classifies its running agents (leader /
+   * member / plain) and injects the matching stop message. A member older than
+   * this release has no such endpoint; that is reported, not retried, and the
+   * upgrade still runs.
+   *
+   * Nothing is announced when the member is already on the newest build: the
+   * upgrade tick would only skip it, and stopping conversations for nothing
+   * would be worse than the missed notice.
+   * @param {string} memberId member id.
+   * @returns {Promise<{status: string, member?: string, reason?: string, announced?: number, counts?: object}>} outcome.
+   */
+  async scheduledPrepareUpgrade(memberId) {
+    const snapshot = await this.members();
+    const everyone = [snapshot.local, ...snapshot.members].filter(Boolean);
+    const member = everyone.find((candidate2) => candidate2.id === memberId);
+    if (member === void 0) return { status: "skipped", reason: "\u6210\u5458\u4E0D\u5728\u5F53\u524D\u5217\u8868", member: memberId };
+    if (member.online === false) return { status: "skipped", reason: "\u79BB\u7EBF", member: member.name };
+    if (member.id === "local" || member.kind === "self") return { status: "skipped", reason: "\u672C\u673A\u6CA1\u6709\u81EA\u52A8\u5347\u7EA7", member: member.name };
+    const deployJobs = await this.deployJobs(50);
+    this.#applyInferredDeployment(member, deployJobs);
+    const packages = (await this.packages()).packages;
+    const release = await this.#scheduledRelease();
+    const candidate = planMemberUpgrade(member, packages, release);
+    if (candidate.package === void 0) {
+      return { status: "skipped", member: member.name, reason: candidate.reason };
+    }
+    return this.#announceUpgrade(member);
+  }
+  /**
+   * Ask one member to stop the conversations an upgrade will interrupt.
+   * @param {object} member member row.
+   * @returns {Promise<{status: string, member: string, reason?: string, announced?: number, counts?: object}>} outcome.
+   */
+  async #announceUpgrade(member) {
+    if (member.dsh !== true || typeof member.ip !== "string" || member.ip === "") {
+      return { status: "skipped", member: member.name, reason: "\u6210\u5458\u6CA1\u6709\u5728\u8FD0\u884C\u7684 DSH" };
+    }
+    let response;
+    try {
+      response = await memberInteropRequest(this, {
+        address: member.ip,
+        path: "/v1/upgrade/prepare",
+        body: {},
+        timeoutMs: 2e4
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logLine(`scheduled upgrade ${member.name}: could not announce the restart: ${reason}`);
+      return { status: "failed", member: member.name, reason };
+    }
+    if (response.unsupported) {
+      this.logLine(`scheduled upgrade ${member.name}: the member's release has no /v1/upgrade/prepare; its conversations are not stopped`);
+      return { status: "unsupported", member: member.name, reason: "\u6210\u5458\u7248\u672C\u8FC7\u65E7\uFF0C\u4E0D\u652F\u6301\u5347\u7EA7\u524D\u505C\u6B62\u901A\u77E5" };
+    }
+    if (!response.ok) {
+      const reason = response.data?.error?.message ?? `HTTP ${String(response.status)}`;
+      this.logLine(`scheduled upgrade ${member.name}: the announcement was refused: ${reason}`);
+      return { status: "failed", member: member.name, reason };
+    }
+    const announced = Number.isSafeInteger(response.data?.announced) ? response.data.announced : 0;
+    const counts = response.data?.counts ?? {};
+    this.announcedUpgrades.set(member.id, { at: (/* @__PURE__ */ new Date()).toISOString(), counts });
+    this.logLine(`scheduled upgrade ${member.name}: announced to ${String(announced)} running conversation(s) (leader ${String(counts.leader ?? 0)}, member ${String(counts.member ?? 0)}, plain ${String(counts.plain ?? 0)})`);
+    return {
+      status: response.data?.already === true ? "already" : "announced",
+      member: member.name,
+      announced,
+      counts
+    };
+  }
+  /**
+   * Make sure the stop messages went out before an upgrade starts.
+   *
+   * The scheduler normally announced ten minutes earlier. When this process
+   * was not alive for that tick (a restart inside the window), the
+   * announcement happens now and the upgrade still proceeds: the alternative —
+   * skipping the upgrade — would silently drop a scheduled deployment.
+   * @param {object} member member row.
+   * @returns {Promise<void>} completion.
+   */
+  async #ensureUpgradeAnnounced(member) {
+    if (member.dsh !== true || typeof member.ip !== "string" || member.ip === "") return;
+    const previous = this.announcedUpgrades.get(member.id);
+    if (previous !== void 0) {
+      const at = Date.parse(previous.at);
+      if (Number.isFinite(at) && Date.now() - at <= UPGRADE_ANNOUNCE_WINDOW_MS) return;
+    }
+    const result = await this.#announceUpgrade(member).catch((error) => ({
+      status: "failed",
+      member: member.name,
+      reason: error instanceof Error ? error.message : String(error)
+    }));
+    if (result.status === "announced" || result.status === "already") {
+      this.logLine(`scheduled upgrade ${member.name}: the stop messages went out at the upgrade tick (the ten-minute lead was missed)`);
+    }
+  }
+  /**
+   * One member's scheduled auto-upgrade.
+   *
+   * The archive comes from the gateway cache when that copy is the newest one;
+   * otherwise the member downloads the matching `latest` release asset itself
+   * (Gitee first, GitHub through an egress member). The job is started and left
+   * detached; the scheduler records "started" instead of holding its tick open
+   * for a download that may take minutes.
+   * @param {string} memberId member id.
+   * @returns {Promise<{status: string, member?: string, package?: string, source?: 'local'|'release', jobId?: string, reason?: string}>} outcome.
+   */
+  async scheduledUpgradeMember(memberId) {
+    if (this.running.size > 0) return { status: "skipped", reason: "\u7F16\u8BD1\u4EFB\u52A1\u8FD8\u5728\u8FD0\u884C", member: memberId };
+    const snapshot = await this.members();
+    const everyone = [snapshot.local, ...snapshot.members].filter(Boolean);
+    const member = everyone.find((candidate2) => candidate2.id === memberId);
+    if (member === void 0) return { status: "skipped", reason: "\u6210\u5458\u4E0D\u5728\u5F53\u524D\u5217\u8868", member: memberId };
+    if (member.online === false) return { status: "skipped", reason: "\u79BB\u7EBF", member: member.name };
+    const deployJobs = await this.deployJobs(50);
+    this.#applyInferredDeployment(member, deployJobs);
+    const packages = (await this.packages()).packages;
+    const release = await this.#scheduledRelease();
+    const candidate = planMemberUpgrade(member, packages, release);
+    if (candidate.package === void 0) {
+      return { status: "skipped", member: member.name, reason: candidate.reason };
+    }
+    try {
+      await this.#ensureUpgradeAnnounced(member);
+      return { status: "started", ...await this.#startScheduledUpgrade(member, candidate) };
+    } catch (error) {
+      return { status: "failed", member: member.name, reason: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  /**
+   * One scheduled upgrade: bring every member that is behind to its newest
+   * source, peers before the local gateway.
+   *
+   * Each member keeps its own detached job; a failure on one member does not
+   * stop the others, and the local install is started last because upgrading
+   * it restarts this process.
+   * @returns {Promise<{status: string, reason?: string, upgraded?: object[], failed?: object[], skipped?: object[]}>} outcome.
+   */
+  async scheduledUpgrade() {
+    if (this.running.size > 0) return { status: "skipped", reason: "\u7F16\u8BD1\u4EFB\u52A1\u8FD8\u5728\u8FD0\u884C" };
+    const snapshot = await this.members();
+    const everyone = [snapshot.local, ...snapshot.members].filter(Boolean);
+    const deployJobs = await this.deployJobs(50);
+    for (const member of everyone) this.#applyInferredDeployment(member, deployJobs);
+    const packages = (await this.packages()).packages;
+    const release = await this.#scheduledRelease();
+    const ordered = [
+      ...everyone.filter((member) => member.id !== "local" && member.kind !== "self"),
+      ...everyone.filter((member) => member.id === "local" || member.kind === "self")
+    ];
+    const upgraded = [];
+    const failed = [];
+    const skipped2 = [];
+    for (const member of ordered) {
+      const candidate = planMemberUpgrade(member, packages, release);
+      if (candidate.package === void 0) {
+        skipped2.push({ member: member.name, reason: candidate.reason });
+        continue;
+      }
+      try {
+        const result = await this.#startScheduledUpgrade(member, candidate);
+        upgraded.push({ member: result.member, package: result.package, source: result.source, job: result.jobId });
+        if (member.id === "local" || member.kind === "self") continue;
+        const final = await this.waitDeploy(result.jobId, { timeoutMs: 20 * 6e4 }).catch(() => null);
+        if (final !== null && final.status === "failed") {
+          failed.push({ member: member.name, reason: final.error ?? "\u5347\u7EA7\u5931\u8D25" });
+        }
+      } catch (error) {
+        failed.push({ member: member.name, reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    if (upgraded.length === 0 && failed.length === 0) {
+      return { status: "skipped", reason: "\u6240\u6709\u6210\u5458\u90FD\u5DF2\u7ECF\u662F\u53EF\u7528\u7684\u6700\u65B0\u90E8\u7F72", skipped: skipped2 };
+    }
+    return {
+      status: failed.length === 0 ? "done" : "failed",
+      upgraded,
+      failed,
+      skipped: skipped2,
+      reason: failed.length === 0 ? void 0 : `${String(failed.length)} \u4E2A\u6210\u5458\u5347\u7EA7\u5931\u8D25`
+    };
+  }
+  /**
+   * Start one scheduled upgrade from a planned candidate.
+   *
+   * A release candidate carries only the target: `upgradeMember` resolves the
+   * asset and its manifest URLs again (30 s cache), so the archive name and
+   * SHA-256 cannot go stale between planning and downloading.
+   * @param {object} member target member.
+   * @param {{source: 'local'|'release', package: object, target: string|null}} candidate planned source.
+   * @returns {Promise<{member: string, package: string, source: 'local'|'release', jobId: string}>} started job.
+   */
+  async #startScheduledUpgrade(member, candidate) {
+    const request = candidate.source === "release" ? { member: member.id, release: { target: candidate.target, refresh: true } } : { member: member.id, package: candidate.package.name };
+    const result = await this.upgradeMember(request);
+    const via = candidate.source === "release" ? "latest" : "gateway cache";
+    this.logLine(`scheduled upgrade ${member.name} -> ${candidate.package.name} via ${via} (${result.job.id})`);
+    return { member: member.name, package: candidate.package.name, source: candidate.source, jobId: result.job.id };
+  }
+  /**
+   * The published `latest` release for a scheduled upgrade.
+   *
+   * A deployment without release settings, or one whose manifest cannot be
+   * read, simply has no release candidates; the gateway cache still works.
+   * @returns {Promise<object|null>} normalized release, or null.
+   */
+  async #scheduledRelease() {
+    try {
+      const release = await this.latestRelease({ refresh: true });
+      return release !== null && typeof release === "object" && release.ok === true ? release : null;
+    } catch (error) {
+      this.logLine(`scheduled upgrade cannot read the latest release: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+  /**
+   * The release publishing settings the panel may see (tokens masked).
+   * @returns {Promise<object>} sanitized config and the manifest URLs.
+   */
+  async releaseSettings() {
+    const config = await this.#healReleaseOwners(await loadReleaseConfig({ file: this.releaseConfigFile }));
+    const sanitized = sanitizeReleaseConfig(config);
+    const urls = latestManifestUrls(config);
+    return {
+      ok: true,
+      config: sanitized,
+      manifestUrls: urls,
+      configured: sanitized.github.enabled || sanitized.gitee.enabled
+    };
+  }
+  /**
+   * Save the release publishing settings.
+   * @param {{config?: object}} request settings.
+   * @returns {Promise<object>} sanitized config after the save.
+   */
+  /**
+   * Fill a stored config's missing owners from its tokens.
+   *
+   * A token-only setup stores the owner as soon as it is known; a config that
+   * predates that (or a save whose provider was unreachable) still shows the
+   * owner here, so the panel never asks the operator for an account name.
+   * Failures are ignored: publishing retries the lookup through its proxy.
+   * @param {object} config loaded config.
+   * @returns {Promise<object>} config, possibly with owners filled in.
+   */
+  async #healReleaseOwners(config) {
+    const missing = ["github", "gitee"].filter((provider) => config?.[provider]?.enabled === true && String(config[provider].owner ?? "") === "");
+    if (missing.length === 0) return config;
+    const owners = {};
+    for (const provider of missing) {
+      try {
+        owners[provider] = await detectReleaseOwner(provider, { token: config[provider].token });
+        this.logLine(`release ${provider} owner detected from token: ${owners[provider]}`);
+      } catch {
+      }
+    }
+    if (Object.keys(owners).length === 0) return config;
+    return await saveReleaseConfig({
+      file: this.releaseConfigFile,
+      input: {
+        enabled: config.enabled,
+        tag: config.tag,
+        partBytes: config.partBytes,
+        github: { owner: owners.github ?? config.github.owner, repo: config.github.repo },
+        gitee: { owner: owners.gitee ?? config.gitee.owner, repo: config.gitee.repo, branch: config.gitee.branch }
+      }
+    });
+  }
+  async saveReleaseSettings(request) {
+    const input = request?.config !== null && typeof request?.config === "object" ? request.config : request;
+    const resolved = await this.#resolveReleaseOwners(input);
+    const config = await saveReleaseConfig({ file: this.releaseConfigFile, input: resolved.input });
+    this.logLine(`release settings saved (tag ${config.tag}, github ${config.github.enabled ? "on" : "off"}, gitee ${config.gitee.enabled ? "on" : "off"})`);
+    return {
+      ok: true,
+      config: sanitizeReleaseConfig(config),
+      manifestUrls: latestManifestUrls(config),
+      configured: config.github.enabled || config.gitee.enabled,
+      warnings: resolved.warnings
+    };
+  }
+  /**
+   * Fill the owner half of a token-only release config from the provider.
+   *
+   * The panel deliberately asks for nothing but a token; the account name is
+   * whatever the token belongs to. An invalid token fails the save, so the
+   * operator sees it immediately instead of at the end of a build; an
+   * unreachable provider only warns, because publishing retries the lookup
+   * through the build's egress proxy.
+   * @param {object} input raw panel input.
+   * @returns {Promise<{input: object, warnings: string[]}>} input with owners and any warnings.
+   */
+  async #resolveReleaseOwners(input) {
+    const warnings = [];
+    const next = { ...input };
+    for (const provider of ["github", "gitee"]) {
+      const entry = input?.[provider];
+      if (entry === null || typeof entry !== "object") continue;
+      const token = typeof entry.token === "string" ? entry.token.trim() : "";
+      if (token === "" || String(entry.owner ?? "").trim() !== "") continue;
+      try {
+        const owner = await detectReleaseOwner(provider, { token });
+        next[provider] = { ...entry, owner };
+        this.logLine(`release ${provider} owner detected from token: ${owner}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/HTTP 401|HTTP 403|无效或缺少/iu.test(message)) throw error;
+        warnings.push(`${provider} \u8D26\u53F7\u6682\u65F6\u65E0\u6CD5\u8BC6\u522B\uFF08${message}\uFF09\uFF1B\u53D1\u5E03\u65F6\u4F1A\u518D\u8BD5\u4E00\u6B21`);
+      }
+    }
+    return { input: next, warnings };
+  }
+  /**
+   * Delete one package (and its `.sha256` sidecar) from the packages directory.
+   * @param {{name: string}} request package file name.
+   * @returns {Promise<{ok: boolean, removed: string[]}>} removed files.
+   */
+  async removePackage(request) {
+    const name = typeof request?.name === "string" ? request.name.trim() : "";
+    if (name === "" || name !== path25.basename(name) || name.startsWith(".")) {
+      throw new Error("package name is invalid");
+    }
+    if (!/\.(?:7z|zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`);
+    const file = path25.join(this.packagesDir, name);
+    const info = await stat13(file).catch(() => null);
+    if (info === null || !info.isFile()) throw new Error(`package not found: ${name}`);
+    const removed = [];
+    await rm15(file, { force: true });
+    removed.push(file);
+    const sidecar = `${file}.sha256`;
+    if (existsSync14(sidecar)) {
+      await rm15(sidecar, { force: true });
+      removed.push(sidecar);
+    }
+    this.logLine(`removed package ${name}`);
+    return { ok: true, removed };
+  }
+  /**
+   * Resolve a package path from an absolute path, `~/.dsh/packages/<name>`,
+   * or the repository `dist/<name>`.
+   * @param {string} input package path or filename.
+   * @returns {Promise<string>} absolute package path.
+   */
+  async resolvePackage(input) {
+    const raw = typeof input === "string" ? input.trim() : "";
+    if (raw === "") throw new Error("package is required");
+    const candidates = path25.isAbsolute(raw) ? [raw] : [path25.join(this.packagesDir, raw), path25.join(this.repositoryRoot, "dist", raw)];
+    for (const file of candidates) {
+      const info = await stat13(file).catch(() => null);
+      if (info?.isFile()) return file;
+    }
+    throw new Error(`package not found: ${raw}`);
+  }
+  /**
+   * Resolve a target and start a deployment or upgrade job.
+   *
+   * The job itself runs in a detached process (`code/deploy/runner.mjs`) so a
+   * member — including this gateway — can restart dsh-web and the gateway while
+   * its own upgrade keeps going. This method only writes the job directory and
+   * returns; `waitDeploy()` is what the model tool uses to block.
+   * @param {{host?: string, member?: string, package?: string, packageOnTarget?: {path: string, bytes: number, sha256: string}, release?: {target: string, sha256?: string, refresh?: boolean}, targetPackage?: {path: string, bytes?: number, sha256?: string}, mode?: 'install'|'upgrade'}} request target and package source.
+   * @returns {Promise<{ok: boolean, job: object, member: object|null, packagePath: string, layout: string}>} queued job.
+   */
+  async startDeploy(request) {
+    const mode = request.mode === "upgrade" ? "upgrade" : request.mode === "test" ? "test" : "install";
+    const test = request.test === true || mode === "test";
+    if (test) throw new Error("\u6307\u9488\u5E03\u5C40\u6CA1\u6709\u5355\u72EC\u7684\u300C\u6D4B\u8BD5\u5347\u7EA7\u300D\uFF1A\u76F4\u63A5\u8FD0\u884C\u300C\u5347\u7EA7\u300D\uFF0C\u5065\u5EB7\u68C0\u67E5\u5931\u8D25\u4F1A\u81EA\u52A8\u56DE\u9000\u5230\u4E0A\u4E00\u4E2A release");
+    const host = typeof request.host === "string" ? request.host.trim() : "";
+    const memberId = typeof request.member === "string" ? request.member.trim() : "";
+    let packageOnTarget = request.packageOnTarget !== null && typeof request.packageOnTarget === "object" ? request.packageOnTarget : null;
+    const releaseRequest = request.release !== null && typeof request.release === "object" ? request.release : null;
+    const targetPackageRequest = request.targetPackage !== null && typeof request.targetPackage === "object" ? request.targetPackage : null;
+    if (releaseRequest !== null && targetPackageRequest !== null) {
+      throw new Error("\u4E00\u6B21\u5347\u7EA7\u53EA\u80FD\u9009\u62E9\u4E00\u4E2A\u5305\u6765\u6E90");
+    }
+    const snapshot = await this.members();
+    const all = [snapshot.local, ...snapshot.members].filter(Boolean);
+    const member = memberId !== "" ? all.find((candidate) => candidate.id === memberId) : all.find((candidate) => candidate.id === host || candidate.name === host || candidate.ip === host);
+    if (memberId !== "" && member === void 0) throw new Error(`member not found: ${memberId}`);
+    const busy = await this.#activeDeployFor(member?.id ?? null, member?.ip ?? host);
+    if (busy !== null) {
+      throw Object.assign(
+        new Error(`\u8BE5\u76EE\u6807\u5DF2\u6709\u6B63\u5728\u8FDB\u884C\u7684${busy.mode === "upgrade" ? "\u5347\u7EA7" : busy.mode === "test" ? "\u6D4B\u8BD5\u5347\u7EA7" : "\u90E8\u7F72"}\u4EFB\u52A1\uFF1A${busy.id}`),
+        { status: 409 }
+      );
+    }
+    let packagePath = "";
+    let os11 = "linux";
+    let packageDescriptor = null;
+    let acquire = null;
+    let downloadRequest = request;
+    if (targetPackageRequest !== null) {
+      if (member === void 0) throw new Error("\u76EE\u6807\u6210\u5458\u5DF2\u6709\u5305\u9700\u8981\u4E00\u4E2A\u6210\u5458");
+      const resolved = await this.#resolveTargetPackage(member, targetPackageRequest);
+      packagePath = resolved.path;
+      os11 = resolved.os;
+      packageOnTarget = { path: resolved.path, bytes: resolved.bytes, sha256: resolved.sha256, keep: true };
+    } else if (releaseRequest !== null) {
+      if (member === void 0) throw new Error("latest tag \u9700\u8981\u6307\u5B9A\u4E00\u4E2A\u6210\u5458");
+      if (mode === "install") {
+        throw new Error("\u65B0\u6210\u5458\u5B89\u88C5\u8BF7\u4F7F\u7528\u672C\u673A\u90E8\u7F72\u5305\u6216\u76EE\u6807\u6210\u5458\u5DF2\u6709\u5305\uFF1Blatest tag \u53EA\u7528\u4E8E\u5347\u7EA7");
+      }
+      const target = typeof releaseRequest.target === "string" ? releaseRequest.target.trim() : "";
+      if (target === "") throw new Error("release.target is required");
+      const memberTarget = memberBuildTarget(member);
+      if (memberTarget !== null && memberTarget !== target) {
+        throw new Error(`\u5305\u5E73\u53F0 ${target} \u4E0E\u6210\u5458 ${memberTarget} \u4E0D\u5339\u914D`);
+      }
+      const latest = await this.latestRelease({ refresh: releaseRequest.refresh === true });
+      if (latest.ok !== true) throw new Error(latest.error ?? "\u53D1\u5E03\u6E05\u5355\u4E0D\u53EF\u7528");
+      const asset = selectLatestAsset(latest, target);
+      if (asset === null) throw new Error(`latest tag \u91CC\u6CA1\u6709 ${target} \u7684\u90E8\u7F72\u5305`);
+      const manifests = latest.manifests ?? latest.manifestUrls;
+      if (member.id === "local" || member.kind === "self") {
+        const link3 = request.direct === true ? null : resolveDeployLinkProxy({
+          links: await this.#directLinks(),
+          target: member,
+          wanted: typeof request.proxyMember === "string" ? request.proxyMember : ""
+        });
+        acquire = {
+          name: asset.name,
+          bytes: asset.bytes,
+          sha256: asset.sha256,
+          manifests,
+          prefer: "gitee",
+          ...link3 === null || typeof link3.url !== "string" || link3.url === "" ? {} : { proxy: link3.url }
+        };
+        packagePath = path25.join(this.packagesDir, asset.name);
+        os11 = asset.os;
+      } else {
+        packagePath = asset.name;
+        os11 = asset.os;
+        packageDescriptor = { name: asset.name, bytes: asset.bytes, sha256: asset.sha256, local: false };
+        downloadRequest = {
+          ...request,
+          release: { ...releaseRequest, manifests, prefer: "gitee" }
+        };
+      }
+    } else if (packageOnTarget !== null) {
+      packagePath = String(packageOnTarget.path ?? "").trim();
+      if (packagePath === "") throw new Error("packageOnTarget.path is required");
+      os11 = /win(?:dows)?/iu.test(path25.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+    } else {
+      packagePath = await this.resolvePackage(request.package);
+      const parsed = packagePlatformFromName(path25.basename(packagePath));
+      if (parsed === null) throw new Error(`\u4E0D\u662F dsh-mesh \u90E8\u7F72\u5305\uFF1A${path25.basename(packagePath)}`);
+      os11 = parsed.os;
+    }
+    if (member !== void 0) {
+      const identity = { id: member.id, name: member.name, ip: member.ip };
+      if (test) assertTestUpgradeTarget(member, { packageOs: os11 });
+      if (member.kind === "self" || member.id === "local") {
+        return this.#startLocalJob({ member, packagePath, os: os11, mode, identity, ...acquire === null ? {} : { acquire } });
+      }
+      const deployRequest = await this.#memberDeployRequest(member, packagePath, os11);
+      const download3 = mode === "install" || packageOnTarget !== null ? null : await this.#deployDownload(downloadRequest, member, all);
+      const job2 = await this.#startEngineJob({
+        request: {
+          ...deployRequest,
+          member: member.id,
+          test,
+          download: download3,
+          ...packageOnTarget === null ? {} : { packageOnTarget },
+          ...packageDescriptor === null ? {} : { packageDescriptor }
+        },
+        member: member.id,
+        mode
+      });
+      return { ok: true, job: job2, member: identity, packagePath, layout: "pointer" };
+    }
+    if (host === "") throw new Error("host is required");
+    if (test) throw new Error("\u6D4B\u8BD5\u5347\u7EA7\u9700\u8981\u4E00\u4E2A\u6210\u5458\uFF08\u8981\u5728\u6210\u5458\u7684\u5B89\u88C5\u4E0A\u6F14\u7EC3\uFF09\uFF0C\u4E0D\u80FD\u76F4\u63A5\u7ED9\u88F8 SSH \u4E3B\u673A");
+    if (packageDescriptor !== null) throw new Error("latest tag \u9700\u8981\u4E00\u4E2A\u5DF2\u53D1\u73B0\u7684\u6210\u5458\uFF0C\u4E0D\u80FD\u76F4\u63A5\u7ED9\u88F8 SSH \u4E3B\u673A");
+    const appRoot = os11 === "windows" ? "C:\\dsh-mesh" : "/opt/dsh-mesh";
+    const download2 = mode === "install" || packageOnTarget !== null ? null : await this.#deployDownload(request, null, all);
+    const job = await this.#startEngineJob({
+      request: { host, package: packagePath, os: os11, appRoot, download: download2, ...packageOnTarget === null ? {} : { packageOnTarget } },
+      member: null,
+      mode
+    });
+    return { ok: true, job, member: null, packagePath, layout: "pointer" };
+  }
+  /**
+   * Deploy one local package to a discovered member, without waiting.
+   * Kept for the panel API, which returns a job id immediately.
+   * @param {{member?: string, package?: string, release?: object, targetPackage?: object, mode?: 'install'|'upgrade'}} request member id/ip and package source.
+   * @returns {Promise<object>} started deploy job.
+   */
+  async deployMember(request) {
+    const result = await this.startDeploy({
+      member: request.member,
+      package: request.package,
+      mode: request.mode,
+      ...request.release === void 0 ? {} : { release: request.release },
+      ...request.targetPackage === void 0 ? {} : { targetPackage: request.targetPackage }
+    });
+    return {
+      ok: true,
+      job: result.job,
+      member: result.member,
+      layout: result.layout,
+      packagesDir: this.packagesDir
+    };
+  }
+  /**
+   * Upgrade one member (or this machine) from a chosen deployment package.
+   *
+   * Same flow as a first deploy; the difference is that an installed member is
+   * upgraded by the package instead of being installed from scratch, and the
+   * panel labels the job as an upgrade.
+   * @param {{member?: string, package?: string, release?: object, targetPackage?: object}} request member id/ip and package source.
+   * @returns {Promise<object>} queued job.
+   */
+  async upgradeMember(request) {
+    const result = await this.startDeploy({
+      member: request.member,
+      package: request.package,
+      mode: "upgrade",
+      ...request.release === void 0 ? {} : { release: request.release },
+      ...request.targetPackage === void 0 ? {} : { targetPackage: request.targetPackage },
+      ...typeof request.proxyMember === "string" ? { proxyMember: request.proxyMember } : {},
+      ...request.direct === true ? { direct: true } : {}
+    });
+    return {
+      ok: true,
+      job: result.job,
+      member: result.member,
+      layout: result.layout,
+      packagesDir: this.packagesDir
+    };
+  }
+  /**
+   * Test-upgrade one package on another member.
+   *
+   * The job does what a member upgrade does — upload, extract, switch, restart,
+   * health check, rollback on failure — and, before touching the member, runs
+   * the flat upgrade the gateway runs on itself against a sandbox built from
+   * the member's current version. That way the local path is exercised on a
+   * machine that is not this one.
+   * @param {{member?: string, package?: string}} request member id/ip and package filename.
+   * @returns {Promise<object>} queued job.
+   */
+  async testUpgradeMember(request) {
+    const result = await this.startDeploy({
+      member: request.member,
+      package: request.package,
+      mode: "test",
+      test: true,
+      ...typeof request.proxyMember === "string" ? { proxyMember: request.proxyMember } : {},
+      ...request.direct === true ? { direct: true } : {}
+    });
+    return {
+      ok: true,
+      job: result.job,
+      member: result.member,
+      layout: result.layout,
+      packagesDir: this.packagesDir
+    };
+  }
+  /**
+   * Deploy one package to an SSH host, synchronously.
+   *
+   * The host may be a discovered member id/name/IP, in which case the member's
+   * OS, install root and WireGuard SSH metadata are used; otherwise the host is
+   * treated as a plain SSH target and the package platform decides the OS.
+   * @param {{host?: string, package?: string, mode?: 'install'|'upgrade'}} request target host and package.
+   * @returns {Promise<{job: object|null, logFile: string, log: string, member?: object}>} final result.
+   */
+  async deployPackage(request) {
+    const started = await this.startDeploy({ host: request.host, package: request.package, mode: request.mode });
+    const job = await this.waitDeploy(started.job.id);
+    return {
+      job,
+      member: started.member,
+      logFile: path25.join(this.deployRoot, started.job.id, "deploy.log"),
+      log: await this.deployLogs(started.job.id, 80)
+    };
+  }
+  /**
+   * The job currently using one target, if any.
+   * @param {string|null} memberId member id.
+   * @param {string} host VPN address or SSH host.
+   * @returns {Promise<object|null>} active job.
+   */
+  async #activeDeployFor(memberId, host) {
+    for (const job of await this.deploy.list(20)) {
+      if (job.status !== "running" && job.status !== "queued") continue;
+      if (memberId !== null && memberId !== "" && job.member === memberId) return job;
+      if (typeof host === "string" && host !== "" && job.target?.host === host) return job;
+    }
+    return null;
+  }
+  /**
+   * Wait for one detached deploy job to settle.
+   * @param {string} id job id.
+   * @param {{timeoutMs?: number}} [options] budget; 30 minutes by default.
+   * @returns {Promise<object|null>} final job state.
+   */
+  async waitDeploy(id, options = {}) {
+    const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 30 * 60 * 1e3;
+    const deadline = Date.now() + timeoutMs;
+    for (; ; ) {
+      const job = await this.deployStatus(id);
+      if (job !== null && job.status !== "running" && job.status !== "queued") return job;
+      if (Date.now() >= deadline) return job;
+      await new Promise((resolve) => setTimeout(resolve, 1e3));
+    }
+  }
+  /**
+   * Start one job for a member or a plain SSH host.
+   *
+   * The plan is built here, once: the queued job needs its release name and
+   * size, and the runner must not hash a 300 MB package a second time.
+   * @param {{request: object, member: string|null, mode: 'install'|'upgrade'}} input job input.
+   * @returns {Promise<object>} queued job state.
+   */
+  async #startEngineJob(input) {
+    const plan = await buildDeployPlan({
+      ...input.request,
+      gatePassword: typeof input.request.gatePassword === "string" ? input.request.gatePassword : process.env.DSH_GATE_PASSWORD,
+      repositoryRoot: this.repositoryRoot
+    });
+    return this.#queueJob({
+      mode: input.mode,
+      member: input.member,
+      plan,
+      request: { kind: "engine", plan, options: { ...input.request, plan, mode: input.mode } }
+    });
+  }
+  /**
+   * Start the local upgrade.
+   *
+   * The host runs the same in-place orchestrator as a member: the package's
+   * `upgrade-local.mjs` moves the tree into `releases/<id>`, rewrites the
+   * pointer and restarts the launcher-backed units.
+   * @param {{member: object, packagePath: string, os: string, mode: 'install'|'upgrade', identity: object, acquire?: object}} input target.
+   * @returns {Promise<object>} queued job and its layout.
+   */
+  async #startLocalJob(input) {
+    const install = this.#localAppRoot();
+    if (install === null) {
+      throw new Error("\u672C\u673A\u6CA1\u6709\u53EF\u8BC6\u522B\u7684 dsh-mesh \u5B89\u88C5\u76EE\u5F55\uFF08\u627E\u4E0D\u5230 dsh-mesh.json\uFF09\uFF0C\u65E0\u6CD5\u5347\u7EA7\u672C\u673A");
+    }
+    if (input.os === "windows") {
+      throw new Error("\u672C\u673A\u662F Linux \u7F51\u5173\uFF0C\u4E0D\u80FD\u5B89\u88C5 Windows \u90E8\u7F72\u5305");
+    }
+    const job = await this.#queueJob({
+      mode: input.mode,
+      member: "local",
+      plan: null,
+      request: {
+        kind: "inplace",
+        inplace: {
+          package: input.packagePath,
+          appRoot: install.appRoot,
+          ...input.acquire === void 0 ? {} : { acquire: input.acquire }
+        }
+      },
+      target: { host: "127.0.0.1", user: os10.userInfo().username, port: null, os: "linux", appRoot: install.appRoot },
+      services: ["dsh-web-app.service", "dsh-web-gate.service", "dsh-wireguard-control.service"],
+      packagePath: input.packagePath,
+      release: typeof input.acquire?.name === "string" ? input.acquire.name : path25.basename(input.packagePath)
+    });
+    return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: "pointer" };
+  }
+  /**
+   * Write one queued job directory and spawn its detached runner.
+   * @param {{mode: string, member: string|null, plan: object|null, request: object, target?: object, services?: string[], packagePath?: string, release?: string}} job job input.
+   * @returns {Promise<object>} queued job state.
+   */
+  async #queueJob(job) {
+    const id = newJobId();
+    const dir = path25.join(this.deployRoot, id);
+    await mkdir14(dir, { recursive: true });
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const bytes = job.plan?.package?.bytes ?? (await stat13(job.packagePath).catch(() => null))?.size ?? 0;
+    const state = {
+      id,
+      mode: job.mode,
+      createdAt: now,
+      updatedAt: now,
+      member: job.member,
+      target: job.plan === null ? job.target : { host: job.plan.host, user: job.plan.user ?? null, port: job.plan.port, os: job.plan.os, appRoot: job.plan.appRoot },
+      release: job.plan?.release ?? job.release ?? "local",
+      package: job.plan?.package?.path ?? job.packagePath ?? null,
+      packageOnTarget: job.plan?.packageOnTarget === true,
+      services: job.plan === null ? job.services ?? [] : job.plan.services.map((service) => service.name),
+      status: "queued",
+      phase: "starting",
+      error: null,
+      steps: initialDeploySteps({ test: job.plan?.test === true, os: job.plan?.os }),
+      progress: { label: "\u542F\u52A8\u72EC\u7ACB\u5347\u7EA7\u8FDB\u7A0B", percent: 0, bytes: 0, totalBytes: bytes, speed: 0, indeterminate: false }
+    };
+    await writeDeployState(dir, state);
+    const requestFile = jobPaths(dir).request;
+    await writeFile14(requestFile, `${JSON.stringify({ ...job.request, id, member: job.member }, null, 2)}
+`, { encoding: "utf8", mode: 384 });
+    const spawned = await this.spawnRunner(dir, id);
+    await appendDeployLog(dir, `job queued; runner ${spawned.mode}${spawned.unit === null ? "" : ` (${spawned.unit})`}`);
+    this.logLine(`mesh ${job.mode} job ${id} queued for ${state.target.host} via ${spawned.mode}`);
+    return state;
+  }
+  /**
+   * Start the detached runner for one job.
+   *
+   * `systemd-run` is preferred: a service restart kills its whole cgroup, so a
+   * plain detached child of dsh-web would not survive the very restart it is
+   * deploying. The transient unit puts the runner in its own cgroup; when
+   * systemd is unavailable the plain detached spawn still survives the parent.
+   * @param {string} dir job directory.
+   * @param {string} id job id.
+   * @returns {Promise<{mode: string, unit: string|null}>} how it was started.
+   */
+  async #spawnRunner(dir, id) {
+    const script = path25.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
+    if (!existsSync14(script)) throw new Error(`deploy runner is missing: ${script}`);
+    const node = process.execPath;
+    const unit = `dsh-mesh-job-${id.replace(/^deploy-/u, "")}`;
+    const systemdRun = ["/usr/bin/systemd-run", "/bin/systemd-run"].find((file) => existsSync14(file));
+    if (systemdRun !== void 0 && process.platform === "linux" && process.getuid?.() === 0) {
+      const result = await new Promise((resolve) => {
+        const child2 = spawn7(systemdRun, [
+          "--unit",
+          unit,
+          "--collect",
+          "--description",
+          `dsh-mesh ${id}`,
+          "--setenv",
+          `DSH_MESH_JOB_UNIT=${unit}`,
+          node,
+          script,
+          "--job",
+          dir
+        ], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+        let stderr = "";
+        child2.stderr.on("data", (chunk) => {
+          stderr += String(chunk);
+        });
+        child2.once("error", (error) => resolve({ ok: false, detail: error.message }));
+        child2.once("exit", (code) => resolve({ ok: code === 0, detail: stderr.trim() }));
+      });
+      if (result.ok) return { mode: "systemd-run", unit };
+      await appendDeployLog(dir, `systemd-run failed, falling back to a detached process: ${result.detail}`);
+    }
+    const child = spawn7(node, [script, "--job", dir], {
+      cwd: this.repositoryRoot,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env: { ...process.env, DSH_MESH_JOB_UNIT: "" }
+    });
+    child.unref();
+    return { mode: "detached", unit: null };
+  }
+  /**
+   * Locate the install that owns this plugin.
+   * @returns {{appRoot: string, layout: 'pointer'}|null} install, or null in a source checkout.
+   */
+  #localAppRoot() {
+    const inspect = (candidate2) => {
+      try {
+        if (existsSync14(path25.join(candidate2, "dsh-mesh.json")) && existsSync14(path25.join(candidate2, "releases"))) {
+          return { appRoot: candidate2, layout: "pointer" };
+        }
+      } catch {
+      }
+      return null;
+    };
+    let candidate = path25.resolve(this.repositoryRoot, "..");
+    for (let depth = 0; depth < 5; depth += 1) {
+      const found = inspect(candidate);
+      if (found !== null) return found;
+      const parent = path25.dirname(candidate);
+      if (parent === candidate) break;
+      candidate = parent;
+    }
+    candidate = path25.resolve(this.home);
+    for (let depth = 0; depth < 5; depth += 1) {
+      const found = inspect(candidate);
+      if (found !== null) return found;
+      const parent = path25.dirname(candidate);
+      if (parent === candidate) break;
+      candidate = parent;
+    }
+    return null;
+  }
+  /**
+   * Empty one finished build job's log.
+   * @param {string} id job id.
+   * @returns {Promise<{ok: boolean, id: string}>} result.
+   */
+  async clearBuildLog(id) {
+    const dir = this._jobDir(id);
+    const state = await readState(dir).catch(() => null);
+    if (state === null) throw new Error(`build job not found: ${id}`);
+    if (this.running.has(state.id) || state.status === "running") {
+      throw new Error("\u7F16\u8BD1\u8FD8\u5728\u8FD0\u884C\uFF0C\u7ED3\u675F\u540E\u518D\u6E05\u7A7A\u65E5\u5FD7");
+    }
+    await writeFile14(path25.join(dir, "build.log"), "", "utf8");
+    return { ok: true, id: state.id };
+  }
+  /**
+   * Drop every finished build job: its record, its log and its worktree.
+   *
+   * Truncating `build.log` alone looked like a no-op in the panel, because the
+   * row stayed in the table. The bulk action now deletes the job directory, so
+   * the list really goes back to empty; the archives themselves were already
+   * copied to `~/.dsh/packages`, which this never touches. A running or queued
+   * job is left alone.
+   * @returns {Promise<{ok: boolean, cleared: string[]}>} cleared job ids.
+   */
+  async clearFinishedBuilds() {
+    const cleared = [];
+    const entries = await readdir9(this.jobRoot, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const dir = path25.join(this.jobRoot, entry.name);
+      const state = await readState(dir).catch(() => null);
+      if (state === null) continue;
+      if (this.running.has(state.id) || state.status === "running" || state.status === "queued") continue;
+      await rm15(dir, { recursive: true, force: true });
+      cleared.push(state.id);
+    }
+    return { ok: true, cleared };
+  }
+  /**
+   * Decide how an upgrade should obtain its package from a release.
+   *
+   * The default is the same policy the build panel uses: a foreign Linux
+   * member with external access hosts the HTTP proxy, so the target's download
+   * leaves through that network instead of the gateway's. A caller can pick a
+   * different member with `proxyMember`, or skip the proxy with `direct: true`
+   * (the member's own network is then used).
+   * @param {{proxyMember?: string, direct?: boolean}} request deploy request.
+   * @param {object|null} target the member being upgraded, when it is one.
+   * @param {object[]} everyone local + peer rows.
+   * @returns {Promise<object|null>} download spec for the deploy plan.
+   */
+  async #deployDownload(request, target, everyone) {
+    const explicit = Array.isArray(request.release?.manifests) ? request.release.manifests : null;
+    const manifests = [];
+    if (explicit !== null) {
+      for (const entry of explicit) {
+        if (typeof entry === "string" && entry !== "") {
+          let provider = "github";
+          try {
+            provider = /(?:^|\.)gitee\.com$/iu.test(new URL(entry).hostname) ? "gitee" : "github";
+          } catch {
+          }
+          manifests.push({ provider, url: entry });
+        } else if (entry !== null && typeof entry === "object" && typeof entry.url === "string" && entry.url !== "") {
+          manifests.push({ provider: entry.provider === "gitee" ? "gitee" : "github", url: entry.url });
+        }
+      }
+    } else {
+      const releaseConfig = await loadReleaseConfig({ file: this.releaseConfigFile });
+      const sources = latestManifestSources(releaseConfig);
+      if (sources.github !== null) manifests.push({ provider: "github", url: sources.github });
+      if (sources.gitee !== null) manifests.push({ provider: "gitee", url: sources.gitee });
+    }
+    const prefer = request.release?.prefer === "gitee" ? "gitee" : void 0;
+    if (manifests.length === 0) return null;
+    if (request.direct === true || request.proxyMember === "none") return { manifests, proxy: null, ...prefer === void 0 ? {} : { prefer } };
+    const wanted = typeof request.proxyMember === "string" ? request.proxyMember.trim() : "";
+    const linkProxy = resolveDeployLinkProxy({ links: await this.#directLinks(), target, wanted });
+    if (linkProxy !== null) return { manifests, proxy: linkProxy, ...prefer === void 0 ? {} : { prefer } };
+    let proxyMember = null;
+    if (wanted !== "" && wanted !== "auto") {
+      proxyMember = everyone.find((candidate) => candidate.id === wanted || candidate.name === wanted || candidate.ip === wanted) ?? null;
+      if (proxyMember === null) throw new Error(`download proxy member not found: ${wanted}`);
+      if (proxyMember.id === "local" || proxyMember.kind === "self") throw new Error("the gateway cannot proxy a member download; pick another member");
+      const platform = String(proxyMember.system?.platform ?? "").toLowerCase();
+      if (platform !== "" && !platform.startsWith("linux")) throw new Error(`download proxy member must be Linux; ${proxyMember.name} runs ${String(proxyMember.system?.platform)}`);
+    } else {
+      const picked = pickProxyMember(everyone);
+      proxyMember = picked === null ? null : everyone.find((candidate) => candidate.id === picked) ?? null;
+    }
+    if (proxyMember === null) return { manifests, proxy: null, ...prefer === void 0 ? {} : { prefer } };
+    const plan = await this.#memberSshPlan(proxyMember);
+    return {
+      manifests,
+      proxy: {
+        kind: "ssh",
+        host: plan.host,
+        user: plan.user,
+        port: plan.port,
+        identityFile: plan.identityFile,
+        appRoot: plan.appRoot,
+        name: proxyMember.name
+      },
+      ...prefer === void 0 ? {} : { prefer }
+    };
+  }
+  /**
+   * Build the deployment request for a discovered member.
+   * @param {object} member member snapshot.
+   * @param {string} packagePath package file.
+   * @param {'linux'|'windows'} os target OS.
+   * @returns {Promise<object>} deploy request.
+   */
+  async #memberDeployRequest(member, packagePath, os11) {
+    if (member.ip === "") throw new Error(`member ${member.id} has no VPN address`);
+    let user = "root";
+    let identityFile;
+    const { state } = await readWireGuardState({ file: path25.join(this.home, "wireguard", "state.json") });
+    const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
+    if (peer !== void 0 && peer !== null) {
+      if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
+      if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
+        const digest = createHash8("sha256").update(peer.publicKey).digest("hex");
+        const candidate = path25.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        if (existsSync14(candidate)) identityFile = candidate;
+      }
+    }
+    const system = member.system;
+    let appRoot = normalizeInstallRoot(system?.appRoot) || void 0;
+    let serviceUser = typeof system?.user === "string" && system.user.trim() !== "" ? system.user.trim() : void 0;
+    if (appRoot === void 0) {
+      try {
+        const detected = await this.deploy.inspectTarget({ host: member.ip, user, identityFile, os: os11 });
+        appRoot = detected.appRoot;
+        serviceUser = serviceUser ?? detected.serviceUser;
+      } catch {
+      }
+    }
+    if (appRoot === void 0 && typeof system?.home === "string" && system.home.trim() !== "") {
+      const home = system.home.trim().replace(/[\\/]+$/u, "");
+      appRoot = os11 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
+    }
+    if (appRoot === void 0) {
+      const home = os11 === "windows" ? `C:\\Users\\${user}` : user === "root" ? "/root" : `/home/${user}`;
+      appRoot = os11 === "windows" ? `${home}\\.dsh\\dsh-mesh` : `${home}/.dsh/dsh-mesh`;
+    }
+    return {
+      host: member.ip,
+      user,
+      identityFile,
+      os: os11,
+      appRoot,
+      serviceUser,
+      package: packagePath
+    };
+  }
+  /**
+   * Refresh a prebuilt package from this repository, in place.
+   *
+   * The DSH app, the browser bundles and the Node runtime inside the package
+   * stay as they are; only the gateway, the scripts and the plugin files are
+   * replaced, then the archive and its checksum are rewritten.
+   * @param {{package: string}} request package name (in the packages dir) or path.
+   * @returns {Promise<object>} summary.
+   */
+  async repackPackage(request) {
+    const packagePath = await this.resolvePackage(request.package);
+    const summary = await repackArchive(packagePath, {
+      repositoryRoot: this.repositoryRoot,
+      log: (line) => this.logLine(`repack: ${line}`)
+    });
+    return { ok: true, ...summary };
+  }
+  /**
+   * Plan an SSH deployment without touching the network.
+   * @param {object} request deploy options.
+   * @returns {Promise<object>} plan.
+   */
+  async deployPlan(request) {
+    return this.deploy.plan(request);
+  }
+  /**
+   * Start an SSH deployment.
+   * @param {object} request deploy options.
+   * @returns {Promise<object>} job.
+   */
+  async deployStart(request) {
+    return this.deploy.start(request);
+  }
+  /**
+   * Read one deployment job.
+   * @param {string} id job id.
+   * @returns {Promise<object|null>} job state.
+   */
+  async deployStatus(id) {
+    return this.deploy.status(id);
+  }
+  /**
+   * Cancel one queued or running deployment job and clean up after it.
+   *
+   * The job is owned by a detached runner, so this stops the runner (and, on
+   * the member, only the staging/temp files that job made) instead of waiting
+   * for the next phase. A job already switching services is refused.
+   * @param {string} id job id.
+   * @returns {Promise<object|null>} cancelled job, or null when unknown.
+   */
+  async cancelDeploy(id) {
+    const job = await this.deploy.cancel(id);
+    this.logLine(`mesh cancel ${typeof id === "string" ? id : ""}: ${job === null ? "unknown job" : job.status}`);
+    return job;
+  }
+  /**
+   * List recent deployment jobs, newest first.
+   * @param {number} [limit] maximum count.
+   * @returns {Promise<object[]>} jobs.
+   */
+  async deployJobs(limit = 20) {
+    return this.deploy.list(limit);
+  }
+  /**
+   * Read one deployment job's log tail.
+   * @param {string} id job id.
+   * @param {number} [lines] line count.
+   * @returns {Promise<string>} log tail.
+   */
+  async deployLogs(id, lines = 80) {
+    return this.deploy.logs(id, lines);
+  }
+  /**
+   * Roll a deployment back to the previous release.
+   * @param {object} request deploy target options.
+   * @returns {Promise<object>} job.
+   */
+  async deployRollback(request) {
+    return this.deploy.rollback(request);
+  }
+  /**
+   * Roll one discovered member back to the release it ran before the last
+   * deploy.
+   *
+   * This is the escape hatch for "the upgrade came up broken": the panel that
+   * started the upgrade is still alive (it is a different machine), so it can
+   * put the member back without a shell. The local gateway rolls back through
+   * `rollback-local.mjs`.
+   * @param {{member: string}} request member id, VPN address, or name.
+   * @returns {Promise<object>} rollback job.
+   */
+  async rollbackMember({ member = "" } = {}) {
+    if (member === "") throw new Error("which member should roll back?");
+    const snapshot = await this.members();
+    const everyone = [snapshot.local, ...snapshot.members].filter((entry) => entry !== null && entry !== void 0);
+    const found = everyone.find((entry) => entry.id === member || entry.name === member || entry.ip === member);
+    if (found === void 0) throw new Error(`member not found: ${member}`);
+    if (found.kind === "self") {
+      throw new Error("\u672C\u673A\u56DE\u6EDA\u8BF7\u6267\u884C\uFF1Anode <\u5B89\u88C5\u6839>/rollback-local.mjs --root <\u5B89\u88C5\u6839>");
+    }
+    if (found.dsh !== true) {
+      throw new Error(`\u6210\u5458 ${found.name} \u7684\u7F51\u5173\u6CA1\u6709\u5E94\u7B54\uFF0C\u65E0\u6CD5\u5728\u7EBF\u56DE\u6EDA\uFF1BSSH \u4E0A\u53BB\u6267\u884C code/deploy/cli.mjs rollback`);
+    }
+    const os11 = String(found.system?.platform ?? "").toLowerCase().startsWith("win") ? "windows" : "linux";
+    const request = await this.#memberDeployRequest(found, "", os11);
+    const rolled = await this.deploy.rollback({ ...request, os: os11, skipPackage: true });
+    return { ok: true, job: rolled.job ?? rolled, member: found };
+  }
+  /**
+   * Resolve and validate one job directory.
+   * @param {string} id job id.
+   * @returns {string} path.
+   */
+  _jobDir(id) {
+    if (typeof id !== "string" || !/^[A-Za-z0-9._-]+$/u.test(id)) throw new Error("invalid job id");
+    const dir = path25.resolve(this.jobRoot, id);
+    if (!dir.startsWith(`${path25.resolve(this.jobRoot)}${path25.sep}`)) throw new Error("invalid job id");
+    return dir;
+  }
+};
+
+// code/shared/event-stream.mjs
+import { mkdirSync, readdirSync, watch } from "node:fs";
+import path26 from "node:path";
+var HEARTBEAT_MS = 15e3;
+var DEBOUNCE_MS = 120;
+var EventHub = class {
+  /**
+   * @param {{log?: (line: string) => void, heartbeatMs?: number}} [options] options.
+   */
+  constructor(options = {}) {
+    this.log = options.log ?? (() => {
+    });
+    this.heartbeatMs = Number.isSafeInteger(options.heartbeatMs) ? options.heartbeatMs : HEARTBEAT_MS;
+    this.clients = /* @__PURE__ */ new Set();
+  }
+  /** How many panels are currently subscribed. */
+  get size() {
+    return this.clients.size;
+  }
+  /**
+   * Turn one HTTP response into a long-lived event stream.
+   *
+   * The caller must not write to the response afterwards. The returned
+   * unsubscribe function is idempotent, so both request and response `close`
+   * handlers can call it.
+   * @param {import('node:http').IncomingMessage} request request.
+   * @param {import('node:http').ServerResponse} response response.
+   * @returns {() => void} unsubscribe.
+   */
+  subscribe(request, response) {
+    response.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no"
+    });
+    try {
+      response.write("retry: 3000\n\n");
+      response.write(`event: ready
+data: ${JSON.stringify({ type: "ready" })}
+
+`);
+    } catch {
+      try {
+        response.end();
+      } catch {
+      }
+      return () => {
+      };
+    }
+    this.clients.add(response);
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      this.clients.delete(response);
+    };
+    const heartbeat = setInterval(() => {
+      try {
+        response.write(": ping\n\n");
+      } catch {
+        close();
+      }
+    }, this.heartbeatMs);
+    heartbeat.unref?.();
+    request.once("close", close);
+    response.once("close", close);
+    return close;
+  }
+  /**
+   * Send one named event to every subscriber.
+   * @param {string} type event name.
+   * @param {object} payload JSON payload.
+   * @returns {void}
+   */
+  send(type, payload) {
+    if (this.clients.size === 0) return;
+    const frame = `event: ${type}
+data: ${JSON.stringify(payload)}
+
+`;
+    for (const client of [...this.clients]) {
+      try {
+        client.write(frame);
+      } catch {
+        this.clients.delete(client);
+      }
+    }
+  }
+  /** Close every stream, e.g. when the plugin is unloaded. */
+  close() {
+    for (const client of [...this.clients]) {
+      try {
+        client.end();
+      } catch {
+      }
+    }
+    this.clients.clear();
+  }
+};
+var JobDirectoryWatcher = class {
+  /**
+   * @param {{root: string, onChange: (dir: string, file: string) => void, log?: (line: string) => void}} options options.
+   */
+  constructor(options) {
+    this.root = options.root;
+    this.onChange = options.onChange;
+    this.log = options.log ?? (() => {
+    });
+    this.watchers = /* @__PURE__ */ new Map();
+    this.pending = /* @__PURE__ */ new Map();
+    this.rootWatcher = null;
+    this.timer = null;
+    this.started = false;
+  }
+  /** Start watching. Safe to call twice. */
+  start() {
+    if (this.started) return;
+    this.started = true;
+    try {
+      mkdirSync(this.root, { recursive: true });
+      this.rootWatcher = watch(this.root, { persistent: false }, (_event, file) => {
+        this.#scan();
+        this.#queue("", String(file ?? ""));
+      });
+      this.rootWatcher.on("error", (error) => this.#fail(error));
+    } catch (error) {
+      this.#fail(error);
+      return;
+    }
+    this.#scan();
+  }
+  /** Stop every watcher and drop pending callbacks. */
+  stop() {
+    this.started = false;
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.pending.clear();
+    this.rootWatcher?.close();
+    this.rootWatcher = null;
+    for (const watcher of this.watchers.values()) watcher.close();
+    this.watchers.clear();
+  }
+  /** Add a watcher for every immediate subdirectory not seen yet. */
+  #scan() {
+    let entries = [];
+    try {
+      entries = readdirSync(this.root, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || this.watchers.has(entry.name)) continue;
+      try {
+        const watcher = watch(path26.join(this.root, entry.name), { persistent: false }, (_event, file) => {
+          this.#queue(entry.name, String(file ?? ""));
+        });
+        watcher.on("error", () => {
+          this.watchers.delete(entry.name);
+        });
+        this.watchers.set(entry.name, watcher);
+      } catch {
+      }
+    }
+  }
+  /** Batch one change and deliver it after a short debounce. */
+  #queue(dir, file) {
+    this.pending.set(`${dir}\0${file}`, { dir, file });
+    if (this.timer !== null) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      const changes = [...this.pending.values()];
+      this.pending.clear();
+      for (const change of changes) {
+        try {
+          this.onChange(change.dir, change.file);
+        } catch (error) {
+          this.log(`event watcher callback failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }, DEBOUNCE_MS);
+    this.timer.unref?.();
+  }
+  /** Report a watcher that could not even be created. */
+  #fail(error) {
+    this.log(`cannot watch ${this.root}: ${error instanceof Error ? error.message : String(error)}`);
+    this.rootWatcher?.close();
+    this.rootWatcher = null;
+  }
+};
+
+// src/lib/job-events.mjs
+import path27 from "node:path";
+var LOG_THROTTLE_MS = 400;
+var LOG_LINES = 300;
+var JOB_ID = /^[A-Za-z0-9._-]+$/u;
+function startJobEvents(options) {
+  const { service, hub } = options;
+  const log = options.log ?? (() => {
+  });
+  const logTimers = /* @__PURE__ */ new Map();
+  const reading = /* @__PURE__ */ new Map();
+  if (typeof service.dataDir !== "string" || service.dataDir === "") {
+    log("job events disabled: the service has no dataDir");
+    return { close() {
+    } };
+  }
+  const watchers = [
+    new JobDirectoryWatcher({
+      root: path27.join(service.dataDir, "build"),
+      log,
+      onChange: (dir, file) => handle("build", dir, file)
+    }),
+    new JobDirectoryWatcher({
+      root: path27.join(service.dataDir, "deploy"),
+      log,
+      onChange: (dir, file) => handle("deploy", dir, file)
+    })
+  ];
+  for (const watcher of watchers) watcher.start();
+  function handle(kind, dir, file) {
+    const id = dir !== "" ? dir : file;
+    if (typeof id !== "string" || id === "" || !JOB_ID.test(id)) return;
+    if (dir === "") {
+      void emit(kind, id);
+      return;
+    }
+    if (file === "" || file === "state.json" || file === "job.json") {
+      void emit(kind, id);
+      return;
+    }
+    if (file.endsWith(".log")) scheduleLog(kind, id);
+  }
+  async function emit(kind, id) {
+    const key = `${kind}:${id}`;
+    if (reading.get(key) === true) return;
+    reading.set(key, true);
+    try {
+      const job = kind === "build" ? await service.buildSummary(id) : await service.deployStatus(id);
+      if (job === null || job === void 0) return;
+      hub.send(kind, { type: kind, id, job });
+    } catch (error) {
+      log(`job event for ${key} failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      reading.delete(key);
+    }
+  }
+  function scheduleLog(kind, id) {
+    const key = `${kind}:${id}`;
+    if (logTimers.has(key)) return;
+    const timer = setTimeout(() => {
+      logTimers.delete(key);
+      void sendLog(kind, id);
+    }, LOG_THROTTLE_MS);
+    timer.unref?.();
+    logTimers.set(key, timer);
+  }
+  async function sendLog(kind, id) {
+    try {
+      const tail = kind === "build" ? await service.log(id, LOG_LINES) : await service.deployLogs(id, LOG_LINES);
+      const lines = Array.isArray(tail) ? tail.filter((line) => typeof line === "string") : typeof tail === "string" && tail.trim() !== "" ? tail.trimEnd().split(/\r?\n/u) : [];
+      hub.send(`${kind}-log`, { type: `${kind}-log`, id, lines });
+    } catch (error) {
+      log(`job log for ${kind}:${id} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return {
+    close() {
+      for (const watcher of watchers) watcher.stop();
+      for (const timer of logTimers.values()) clearTimeout(timer);
+      logTimers.clear();
+      reading.clear();
+    }
+  };
+}
+
+// src/lib/http-api.mjs
+var API_PREFIX = "/api/dsh-mesh";
+var AGENT_HEADER = "x-dsh-mesh";
+var MAX_BODY_BYTES = 64 * 1024;
+function writeJson(response, status, value) {
+  const body = JSON.stringify(value);
+  response.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": Buffer.byteLength(body),
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff"
+  });
+  response.end(body);
+}
+async function readJson2(request) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > MAX_BODY_BYTES) throw new Error("request body is too large");
+    chunks.push(buffer);
+  }
+  if (size === 0) return {};
+  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("request body must be a JSON object");
+  return parsed;
+}
+function registerApi(ctx, service, scheduler = null) {
+  const hub = new EventHub({ log: (line) => ctx.logger?.info?.(`mesh events: ${line}`) });
+  const jobEvents = startJobEvents({ service, hub, log: (line) => ctx.logger?.warn?.(`mesh events: ${line}`) });
+  ctx.effect(() => () => {
+    jobEvents.close();
+    hub.close();
+  }, "mesh events");
+  ctx.effect(() => ctx.webServer.register({
+    kind: "prefix",
+    path: API_PREFIX,
+    handler: async (request, response) => {
+      try {
+        const method = request.method ?? "GET";
+        const url = new URL(request.url ?? "/", "http://local.invalid");
+        const path31 = url.pathname.slice(API_PREFIX.length) || "/";
+        if (method === "GET" && path31 === "/status") {
+          writeJson(response, 200, await service.status());
+          return;
+        }
+        if (method === "GET" && path31 === "/members") {
+          writeJson(response, 200, await service.members());
+          return;
+        }
+        if (method === "GET" && path31 === "/member-tags") {
+          writeJson(response, 200, { ok: true, tags: await service.memberTags() });
+          return;
+        }
+        if (method === "GET" && path31 === "/member-conversations") {
+          writeJson(response, 200, await service.memberConversations(url.searchParams.get("session") ?? ""));
+          return;
+        }
+        if (method === "GET" && path31 === "/schedule") {
+          if (scheduler === null) {
+            writeJson(response, 503, { ok: false, error: { code: "unavailable", message: "\u5B9A\u65F6\u4EFB\u52A1\u8FD8\u6CA1\u6709\u542F\u52A8\u3002" } });
+            return;
+          }
+          const member = url.searchParams.get("member") ?? "";
+          writeJson(response, 200, { ok: true, schedule: scheduler.status(member === "" ? void 0 : member) });
+          return;
+        }
+        if (method === "POST" && path31 === "/packages/delete") {
+          const body = await readJson2(request);
+          writeJson(response, 200, await service.removePackage({ name: typeof body.name === "string" ? body.name : "" }));
+          return;
+        }
+        if (method === "GET" && path31 === "/events") {
+          hub.subscribe(request, response);
+          return;
+        }
+        if (method === "GET" && path31 === "/jobs") {
+          writeJson(response, 200, { ok: true, jobs: await service.jobs() });
+          return;
+        }
+        if (method === "GET" && path31 === "/packages") {
+          writeJson(response, 200, await service.packages());
+          return;
+        }
+        if (method === "GET" && path31 === "/release/latest") {
+          writeJson(response, 200, await service.latestRelease({
+            refresh: url.searchParams.get("refresh") === "1"
+          }));
+          return;
+        }
+        if (method === "GET" && path31 === "/member-packages") {
+          writeJson(response, 200, await service.memberPackages(url.searchParams.get("member") ?? ""));
+          return;
+        }
+        if (method === "GET" && path31 === "/release") {
+          writeJson(response, 200, await service.releaseSettings());
+          return;
+        }
+        if (method === "GET" && path31 === "/deploy/jobs") {
+          writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) });
+          return;
+        }
+        if (method === "GET") {
+          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path31);
+          if (deployRead !== null) {
+            const lines = Number.parseInt(url.searchParams.get("lines") ?? "200", 10);
+            const job = await service.deployStatus(deployRead[1]);
+            if (job === null) {
+              writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown deploy job." } });
+              return;
+            }
+            const tail = await service.deployLogs(deployRead[1], Number.isSafeInteger(lines) ? Math.min(Math.max(lines, 1), 500) : 200);
+            writeJson(response, 200, {
+              ok: true,
+              job,
+              // Match the build log endpoint: the panel expects an array.
+              lines: tail.trimEnd() === "" ? [] : tail.trimEnd().split(/\r?\n/u)
+            });
+            return;
+          }
+          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path31);
+          if (read !== null) {
+            if (read[2] === "/log") {
+              const lines = Number.parseInt(url.searchParams.get("lines") ?? "80", 10);
+              writeJson(response, 200, {
+                ok: true,
+                lines: await service.log(read[1], Number.isSafeInteger(lines) ? Math.min(Math.max(lines, 1), 500) : 80)
+              });
+              return;
+            }
+            writeJson(response, 200, { ok: true, job: await service.job(read[1]) });
+            return;
+          }
+        }
+        if (method !== "POST") {
+          writeJson(response, 405, { ok: false, error: { code: "method_not_allowed", message: "Use GET or POST." } });
+          return;
+        }
+        if (request.headers[AGENT_HEADER] !== "1") {
+          writeJson(response, 403, { ok: false, error: { code: "forbidden", message: `Missing the ${AGENT_HEADER} header.` } });
+          return;
+        }
+        if (method === "POST" && path31 === "/release") {
+          const body = await readJson2(request);
+          writeJson(response, 200, await service.saveReleaseSettings(body));
+          return;
+        }
+        if (path31 === "/deploy") {
+          const body = await readJson2(request);
+          const result = await service.deployMember({
+            member: typeof body.member === "string" ? body.member : void 0,
+            package: typeof body.package === "string" ? body.package : void 0,
+            release: body.release !== null && typeof body.release === "object" ? body.release : void 0,
+            targetPackage: body.targetPackage !== null && typeof body.targetPackage === "object" ? body.targetPackage : void 0
+          });
+          writeJson(response, 202, result);
+          return;
+        }
+        if (path31 === "/session/promote") {
+          const body = await readJson2(request);
+          writeJson(response, 200, await service.promoteSession(String(body.member ?? "")));
+          return;
+        }
+        if (path31 === "/member-tags") {
+          const body = await readJson2(request);
+          writeJson(response, 200, await service.setMemberTag(
+            typeof body.id === "string" ? body.id : "",
+            typeof body.tag === "string" ? body.tag : ""
+          ));
+          return;
+        }
+        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path31);
+        if (clearLog !== null) {
+          writeJson(response, 200, await service.clearBuildLog(clearLog[1]));
+          return;
+        }
+        if (path31 === "/build/logs/clear") {
+          writeJson(response, 200, await service.clearFinishedBuilds());
+          return;
+        }
+        if (path31 === "/deploy/cancel") {
+          const body = await readJson2(request);
+          const job = await service.cancelDeploy(typeof body.id === "string" ? body.id : "");
+          if (job === null) {
+            writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown deploy job." } });
+            return;
+          }
+          writeJson(response, 200, { ok: true, job });
+          return;
+        }
+        if (path31 === "/deploy/rollback") {
+          const body = await readJson2(request);
+          writeJson(response, 202, await service.rollbackMember({
+            member: typeof body.member === "string" ? body.member : ""
+          }));
+          return;
+        }
+        if (path31 === "/upgrade" || path31 === "/test-upgrade") {
+          const body = await readJson2(request);
+          const request_ = {
+            member: typeof body.member === "string" ? body.member : void 0,
+            package: typeof body.package === "string" ? body.package : void 0,
+            // The two extra package sources: the public latest tag and an
+            // archive already on the target member.
+            ...body.release !== null && typeof body.release === "object" ? { release: body.release } : {},
+            ...body.targetPackage !== null && typeof body.targetPackage === "object" ? { targetPackage: body.targetPackage } : {},
+            // Upgrade downloads default to the external proxy; the panel can
+            // pick a different member or ask for a direct download.
+            ...typeof body.proxyMember === "string" && body.proxyMember.trim() !== "" ? { proxyMember: body.proxyMember.trim() } : {},
+            ...body.direct === true ? { direct: true } : {}
+          };
+          const test = path31 === "/test-upgrade" || body.test === true;
+          writeJson(response, 202, test ? await service.testUpgradeMember(request_) : await service.upgradeMember(request_));
+          return;
+        }
+        if (path31 === "/schedule") {
+          if (scheduler === null) {
+            writeJson(response, 503, { ok: false, error: { code: "unavailable", message: "\u5B9A\u65F6\u4EFB\u52A1\u8FD8\u6CA1\u6709\u542F\u52A8\u3002" } });
+            return;
+          }
+          const body = await readJson2(request);
+          const member = typeof body.member === "string" ? body.member.trim() : "";
+          const patch = member === "" ? {
+            build: body.build !== null && typeof body.build === "object" ? {
+              ...typeof body.build.enabled === "boolean" ? { enabled: body.build.enabled } : {},
+              ...typeof body.build.time === "string" ? { time: body.build.time } : {}
+            } : void 0
+          } : {
+            member,
+            upgrade: body.upgrade !== null && typeof body.upgrade === "object" ? {
+              ...typeof body.upgrade.enabled === "boolean" ? { enabled: body.upgrade.enabled } : {},
+              ...typeof body.upgrade.time === "string" ? { time: body.upgrade.time } : {}
+            } : void 0
+          };
+          writeJson(response, 200, { ok: true, schedule: await scheduler.update(patch) });
+          return;
+        }
+        if (path31 === "/build") {
+          const body = await readJson2(request);
+          const job = await service.startBuild({
+            source: typeof body.source === "string" ? body.source : void 0,
+            ref: typeof body.ref === "string" ? body.ref : void 0,
+            targets: Array.isArray(body.targets) ? body.targets.filter((value) => typeof value === "string") : void 0,
+            planOnly: body.planOnly === true,
+            version: typeof body.version === "string" ? body.version : void 0,
+            member: typeof body.member === "string" ? body.member : void 0,
+            proxy: typeof body.proxy === "string" ? body.proxy : void 0,
+            proxyMember: typeof body.proxyMember === "string" ? body.proxyMember : void 0,
+            direct: body.direct === true,
+            pullBack: typeof body.pullBack === "boolean" ? body.pullBack : void 0,
+            autoUpgrade: typeof body.autoUpgrade === "boolean" ? body.autoUpgrade : void 0
+          });
+          writeJson(response, 202, { ok: true, job });
+          return;
+        }
+        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path31);
+        if (resume !== null) {
+          writeJson(response, 202, { ok: true, job: await service.resumeBuild(resume[1]) });
+          return;
+        }
+        const match = /^\/build\/([^/]+)\/learn$/u.exec(path31);
+        if (match !== null) {
+          writeJson(response, 200, { ok: true, job: await service.learn(match[1]) });
+          return;
+        }
+        writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Unknown mesh endpoint." } });
+      } catch (error) {
+        writeJson(response, 400, {
+          ok: false,
+          error: {
+            code: "request_failed",
+            message: error instanceof Error ? error.message : String(error)
+          }
+        });
+      }
+    }
+  }), "mesh local api");
+}
+
+// src/lib/scheduler.mjs
+import { mkdir as mkdir15, readFile as readFile18, writeFile as writeFile15 } from "node:fs/promises";
+import path28 from "node:path";
+var TICK_TOLERANCE_MS = 9e4;
+var DUPLICATE_WINDOW_MS = 10 * 6e4;
+var Scheduler = class {
+  /**
+   * @param {object} options scheduler input.
+   * @param {{ scheduledBuild: () => Promise<object>, scheduledUpgradeMember: (memberId: string) => Promise<object> }} options.service mesh service.
+   * @param {string} options.file `schedule.json` path.
+   * @param {() => Promise<string[]>} [options.members] current member id provider.
+   * @param {(line: string) => void} [options.log] logger.
+   * @param {() => number} [options.now] clock (tests).
+   * @param {typeof setTimeout} [options.setTimeout] timer factory (tests).
+   * @param {typeof clearTimeout} [options.clearTimeout] timer canceller (tests).
+   * @param {boolean} [options.autoStart] arm on construction; default true.
+   */
+  constructor(options) {
+    this.service = options.service;
+    this.file = options.file;
+    this.memberIdProvider = typeof options.members === "function" ? options.members : null;
+    this.log = typeof options.log === "function" ? options.log : () => {
+    };
+    this.now = typeof options.now === "function" ? options.now : Date.now;
+    this.setTimer = options.setTimeout ?? setTimeout;
+    this.clearTimer = options.clearTimeout ?? clearTimeout;
+    this.schedule = normalizeSchedules({});
+    this.upgrades = /* @__PURE__ */ new Map();
+    this.last = { build: null, upgrades: {}, prepares: {} };
+    this.runningUpgrades = /* @__PURE__ */ new Set();
+    this.runningBuild = false;
+    this.memberIds = [];
+    this.timer = null;
+    this.disposed = false;
+    this.loading = null;
+    if (options.autoStart !== false) void this.start();
+  }
+  /**
+   * Read the persisted schedule, discover members, and arm the timer.
+   * @returns {Promise<void>} when armed.
+   */
+  async start() {
+    await this.#load();
+    await this.#refreshMembers();
+    this.#arm();
+  }
+  /**
+   * Merge one client update and re-arm immediately.
+   *
+   * Either the build clock (`{build}`) or one member's auto-upgrade
+   * (`{member, upgrade}`) is updated per call.
+   * @param {{build?: {enabled?: boolean, time?: string}, member?: string, upgrade?: {enabled?: boolean, time?: string}}} patch schedule patch.
+   * @returns {Promise<object>} new status (build or the member's entry).
+   */
+  async update(patch) {
+    const memberId = typeof patch?.member === "string" ? patch.member.trim() : "";
+    if (memberId !== "") {
+      const entry = normalizeUpgradeSchedule({
+        ...upgradeEntryFor(this.schedule, memberId),
+        ...patch?.upgrade ?? {}
+      });
+      this.upgrades.set(memberId, entry);
+      if (!this.memberIds.includes(memberId)) this.memberIds.push(memberId);
+    } else if (patch?.build !== void 0) {
+      this.schedule.build = normalizeBuildSchedule({ ...this.schedule.build, ...patch.build ?? {} });
+    }
+    this.schedule = {
+      ...this.schedule,
+      upgrades: Object.fromEntries(this.upgrades)
+    };
+    await this.#save();
+    this.#arm();
+    this.log(`schedule saved: build ${this.schedule.build.time} ${this.schedule.build.enabled ? "on" : "off"}${memberId === "" ? "" : `, upgrade ${memberId} ${this.upgrades.get(memberId)?.time} ${this.upgrades.get(memberId)?.enabled ? "on" : "off"}`}`);
+    return this.status(memberId === "" ? void 0 : memberId);
+  }
+  /**
+   * The panel's read model.
+   * @param {string} [memberId] when set, include that member's auto-upgrade.
+   * @returns {object} status.
+   */
+  status(memberId) {
+    const at = new Date(this.now());
+    const result = {
+      ok: true,
+      build: this.#statusEntry(this.schedule.build, "build", void 0, at)
+    };
+    if (typeof memberId === "string" && memberId !== "") {
+      result.upgrade = this.#statusEntry(upgradeEntryFor(this.schedule, memberId), "upgrade", memberId, at);
+    }
+    return result;
+  }
+  /** Stop the timer. */
+  dispose() {
+    this.disposed = true;
+    if (this.timer !== null) this.clearTimer(this.timer);
+    this.timer = null;
+  }
+  /** Build one status row with next occurrence and last outcome. */
+  #statusEntry(entry, kind, memberId, at) {
+    const last = kind === "build" ? this.last.build : this.last.upgrades[memberId] ?? null;
+    return {
+      enabled: entry.enabled,
+      time: entry.time,
+      next: entry.enabled ? nextRunAt(at, entry.time).toISOString() : null,
+      last,
+      // The announcement runs one lead time before the upgrade itself, so the
+      // panel can show that the member's conversations were told to stop.
+      ...kind === "build" ? {} : { prepare: this.last.prepares?.[memberId] ?? null },
+      running: kind === "build" ? this.runningBuild : this.runningUpgrades.has(memberId),
+      ...memberId === void 0 ? {} : { member: memberId }
+    };
+  }
+  /** Read the schedule file once. */
+  async #load() {
+    if (this.loading !== null) return this.loading;
+    this.loading = (async () => {
+      try {
+        const parsed = JSON.parse(await readFile18(this.file, "utf8"));
+        const normalized = migrateSchedules(parsed);
+        this.schedule = normalized;
+        this.upgrades = new Map(Object.entries(normalized.upgrades));
+        if (parsed?.last !== null && typeof parsed?.last === "object") {
+          this.last = {
+            build: typeof parsed.last.build === "object" ? parsed.last.build : null,
+            upgrades: parsed.last.upgrades !== null && typeof parsed.last.upgrades === "object" ? parsed.last.upgrades : {},
+            prepares: parsed.last.prepares !== null && typeof parsed.last.prepares === "object" ? parsed.last.prepares : {}
+          };
+        }
+        if (parsed?.format !== SCHEDULE_FORMAT) await this.#save();
+      } catch {
+      }
+    })();
+    return this.loading;
+  }
+  /** Persist the current settings and last outcomes. */
+  async #save() {
+    try {
+      await mkdir15(path28.dirname(this.file), { recursive: true });
+      await writeFile15(this.file, `${JSON.stringify({
+        format: SCHEDULE_FORMAT,
+        build: this.schedule.build,
+        upgrade: this.schedule.upgrade,
+        upgrades: Object.fromEntries(this.upgrades),
+        last: this.last
+      }, null, 2)}
+`, "utf8");
+    } catch (error) {
+      this.log(`cannot save schedule: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  /** Ask the service who exists now; a failure keeps the previous list. */
+  async #refreshMembers() {
+    if (this.memberIdProvider === null) return;
+    try {
+      const ids = await this.memberIdProvider();
+      const unique = [...new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === "string" && id !== ""))];
+      if (unique.length > 0) this.memberIds = unique;
+    } catch {
+    }
+  }
+  /** One timer for the nearest enabled occurrence. */
+  #arm() {
+    if (this.disposed) return;
+    if (this.timer !== null) this.clearTimer(this.timer);
+    this.timer = null;
+    const at = new Date(this.now());
+    const candidates = [];
+    if (this.schedule.build.enabled) {
+      candidates.push({ kind: "build", memberId: void 0, at: nextRunAt(at, this.schedule.build.time) });
+    }
+    const ids = [.../* @__PURE__ */ new Set([...this.memberIds, ...this.upgrades.keys()])];
+    for (const memberId of ids) {
+      const entry = upgradeEntryFor(this.schedule, memberId);
+      if (!entry.enabled) continue;
+      const upgradeAt = nextRunAt(at, entry.time);
+      candidates.push({ kind: "upgrade", memberId, at: upgradeAt });
+      const prepareAt = new Date(upgradeAt.getTime() - UPGRADE_LEAD_MS);
+      if (prepareAt.getTime() > at.getTime() + 1e3) {
+        candidates.push({ kind: "prepare", memberId, at: prepareAt });
+      }
+    }
+    if (candidates.length === 0) return;
+    candidates.sort((left, right) => left.at.getTime() - right.at.getTime());
+    const next = candidates[0];
+    const delay2 = Math.max(0, next.at.getTime() - at.getTime());
+    this.timer = this.setTimer(() => {
+      this.timer = null;
+      void this.#tick();
+    }, delay2);
+    if (typeof this.timer?.unref === "function") this.timer.unref();
+    this.log(`next ${next.kind}${next.memberId === void 0 ? "" : ` ${next.memberId}`} at ${next.at.toISOString()}`);
+  }
+  /** Run every occurrence due in this tick, then re-arm. */
+  async #tick() {
+    if (this.disposed) return;
+    await this.#refreshMembers();
+    const at = new Date(this.now());
+    try {
+      if (this.schedule.build.enabled && this.#isDue(this.schedule.build.time, at)) {
+        if (!this.#recentlyRan(this.last.build)) await this.#runBuild();
+      }
+      for (const memberId of [.../* @__PURE__ */ new Set([...this.memberIds, ...this.upgrades.keys()])]) {
+        const entry = upgradeEntryFor(this.schedule, memberId);
+        if (!entry.enabled) continue;
+        const prepareDue = [new Date(at.getTime() - 24 * 60 * 6e4), at].some((reference) => {
+          const upgradeAt = nextRunAt(reference, entry.time);
+          return this.#isDueTime(new Date(upgradeAt.getTime() - UPGRADE_LEAD_MS), at);
+        });
+        if (prepareDue && !this.#recentlyRan(this.last.prepares?.[memberId])) {
+          await this.#runPrepare(memberId);
+        }
+        if (!this.#isDue(entry.time, at)) continue;
+        if (this.runningUpgrades.has(memberId)) continue;
+        if (this.#recentlyRan(this.last.upgrades[memberId])) continue;
+        await this.#runUpgrade(memberId);
+      }
+    } finally {
+      this.#arm();
+    }
+  }
+  /** Whether a daily clock occurrence is within the tick window. */
+  #isDue(time, at) {
+    const base = new Date(at.getTime() - 24 * 60 * 6e4);
+    const due = nextRunAt(base, time);
+    return Math.abs(due.getTime() - at.getTime()) <= TICK_TOLERANCE_MS;
+  }
+  /** Whether one exact instant is within the tick window. */
+  #isDueTime(due, at) {
+    return Math.abs(due.getTime() - at.getTime()) <= TICK_TOLERANCE_MS;
+  }
+  /** Whether this kind already ran within the duplicate window. */
+  #recentlyRan(last) {
+    const at = last?.at;
+    return typeof at === "string" && Math.abs(this.now() - Date.parse(at)) < DUPLICATE_WINDOW_MS;
+  }
+  /**
+   * Run the pre-upgrade announcement and record the outcome.
+   *
+   * Independent of the upgrade tick on purpose: a failure only means the
+   * conversations were not stopped in time, and the upgrade still runs.
+   * @param {string} memberId member id.
+   * @returns {Promise<void>} when recorded.
+   */
+  async #runPrepare(memberId) {
+    const at = new Date(this.now()).toISOString();
+    try {
+      this.log(`prepare ${memberId} tick at ${at}`);
+      const result = await this.service.scheduledPrepareUpgrade(memberId);
+      this.last.prepares ??= {};
+      this.last.prepares[memberId] = { at, ...result !== null && typeof result === "object" ? result : { status: "unknown" } };
+      await this.#save();
+      this.log(`prepare ${memberId}: ${String(this.last.prepares[memberId].status ?? "unknown")}${this.last.prepares[memberId].reason ? ` (${String(this.last.prepares[memberId].reason)})` : ""}`);
+    } catch (error) {
+      this.last.prepares ??= {};
+      this.last.prepares[memberId] = { at, status: "failed", reason: error instanceof Error ? error.message : String(error) };
+      await this.#save();
+      this.log(`prepare ${memberId} failed: ${String(this.last.prepares[memberId].reason)}`);
+    }
+  }
+  /** Run the build hook and record the outcome. */
+  async #runBuild() {
+    if (this.runningBuild) return;
+    this.runningBuild = true;
+    const at = new Date(this.now()).toISOString();
+    try {
+      this.log(`build tick at ${at}`);
+      const result = await this.service.scheduledBuild();
+      this.last.build = { at, ...result !== null && typeof result === "object" ? result : { status: "unknown" } };
+      await this.#save();
+      this.log(`build: ${String(this.last.build.status ?? "unknown")}${this.last.build.reason ? ` (${String(this.last.build.reason)})` : ""}`);
+    } catch (error) {
+      this.last.build = { at, status: "failed", reason: error instanceof Error ? error.message : String(error) };
+      await this.#save();
+      this.log(`build failed: ${String(this.last.build.reason)}`);
+    } finally {
+      this.runningBuild = false;
+    }
+  }
+  /** Run one member's upgrade hook and record the outcome. */
+  async #runUpgrade(memberId) {
+    if (this.runningUpgrades.has(memberId)) return;
+    this.runningUpgrades.add(memberId);
+    const at = new Date(this.now()).toISOString();
+    try {
+      this.log(`upgrade ${memberId} tick at ${at}`);
+      const result = await this.service.scheduledUpgradeMember(memberId);
+      this.last.upgrades[memberId] = { at, ...result !== null && typeof result === "object" ? result : { status: "unknown" } };
+      await this.#save();
+      this.log(`upgrade ${memberId}: ${String(this.last.upgrades[memberId].status ?? "unknown")}${this.last.upgrades[memberId].reason ? ` (${String(this.last.upgrades[memberId].reason)})` : ""}`);
+    } catch (error) {
+      this.last.upgrades[memberId] = { at, status: "failed", reason: error instanceof Error ? error.message : String(error) };
+      await this.#save();
+      this.log(`upgrade ${memberId} failed: ${String(this.last.upgrades[memberId].reason)}`);
+    } finally {
+      this.runningUpgrades.delete(memberId);
+    }
+  }
+};
+
+// src/lib/wireguard-api.mjs
+import { request as httpRequest } from "node:http";
+var API_PREFIX2 = "/api/dsh-wireguard";
+function proxy(request, response) {
+  const port = Number(process.env.DSH_WIREGUARD_CONTROL_PORT ?? "51821");
+  return new Promise((resolve) => {
+    const upstream = httpRequest({
+      host: "127.0.0.1",
+      port: Number.isSafeInteger(port) && port > 0 ? port : 51821,
+      method: request.method,
+      path: request.url,
+      headers: { ...request.headers, host: `127.0.0.1:${String(port)}` }
+    }, (answer) => {
+      response.writeHead(answer.statusCode ?? 502, answer.headers);
+      answer.pipe(response);
+      answer.once("end", resolve);
+    });
+    upstream.once("error", () => {
+      if (!response.headersSent) {
+        const body = JSON.stringify({
+          ok: false,
+          error: {
+            code: "control_panel_unavailable",
+            message: "The standalone WireGuard control service is not reachable on 51821."
+          }
+        });
+        response.writeHead(503, {
+          "content-type": "application/json; charset=utf-8",
+          "content-length": Buffer.byteLength(body),
+          "cache-control": "no-store"
+        });
+        response.end(body);
+      }
+      resolve();
+    });
+    request.pipe(upstream);
+  });
+}
+function registerWireGuardApi(ctx) {
+  ctx.effect(() => ctx.webServer.register({
+    kind: "prefix",
+    path: API_PREFIX2,
+    handler: proxy
+  }), "mesh wireguard api");
+}
 
 // src/lib/member-context.mjs
 import { randomUUID as randomUUID3 } from "node:crypto";
@@ -15852,11 +15921,11 @@ function formatMemberConversationLine(task, scopes = {}) {
   const stored = scopes[String(task?.conversationId ?? "")];
   const explicitCompress = typeof stored?.compressPercent === "number" && Number.isFinite(stored.compressPercent) ? `\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(stored.compressPercent)}` : "";
   const noteText = typeof stored?.note === "string" && stored.note.trim() !== "" ? `\uFF1B\u5907\u6CE8\uFF1A${stored.note.trim().length > 120 ? `${stored.note.trim().slice(0, 120)}\u2026` : stored.note.trim()}` : "";
-  const turn = entry.turns !== null && entry.turns > 0 ? `\u7B2C ${String(entry.turns)} \u8F6E` : "";
-  return `- ${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${entry.workspace}\uFF0C${entry.statusLabel}${turn === "" ? "" : `\uFF0C${turn}`}\uFF09\u8EAB\u4EFD\uFF1A${profile?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${profile?.scope ?? "\u672A\u8BBE\u7F6E"}${explicitCompress}${noteText}`;
+  const turn = entry.turns !== null && entry.turns > 0 ? `\uFF0C\u7B2C ${String(entry.turns)} \u8F6E` : "";
+  return `- \u8EAB\u4EFD\uFF1A${profile?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u533A\uFF1A${entry.workspace}\uFF1B\u4F1A\u8BDD\uFF1A${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C${entry.statusLabel}${turn}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${profile?.scope ?? "\u672A\u8BBE\u7F6E"}${explicitCompress}${noteText}`;
 }
 function formatSelfLine(selfId, selfScope) {
-  return `- \u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1A\u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${selfScope?.keep === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
+  return `- \u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF08\u81EA\u8EAB\uFF0C\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${selfScope?.keep === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
 }
 function formatMemberStatusSnapshot(tasks, options = {}) {
   const list = Array.isArray(tasks) ? tasks : [];

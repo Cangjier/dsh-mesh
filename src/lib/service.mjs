@@ -60,6 +60,7 @@ import { autoUpgradeEnabled, pickBuildMember, pickProxyMember, pullBackEnabled }
 import { memberBuildTarget, pickArtifactForMember } from './build-artifacts.mjs'
 import { linkFor, resolveBuildEgress, resolveDeployLinkProxy } from './egress-plan.mjs'
 import { EGRESS_PROBE_SOURCE } from './egress-probe.mjs'
+import { memberConversationEntries, memberConversationSummary } from './member-ui.mjs'
 import {
   isAllowedPackagePath,
   listPackagesScript,
@@ -745,6 +746,27 @@ export class MeshService {
     await mkdir(this.dataDir, { recursive: true })
     await writeFile(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}\n`, 'utf8')
     return { ok: true, tags }
+  }
+
+  /**
+   * The member conversations one main conversation tracks, for the Web
+   * client's header chip.
+   *
+   * The browser only ever sees this flat row shape; the task table and the
+   * scope store stay host concerns. A conversation without an identity yet is
+   * still listed: the chip is exactly how an operator notices it.
+   * @param {string} sessionId origin (main) conversation id.
+   * @returns {Promise<{ok: boolean, total: number, running: number, conversations: object[]}>} rows and counts.
+   */
+  async memberConversations(sessionId) {
+    const id = String(sessionId ?? '').trim()
+    if (id === '') return { ok: true, total: 0, running: 0, conversations: [] }
+    const tasks = typeof this.memberTasks?.listForOrigin === 'function'
+      ? await this.memberTasks.listForOrigin(id).catch(() => [])
+      : []
+    const scopes = await this.memberScopes()
+    const conversations = memberConversationEntries(tasks, scopes)
+    return { ok: true, ...memberConversationSummary(conversations), conversations }
   }
 
   /**

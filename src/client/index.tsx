@@ -1740,7 +1740,7 @@ export function apply(ctx: any) {
     // Between the environment block and the subagent catalog (200), which is
     // where the roster and the delegated work read naturally together.
     order: 190,
-    label: () => '成员列表',
+    label: () => '成员',
   }, (props: any) => <MemberConversationsSection {...props} ctx={ctx} />))
   ctx.slots.inject('conversation.session.panel.section.actions', () => ctx.slots.register({
     name: 'conversation.session.panel.section.actions',

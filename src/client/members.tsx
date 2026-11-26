@@ -11,7 +11,7 @@
  * touches the task records directly.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   ConfigProvider,
   Descriptions,
@@ -59,13 +59,30 @@ interface Snapshot {
   rows: MemberConversationRow[]
 }
 
-interface Store {
+/**
+ * Per-Session section state: the last read, the view, and what the reader folded.
+ *
+ * It lives outside React so re-entering the Session (or remounting the panel)
+ * paints the last list immediately instead of waiting for another request,
+ * the way the subagent catalog reads its already-loaded projections.
+ */
+interface SectionState {
   snapshot: Snapshot | null
+  /** The whole section body is folded away. */
+  collapsed: boolean
+  /** Group titles whose rows are folded away. */
+  closedGroups: ReadonlySet<string>
+  /** `grouped` lists every conversation by role; `running` is a flat running-only list. */
+  view: 'grouped' | 'running'
+}
+
+interface Store {
+  state: SectionState
   listeners: Set<() => void>
   timer: ReturnType<typeof setInterval> | null
 }
 
-/** One poller per Session, shared by the section and its title-side count. */
+/** One store per Session; kept after unmount so the next entry is instant. */
 const stores = new Map<string, Store>()
 
 /**
@@ -76,10 +93,25 @@ const stores = new Map<string, Store>()
 function storeOf(sessionId: string): Store {
   let entry = stores.get(sessionId)
   if (entry === undefined) {
-    entry = { snapshot: null, listeners: new Set(), timer: null }
+    entry = {
+      state: { snapshot: null, collapsed: false, closedGroups: new Set(), view: 'grouped' },
+      listeners: new Set(),
+      timer: null,
+    }
     stores.set(sessionId, entry)
   }
   return entry
+}
+
+/**
+ * Replace one store's state and wake every listener.
+ * @param entry store.
+ * @param patch fields to change.
+ * @returns nothing.
+ */
+function update(entry: Store, patch: Partial<SectionState>): void {
+  entry.state = { ...entry.state, ...patch }
+  for (const listener of [...entry.listeners]) listener()
 }
 
 /**
@@ -99,31 +131,38 @@ async function load(sessionId: string): Promise<void> {
     if (response.ok) {
       const body = await response.json() as { total?: number, running?: number, conversations?: MemberConversationRow[] }
       const rows = Array.isArray(body.conversations) ? body.conversations : []
-      entry.snapshot = {
-        total: typeof body.total === 'number' ? body.total : rows.length,
-        running: typeof body.running === 'number' ? body.running : 0,
-        rows,
-      }
+      update(entry, {
+        snapshot: {
+          total: typeof body.total === 'number' ? body.total : rows.length,
+          running: typeof body.running === 'number' ? body.running : 0,
+          rows,
+        },
+      })
     }
   } catch {
     // Keep the previous snapshot; the next poll retries.
   }
-  for (const listener of [...entry.listeners]) listener()
 }
 
 /**
- * Follow one Session's member conversations.
+ * Follow one Session's member conversations and view state.
  *
- * The first mount starts the poller; the last unmount stops it, so an unread
- * section costs nothing.
+ * The first mount starts the poller; the last unmount stops it. The store
+ * itself stays, so the section paints its last list without a round trip.
  * @param sessionId main conversation id.
- * @returns the latest snapshot, or null before the first successful read.
+ * @returns current state and the actions the section and its header need.
  */
-function useMemberConversations(sessionId: string): Snapshot | null {
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(() => stores.get(sessionId)?.snapshot ?? null)
+function useMemberSection(sessionId: string): {
+  state: SectionState
+  toggleCollapsed: () => void
+  toggleGroup: (title: string) => void
+  setView: (view: 'grouped' | 'running') => void
+  refresh: () => Promise<void>
+} {
+  const [state, setState] = useState<SectionState>(() => storeOf(sessionId).state)
   useEffect(() => {
     const entry = storeOf(sessionId)
-    const listener = (): void => setSnapshot(entry.snapshot)
+    const listener = (): void => setState(entry.state)
     listener()
     entry.listeners.add(listener)
     if (entry.timer === null) {
@@ -137,11 +176,28 @@ function useMemberConversations(sessionId: string): Snapshot | null {
       if (entry.listeners.size === 0 && entry.timer !== null) {
         clearInterval(entry.timer)
         entry.timer = null
-        stores.delete(sessionId)
       }
     }
   }, [sessionId])
-  return snapshot
+  return {
+    state,
+    toggleCollapsed: () => {
+      update(storeOf(sessionId), { collapsed: !storeOf(sessionId).state.collapsed })
+    },
+    toggleGroup: (title) => {
+      const entry = storeOf(sessionId)
+      const closed = new Set(entry.state.closedGroups)
+      if (closed.has(title)) closed.delete(title)
+      else closed.add(title)
+      update(entry, { closedGroups: closed })
+    },
+    setView: (view) => {
+      update(storeOf(sessionId), { view })
+    },
+    refresh: async () => {
+      await load(sessionId)
+    },
+  }
 }
 
 /** The section's own styles: the panel has no stylesheet of ours. */
@@ -149,29 +205,79 @@ const SECTION_CSS = `
 .dsh-mesh-members {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0;
 }
-.dsh-mesh-group {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
+/* Folded away: an empty marker keeps the section (and its chevron) alive. */
+.dsh-mesh-collapsed {
+  height: 0;
+}
+.dsh-mesh-view {
+  display: inline-flex;
+  gap: 7px;
+  font-size: 11px;
+}
+.dsh-mesh-view button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  opacity: 0.42;
+  font: inherit;
+  cursor: pointer;
+}
+.dsh-mesh-view button:hover {
+  opacity: 0.7;
+}
+.dsh-mesh-view button[data-active] {
+  opacity: 0.85;
+  font-weight: 500;
+}
+.dsh-mesh-empty {
+  padding: 2px 8px 4px;
+  font-size: 11px;
+  opacity: 0.45;
 }
 .dsh-mesh-group + .dsh-mesh-group {
-  margin-top: 6px;
+  margin-top: 2px;
 }
 .dsh-mesh-group-title {
-  padding: 2px 6px;
+  display: grid;
+  grid-template-columns: 1ch minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 4px;
+  width: 100%;
+  padding: 2px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
   font-size: 11px;
   font-weight: 500;
-  opacity: 0.55;
+  opacity: 0.5;
+}
+.dsh-mesh-group-title:hover {
+  opacity: 0.8;
+}
+.dsh-mesh-chevron {
+  font-size: 9px;
+}
+.dsh-mesh-group-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-mesh-group-count {
+  font-variant-numeric: tabular-nums;
 }
 .dsh-mesh-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 6px minmax(0, 1fr);
   align-items: center;
-  column-gap: 8px;
+  column-gap: 7px;
   width: 100%;
-  padding: 4px 6px;
+  padding: 3px 8px 3px 2ch;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -181,31 +287,66 @@ const SECTION_CSS = `
   font: inherit;
 }
 .dsh-mesh-row:hover {
-  background: color-mix(in srgb, currentColor 10%, transparent);
+  background: color-mix(in srgb, currentColor 8%, transparent);
 }
-.dsh-mesh-row-main {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
+.dsh-mesh-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  /* Idle: a hollow ring, like the subagent catalog's untouched rows. */
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+  opacity: 0.45;
+}
+.dsh-mesh-dot[data-status="running"],
+.dsh-mesh-dot[data-status="starting"] {
+  background: #1677ff;
+  box-shadow: none;
+  opacity: 1;
+  animation: dsh-mesh-dot-pulse 1.4s ease-in-out infinite;
+}
+.dsh-mesh-dot[data-status="completed"] {
+  background: #52c41a;
+  box-shadow: none;
+  opacity: 0.75;
+}
+.dsh-mesh-dot[data-status="failed"],
+.dsh-mesh-dot[data-status="interrupted"] {
+  background: #e5484d;
+  box-shadow: none;
+  opacity: 0.85;
+}
+@keyframes dsh-mesh-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 .dsh-mesh-row-identity {
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.dsh-mesh-row-meta {
-  font-size: 11px;
-  opacity: 0.65;
+  font-size: 12.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .dsh-mesh-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   font-size: 12px;
-  opacity: 0.6;
+  opacity: 0.55;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.dsh-mesh-fold {
+  padding: 0 1px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  opacity: 0.7;
+}
+.dsh-mesh-fold:hover {
+  opacity: 1;
 }
 .dsh-mesh-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -358,68 +499,108 @@ function MemberDetail({ row }: { row: MemberConversationRow }) {
 }
 
 /**
- * The section body: one row per tracked member conversation.
+ * One group heading: the role, its running/total count, and a fold toggle.
+ * @param props group title, counts, folded state and the toggle.
+ * @returns the heading button.
+ */
+function GroupHeading({ title, running, total, folded, onToggle }: {
+  title: string
+  running: number
+  total: number
+  folded: boolean
+  onToggle: () => void
+}) {
+  return (
+    <button
+      type="button"
+      className="dsh-mesh-group-title"
+      aria-expanded={!folded}
+      title={`${folded ? '展开' : '折叠'} ${title}（${String(running)} 个进行中 / 共 ${String(total)} 个）`}
+      onClick={onToggle}
+    >
+      <span className="dsh-mesh-chevron" aria-hidden="true">{folded ? '▸' : '▾'}</span>
+      <span className="dsh-mesh-group-name">{title}</span>
+      <span className="dsh-mesh-group-count">{`${String(running)}/${String(total)}`}</span>
+    </button>
+  )
+}
+
+/**
+ * The section body: the member conversations of one Session.
  *
- * With two or more conversations the rows are grouped by role (the identity
- * without its trailing number); a single conversation is listed without a
- * heading. Clicking a row opens that conversation's detail. Nothing renders
- * while the Session tracks no conversation, which also hides the section.
+ * Two views: `grouped` lists every conversation under its role (folding on
+ * either level), `running` is a flat list of the conversations running right
+ * now. The reader's folds, view and last list live in the shared store, so
+ * re-entering the Session paints the previous state immediately.
  * @param props slot props (`sessionId`) and the client context.
  * @returns the section body, or null with nothing to show.
  */
 export function MemberConversationsSection({ sessionId, ctx }: { sessionId: string, ctx: any }) {
   const mode = useThemeMode(ctx)
-  const snapshot = useMemberConversations(sessionId)
+  const { state, toggleCollapsed, toggleGroup, setView } = useMemberSection(sessionId)
   const [selected, setSelected] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
 
-  const refresh = useCallback(async () => {
+  const refresh = async (): Promise<void> => {
     setRefreshing(true)
     try {
       await load(sessionId)
     } finally {
       setRefreshing(false)
     }
-  }, [sessionId])
+  }
 
+  const snapshot = state.snapshot
   if (snapshot === null || snapshot.rows.length === 0) return null
   const { rows } = snapshot
   const selectedRow = rows.find(row => row.conversationId === selected) ?? null
-  // One conversation needs no heading; two or more are grouped by role.
-  const grouped = rows.length > 1 ? groupRows(rows) : []
   const renderRow = (row: MemberConversationRow) => (
     <button
       key={row.conversationId}
       type="button"
       className="dsh-mesh-row"
-      title={`${row.identity ?? '未设置身份'} · ${row.workspace}`}
+      title={`${row.identity ?? '未设置身份'} · ${row.workspace} · ${row.statusLabel}`}
       onClick={() => setSelected(row.conversationId)}
     >
-      <span className="dsh-mesh-row-main">
-        <span className="dsh-mesh-row-identity">{row.identity ?? '未设置身份'}</span>
-        <span className="dsh-mesh-row-meta">{`成员 ${row.memberLabel} · ${row.workspace}`}</span>
-      </span>
-      <StatusTag status={row.status} label={row.statusLabel} />
+      <span className="dsh-mesh-dot" data-status={row.status} title={row.statusLabel} aria-label={row.statusLabel} />
+      <span className="dsh-mesh-row-identity">{row.identity ?? '未设置身份'}</span>
     </button>
   )
+  const runningRows = rows.filter(row => row.status === 'running' || row.status === 'starting')
+  // A single conversation has nothing to group; two or more group by role.
+  const groups = rows.length > 1 ? groupRows(rows) : []
   return (
     <ConfigProvider theme={{ algorithm: mode === 'dark' ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm }}>
       <style>{SECTION_CSS}</style>
-      <div className="dsh-mesh-members">
-        {grouped.length === 0
-          ? rows.map(renderRow)
-          : grouped.map(group => (
-            <div key={group.title} className="dsh-mesh-group">
-              <div
-                className="dsh-mesh-group-title"
-                title={`${String(groupRunning(group.rows))} 个进行中 / 共 ${String(group.rows.length)} 个`}
-              >
-                {`${group.title} ${String(groupRunning(group.rows))}/${String(group.rows.length)}`}
-              </div>
-              {group.rows.map(renderRow)}
-            </div>
-          ))}
-      </div>
+      {state.collapsed
+        // An empty marker keeps the slot non-empty, so the panel keeps the
+        // section title (and its expand control) instead of hiding it.
+        ? <div className="dsh-mesh-collapsed" />
+        : (
+          <div className="dsh-mesh-members">
+            {state.view === 'running'
+              ? (runningRows.length === 0
+                  ? <div className="dsh-mesh-empty">没有进行中的成员对话</div>
+                  : runningRows.map(renderRow))
+              : (groups.length === 0
+                  ? rows.map(renderRow)
+                  : groups.map((group) => {
+                    const folded = state.closedGroups.has(group.title)
+                    return (
+                      <div key={group.title} className="dsh-mesh-group">
+                        <GroupHeading
+                          title={group.title}
+                          running={groupRunning(group.rows)}
+                          total={group.rows.length}
+                          folded={folded}
+                          onToggle={() => toggleGroup(group.title)}
+                        />
+                        {folded ? null : group.rows.map(renderRow)}
+                      </div>
+                    )
+                  }))}
+          </div>
+        )}
       <Modal
         open={selectedRow !== null}
         title={`成员对话 · ${selectedRow?.identity ?? selectedRow?.conversationId ?? ''}`}
@@ -446,13 +627,50 @@ export function MemberConversationsSection({ sessionId, ctx }: { sessionId: stri
 }
 
 /**
- * The count beside the section title: every conversation and the running ones.
+ * The count and fold control beside the section title.
+ *
+ * The count is running over total, matching each group heading; the chevron
+ * folds the whole list away while leaving the title (and this control) in
+ * place.
  * @param props slot props (`sessionId`).
- * @returns the phrase, or null when the Session tracks none.
+ * @returns the phrase and control, or null when the Session tracks none.
  */
 export function MemberConversationsProgress({ sessionId }: { sessionId: string }) {
-  const snapshot = useMemberConversations(sessionId)
+  const { state, toggleCollapsed, setView } = useMemberSection(sessionId)
+  const snapshot = state.snapshot
   if (snapshot === null || snapshot.rows.length === 0) return null
-  const { total, running } = snapshot
-  return <span className="dsh-mesh-progress">{`${String(total)} 个${running > 0 ? ` · ${String(running)} 进行中` : ' · 全部空闲'}`}</span>
+  return (
+    <span className="dsh-mesh-progress">
+      <button
+        type="button"
+        className="dsh-mesh-fold"
+        aria-expanded={!state.collapsed}
+        title={state.collapsed ? '展开' : '折叠'}
+        onClick={() => toggleCollapsed()}
+      >
+        {state.collapsed ? '▸' : '▾'}
+      </button>
+      <span className="dsh-mesh-view" role="group" aria-label="成员视图">
+        <button
+          type="button"
+          data-active={state.view === 'grouped' ? '' : undefined}
+          title="按角色分组"
+          onClick={() => setView('grouped')}
+        >
+          分组
+        </button>
+        <button
+          type="button"
+          data-active={state.view === 'running' ? '' : undefined}
+          title="平铺，只显示进行中的成员"
+          onClick={() => setView('running')}
+        >
+          平铺
+        </button>
+      </span>
+      <span title={`${String(snapshot.running)} 个进行中 / 共 ${String(snapshot.total)} 个`}>
+        {`${String(snapshot.running)}/${String(snapshot.total)}`}
+      </span>
+    </span>
+  )
 }

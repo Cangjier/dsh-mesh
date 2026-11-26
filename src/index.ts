@@ -66,19 +66,8 @@ export async function apply(ctx: any, config: any = {}) {
   // A profile without the agent registry (a non-Web launch) simply never runs
   // this block. `interopEmbedded: false` is the emergency fallback to the
   // standalone `code/interop-service/server.mjs`.
-  // The pre-upgrade announcement persists which conversations it stopped. A
-  // restart consumes it: two minutes after the plugin is up, the leader and
-  // plain conversations get "重启成功，请继续。". Member conversations are left
-  // to their initiator. Arming needs no agents yet; the resume looks them up
-  // when the timer fires.
+  // Shared by the announcement endpoint below and the resume armed inside.
   const upgradePlanFile = path.join(dataDirectory(), 'upgrade-plan.json')
-  void armUpgradeResume(ctx, {
-    planFile: upgradePlanFile,
-    log: (line: string) => console.log(`mesh upgrade: ${line}`),
-  }).catch((error: unknown) => {
-    console.error(`mesh upgrade: could not arm the resume: ${error instanceof Error ? error.message : String(error)}`)
-  })
-
   if (config.interopEmbedded !== false) {
     try {
       ctx.inject(['agents'], (agentsCtx: any) => {
@@ -89,6 +78,17 @@ export async function apply(ctx: any, config: any = {}) {
           console.error(`mesh interop: could not resolve settings: ${error instanceof Error ? error.message : String(error)}`)
           return
         }
+        // The pre-upgrade announcement persists which conversations it stopped.
+        // A restart consumes it: two minutes after the plugin is up, the leader
+        // and plain conversations get "重启成功，请继续。"; member conversations
+        // are left to their initiator. This context knows `agents`, which is
+        // exactly what the resume needs when the timer fires.
+        void armUpgradeResume(agentsCtx, {
+          planFile: upgradePlanFile,
+          log: (line: string) => console.log(`mesh upgrade: ${line}`),
+        }).catch((error: unknown) => {
+          console.error(`mesh upgrade: could not arm the resume: ${error instanceof Error ? error.message : String(error)}`)
+        })
         const interop = (createInteropService as unknown as (options: {
           ctx: any
           settings: Record<string, any>

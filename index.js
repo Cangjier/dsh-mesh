@@ -18834,12 +18834,6 @@ async function apply(ctx, config = {}) {
     console.error(`mesh: tools service is unavailable: ${error instanceof Error ? error.message : String(error)}`);
   }
   const upgradePlanFile = path30.join(dataDirectory(), "upgrade-plan.json");
-  void armUpgradeResume(ctx, {
-    planFile: upgradePlanFile,
-    log: (line) => console.log(`mesh upgrade: ${line}`)
-  }).catch((error) => {
-    console.error(`mesh upgrade: could not arm the resume: ${error instanceof Error ? error.message : String(error)}`);
-  });
   if (config.interopEmbedded !== false) {
     try {
       ctx.inject(["agents"], (agentsCtx) => {
@@ -18850,6 +18844,12 @@ async function apply(ctx, config = {}) {
           console.error(`mesh interop: could not resolve settings: ${error instanceof Error ? error.message : String(error)}`);
           return;
         }
+        void armUpgradeResume(agentsCtx, {
+          planFile: upgradePlanFile,
+          log: (line) => console.log(`mesh upgrade: ${line}`)
+        }).catch((error) => {
+          console.error(`mesh upgrade: could not arm the resume: ${error instanceof Error ? error.message : String(error)}`);
+        });
         const interop = createInteropService({
           ctx: agentsCtx,
           settings,

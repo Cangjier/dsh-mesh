@@ -81,7 +81,11 @@ function layoutRoot(args) {
 /** Read JSON, returning null when it is missing or broken. */
 function readJson(file) {
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    // A UTF-8 BOM makes JSON.parse throw, which would silently turn the
+    // pointer into "no pointer": `previous` would be lost and the retention
+    // step could delete the release the services still run from. Editors and
+    // PowerShell's Set-Content both write a BOM, so strip it.
+    const parsed = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/u, ''))
     return parsed !== null && typeof parsed === 'object' ? parsed : null
   } catch {
     return null

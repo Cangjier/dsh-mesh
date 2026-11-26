@@ -339,15 +339,26 @@ const pointer = readJson(pointerFile) ?? {}
 const activeNow = typeof pointer.active === 'string' ? pointer.active : ''
 const previousNow = typeof pointer.previous === 'string' ? pointer.previous : ''
 if (activeNow !== '') {
-  const keep = new Set([activeNow, previousNow].filter(name => name !== ''))
+  // Keep the pre-upgrade release as well, not only the pointer's `previous`:
+  // it is the tree the running services were started from, and deleting it
+  // while they still run breaks them (on Windows the deletion fails with
+  // EPERM and used to fail the whole upgrade after the pointer had moved).
+  const keep = new Set([activeNow, previousNow, previous].filter(name => name !== ''))
   const releases = readdirSync(path.join(root, 'releases'), { withFileTypes: true })
     .filter(entry => entry.isDirectory())
     .map(entry => entry.name)
   let removed = 0
   for (const name of releases) {
     if (keep.has(`releases/${name}`)) continue
-    rmSync(path.join(root, 'releases', name), { recursive: true, force: true })
-    removed += 1
+    try {
+      rmSync(path.join(root, 'releases', name), { recursive: true, force: true })
+      removed += 1
+    } catch (error) {
+      // A file still mapped by a running process (Windows) or a permission
+      // problem must not fail an upgrade that is already activated: the old
+      // tree is dead weight, not part of this deployment.
+      log(`[upgrade] could not remove releases/${name}: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
   log(`[upgrade] active=${activeNow} previous=${previousNow || '<none>'} kept releases=${String(keep.size)} removed=${String(removed)}`)
 }

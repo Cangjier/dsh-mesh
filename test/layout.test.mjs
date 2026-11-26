@@ -176,6 +176,28 @@ test('upgrade replaces the launcher but keeps the previous one as .bak', () => {
   }
 })
 
+test('a pointer written with a UTF-8 BOM still keeps the previous release', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dsh-layout-'))
+  try {
+    makeRelease(root, '20261118D-aaaaaaaa')
+    layout(['prepare', '--root', root, '--release', '20261118D-aaaaaaaa', '--no-units'])
+    layout(['activate', '--root', root, '--release', '20261118D-aaaaaaaa'])
+    // PowerShell's Set-Content and several editors prepend a BOM. Reading it
+    // must not look like "no pointer": that lost `previous` and let the
+    // retention step delete the release the services were still running.
+    const pointerFile = path.join(root, 'dsh-mesh.json')
+    writeFileSync(pointerFile, `\uFEFF${readFileSync(pointerFile, 'utf8')}`)
+    makeRelease(root, '20261120A-bbbbbbbb')
+    layout(['prepare', '--root', root, '--release', '20261120A-bbbbbbbb', '--no-units'])
+    layout(['activate', '--root', root, '--release', '20261120A-bbbbbbbb'])
+    const pointer = JSON.parse(readFileSync(pointerFile, 'utf8').replace(/^\uFEFF/u, ''))
+    assert.equal(pointer.active, 'releases/20261120A-bbbbbbbb')
+    assert.equal(pointer.previous, 'releases/20261118D-aaaaaaaa', 'the BOM pointer still names the rollback target')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('rollback flips the pointer back', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'dsh-layout-'))
   try {

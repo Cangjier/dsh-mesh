@@ -20,9 +20,9 @@
  * - member conversations are excluded from the snapshot via
  *   {@link isMemberSession};
  * - with the self scope's `keep` on, a turn end with no running member
- *   conversation delivers one user message ("继续") to keep the conversation
- *   going; the turn that message starts does not nudge again, so the nudge
- *   cannot feed itself;
+ *   conversation delivers one user message (default "继续", overridable with
+ *   `keepPrompt`) to keep the conversation going; the turn that message starts
+ *   does not nudge again, so the nudge cannot feed itself;
  * - a failure is logged and swallowed so the agent loop is never affected.
  *
  * @module @local/dsh-mesh/member-context
@@ -49,8 +49,8 @@ const LONG_JOBS_MAX = 20
 /** Source kind of the injected/pushed message; it must never read as user input. */
 export const MEMBER_CONTEXT_SOURCE = 'member-context'
 
-/** The one-word message a `keep` turn end delivers. */
-export const MEMBER_KEEP_TEXT = '继续'
+/** The default message a `keep` turn end delivers. */
+export const DEFAULT_KEEP_PROMPT = '继续'
 
 /**
  * Render a percentage threshold without a trailing `.0`.
@@ -170,7 +170,11 @@ function formatMemberConversationLine(task, scopes = {}) {
  */
 function formatSelfLine(selfId, selfScope) {
   // Same head order as a member line: the identity answers "who am I" first.
-  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === true ? '开启' : '关闭'}（只对主对话生效）；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
+  const keep = selfScope?.keep === true
+  const keepPrompt = typeof selfScope?.keepPrompt === 'string' && selfScope.keepPrompt !== ''
+    ? selfScope.keepPrompt
+    : DEFAULT_KEEP_PROMPT
+  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${keep ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
 }
 
 /**
@@ -453,15 +457,19 @@ export function createMemberContext({
     if (closed || turns.get(sessionId) !== turn) return
     const agent = typeof ctx?.get === 'function' ? ctx.get('agents')?.get(sessionId) : undefined
     if (agent === undefined || agent === null || agent.status !== 'idle') return
+    const selfScope = scopes[sessionId] ?? null
+    const prompt = typeof selfScope?.keepPrompt === 'string' && selfScope.keepPrompt !== ''
+      ? selfScope.keepPrompt
+      : DEFAULT_KEEP_PROMPT
     try {
       agent.followup({
         id: randomUUID(),
         role: 'user',
-        content: [{ type: 'text', text: MEMBER_KEEP_TEXT }],
+        content: [{ type: 'text', text: prompt }],
         source: { kind: MEMBER_CONTEXT_SOURCE, form: 'keep' },
       })
       keepPending.add(sessionId)
-      log(`member keep push to ${sessionId}: no member conversation is running`)
+      log(`member keep push to ${sessionId}: no member conversation is running, prompt "${prompt}"`)
     } catch (error) {
       log(`member keep push failed: ${error instanceof Error ? error.message : String(error)}`)
     }

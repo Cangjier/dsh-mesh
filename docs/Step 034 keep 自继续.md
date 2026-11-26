@@ -6,17 +6,22 @@ Step 033 删掉了旧的 `keep` 派活推送：它在 turn 结束后让子代理
 
 ## 输入与存储
 
-`set_member_scope` 重新接受 `keep`（布尔，默认 false）：
+`set_member_scope` 重新接受 `keep`（布尔，默认 false），以及这条消息的正文
+`keepPrompt`（别名 `keep_prompt`，默认「继续」，最长 200 字符）：
 
 ```text
 set_member_scope { "conversationId": "self", "keep": true }
+set_member_scope { "conversationId": "self", "keep": true, "keepPrompt": "继续推进成员结果" }
+set_member_scope { "conversationId": "self", "keep_prompt": "继续推进成员结果" }
 set_member_scope { "keep": false }
 ```
 
 - 只对**自身/主对话**生效；设置成员会话时忽略，返回文字会说明；
 - 存在 `$DSH_HOME/mesh/member-scopes.json` 的同一个会话记录里，和 `identity` / `role` /
-  `scope` / `note` / `avoidLongJobs` / `compressPercent` 一起合并；
-- 成员上下文快照的自身行重新显示 `保持目标：开启/关闭（只对主对话生效）`；
+  `scope` / `note` / `avoidLongJobs` / `compressPercent` 一起合并；`keepPrompt` 为空字符串时
+  删除该字段，回到默认「继续」；
+- 成员上下文快照的自身行重新显示 `保持目标：开启/关闭（只对主对话生效）`，开启时附提示语
+  `保持目标：开启（只对主对话生效，提示语「…」）`；
 - 只存本机，不注入成员、不随 `call_member` 投递。
 
 ## 触发条件
@@ -28,7 +33,8 @@ set_member_scope { "keep": false }
    `running` / `starting` 就不投递——成员还在干活，主对话不需要被叫醒；
 3. 等一个宏任务让当前 turn 收尾；期间如果开始了新 turn（`turns` 里的轮次变了）或 agent 不是
    `idle`，放弃本次投递；
-4. `agent.followup({ role: 'user', content: [{ type: 'text', text: '继续' }], source: { kind: 'member-context', form: 'keep' } })`。
+4. `agent.followup({ role: 'user', content: [{ type: 'text', text: keepPrompt }], source: { kind: 'member-context', form: 'keep' } })`；
+   `keepPrompt` 没设置时用默认「继续」。
 
 成员会话（`isMemberSession`）永远不会被投递。
 
@@ -48,15 +54,16 @@ set_member_scope { "keep": false }
 | turn 结束时做什么 | 用 subagent 审查 `.coder/members` 与 gap，判断能否派活 | 没有进行中的成员会话就投递「继续」 |
 | 频率 | 距上次 review 结束超过 10 分钟 | 每个正常 turn 结束（nudge 自身那轮除外） |
 | 推送前压缩 | 超过 `compressPercent` 先压缩 | 无 |
-| 消息体 | 多行 `[成员调度]` 指令 | 一条用户消息「继续」，`form: keep` |
+| 消息体 | 多行 `[成员调度]` 指令 | 一条用户消息，正文默认「继续」、可用 `keepPrompt` 改，`form: keep` |
 | 成员会话 | 排除 | 排除 |
 
 ## 验证
 
 - `test/member-context.test.mjs`：`keep` 开启且没有进行中的成员会话时，turn 结束投递一条
-  `role: user`、正文 `继续`、`source.form: keep`；由它拉起的这一轮不再投递且清掉 `keepPending`；
+  `role: user`、正文默认 `继续`（或自定义 `keepPrompt`）、`source.form: keep`；由它拉起的这一轮不再投递且清掉 `keepPending`；
   运行中的成员会话抑制投递；`keep` 缺失/false 不投递；成员会话不投递；异步检查期间开始新
   turn 时放弃投递。
-- `test/member-scope.test.mjs`：`keep` 的读写、仅自身生效、成员会话忽略、非布尔值拒绝、
-  `memberScopes` 读取保留 `keep`。
+- `test/member-scope.test.mjs`：`keep` / `keepPrompt` 的读写、别名 `keep_prompt`、空字符串恢复
+  默认、超长拒绝、同时传两个名字报错、仅自身生效、成员会话忽略、非布尔值拒绝、
+  `memberScopes` 读取保留 `keep` / `keepPrompt`。
 - `test/member-task.test.mjs`：`set_member_scope` 的参数表包含 `keep`。

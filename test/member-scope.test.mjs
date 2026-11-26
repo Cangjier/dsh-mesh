@@ -172,14 +172,14 @@ test('scope readers apply defaults and drop unusable stored values', async () =>
     const service = new MeshService({ dataDir, config: {}, log: () => {} })
     await mkdir(dataDir, { recursive: true })
     await writeFile(path.join(dataDir, 'member-scopes.json'), JSON.stringify({
-      good: { identity: '开发', role: '开发', keep: true, avoidLongJobs: true, note: '只读复核', compressPercent: 75 },
+      good: { identity: '开发', role: '开发', keep: true, keepPrompt: '检查成员结果', avoidLongJobs: true, note: '只读复核', compressPercent: 75 },
       badIdle: { identity: '测试' },
       badPercent: { compressPercent: 0 },
       onlyJunk: { compressPercent: 101, role: '老板', avoidLongJobs: 'yes' },
       badNote: { note: 'x'.repeat(501) },
     }), 'utf8')
     assert.deepEqual(await service.memberScopes(), {
-      good: { identity: '开发', role: '开发', keep: true, avoidLongJobs: true, note: '只读复核', compressPercent: 75 },
+      good: { identity: '开发', role: '开发', keep: true, keepPrompt: '检查成员结果', avoidLongJobs: true, note: '只读复核', compressPercent: 75 },
       badIdle: { identity: '测试' },
     })
   } finally {
@@ -287,7 +287,7 @@ test('set_member_scope on self stores compressPercent and shows effective values
     )
     await assert.rejects(
       () => set.execute({}, { agent: mainAgent }),
-      /identity, role, scope, note, keep, avoidLongJobs, or compressPercent is required/u,
+      /identity, role, scope, note, keep, keepPrompt, avoidLongJobs, or compressPercent is required/u,
     )
   } finally {
     await service?.memberTasks.dispose()
@@ -304,23 +304,42 @@ test('set_member_scope stores keep only for the current conversation', async () 
     const set = register(service).find(tool => tool.name === 'set_member_scope')
 
     const enabled = await set.execute({ keep: true }, { agent: mainAgent })
-    assert.match(enabled.text, /保持目标：开启（只对主对话生效）/u)
+    assert.match(enabled.text, /保持目标：开启（只对主对话生效，提示语「继续」）/u)
     assert.equal(enabled.data.keep, true)
+    assert.equal(enabled.data.keepPrompt, '继续')
     assert.deepEqual(await service.memberScope('main-1'), { keep: true })
 
     const partial = await set.execute({ identity: '网关' }, { agent: mainAgent })
     assert.deepEqual(await service.memberScope('main-1'), { identity: '网关', keep: true })
     assert.match(partial.text, /保持目标：开启/u)
 
+    const custom = await set.execute({ keep_prompt: '继续推进成员结果' }, { agent: mainAgent })
+    assert.deepEqual(await service.memberScope('main-1'), { identity: '网关', keep: true, keepPrompt: '继续推进成员结果' })
+    assert.match(custom.text, /提示语「继续推进成员结果」/u)
+    assert.equal(custom.data.keepPrompt, '继续推进成员结果')
+
+    const cleared = await set.execute({ keepPrompt: '' }, { agent: mainAgent })
+    assert.deepEqual(await service.memberScope('main-1'), { identity: '网关', keep: true })
+    assert.equal(cleared.data.keepPrompt, '继续')
+    assert.match(cleared.text, /提示语「继续」/u)
+
     const ignored = await set.execute({ conversationId: 'conv-x', identity: '开发', keep: true }, { agent: mainAgent })
     assert.equal(ignored.data.ignoredKeep, true)
     assert.deepEqual(await service.memberScope('conv-x'), { identity: '开发' })
-    assert.match(ignored.text, /keep \/ avoidLongJobs 只对主对话自身生效/u)
+    assert.match(ignored.text, /keep \/ keepPrompt \/ avoidLongJobs 只对主对话自身生效/u)
+
+    const ignoredPrompt = await set.execute({ conversationId: 'conv-x', identity: '开发', keep_prompt: '看这里' }, { agent: mainAgent })
+    assert.equal(ignoredPrompt.data.ignoredKeepPrompt, true)
 
     await assert.rejects(() => set.execute({ keep: 'yes' }, { agent: mainAgent }), /keep must be a boolean/u)
+    await assert.rejects(() => set.execute({ keepPrompt: 'x'.repeat(201) }, { agent: mainAgent }), /keepPrompt is too long/u)
+    await assert.rejects(
+      () => set.execute({ keepPrompt: 'a', keep_prompt: 'b' }, { agent: mainAgent }),
+      /use only one of keepPrompt and keep_prompt/u,
+    )
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-x', keep: false }, { agent: mainAgent }),
-      /keep and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent/u,
+      /keep, keepPrompt and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent/u,
     )
   } finally {
     await service?.memberTasks.dispose()
@@ -393,12 +412,12 @@ test('set_member_scope updates a tracked member conversation and stores its stan
       { agent: mainAgent },
     )
     assert.deepEqual(await service.memberScope('conv-9'), { identity: '开发', compressPercent: 10 })
-    assert.match(ignored.text, /avoidLongJobs 只对主对话自身生效/u)
+    assert.match(ignored.text, /keep \/ keepPrompt \/ avoidLongJobs 只对主对话自身生效/u)
     assert.equal(ignored.data.ignoredAvoidLongJobs, true)
 
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-9', avoidLongJobs: true }, { agent: mainAgent }),
-      /keep and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent/u,
+      /keep, keepPrompt and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent/u,
     )
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-9', compressPercent: 0 }, { agent: mainAgent }),
@@ -568,10 +587,10 @@ test('set_member_scope saves an untracked conversation and rejects invalid input
     assert.match(untracked.text, /本机未跟踪该会话，只保存设置/u)
     assert.deepEqual(await service.memberScope('conv-other'), { scope: '外部会话' })
 
-    await assert.rejects(() => set.execute({}, { agent: mainAgent }), /identity, role, scope, note, keep, avoidLongJobs, or compressPercent is required/u)
+    await assert.rejects(() => set.execute({}, { agent: mainAgent }), /identity, role, scope, note, keep, keepPrompt, avoidLongJobs, or compressPercent is required/u)
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-other', avoidLongJobs: true }, { agent: mainAgent }),
-      /keep and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent/u,
+      /keep, keepPrompt and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent/u,
     )
     await assert.rejects(
       () => set.execute({ identity: 'a'.repeat(41) }, { agent: mainAgent }),

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import {
-  MEMBER_KEEP_TEXT,
+  DEFAULT_KEEP_PROMPT,
   MEMBER_STATUS_INTERVAL_MS,
   MEMBER_CONTEXT_SOURCE,
   createMemberContext,
@@ -522,7 +522,7 @@ test('keep nudges 继续 once after a turn ends with no running member conversat
     assert.equal(h.followups.length, 1)
     const message = h.followups[0]
     assert.equal(message.role, 'user')
-    assert.deepEqual(message.content, [{ type: 'text', text: MEMBER_KEEP_TEXT }])
+    assert.deepEqual(message.content, [{ type: 'text', text: DEFAULT_KEEP_PROMPT }])
     assert.equal(message.source.kind, MEMBER_CONTEXT_SOURCE)
     assert.equal(message.source.form, 'keep')
     assert.equal(h.context.keepPending.has('session-a'), true)
@@ -532,6 +532,21 @@ test('keep nudges 继续 once after a turn ends with no running member conversat
     await sleep(80)
     assert.equal(h.followups.length, 1)
     assert.equal(h.context.keepPending.has('session-a'), false)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('keep uses the configured keepPrompt as the nudge text', async () => {
+  const h = harness({
+    tasks: [],
+    scopes: { 'session-a': { keep: true, keepPrompt: '继续推进成员结果，别停下来' } },
+  })
+  try {
+    turn(h, 1)
+    await waitFollowups(h, 1)
+    assert.equal(h.followups.length, 1)
+    assert.deepEqual(h.followups[0].content, [{ type: 'text', text: '继续推进成员结果，别停下来' }])
   } finally {
     h.context.dispose()
   }

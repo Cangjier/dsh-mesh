@@ -13111,6 +13111,7 @@ var UPGRADE_ANNOUNCE_WINDOW_MS = UPGRADE_LEAD_MS * 3;
 var UPGRADE_PREPARE_GRACE_MS = 5 * 6e4;
 var DEFAULT_COMPRESS_PERCENT = 35;
 var MEMBER_NOTE_MAX = 500;
+var MEMBER_KEEP_PROMPT_MAX = 200;
 function normalizeMemberScopePatch(patch = {}) {
   if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
     throw new Error("member scope must be an object");
@@ -13151,6 +13152,14 @@ function normalizeMemberScopePatch(patch = {}) {
   if (patch.keep !== void 0) {
     if (typeof patch.keep !== "boolean") throw new Error("keep must be a boolean");
     normalized.keep = patch.keep;
+  }
+  if (patch.keepPrompt !== void 0) {
+    if (typeof patch.keepPrompt !== "string") throw new Error("keepPrompt must be a string");
+    const text = patch.keepPrompt.trim();
+    if (text.length > MEMBER_KEEP_PROMPT_MAX) {
+      throw new Error(`keepPrompt is too long: ${String(text.length)} > ${String(MEMBER_KEEP_PROMPT_MAX)} characters`);
+    }
+    normalized.keepPrompt = text === "" ? null : text;
   }
   if (patch.avoidLongJobs !== void 0) {
     if (typeof patch.avoidLongJobs !== "boolean") throw new Error("avoidLongJobs must be a boolean");
@@ -13717,7 +13726,7 @@ var MeshService = class {
    * file is the same as "nothing set yet", never a startup failure. Only the
    * fields that were actually set are stored; defaults are applied by readers
    * ({@link effectiveCompressPercent}).
-   * @returns {Promise<Record<string, {identity?: string, role?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, compressPercent?: number}>>} scopes.
+   * @returns {Promise<Record<string, {identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, note?: string, compressPercent?: number}>>} scopes.
    */
   async memberScopes() {
     try {
@@ -13732,15 +13741,17 @@ var MeshService = class {
         const role = rawRole !== null && MEMBER_ROLES.includes(rawRole) ? rawRole : null;
         const scope = savedScopeText(value.scope, MEMBER_SCOPE_MAX);
         const keep = typeof value.keep === "boolean" ? value.keep : void 0;
+        const keepPrompt = savedScopeText(value.keepPrompt, MEMBER_KEEP_PROMPT_MAX);
         const avoidLongJobs = typeof value.avoidLongJobs === "boolean" ? value.avoidLongJobs : void 0;
         const note = savedScopeText(value.note, MEMBER_NOTE_MAX);
         const compressPercent = savedScopeNumber(value.compressPercent, (candidate) => candidate >= 1 && candidate <= 100);
-        if (identity === null && role === null && scope === null && keep === void 0 && avoidLongJobs === void 0 && note === null && compressPercent === void 0) continue;
+        if (identity === null && role === null && scope === null && keep === void 0 && keepPrompt === null && avoidLongJobs === void 0 && note === null && compressPercent === void 0) continue;
         scopes[rawId.trim()] = {
           ...identity === null ? {} : { identity },
           ...role === null ? {} : { role },
           ...scope === null ? {} : { scope },
           ...keep === void 0 ? {} : { keep },
+          ...keepPrompt === null ? {} : { keepPrompt },
           ...avoidLongJobs === void 0 ? {} : { avoidLongJobs },
           ...note === null ? {} : { note },
           ...compressPercent === void 0 ? {} : { compressPercent }
@@ -13754,7 +13765,7 @@ var MeshService = class {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, compressPercent?: number}|null>} scope.
+   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, note?: string, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? "").trim();
@@ -13768,12 +13779,12 @@ var MeshService = class {
    * Only the fields present in the patch change. An empty string clears that
    * text field (the record is dropped when nothing remains). `role` is the
    * member's standard identity; only the member target is supposed to pass it.
-   * `keep` and `avoidLongJobs` are stored as given and only the self target
-   * uses them. `note` is main-conversation-only metadata and is never injected
-   * or delivered to the member. `compressPercent` applies to both self and
-   * member conversations.
+   * `keep`, `keepPrompt` and `avoidLongJobs` are stored as given and only the
+   * self target uses them. `note` is main-conversation-only metadata and is
+   * never injected or delivered to the member. `compressPercent` applies to
+   * both self and member conversations.
    * @param {string} conversationId conversation or session id.
-   * @param {{identity?: unknown, role?: unknown, scope?: unknown, keep?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] fields to change.
+   * @param {{identity?: unknown, role?: unknown, scope?: unknown, keep?: unknown, keepPrompt?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] fields to change.
    * @returns {Promise<{ok: boolean, scopes: Record<string, object>, scope: object|null}>} saved scopes.
    */
   async setMemberScope(conversationId, patch = {}) {
@@ -13795,6 +13806,10 @@ var MeshService = class {
       else next.scope = normalized.scope;
     }
     if (normalized.keep !== void 0) next.keep = normalized.keep;
+    if (normalized.keepPrompt !== void 0) {
+      if (normalized.keepPrompt === null) delete next.keepPrompt;
+      else next.keepPrompt = normalized.keepPrompt;
+    }
     if (normalized.avoidLongJobs !== void 0) next.avoidLongJobs = normalized.avoidLongJobs;
     if (normalized.note !== void 0) {
       if (normalized.note === null) delete next.note;
@@ -16675,7 +16690,7 @@ var LONG_JOB_WARN_MS = 6e4;
 var HOST_CACHE_MS = 5 * 6e4;
 var LONG_JOBS_MAX = 20;
 var MEMBER_CONTEXT_SOURCE = "member-context";
-var MEMBER_KEEP_TEXT = "\u7EE7\u7EED";
+var DEFAULT_KEEP_PROMPT = "\u7EE7\u7EED";
 function formatMemberPercent(value) {
   const amount = Number.isFinite(value) ? value : DEFAULT_COMPRESS_PERCENT;
   return `${amount >= 100 ? String(Math.round(amount)) : amount.toFixed(1).replace(/\.0$/u, "")}%`;
@@ -16724,7 +16739,9 @@ function formatMemberConversationLine(task, scopes = {}) {
   return `- \u8EAB\u4EFD\uFF1A${profile?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u533A\uFF1A${entry.workspace}\uFF1B\u4F1A\u8BDD\uFF1A${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C${entry.statusLabel}${turn}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${profile?.scope ?? "\u672A\u8BBE\u7F6E"}${explicitCompress}${noteText}`;
 }
 function formatSelfLine(selfId, selfScope) {
-  return `- \u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF08\u81EA\u8EAB\uFF0C\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${selfScope?.keep === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
+  const keep = selfScope?.keep === true;
+  const keepPrompt = typeof selfScope?.keepPrompt === "string" && selfScope.keepPrompt !== "" ? selfScope.keepPrompt : DEFAULT_KEEP_PROMPT;
+  return `- \u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF08\u81EA\u8EAB\uFF0C\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${keep ? `\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u63D0\u793A\u8BED\u300C${keepPrompt}\u300D\uFF09` : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
 }
 function formatMemberStatusSnapshot(tasks, options = {}) {
   const list = Array.isArray(tasks) ? tasks : [];
@@ -16896,15 +16913,17 @@ function createMemberContext({
     if (closed || turns.get(sessionId) !== turn) return;
     const agent = typeof ctx?.get === "function" ? ctx.get("agents")?.get(sessionId) : void 0;
     if (agent === void 0 || agent === null || agent.status !== "idle") return;
+    const selfScope = scopes[sessionId] ?? null;
+    const prompt = typeof selfScope?.keepPrompt === "string" && selfScope.keepPrompt !== "" ? selfScope.keepPrompt : DEFAULT_KEEP_PROMPT;
     try {
       agent.followup({
         id: randomUUID3(),
         role: "user",
-        content: [{ type: "text", text: MEMBER_KEEP_TEXT }],
+        content: [{ type: "text", text: prompt }],
         source: { kind: MEMBER_CONTEXT_SOURCE, form: "keep" }
       });
       keepPending.add(sessionId);
-      log(`member keep push to ${sessionId}: no member conversation is running`);
+      log(`member keep push to ${sessionId}: no member conversation is running, prompt "${prompt}"`);
     } catch (error) {
       log(`member keep push failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -17296,9 +17315,10 @@ function registerTools(ctx, toolsCtx, service) {
       "`role` \u662F\u6210\u5458\u7684\u6807\u51C6\u8EAB\u4EFD\uFF0C\u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF1A\u4EA7\u54C1\u7ECF\u7406 / \u7814\u7A76\u5458 / \u5F00\u53D1 / \u6D4B\u8BD5 / \u4E1A\u52A1\uFF1Bset_product_stage \u7684\u9636\u6BB5\u53C2\u4E0E\u6821\u9A8C\u6309\u5B83\u5224\u65AD\u3002\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5FFD\u7565\u3002",
       "`note` \u4EC5\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF1A\u5B83\u4E0D\u4F1A\u6CE8\u5165\u6210\u5458\u7684\u7CFB\u7EDF\u4E0A\u4E0B\u6587\uFF0C\u4E5F\u4E0D\u4F1A\u968F call_member \u6295\u9012\uFF0C\u53EA\u5728\u4E3B\u5BF9\u8BDD\u7684 status_member \u548C\u6210\u5458\u4E0A\u4E0B\u6587\u91CC\u53EF\u89C1\uFF1B\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5FFD\u7565\u3002",
       "`keep` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0C\u6BCF\u4E2A turn \u7ED3\u675F\u4E14\u672C\u5BF9\u8BDD\u6CA1\u6709\u8FDB\u884C\u4E2D\u7684\u6210\u5458\u4F1A\u8BDD\u65F6\uFF0C\u63D2\u4EF6\u5411\u672C\u5BF9\u8BDD\u6295\u9012\u4E00\u6761\u7528\u6237\u6D88\u606F\u300C\u7EE7\u7EED\u300D\uFF1B\u7531\u8FD9\u6761\u6D88\u606F\u62C9\u8D77\u7684\u8FD9\u4E00\u8F6E\u7ED3\u675F\u65F6\u4E0D\u4F1A\u518D\u6B21\u6295\u9012\uFF0C\u907F\u514D\u81EA\u5FAA\u73AF\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
+      "`keepPrompt`\uFF08\u4E5F\u53EF\u5199 `keep_prompt`\uFF09\u662F\u8FD9\u6761\u7528\u6237\u6D88\u606F\u7684\u6B63\u6587\uFF0C\u9ED8\u8BA4\u300C\u7EE7\u7EED\u300D\uFF0C\u6700\u957F 200 \u5B57\u7B26\uFF1B\u7A7A\u5B57\u7B26\u4E32\u6062\u590D\u9ED8\u8BA4\u3002\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       "`avoidLongJobs` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0C\u4E3B\u5BF9\u8BDD\u4E0B\u4E00\u6B21\u72B6\u6001\u5FEB\u7167\u4F1A\u5217\u51FA\u8DDD\u4E0A\u4E00\u6B21\u5FEB\u7167\u4E4B\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       `\`compressPercent\`\uFF1A\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u6570\u5B57 1\u2013100\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_COMPRESS_PERCENT)}\uFF09\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0B\u4E00\u6B21 call_member \u6295\u9012\u524D\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u538B\u7F29\u3002`,
-      "\u81F3\u5C11\u63D0\u4F9B identity\u3001role\u3001scope\u3001note\u3001keep\u3001avoidLongJobs\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001role\u3001scope\u3001note \u6216 compressPercent \u4E4B\u4E00\u3002",
+      "\u81F3\u5C11\u63D0\u4F9B identity\u3001role\u3001scope\u3001note\u3001keep\u3001keepPrompt\u3001avoidLongJobs\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001role\u3001scope\u3001note \u6216 compressPercent \u4E4B\u4E00\u3002",
       "\u6210\u5458\u4F1A\u8BDD\u53EF\u4EE5\u672A\u88AB\u672C\u673A\u8DDF\u8E2A\uFF0C\u8BBE\u7F6E\u4ECD\u4F1A\u4FDD\u5B58\uFF0C\u53EA\u662F\u4E0D\u4F1A\u540C\u6B65\u4EFB\u52A1\u5FEB\u7167\u3002",
       "\u8FD9\u4E2A\u5DE5\u5177\u53EA\u4FDD\u5B58\u8BBE\u7F6E\uFF0C\u4E0D\u7ED9\u6210\u5458\u4F1A\u8BDD\u53D1\u6D88\u606F\u3001\u4E0D\u81EA\u52A8\u52A0\u6295\u9012\u524D\u7F00\uFF1B\u968F\u5BF9\u8BDD\u4E00\u8D77\u8BBE\u7F6E/\u66F4\u65B0\u7528 call_member \u7684 identity/role/scope \u53C2\u6570\u3002"
     ].join("\n"),
@@ -17330,6 +17350,16 @@ function registerTools(ctx, toolsCtx, service) {
           type: "boolean",
           description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF1B\u5F00\u542F\u540E\u6BCF\u4E2A turn \u7ED3\u675F\u4E14\u6CA1\u6709\u8FDB\u884C\u4E2D\u7684\u6210\u5458\u4F1A\u8BDD\u65F6\u6295\u9012\u4E00\u6761\u7528\u6237\u6D88\u606F\u300C\u7EE7\u7EED\u300D\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
         },
+        keepPrompt: {
+          type: "string",
+          maxLength: 200,
+          description: "\u81EA\u7EE7\u7EED\u63D0\u793A\u8BED\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4\u300C\u7EE7\u7EED\u300D\uFF1B\u7A7A\u5B57\u7B26\u4E32\u6062\u590D\u9ED8\u8BA4\u3002\u4E5F\u53EF\u4EE5\u5199\u6210 keep_prompt\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
+        },
+        keep_prompt: {
+          type: "string",
+          maxLength: 200,
+          description: "keepPrompt \u7684\u522B\u540D\uFF1B\u4E0E keepPrompt \u53EA\u4F20\u4E00\u4E2A\u3002"
+        },
         avoidLongJobs: {
           type: "boolean",
           description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF1B\u5F00\u542F\u540E\u72B6\u6001\u5FEB\u7167\u4F1A\u5217\u51FA\u4E24\u6B21\u5FEB\u7167\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
@@ -17360,14 +17390,18 @@ function registerTools(ctx, toolsCtx, service) {
       const hasScope = args.scope !== void 0;
       const hasNote = args.note !== void 0;
       const hasKeep = args.keep !== void 0;
+      const hasKeepPrompt = args.keepPrompt !== void 0 || args.keep_prompt !== void 0;
       const hasAvoidLongJobs = args.avoidLongJobs !== void 0;
       const hasCompressPercent = args.compressPercent !== void 0;
-      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasAvoidLongJobs && !hasCompressPercent) {
-        throw new Error("identity, role, scope, note, keep, avoidLongJobs, or compressPercent is required");
+      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasKeepPrompt && !hasAvoidLongJobs && !hasCompressPercent) {
+        throw new Error("identity, role, scope, note, keep, keepPrompt, avoidLongJobs, or compressPercent is required");
+      }
+      if (args.keepPrompt !== void 0 && args.keep_prompt !== void 0) {
+        throw new Error("use only one of keepPrompt and keep_prompt");
       }
       if (isSelf && selfId === "") throw new Error("cannot set the current session scope: no current session");
       if (!isSelf && !hasIdentity && !hasRole && !hasScope && !hasNote && !hasCompressPercent) {
-        throw new Error("keep and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation");
+        throw new Error("keep, keepPrompt and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation");
       }
       const patch = {
         ...hasIdentity ? { identity: args.identity } : {},
@@ -17375,6 +17409,7 @@ function registerTools(ctx, toolsCtx, service) {
         ...hasScope ? { scope: args.scope } : {},
         ...!isSelf && hasNote ? { note: args.note } : {},
         ...isSelf && hasKeep ? { keep: args.keep } : {},
+        ...isSelf && hasKeepPrompt ? { keepPrompt: args.keepPrompt !== void 0 ? args.keepPrompt : args.keep_prompt } : {},
         ...isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {},
         ...hasCompressPercent ? { compressPercent: args.compressPercent } : {}
       };
@@ -17384,6 +17419,7 @@ function registerTools(ctx, toolsCtx, service) {
       const scope = saved.scope ?? null;
       const tracked = isSelf ? false : await memberTasks.syncTaskScope(targetId, scope, { profile: hasIdentity || hasRole || hasScope });
       const compressThreshold = effectiveCompressPercent(scope);
+      const keepPrompt = typeof scope?.keepPrompt === "string" && scope.keepPrompt !== "" ? scope.keepPrompt : DEFAULT_KEEP_PROMPT;
       const lines = [
         isSelf ? `\u5DF2\u8BBE\u7F6E\u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId}\uFF09\u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u4E0E\u914D\u7F6E\u3002` : `\u5DF2\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD ${targetId} \u7684\u8EAB\u4EFD\u3001\u6807\u51C6\u8EAB\u4EFD\u4E0E\u538B\u7F29\u9608\u503C\u3002`,
         ...!isSelf ? [`\u6807\u51C6\u8EAB\u4EFD\uFF1A${scope?.role ?? "\u672A\u8BBE\u7F6E"}`] : [],
@@ -17391,11 +17427,11 @@ function registerTools(ctx, toolsCtx, service) {
         `\u5DE5\u4F5C\u8303\u56F4\uFF1A${scope?.scope ?? "\u672A\u8BBE\u7F6E"}`,
         ...!isSelf ? [`\u5907\u6CE8\uFF1A${scope?.note ?? "\u672A\u8BBE\u7F6E"}`] : [],
         ...isSelf ? [
-          `\u4FDD\u6301\u76EE\u6807\uFF1A${scope?.keep === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
+          `\u4FDD\u6301\u76EE\u6807\uFF1A${scope?.keep === true ? `\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u63D0\u793A\u8BED\u300C${keepPrompt}\u300D\uFF09` : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}`,
           `\u907F\u514D\u8017\u65F6\uFF1A${scope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
           `\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%`
         ] : [`\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%\uFF08\u6295\u9012\u524D\u8D85\u8FC7\u8BE5\u5360\u6BD4\u81EA\u52A8\u538B\u7F29\uFF09`],
-        ...!isSelf && (hasKeep || hasAvoidLongJobs) ? ["keep / avoidLongJobs \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
+        ...!isSelf && (hasKeep || hasKeepPrompt || hasAvoidLongJobs) ? ["keep / keepPrompt / avoidLongJobs \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...isSelf && hasRole ? ["role \u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...isSelf && hasNote ? ["note \u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...!isSelf && !tracked ? ["\u672C\u673A\u672A\u8DDF\u8E2A\u8BE5\u4F1A\u8BDD\uFF0C\u53EA\u4FDD\u5B58\u8BBE\u7F6E\u3002"] : []
@@ -17411,11 +17447,13 @@ function registerTools(ctx, toolsCtx, service) {
           compressPercent: compressThreshold,
           role: !isSelf ? scope?.role ?? null : null,
           keep: isSelf ? scope?.keep === true : null,
+          keepPrompt: isSelf ? keepPrompt : null,
           avoidLongJobs: scope?.avoidLongJobs === true,
           tracked,
           note: !isSelf ? scope?.note ?? null : null,
           ignoredRole: isSelf && hasRole,
           ignoredKeep: !isSelf && hasKeep,
+          ignoredKeepPrompt: !isSelf && hasKeepPrompt,
           ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
           ignoredNote: isSelf && hasNote
         }

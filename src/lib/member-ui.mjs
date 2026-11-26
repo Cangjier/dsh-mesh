@@ -64,6 +64,7 @@ export function memberConversationEntry(task, scopes = {}) {
     memberName: profile?.name ?? (entry.member === '' ? null : entry.member),
     memberLabel: memberShortLabel(task),
     workspace: entry.workspace,
+    role: profile?.role ?? null,
     identity: profile?.identity ?? null,
     scope: profile?.scope ?? null,
     note,

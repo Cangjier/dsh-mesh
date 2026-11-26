@@ -151,13 +151,13 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.7z \
 - 新工具 `call_member`：没有 `action`；没有 `conversationId` 就新建对话，有就继续那个对话，只发起并立即返回会话id。目标对话正在运行时，消息用 `agent.steer()` 直接插入当前 turn，不等这一轮结束；空闲时按普通 `followup` 开一轮。回执里带 `steered` / `delivery`，`call_member` 的返回会说明这次是怎么投递的。
 - `wait_member` 只有两种输入：`conversationIds` 指定会话，或 `all: true` 等本对话所有「进行中」的会话（推荐，工具描述和所有提示都推荐它）；两者互斥，同时传会报错。任意一个先有新回复或进入终态就立刻返回，其余会话在结果里列出。没有进行中的会话时 `all: true` 直接返回 ok 并附上所有会话状态，不报错。
 - `call_member` / `wait_member` 返回本对话跟踪的**所有成员会话**（按 `originSessionId`，不是成员上的全部对话）：会话id、进行中/空闲/异常中止、工作区名、轮次；当前会话带 `current` 标记，`call_member` 另给 `currentConversationId`。状态映射：running/starting=进行中，completed=空闲，failed/interrupted=异常中止。
-- **60 秒状态注入**：本对话有进行中的成员会话、或（开启「避免耗时」后）上次快照以来有超过 1 分钟的已结束 job 时，`agent/pre-step` 在每个 step 前把一份状态快照附加到 `decision.messages`（同一会话最多每 60 秒一次）：首行汇总、自身（会话id/身份/工作范围/保持目标/避免耗时）、每个成员会话一行，**身份和工作区在行首**，随后是会话 id/成员/状态/轮次/工作范围（缺失标 `未设置`）。缺身份/工作范围时按“成员会话”和“自身”分别聚合提示；全部齐全时不出现提示。快照不新开 turn、不调用 `followup`/`steer`，source kind 不是 `user`；读取失败吞掉，不影响 agent loop。
-- **名册缺口检查**：`[成员上下文]` 快照和派活推送会把 `.coder/members/all.md`（`工作区名称` / `身份` / `工作范围` / 可选 `备注`）和本对话的成员会话对一遍：名册里有、但没有对应会话的成员会列成 `[成员缺口]`，并要求用 `call_member` 建出来；只有名册备注写了 `宿主 <地址>` 且该宿主离线/不在组网、或当前没有任何可用成员主机时才记为「暂时建不了」。覆盖按工作区名匹配，旧记录按身份兜底；缺口存在时即使没有进行中的成员会话也会注入快照。详见 [Step 032](docs/Step%20032%20名册缺口检查.md)。
+- **60 秒状态注入**：本对话有进行中的成员会话、有生效的产品阶段、或（开启「避免耗时」后）上次快照以来有超过 1 分钟的已结束 job 时，`agent/pre-step` 在每个 step 前把一份状态快照附加到 `decision.messages`（同一会话最多每 60 秒一次）：首行汇总、产品阶段（版本/阶段/轮次/目标/参与度/下一步调用）、自身（会话id/身份/工作范围/避免耗时/压缩阈值）、每个成员会话一行，**身份和工作区在行首**，随后是会话 id/成员/状态/轮次/工作范围（缺失标 `未设置`）。缺身份/工作范围时按“成员会话”和“自身”分别聚合提示；全部齐全时不出现提示。没有设置产品阶段时，只要本对话跟踪了成员会话就会提示用 `set_product_stage` 建立。快照不新开 turn、不调用 `followup`/`steer`，source kind 不是 `user`；读取失败吞掉，不影响 agent loop。
+- **名册缺口检查**：`[成员上下文]` 快照会把 `.coder/members/all.md`（`工作区名称` / `身份` / `工作范围` / 可选 `备注`）和本对话的成员会话对一遍：名册里有、但没有对应会话的成员会列成 `[成员缺口]`，并要求用 `call_member` 建出来；只有名册备注写了 `宿主 <地址>` 且该宿主离线/不在组网、或当前没有任何可用成员主机时才记为「暂时建不了」。覆盖按工作区名匹配，旧记录按身份兜底；缺口存在时即使没有进行中的成员会话也会注入快照。详见 [Step 032](docs/Step%20032%20名册缺口检查.md)。
 - **一个工作区只允许一个对话**：新建对话时，解析出的目标目录里只要已经有对话——**进行中、空闲、异常中止、出错都算**——成员就返回 `409 workspace_occupied`，消息里给出那条对话的会话id，`call_member` 以 `ok:false` 直接返回说明（不创建对话），并明确建议 `call_member { "member": …, "conversationId": "<那条对话>", "prompt": … }` 继续它。没有 `force` 之类的覆盖开关；要并行工作就换一个 `workspace` 名（归档后该工作区名会重新可用）。继续已有 `conversationId` 永远不触发这个拦截。
 - **部署/升级期间拒发**：目标成员有正在跑的部署/升级任务（含自动升级前十分钟的准备期）时，`call_member` 在创建会话前就返回 `ok:false`，说明成员正在升级、阶段与开始时间；升级结束后用同一个 `conversationId` 继续。
 - **长消息落盘**：正文超过 48 000 字符时先写到成员本机的临时目录（`POST /v1/scratch`），投递的消息改成「请先用 read 读取 `<路径>`」的说明；`data.messageSpill` 是文件路径。成员版本过旧（没有该接口）时退回整段内联。
 - 新建对话前，`call_member` 先从组网直连配置找到目标成员的本地代理端口，用 SSH 在目标成员上跑 mjs 探针实测该端口的出网延迟和下行带宽，把**一行结果 + 代理端口 + hub 的 git token 原值**随每一次投递的最终 prompt 注入（不再写成员的系统上下文）；组网里没有该成员的直连配置就不报出网信息。并**禁用该会话的 `ask_user_question`**——成员任务没有可应答的用户，需要信息时会在回复里提问并停下，用 `call_member` 带同一个 `conversationId` 回答。禁用规则在会话 setup 时应用，并在**每次投递消息前**对当前 live agent 重新应用一次（去重）：成员自己的 Web UI 恢复会话时只挂 preset、不跑 interop 的 setup，不补这一步就会留下一个无人应答的 `ask_user_question`，整轮永久挂起。详见 [Step 025](docs/Step%20025%20成员任务的出网实测与token注入.md)。
-- **会话身份、工作范围与推送/压缩配置**：`call_member` 的可选参数 `identity`（身份/角色，≤40 字符）和 `scope`（负责范围，≤120 字符）按**会话**合并保存到 `$DSH_HOME/mesh/member-scopes.json`（记录形如 `{ "<conversationId>": { identity, scope, note, keep, avoidLongJobs, compressPercent } }`，只存显式设置过的字段，默认值读取时应用；自身用当前主对话 session id）。身份/范围随最终 prompt 注入：新建对话时把本次身份/范围作为 `【成员身份】…` 前缀放进 prompt；继续已有对话时合并设置，只有本次显式传 identity/scope 才追加该前缀（与之前一致）。这些信息不再写入成员的系统上下文。任意时候可用 `set_member_scope` 单独设置成员会话或自身（省略 `conversationId` / `self` / `local` 即自身），不给成员发消息：`keep` / `avoidLongJobs` 只对主对话自身有效，设置成员会话时忽略；`compressPercent` 对两者都生效。成员会话还可设 `note`（备注，≤500 字符）：只存本机，**不注入成员系统上下文、不随投递发送**，只在主对话的 `status_member` 和成员上下文快照里可见。`compressPercent` 目前只能设置数值，不支持直接清除；要恢复默认请设回 `35`。`members` 恢复为只读成员发现，不再显示会话身份。
+- **会话身份、标准身份、工作范围与压缩配置**：`call_member` 的可选参数 `identity`（自由身份，≤40 字符）、`role`（标准身份：产品经理 / 研究员 / 开发 / 测试 / 业务）和 `scope`（负责范围，≤120 字符）按**会话**合并保存到 `$DSH_HOME/mesh/member-scopes.json`（记录形如 `{ "<conversationId>": { identity, role, scope, note, avoidLongJobs, compressPercent } }`，只存显式设置过的字段，默认值读取时应用；自身用当前主对话 session id）。身份/标准身份/范围随最终 prompt 注入：新建对话时把本次 profile 作为 `【成员身份】…` 前缀放进 prompt；继续已有对话时合并设置，只有本次显式传 identity/role/scope 才追加该前缀。这些信息不再写入成员的系统上下文。任意时候可用 `set_member_scope` 单独设置成员会话或自身（省略 `conversationId` / `self` / `local` 即自身），不给成员发消息：`role`、`note` 只对成员会话有效，设置自身时忽略；`avoidLongJobs` 只对主对话自身有效；`compressPercent` 对成员会话的投递生效。成员会话还可设 `note`（备注，≤500 字符）：只存本机，**不注入成员系统上下文、不随投递发送**，只在主对话的 `status_member` 和成员上下文快照里可见。`compressPercent` 目前只能设置数值，不支持直接清除；要恢复默认请设回 `35`。`members` 恢复为只读成员发现，不再显示会话身份。
 - **工作区归属**：显式 `workspace` 优先；显式 `cwd` 保持原语义（不带工作区名，但会话仍按该目录归组，标题取目录名）；两者都没有时用调用方会话当前所属工作区的标题（自动派生的名称会额外拒绝 `: * ? < > |`，避免 Windows 成员建不出目录）。目标成员创建会话后把它挂到 `ctx.workspaceRegistry`；默认分支（含调用方兜底显式发送的 `default-workspace`）优先复用已有的同名记录，所以不会新增第二个「默认工作区」（旧版本已写入的重复记录需手动清理），也不会再留在「未分组」。任务记录同时保存工作区名：新建时取显式 workspace / 显式 cwd 的目录名 / 调用方工作区，继续投递时用成员实时 projection 的 `workspace` 刷新，旧记录缺失时回退 `unknown`。详见 [Step 026](docs/Step%20026%20成员任务的工作区归属.md)。
 - `conversationId` 是唯一对外的继续投递凭据（内部 task id 不再出现在工具参数里）；**`call_member` 不再有 `compress` 参数**。继续投递前会读取该会话的压缩阈值（`set_member_scope` 的 `compressPercent`，默认 35%）：上下文占比**严格超过阈值**就先让成员压缩再投递（压缩要求对话空闲，目标还在跑时拒绝投递），不超过就直接投递；目标对话正在运行时跳过压缩、直接 `steer` 插入（压缩要空闲），压缩失败也只记日志再照常投递。`wait_member` 在 `state=done` 时返回会话id和上下文占用（只显示占比）；超过该会话阈值时说明“下次投递前会自动压缩”，不引导传任何压缩参数。
 - A 通过 WireGuard 成员发现找到 B，调用 B 的 8765 创建对话；后台轮询 B 的 `/wait`，`wait_member` 按轮取回。
@@ -167,7 +167,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.7z \
 - **`status_member`**：按会话id 返回目标会话状态（进行中/空闲/异常中止/出错）、工作区、身份/工作范围、最近两次用户消息（本机 `call_member` 投递记录）和最近一次思考（目标会话的 reasoning）；`conversationIds` 可一次查多个，分块输出并带汇总；返回值同时列出本对话跟踪的**所有**成员会话（id、状态、工作区名称、身份/工作范围），不只看本次查询的会话，缺失项会提示用 `call_member` 或 `set_member_scope` 补齐。
 - **`remove_member`**：输入 `conversationId`，把它**彻底删掉**：先在成员上归档（停止正在跑的工作、移出 Web 列表），再删除 interop 对话记录，再删除工作区记录，最后递归清空并删除工作区目录；本机任务记录和日志也一并删除，工作区名因此空出来可以重新使用。工作区目录只在成员的工作区根目录（`~/.dsh/workspaces`）之下才会被删除——默认工作区可能指向 Documents 之类的用户目录，那种情况只删记录、不删目录。目标成员从本机任务记录解析；旧版成员没有删除接口会明确报错。成员 UI 里自行归档的会话仍会在下一次 `status_member` 读取时被识别并移出列表（归档不等于删除）。
 - **避免耗时（`avoidLongJobs`）**：默认 false，只对主对话生效。开启后，每次状态快照会检查距上一次快照之间结束、耗时超过 1 分钟的 job，并在注入末尾列出这些 job（kind、命令/标签、耗时）并建议用 `call_member` 交给成员对话执行；没有进行中的成员会话时也能单独注入这条提醒。窗口在每次快照时消费，同一 job 不会重复提示。
-- **主对话 turn 结束后的派活审查**：不再有静默等待。`session/event` 的 `turn/end` 后，若会话不是 interop 创建的成员会话、且 `keep === true`（默认 false，需要显式开启），插件在**距上一次成员状态 review 结束已超过 10 分钟**（首次无记录即视为超过）时用 `followup` 投递一条**派活指令**（source 为 `member-context` / `form: push`，非 user 来源）：要求主对话立即用 `subagent` 新建一个子代理做只读审查，读本工作区的 `.coder/members/all.md`、`.coder/members/flow.md` 和现有 gap（`.coder/issues/open.md`、`.coder/plan/todo.md`、`.coder/plan/goal.md` 等），判断是否可以激活部分现有空闲成员对话；指令里附本对话跟踪的成员会话清单（空闲/进行中、身份、工作范围、备注）作为审查事实，并明确只考虑空闲会话、进行中/异常中止的一律跳过、禁止重启或新建同名会话、派活必须带原 `conversationId`。审查结论交回主对话，由主对话决定是否 `call_member`。派活指令拉起的这一轮就是 review 本身，它的 `turn/end` 才把「review 结束时间」刷新为当前时刻；没到 10 分钟的普通 turn 结束不投递。投递前仍会测量主对话上下文占比：超过 `compressPercent`（默认 35%）先压缩再投递；压缩失败只记日志、不阻塞投递，压缩期间开始了新 turn 则放弃本次投递。`turn/start` 不单独取消任何计时（已无计时器），dispose 清理；相同状态不会因去重被永久压住——只要窗口超过 10 分钟，下一次 turn 结束就会再次审查。成员会话永不主动推送。
+- **产品阶段（A → B → C → D → A）**：`set_product_stage` 按项目目录维护产品版本、大阶段、子阶段轮次和三个目标（产品 / 开发 / 研究，状态为未开始 / 进行中 / 已达成 / 未达成），保存在 `$DSH_HOME/mesh/product-stages.json`。A 阶段所有成员参与提建议、主对话决定计划；B 阶段开发/测试/研究员参与，本轮功能没有 BUG（疑难杂症除外）；C 阶段产品经理真实使用，发现问题回 B，直到放行；D 阶段业务人员介入，发现问题回 C，业务放行后回到 A。产品版本自动维护、不需要传入：**D 完成进入 A 时升版**，同一天小版本 +1，跨天重置为当天 `.1`；同一轮迭代内版本和轮次不变，显式传 `round` 可开启新的子阶段。阶段按项目目录保存，同一工作区共享；成员上下文每次注入都会带上版本、阶段、目标与状态、本轮哪些成员已参与/未参与、以及下一步可用的调用（进入下一阶段、返工回退、新一轮、只更新目标状态）。参与度由成员回复自动记录：`wait_member` 取走回复和兜底把回复投递给主对话共用同一张回复表，成员一轮回复被接受时就记到当前阶段轮次。没有设置 `role` 的成员会在阶段校验里被点名，提示用 `set_member_scope` 设置标准身份。退出阶段时工具结果会给出放行检查警告（成员未参与、没有对应身份的会话、目标状态未达成）。
 - **没人继续等待时的兜底投递（不重复）**：模型拿到 `progress` 后可能就不再 `wait_member`。对话完成（或失败/中断）后，插件先等 3 秒，让正在等待或紧接着发起的 `wait_member` 取走结果；如果任务结束时有 `wait_member` 正停在上面，窗口延长到 15 秒，让它先完成终态复读。兜底**只投递 `seq > deliveredSeq` 的未取回复**，同一个回复文本绝不重复投递；终态或 progress 已经被 `wait_member` 取走时兜底完全不投递，不再发完成提示（从未产生任何文本的任务仍会收到一条状态提示）；后到的 `wait_member` 也不会再从 `lastText` 重印已取走或已由兜底认领的正文。完成/失败提示使用固定格式：`[成员任务完成]`、`成员：<主对话记录里的最新身份>`、`标识符：<成员> (<IP>) 的对话 <会话id>`，空一行后是成员对话的结果；`wait_member` 消费终态时同步取消待投递 timer 并标记已消费；兜底投递失败会释放已认领的回复，后续 wait 仍能返回正文。投递时如果主对话正在执行 turn，用 `agent.steer()` 把结果**直接插入当前 turn 的下一步边界**，不等 turn 结束；空闲时才开新 turn。
 - 不需要 B 主动访问 A；A 长轮询（阻塞式等待）B 的 `/wait`，避免回调端口/NAT 问题。
 - 状态快照、工作区并发保护、steer 与结果去重的完整边界见 [Step 027](docs/Step%20027%20成员任务状态、工作区并发保护与结果不重复投递.md)。
@@ -343,6 +343,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 030 新会话默认完全权限](docs/Step%20030%20新会话默认完全权限.md) | 安装器在 profile 缺 `permission` 行时补 `defaultPreset: danger-full-access`，保留操作者的显式选择，已有会话不追溯 |
 | [Step 031 部署期间拒发、长消息落盘、重启后续投与不可达重试](docs/Step%20031%20部署期间拒发、长消息落盘、重启后续投与不可达重试.md) | 升级/部署期间 `call_member` 拒发、48K 以上正文落盘成文件、手动升级也通知并在重启后续投、成员不可达 20 分钟重试、全隧道成员补回 wg-quick 策略规则 |
 | [Step 032 名册缺口检查](docs/Step%20032%20名册缺口检查.md) | 把 `.coder/members/all.md` 和成员会话对齐，缺的成员列成 `[成员缺口]` 并要求建出来，宿主不可用时豁免 |
+| [Step 033 产品阶段与标准身份](docs/Step%20033%20产品阶段与标准身份.md) | A/B/C/D 阶段机与自动产品版本、`set_product_stage`、成员标准身份 `role`、按阶段校验参与度、移除成员调度推送 |
 | [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、升级/取消、包内容 |
 | [Step 020 内嵌 interop 服务](docs/Step%20020%20内嵌interop服务.md) | 会话由 DSH Web 拥有、嵌入式 :8765、部署/回滚、冷读「已停止」根因 |
 
@@ -366,12 +367,13 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `src/lib/interop-service.mjs` | 内嵌 HTTP 服务：`ctx.agents` 创建/恢复、等待/通知/事件/回调 |
 | `code/interop-service/server.mjs` | 旧独立 HTTP 服务（回退用，默认不启动） |
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
-| `src/lib/member-context.mjs` | 成员会话状态快照：`agent/pre-step` 每 60 秒附加一次；主对话 `turn/end` 后若距上次 review 结束超过 10 分钟则 `followup` 一条派活指令（`keep` 控制是否开启），超过压缩阈值（默认 35%）先压缩 |
+| `src/lib/member-context.mjs` | 成员上下文快照：`agent/pre-step` 每 60 秒附加一次（有进行中会话、产品阶段、名册缺口或耗时提醒时），含产品阶段、自身配置与成员会话行 |
+| `src/lib/product-stage.mjs` | 产品阶段状态机：A/B/C/D 流转、版本升降（同日 +1、跨天重置）、目标与状态、参与度统计、下一阶段调用提示与放行检查 |
 | `src/lib/member-ui.mjs` | 会话头部「N个成员对话」的数据行：任务表 + `member-scopes.json` 合成 JSON 安全字段、成员短标签（IP 末段）、状态与计数 |
 | `src/lib/member-roster.mjs` | `.coder/members/all.md` 解析、按工作区/身份对齐成员会话、宿主不可用时的豁免、缺口文案 |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
-| `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `set_member_scope` / `wait_member` / `status_member` / `remove_member` 工具 |
+| `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `set_member_scope` / `set_product_stage` / `wait_member` / `status_member` / `remove_member` 工具 |
 | `src/lib/member-sessions.mjs` | 标记 interop 创建的成员会话，主动推送时排除 |
 | `src/client/index.tsx` | 侧边栏「DSH 成员」面板 |
 | `src/client/members.tsx` | 会话头部「N个成员对话」入口：悬停列表、详情弹窗、10 秒轮询 |
@@ -399,8 +401,9 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `deploy` | SSH 部署/升级成员（pointer） |
 | `repack` | 用当前仓库刷新已有离线包：只替换 `gate/`、`shared/`、`config/`、`code/*`、根脚本和 `plugins/dsh-mesh/`，DSH 主体（`app/`、`web/`、`runtime/`）复用，最后更新 `.sha256` |
 | `members` | WireGuard 成员发现 |
-| `call_member` | 在成员上新建/继续对话，返回会话id；可设 `identity` / `scope` |
-| `set_member_scope` | 设置成员会话或自身的 `identity` / `scope` / `compressPercent`；成员会话还可设 `note`；自身还可设 `keep` / `avoidLongJobs` |
+| `call_member` | 在成员上新建/继续对话，返回会话id；可设 `identity` / `role` / `scope` |
+| `set_member_scope` | 设置成员会话或自身的 `identity` / `scope` / `compressPercent`；成员会话还可设 `role`（标准身份）/ `note`；自身还可设 `avoidLongJobs` |
+| `set_product_stage` | 设置产品版本（自动维护）、大阶段 A/B/C/D、子阶段轮次和产品/开发/研究目标及状态；阶段按项目目录保存 |
 | `wait_member` | 有界等待成员会话：`all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定；有新回复立刻返回（`state=progress`），完成返回 `done` |
 | `status_member` | 目标会话状态、工作区、身份/工作范围、最近两次用户消息、最近一次思考；附带本对话全部成员会话的状态、工作区与身份/工作范围（已归档的不列出） |
 | `remove_member` | 彻底删除一个成员对话：归档 → 删对话记录 → 删工作区记录 → 清空并删除工作区目录，同时删掉本机任务记录 |

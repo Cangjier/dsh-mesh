@@ -1,6 +1,6 @@
 // src/index.ts
 import { homedir as homedir4 } from "node:os";
-import path31 from "node:path";
+import path32 from "node:path";
 
 // src/lib/service.mjs
 import { mkdir as mkdir15, readFile as readFile18, readdir as readdir9, rm as rm15, stat as stat13, writeFile as writeFile15 } from "node:fs/promises";
@@ -8,7 +8,7 @@ import { existsSync as existsSync14, readFileSync as readFileSync5, realpathSync
 import { execFile as execFile3, spawn as spawn7 } from "node:child_process";
 import { createHash as createHash8 } from "node:crypto";
 import os10 from "node:os";
-import path26 from "node:path";
+import path27 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { promisify as promisify3 } from "node:util";
 
@@ -9853,8 +9853,8 @@ function signClusterRequest(secret, request) {
   const signature = createHmac("sha256", secret).update(payload).digest("base64url");
   return `${VERSION}.${String(timestamp)}.${nonce}.${signature}`;
 }
-function payloadOf(method, path32, timestamp, nonce) {
-  return [VERSION, String(method).toUpperCase(), path32, String(timestamp), nonce].join("\n");
+function payloadOf(method, path33, timestamp, nonce) {
+  return [VERSION, String(method).toUpperCase(), path33, String(timestamp), nonce].join("\n");
 }
 
 // code/build/repack.mjs
@@ -10564,27 +10564,31 @@ function memberTaskProfile(task) {
   const profile = task?.profile;
   if (profile === null || typeof profile !== "object" || Array.isArray(profile)) return null;
   const identity = typeof profile.identity === "string" && profile.identity.trim() !== "" ? profile.identity.trim() : null;
+  const role = typeof profile.role === "string" && profile.role.trim() !== "" ? profile.role.trim() : null;
   const scope = typeof profile.scope === "string" && profile.scope.trim() !== "" ? profile.scope.trim() : null;
-  if (identity === null && scope === null) return null;
+  if (identity === null && role === null && scope === null) return null;
   const name = typeof profile.name === "string" && profile.name.trim() !== "" ? profile.name.trim() : null;
-  return { name, identity, scope };
+  return { name, identity, ...role === null ? {} : { role }, scope };
 }
 function profileFromScope(scope, name) {
   const identity = typeof scope?.identity === "string" && scope.identity.trim() !== "" ? scope.identity.trim() : null;
+  const role = typeof scope?.role === "string" && scope.role.trim() !== "" ? scope.role.trim() : null;
   const scopeText = typeof scope?.scope === "string" && scope.scope.trim() !== "" ? scope.scope.trim() : null;
-  if (identity === null && scopeText === null) return null;
+  if (identity === null && role === null && scopeText === null) return null;
   const member = typeof name === "string" && name.trim() !== "" ? name.trim() : null;
-  return { name: member, identity, scope: scopeText };
+  return { name: member, identity, ...role === null ? {} : { role }, scope: scopeText };
 }
 function profileFromPatch(patch, name) {
   return profileFromScope({
     ...typeof patch.identity === "string" ? { identity: patch.identity } : {},
+    ...typeof patch.role === "string" ? { role: patch.role } : {},
     ...typeof patch.scope === "string" ? { scope: patch.scope } : {}
   }, name);
 }
 function profilePromptPrefix(profile) {
   if (profile === null) return "";
   const parts = [];
+  if (typeof profile.role === "string" && profile.role !== "") parts.push(`\u4F60\u7684\u6807\u51C6\u8EAB\u4EFD\uFF1A${profile.role}`);
   if (profile.identity !== null) parts.push(`\u4F60\u7684\u8EAB\u4EFD\uFF1A${profile.identity}`);
   if (profile.scope !== null) parts.push(`\u8D1F\u8D23\u8303\u56F4\uFF1A${profile.scope}`);
   return parts.length === 0 ? "" : `\u3010\u6210\u5458\u8EAB\u4EFD\u3011${parts.join("\uFF1B")}\u3002`;
@@ -10621,6 +10625,10 @@ function workspaceNameFromTitle(value) {
   if (name === "" || name === "." || name === ".." || name.length > 120) return "";
   if (/[\\/"<>:|?*]/u.test(name) || /[\u0000-\u001f]/u.test(name)) return "";
   return name;
+}
+function callerProjectDir(agent) {
+  const cwd = agent?.session?.header?.cwd ?? agent?.session?.meta?.cwd ?? agent?.session?.cwd;
+  return typeof cwd === "string" && cwd.trim() !== "" ? cwd.trim() : null;
 }
 async function callerWorkspaceName(ctx, agent) {
   if (typeof ctx?.get !== "function") return DEFAULT_WORKSPACE;
@@ -10744,6 +10752,9 @@ var MemberTaskService = class {
         task.lastTaskText = typeof task.lastTaskText === "string" ? task.lastTaskText : String(task.prompt ?? "");
         task.repliesTakenByWait = task.repliesTakenByWait === true;
         if (typeof task.workspace !== "string" || task.workspace.trim() === "") task.workspace = "unknown";
+        if (typeof task.originCwd !== "string" || task.originCwd === "") {
+          task.originCwd = this.#originCwdOf(task.originAgentId, task.originSessionId);
+        }
         task.profile = memberTaskProfile(task);
         if (!Array.isArray(task.sentMessages)) {
           task.sentMessages = typeof task.prompt === "string" && task.prompt !== "" ? [{ text: task.prompt, at: String(task.createdAt ?? "") }] : [];
@@ -11046,11 +11057,11 @@ var MemberTaskService = class {
     if (file === "") return { text, spill: null };
     return { text: formatSpilledMessage(text.length, file), spill: file };
   }
-  async start({ member, prompt, cwd, workspace, identity, scope, agent, notify = true, signal }) {
+  async start({ member, prompt, cwd, workspace, identity, role, scope, agent, notify = true, signal }) {
     await this.#ensureLoaded();
     if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("prompt is required");
     if (agent === void 0 || agent === null) throw new Error("delegation must be called from a DSH conversation");
-    const scopePatch = normalizeMemberScopePatch({ identity, scope });
+    const scopePatch = normalizeMemberScopePatch({ identity, role, scope });
     const hasScopePatch = Object.keys(scopePatch).length > 0;
     const target = await this.#resolveMember(member);
     const maintenance = await this.#maintenanceFor(target);
@@ -11086,7 +11097,7 @@ var MemberTaskService = class {
     let profile = null;
     if (hasScopePatch) {
       if (typeof this.service.setMemberScope !== "function") throw new Error("member scopes are not available");
-      const saved = await this.service.setMemberScope(conversation.id, { identity, scope });
+      const saved = await this.service.setMemberScope(conversation.id, { identity, role, scope });
       profile = profileFromScope(saved?.scope ?? null, target.name);
     }
     const reportedWorkspace = typeof conversation.workspace === "string" && conversation.workspace.trim() !== "" ? conversation.workspace.trim() : taskWorkspace;
@@ -11125,6 +11136,8 @@ var MemberTaskService = class {
       notifyError: null,
       originAgentId: String(agent.id ?? ""),
       originSessionId: String(agent.session?.id ?? ""),
+      /** Project directory the delegating conversation runs in, or null. */
+      originCwd: callerProjectDir(agent),
       /** One-line egress report the target received, or ''. */
       egressLine,
       /** Identity/scope snapshot this conversation was started with. */
@@ -11427,6 +11440,40 @@ var MemberTaskService = class {
       await this.#save(task);
     }
     return true;
+  }
+  /**
+   * Recover the project directory of a task recorded before `originCwd` existed.
+   * @param {string} agentId origin agent id.
+   * @param {string} sessionId origin session id.
+   * @returns {string|null} directory, or null when the origin is gone.
+   */
+  #originCwdOf(agentId, sessionId) {
+    const agents = typeof this.ctx?.get === "function" ? this.ctx.get("agents") : this.ctx?.agents;
+    const agent = agents?.get?.(String(agentId ?? "")) ?? agents?.get?.(String(sessionId ?? ""));
+    return callerProjectDir(agent);
+  }
+  /**
+   * Record one accepted reply as the conversation's participation in the
+   * project's active product stage round.
+   *
+   * The service ignores projects without a stage, and a missing service keeps
+   * the reply path working in unit tests. Failures are swallowed: participation
+   * is bookkeeping, never a reason to drop an answer.
+   * @param {object} task the task that answered.
+   * @returns {Promise<void>} resolution after the record is attempted.
+   */
+  async #noteParticipation(task) {
+    if (typeof this.service?.noteMemberParticipation !== "function") return;
+    const cwd = typeof task.originCwd === "string" ? task.originCwd : "";
+    if (cwd === "") return;
+    const replies = Array.isArray(task.replies) ? task.replies : [];
+    const newest = replies.length > 0 && Number.isSafeInteger(replies[replies.length - 1]?.turn) ? replies[replies.length - 1].turn : null;
+    await this.service.noteMemberParticipation({
+      cwd,
+      conversationId: String(task.conversationId ?? ""),
+      turn: newest ?? (Number.isSafeInteger(task.turns) ? task.turns : null)
+    }).catch(() => {
+    });
   }
   /**
    * Newest task one origin session used, by its most recent delivery.
@@ -11847,18 +11894,18 @@ var MemberTaskService = class {
    * between the occupancy read and the compaction request: the refusal is
    * treated as "deliver without compressing", not as an error.
    *
-   * Passing `identity` / `scope` merges the conversation's stored scope and
-   * prefixes this delivery with a one-line identity note, so a conversation
-   * created before the setting existed can complete it in place.
+   * Passing `identity` / `role` / `scope` merges the conversation's stored
+   * scope and prefixes this delivery with a one-line identity note, so a
+   * conversation created before the setting existed can complete it in place.
    *
-   * @param {{conversationId: string, member?: string, prompt: string, identity?: unknown, scope?: unknown, agent?: any, signal?: AbortSignal}} request send request.
+   * @param {{conversationId: string, member?: string, prompt: string, identity?: unknown, role?: unknown, scope?: unknown, agent?: any, signal?: AbortSignal}} request send request.
    * @returns {Promise<object>} the tracked task.
    */
   async send(request) {
     await this.#ensureLoaded();
     const prompt = request.prompt;
     if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("prompt is required");
-    const scopePatch = normalizeMemberScopePatch({ identity: request.identity, scope: request.scope });
+    const scopePatch = normalizeMemberScopePatch({ identity: request.identity, role: request.role, scope: request.scope });
     const hasScopePatch = Object.keys(scopePatch).length > 0;
     const signal = request.signal;
     const { task, fresh, target } = await this.#sendTarget(request);
@@ -11884,7 +11931,7 @@ var MemberTaskService = class {
     }
     if (hasScopePatch) {
       if (typeof this.service.setMemberScope !== "function") throw new Error("member scopes are not available");
-      const saved = await this.service.setMemberScope(task.conversationId, { identity: request.identity, scope: request.scope });
+      const saved = await this.service.setMemberScope(task.conversationId, { identity: request.identity, role: request.role, scope: request.scope });
       task.profile = profileFromScope(saved?.scope ?? null, target?.name ?? task.member);
     } else if (typeof this.service.memberScope === "function") {
       const stored = await this.service.memberScope(task.conversationId).catch(() => null);
@@ -12363,6 +12410,7 @@ var MemberTaskService = class {
     if (!added) return false;
     await this.#save(task);
     await this.#log(task, `reply ${String(task.replySeq)}: ${truncate(task.lastText, 300)}`);
+    await this.#noteParticipation(task);
     if (options.notify !== false) this.#notifyWaiters(task);
     return true;
   }
@@ -12667,6 +12715,7 @@ function memberConversationEntry(task, scopes = {}) {
     memberName: profile?.name ?? (entry.member === "" ? null : entry.member),
     memberLabel: memberShortLabel(task),
     workspace: entry.workspace,
+    role: profile?.role ?? null,
     identity: profile?.identity ?? null,
     scope: profile?.scope ?? null,
     note,
@@ -12691,8 +12740,305 @@ function memberConversationSummary(entries) {
   };
 }
 
+// src/lib/product-stage.mjs
+import path26 from "node:path";
+var PRODUCT_STAGES = ["A", "B", "C", "D"];
+var PRODUCT_STAGE_SHORT = {
+  A: "\u8BA1\u5212\u4E0E\u76EE\u6807",
+  B: "\u5F00\u53D1\u4E0E\u6D4B\u8BD5",
+  C: "\u4EA7\u54C1\u7ECF\u7406\u4F7F\u7528",
+  D: "\u4E1A\u52A1\u4ECB\u5165"
+};
+var PRODUCT_STAGE_REQUIREMENTS = {
+  A: "\u6240\u6709\u6210\u5458\u53C2\u4E0E\u5E76\u63D0\u51FA\u5EFA\u8BAE\uFF0C\u6700\u540E\u7531\u4E3B\u5BF9\u8BDD\u51B3\u5B9A\u672C\u8F6E\u8BA1\u5212\u4E0E\u76EE\u6807\u3002",
+  B: "\u5F00\u53D1\u3001\u6D4B\u8BD5\u3001\u7814\u7A76\u5458\u53C2\u4E0E\uFF1B\u672C\u8F6E\u5F00\u53D1\u7684\u529F\u80FD\u6CA1\u6709 BUG\uFF08\u7591\u96BE\u6742\u75C7\u9664\u5916\uFF09\u3002",
+  C: "\u4EA7\u54C1\u7ECF\u7406\u771F\u5B9E\u4F7F\u7528\uFF1B\u53D1\u73B0\u95EE\u9898\u56DE\u5230 B \u9636\u6BB5\uFF0C\u76F4\u5230\u4EA7\u54C1\u7ECF\u7406\u653E\u884C\u3002",
+  D: "\u4E1A\u52A1\u4EBA\u5458\u5F00\u5C55\u4E1A\u52A1\u5DE5\u4F5C\uFF1B\u53D1\u73B0\u95EE\u9898\u56DE\u5230 C \u9636\u6BB5\uFF0C\u4E1A\u52A1\u653E\u884C\u540E\u56DE\u5230 A \u9636\u6BB5\u5E76\u5347\u4EA7\u54C1\u7248\u672C\u3002"
+};
+var MEMBER_ROLES = ["\u4EA7\u54C1\u7ECF\u7406", "\u7814\u7A76\u5458", "\u5F00\u53D1", "\u6D4B\u8BD5", "\u4E1A\u52A1"];
+var PRODUCT_GOAL_KEYS = ["product", "dev", "research"];
+var PRODUCT_GOAL_LABELS = {
+  product: "\u4EA7\u54C1\u76EE\u6807",
+  dev: "\u5F00\u53D1\u76EE\u6807",
+  research: "\u7814\u7A76\u76EE\u6807"
+};
+var PRODUCT_GOAL_STATUSES = ["\u672A\u5F00\u59CB", "\u8FDB\u884C\u4E2D", "\u5DF2\u8FBE\u6210", "\u672A\u8FBE\u6210"];
+var PRODUCT_GOAL_TEXT_MAX = 300;
+var PRODUCT_ROUND_MAX = 999;
+var PRODUCT_VERSION_PATTERN = /^(\d{8})\.(\d{1,4})$/u;
+function productDay(date = /* @__PURE__ */ new Date()) {
+  const value = date instanceof Date && !Number.isNaN(date.getTime()) ? date : /* @__PURE__ */ new Date();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${String(value.getFullYear())}${month}${day}`;
+}
+function isProductVersion(value) {
+  return typeof value === "string" && PRODUCT_VERSION_PATTERN.test(value.trim());
+}
+function nextProductVersion(previous, now = /* @__PURE__ */ new Date()) {
+  const day = productDay(now);
+  const match = typeof previous === "string" ? PRODUCT_VERSION_PATTERN.exec(previous.trim()) : null;
+  if (match === null || match[1] !== day) return `${day}.1`;
+  const minor = Number(match[2]) + 1;
+  return `${day}.${String(minor)}`;
+}
+function productStageKey(cwd) {
+  const text = typeof cwd === "string" ? cwd.trim() : "";
+  return text === "" ? "" : path26.resolve(text);
+}
+function roleOfScope(scope) {
+  const role = typeof scope?.role === "string" ? scope.role.trim() : "";
+  return MEMBER_ROLES.includes(role) ? role : null;
+}
+function stageRequiredRoles(stage) {
+  if (stage === "A") return [...MEMBER_ROLES];
+  if (stage === "B") return ["\u5F00\u53D1", "\u6D4B\u8BD5", "\u7814\u7A76\u5458"];
+  if (stage === "C") return ["\u4EA7\u54C1\u7ECF\u7406"];
+  if (stage === "D") return ["\u4E1A\u52A1"];
+  return [];
+}
+function normalizeGoalText(value, key) {
+  if (typeof value !== "string") throw new Error(`${key} goal text must be a string`);
+  const text = value.trim();
+  if (text.length > PRODUCT_GOAL_TEXT_MAX) {
+    throw new Error(`${key} goal text is too long: ${String(text.length)} > ${String(PRODUCT_GOAL_TEXT_MAX)} characters`);
+  }
+  return text === "" ? null : text;
+}
+function normalizeGoalStatus(value, key) {
+  if (typeof value !== "string") throw new Error(`${key} goal status must be a string`);
+  const status = value.trim();
+  if (status === "") return null;
+  if (!PRODUCT_GOAL_STATUSES.includes(status)) {
+    throw new Error(`${key} goal status must be one of ${PRODUCT_GOAL_STATUSES.join(", ")}: ${status}`);
+  }
+  return status;
+}
+function normalizeGoalPatch(patch) {
+  if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
+    throw new Error("goals must be an object");
+  }
+  const goals = {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (!PRODUCT_GOAL_KEYS.includes(key)) {
+      throw new Error(`unknown goal: ${key} (expected ${PRODUCT_GOAL_KEYS.join(", ")})`);
+    }
+    if (typeof value === "string") {
+      goals[key] = { text: normalizeGoalText(value, key) };
+      continue;
+    }
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`${key} goal must be a string or an object with text/status`);
+    }
+    for (const field of Object.keys(value)) {
+      if (field !== "text" && field !== "status") throw new Error(`unknown ${key} goal field: ${field}`);
+    }
+    const entry = {};
+    if (value.text !== void 0) entry.text = normalizeGoalText(value.text, key);
+    if (value.status !== void 0) entry.status = normalizeGoalStatus(value.status, key);
+    goals[key] = entry;
+  }
+  return goals;
+}
+function normalizeProductStageInput(input = {}) {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("product stage input must be an object");
+  }
+  const normalized = {};
+  if (input.stage !== void 0) {
+    if (typeof input.stage !== "string") throw new Error("stage must be a string");
+    const stage = input.stage.trim().toUpperCase();
+    if (!PRODUCT_STAGES.includes(stage)) {
+      throw new Error(`stage must be one of ${PRODUCT_STAGES.join(", ")}: ${stage}`);
+    }
+    normalized.stage = stage;
+  }
+  if (input.round !== void 0) {
+    const round2 = input.round;
+    if (!Number.isSafeInteger(round2) || round2 < 1 || round2 > PRODUCT_ROUND_MAX) {
+      throw new Error(`round must be an integer between 1 and ${String(PRODUCT_ROUND_MAX)}`);
+    }
+    normalized.round = round2;
+  }
+  if (input.goals !== void 0) normalized.goals = normalizeGoalPatch(input.goals);
+  if (Object.keys(normalized).length === 0) throw new Error("stage, round, or goals is required");
+  return normalized;
+}
+function mergeGoals(previous, patch) {
+  const goals = {};
+  for (const key of PRODUCT_GOAL_KEYS) {
+    const stored = previous?.[key];
+    if (stored === void 0) continue;
+    const text = typeof stored?.text === "string" && stored.text !== "" ? stored.text : null;
+    const status = PRODUCT_GOAL_STATUSES.includes(stored?.status) ? stored.status : null;
+    if (text !== null || status !== null) goals[key] = { text, status };
+  }
+  if (patch === void 0) return goals;
+  for (const key of PRODUCT_GOAL_KEYS) {
+    const change = patch[key];
+    if (change === void 0) continue;
+    const base = goals[key] ?? { text: null, status: null };
+    const text = change.text !== void 0 ? change.text : base.text;
+    if (text === null) {
+      delete goals[key];
+      continue;
+    }
+    const status = (change.status !== void 0 ? change.status : base.status) ?? "\u672A\u5F00\u59CB";
+    goals[key] = { text, status };
+  }
+  return goals;
+}
+function normalizeStoredProductStage(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const stage = typeof value.stage === "string" ? value.stage.trim().toUpperCase() : "";
+  if (!PRODUCT_STAGES.includes(stage)) return null;
+  const version = typeof value.version === "string" ? value.version.trim() : "";
+  if (!isProductVersion(version)) return null;
+  const round2 = Number.isSafeInteger(value.round) && value.round >= 1 && value.round <= PRODUCT_ROUND_MAX ? value.round : null;
+  if (round2 === null) return null;
+  const goals = mergeGoals(value.goals, void 0);
+  const participation = {};
+  if (value.participation !== null && typeof value.participation === "object" && !Array.isArray(value.participation)) {
+    for (const [conversationId, entry] of Object.entries(value.participation)) {
+      const id = conversationId.trim();
+      if (id === "" || entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const turn = Number.isSafeInteger(entry.turn) ? entry.turn : null;
+      const at = typeof entry.at === "string" ? entry.at : "";
+      participation[id] = { turn, at };
+    }
+  }
+  return {
+    version,
+    stage,
+    round: round2,
+    goals,
+    participation,
+    updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
+    updatedBy: typeof value.updatedBy === "string" ? value.updatedBy : ""
+  };
+}
+function applyProductStage(previous, input, now = /* @__PURE__ */ new Date()) {
+  const prev = previous ?? null;
+  const stage = input.stage ?? prev?.stage ?? "A";
+  const version = prev === null || !isProductVersion(prev.version) ? nextProductVersion(null, now) : stage === "A" && prev.stage === "D" ? nextProductVersion(prev.version, now) : prev.version;
+  const automaticRound = prev === null ? 1 : stage === "A" && prev.stage === "D" ? prev.round + 1 : prev.round;
+  const round2 = Math.min(input.round ?? automaticRound, PRODUCT_ROUND_MAX);
+  const reset = prev === null || prev.stage !== stage || prev.round !== round2;
+  return {
+    version,
+    stage,
+    round: round2,
+    goals: mergeGoals(prev?.goals, input.goals),
+    participation: reset ? {} : { ...prev?.participation ?? {} },
+    updatedAt: new Date(now).toISOString(),
+    updatedBy: ""
+  };
+}
+function goalLine(goal) {
+  const text = typeof goal?.text === "string" && goal.text !== "" ? goal.text : "";
+  if (text === "") return "\u672A\u8BBE\u7F6E";
+  const status = PRODUCT_GOAL_STATUSES.includes(goal?.status) ? goal.status : "\u672A\u5F00\u59CB";
+  return `${text}\uFF08${status}\uFF09`;
+}
+function productStageParticipants(state, tasks, scopes = {}) {
+  const list = Array.isArray(tasks) ? tasks : [];
+  const entries = list.map((task) => {
+    const conversationId = String(task?.conversationId ?? "");
+    const stored = scopes[conversationId] ?? null;
+    const role = roleOfScope(stored) ?? roleOfScope(task?.profile);
+    return {
+      conversationId,
+      role,
+      identity: typeof stored?.identity === "string" && stored.identity !== "" ? stored.identity : typeof task?.profile?.identity === "string" ? task.profile.identity : null,
+      statusLabel: typeof task?.statusLabel === "string" ? task.statusLabel : typeof task?.status === "string" ? task.status : "\u672A\u77E5",
+      participated: Boolean(state?.participation?.[conversationId])
+    };
+  });
+  const requiredRoles = stageRequiredRoles(state?.stage);
+  const required = state?.stage === "A" ? entries : entries.filter((entry) => entry.role !== null && requiredRoles.includes(entry.role));
+  const missing = required.filter((entry) => !entry.participated);
+  const missingRoles = state?.stage === "A" ? [] : requiredRoles.filter((role) => !entries.some((entry) => entry.role === role));
+  const roleLess = entries.filter((entry) => entry.role === null);
+  return { entries, required, missing, missingRoles, roleLess };
+}
+function participantLabel(entry) {
+  return entry.role === null ? entry.conversationId : `${entry.role} ${entry.conversationId}`;
+}
+function formatProductStageParticipation(state, tasks, scopes = {}) {
+  const view = productStageParticipants(state, tasks, scopes);
+  const done = view.required.filter((entry) => entry.participated);
+  const lines = [
+    `- \u672C\u8F6E\u53C2\u4E0E\uFF1A${String(done.length)}/${String(view.required.length)}${done.length === 0 ? "" : `\uFF08${done.map(participantLabel).join("\uFF1B")}\uFF09`}`
+  ];
+  if (view.missing.length > 0) {
+    lines.push(`- \u672A\u53C2\u4E0E\uFF1A${view.missing.map(participantLabel).join("\u3001")}`);
+  }
+  if (view.missingRoles.length > 0) {
+    lines.push(`- \u6CA1\u6709\u6210\u5458\u4F1A\u8BDD\u7684\u6807\u51C6\u8EAB\u4EFD\uFF1A${view.missingRoles.join("\u3001")}`);
+  }
+  if (view.roleLess.length > 0) {
+    lines.push(`- \u6807\u51C6\u8EAB\u4EFD\u672A\u8BBE\u7F6E\uFF1A${view.roleLess.map((entry) => `${entry.conversationId}\uFF08${entry.identity ?? "\u8EAB\u4EFD\u672A\u8BBE\u7F6E"}\uFF09`).join("\u3001")}\uFF1B\u7528 set_member_scope { "conversationId": "<\u4F1A\u8BDDid>", "role": "\u5F00\u53D1" } \u8BBE\u7F6E\u3002`);
+  }
+  return lines;
+}
+function formatProductStageNextCalls(state) {
+  const calls = [];
+  if (state.stage === "A") calls.push('\u8FDB\u5165 B \u9636\u6BB5 { "stage": "B" }');
+  if (state.stage === "B") calls.push('\u8FDB\u5165 C \u9636\u6BB5 { "stage": "C" }', '\u56DE A \u9636\u6BB5\u91CD\u65B0\u8BA1\u5212 { "stage": "A" }');
+  if (state.stage === "C") calls.push('\u8FDB\u5165 D \u9636\u6BB5 { "stage": "D" }', '\u53D1\u73B0\u95EE\u9898\u56DE B \u9636\u6BB5 { "stage": "B" }');
+  if (state.stage === "D") calls.push('\u4E1A\u52A1\u653E\u884C\u56DE A \u9636\u6BB5 { "stage": "A" }\uFF08\u81EA\u52A8\u5347\u7248\u672C\uFF09', '\u53D1\u73B0\u95EE\u9898\u56DE C \u9636\u6BB5 { "stage": "C" }');
+  return [
+    `- \u4E0B\u4E00\u6B65\uFF08set_product_stage\uFF09\uFF1A${calls.join("\uFF1B")}\u3002`,
+    `- \u5B50\u9636\u6BB5\u6216\u76EE\u6807\uFF1A\u540C\u4E00\u9636\u6BB5\u4E0B\u4E00\u8F6E { "stage": "${state.stage}", "round": ${String(state.round + 1)} }\uFF1B\u53EA\u66F4\u65B0\u76EE\u6807\u72B6\u6001 { "goals": { "dev": { "status": "\u5DF2\u8FBE\u6210" } } }\u3002`
+  ];
+}
+function formatProductStageLines(state, tasks, scopes = {}) {
+  return [
+    `[\u4EA7\u54C1\u9636\u6BB5] ${state.version} \xB7 ${state.stage} \u9636\u6BB5\uFF08\u7B2C ${String(state.round)} \u8F6E\u8FED\u4EE3\uFF09\xB7 ${PRODUCT_STAGE_SHORT[state.stage] ?? ""}`,
+    `- \u9636\u6BB5\u8981\u6C42\uFF1A${PRODUCT_STAGE_REQUIREMENTS[state.stage] ?? ""}`,
+    ...PRODUCT_GOAL_KEYS.map((key) => `- ${PRODUCT_GOAL_LABELS[key]}\uFF1A${goalLine(state.goals?.[key])}`),
+    ...formatProductStageParticipation(state, tasks, scopes),
+    ...formatProductStageNextCalls(state)
+  ];
+}
+function formatProductStageResult(state, options = {}) {
+  const lines = [
+    `${options.created === true ? "\u4EA7\u54C1\u9636\u6BB5\u5DF2\u5EFA\u7ACB" : "\u4EA7\u54C1\u9636\u6BB5\u5DF2\u66F4\u65B0"}\uFF1A${state.version} \xB7 ${state.stage} \u9636\u6BB5\uFF08\u7B2C ${String(state.round)} \u8F6E\u8FED\u4EE3\uFF09`,
+    `- \u9636\u6BB5\u8981\u6C42\uFF1A${PRODUCT_STAGE_REQUIREMENTS[state.stage] ?? ""}`,
+    ...PRODUCT_GOAL_KEYS.map((key) => `- ${PRODUCT_GOAL_LABELS[key]}\uFF1A${goalLine(state.goals?.[key])}`),
+    ...formatProductStageParticipation(state, options.tasks ?? [], options.scopes ?? {}),
+    ...formatProductStageNextCalls(state),
+    ...Array.isArray(options.warnings) && options.warnings.length > 0 ? ["[\u653E\u884C\u68C0\u67E5]", ...options.warnings.map((line) => `- ${line}`)] : []
+  ];
+  return lines.join("\n");
+}
+function productStageWarnings(previous, tasks, scopes = {}) {
+  if (previous === null || previous === void 0) return [];
+  const view = productStageParticipants(previous, tasks, scopes);
+  const warnings = [];
+  if (view.missing.length > 0) {
+    warnings.push(`\u79BB\u5F00 ${previous.stage} \u9636\u6BB5\u65F6\u8FD8\u6709\u6210\u5458\u6CA1\u6709\u53C2\u4E0E\u672C\u8F6E\uFF1A${view.missing.map(participantLabel).join("\u3001")}`);
+  }
+  if (view.missingRoles.length > 0) {
+    warnings.push(`\u79BB\u5F00 ${previous.stage} \u9636\u6BB5\u65F6\u6CA1\u6709\u8FD9\u4E9B\u8EAB\u4EFD\u7684\u6210\u5458\u4F1A\u8BDD\uFF1A${view.missingRoles.join("\u3001")}`);
+  }
+  if (view.roleLess.length > 0) {
+    warnings.push(`\u79BB\u5F00 ${previous.stage} \u9636\u6BB5\u65F6\u4ECD\u6709\u6210\u5458\u6CA1\u6709\u8BBE\u7F6E\u6807\u51C6\u8EAB\u4EFD\uFF1A${view.roleLess.map((entry) => entry.conversationId).join("\u3001")}`);
+  }
+  if (previous.stage === "A" && !previous.goals?.product?.text) {
+    warnings.push("\u79BB\u5F00 A \u9636\u6BB5\u65F6\u4EA7\u54C1\u76EE\u6807\u8FD8\u6CA1\u6709\u8BBE\u7F6E");
+  }
+  if (previous.stage === "B" && previous.goals?.dev?.status !== "\u5DF2\u8FBE\u6210") {
+    warnings.push("\u79BB\u5F00 B \u9636\u6BB5\u65F6\u5F00\u53D1\u76EE\u6807\u72B6\u6001\u4E0D\u662F\u300C\u5DF2\u8FBE\u6210\u300D");
+  }
+  if (previous.stage === "C" && previous.goals?.product?.status !== "\u5DF2\u8FBE\u6210") {
+    warnings.push("\u79BB\u5F00 C \u9636\u6BB5\u65F6\u4EA7\u54C1\u76EE\u6807\u72B6\u6001\u4E0D\u662F\u300C\u5DF2\u8FBE\u6210\u300D");
+  }
+  return warnings;
+}
+
 // src/lib/service.mjs
-var HERE2 = path26.dirname(fileURLToPath2(import.meta.url));
+var HERE2 = path27.dirname(fileURLToPath2(import.meta.url));
 var execFileAsync2 = promisify3(execFile3);
 var PROBE_GRACE_MS = 10 * 6e4;
 var PROBE_TIMEOUT_MS = 4500;
@@ -12717,6 +13063,14 @@ function normalizeMemberScopePatch(patch = {}) {
     }
     normalized.identity = text === "" ? null : text;
   }
+  if (patch.role !== void 0) {
+    if (typeof patch.role !== "string") throw new Error("role must be a string");
+    const role = patch.role.trim();
+    if (role !== "" && !MEMBER_ROLES.includes(role)) {
+      throw new Error(`role must be one of ${MEMBER_ROLES.join(", ")}: ${role}`);
+    }
+    normalized.role = role === "" ? null : role;
+  }
   if (patch.scope !== void 0) {
     if (typeof patch.scope !== "string") throw new Error("scope must be a string");
     const text = patch.scope.trim();
@@ -12732,10 +13086,6 @@ function normalizeMemberScopePatch(patch = {}) {
       throw new Error(`note is too long: ${String(text.length)} > ${String(MEMBER_NOTE_MAX)} characters`);
     }
     normalized.note = text === "" ? null : text;
-  }
-  if (patch.keep !== void 0) {
-    if (typeof patch.keep !== "boolean") throw new Error("keep must be a boolean");
-    normalized.keep = patch.keep;
   }
   if (patch.avoidLongJobs !== void 0) {
     if (typeof patch.avoidLongJobs !== "boolean") throw new Error("avoidLongJobs must be a boolean");
@@ -12768,14 +13118,14 @@ function savedScopeNumber(value, valid) {
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync14(path26.join(current, "build", "recipes.json")) && existsSync14(path26.join(current, "code", "build"))) {
+    if (existsSync14(path27.join(current, "build", "recipes.json")) && existsSync14(path27.join(current, "code", "build"))) {
       return current;
     }
-    const parent = path26.dirname(current);
+    const parent = path27.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return path26.resolve(start, "..", "..");
+  return path27.resolve(start, "..", "..");
 }
 var REPOSITORY_ROOT = findRepositoryRoot(HERE2);
 function runSshProbe(args, source, timeoutMs = 3e4) {
@@ -12819,7 +13169,7 @@ function runSshProbe(args, source, timeoutMs = 3e4) {
 }
 function packageVersion() {
   try {
-    const parsed = JSON.parse(readFileSync5(path26.join(REPOSITORY_ROOT, "package.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync5(path27.join(REPOSITORY_ROOT, "package.json"), "utf8"));
     return typeof parsed.version === "string" ? parsed.version : "0.0.0";
   } catch {
     return "0.0.0";
@@ -12850,24 +13200,26 @@ var MeshService = class {
     this.config = options.config ?? {};
     this.logLine = options.log ?? (() => {
     });
-    this.jobRoot = path26.join(this.dataDir, "build");
-    this.cacheDir = path26.join(this.dataDir, "cache");
+    this.jobRoot = path27.join(this.dataDir, "build");
+    this.cacheDir = path27.join(this.dataDir, "cache");
     this.version = packageVersion();
     this.repositoryRoot = REPOSITORY_ROOT;
-    this.recipesPath = path26.join(REPOSITORY_ROOT, "build", "recipes.json");
-    this.overlayRoot = path26.join(REPOSITORY_ROOT, "build", "overlays");
-    this.home = path26.dirname(this.dataDir);
-    this.deployRoot = path26.join(this.dataDir, "deploy");
-    this.memberTagsFile = path26.join(this.dataDir, "member-tags.json");
-    this.memberScopesFile = path26.join(this.dataDir, "member-scopes.json");
+    this.recipesPath = path27.join(REPOSITORY_ROOT, "build", "recipes.json");
+    this.overlayRoot = path27.join(REPOSITORY_ROOT, "build", "overlays");
+    this.home = path27.dirname(this.dataDir);
+    this.deployRoot = path27.join(this.dataDir, "deploy");
+    this.memberTagsFile = path27.join(this.dataDir, "member-tags.json");
+    this.memberScopesFile = path27.join(this.dataDir, "member-scopes.json");
+    this.productStagesFile = path27.join(this.dataDir, "product-stages.json");
+    this.productStageWrites = Promise.resolve();
     this.announcedUpgrades = /* @__PURE__ */ new Map();
-    this.packagesDir = path26.join(os10.homedir(), ".dsh", "packages");
-    this.releaseConfigFile = path26.join(this.dataDir, "release.json");
+    this.packagesDir = path27.join(os10.homedir(), ".dsh", "packages");
+    this.releaseConfigFile = path27.join(this.dataDir, "release.json");
     this.latestReleaseCache = null;
     const geoConfig = this.config.geo === false ? { enabled: false } : this.config.geo !== null && typeof this.config.geo === "object" ? this.config.geo : {};
     this.geo = options.geoLookup ?? new GeoLookup({
       enabled: geoConfig.enabled !== false,
-      cacheFile: path26.join(this.dataDir, "geo-cache.json"),
+      cacheFile: path27.join(this.dataDir, "geo-cache.json"),
       provider: typeof geoConfig.provider === "string" && geoConfig.provider !== "" ? geoConfig.provider : void 0,
       timeoutMs: typeof geoConfig.timeoutMs === "number" ? geoConfig.timeoutMs : void 0,
       fetchImpl: typeof geoConfig.fetchImpl === "function" ? geoConfig.fetchImpl : void 0,
@@ -12884,7 +13236,7 @@ var MeshService = class {
     this.remoteBuilder = new RemoteBuilder({ packagesDir: this.packagesDir, log: (line) => this.logLine(line) });
     this.systemCache = null;
     this.probes = /* @__PURE__ */ new Map();
-    this.probeCacheFile = path26.join(this.dataDir, "probe-cache.json");
+    this.probeCacheFile = path27.join(this.dataDir, "probe-cache.json");
     this.probeCacheLoaded = false;
     this.fetchImpl = options.fetchImpl;
   }
@@ -12924,7 +13276,7 @@ var MeshService = class {
   /** Persist the probe map; a failed write is not worth reporting. */
   async #saveProbes() {
     try {
-      await mkdir15(path26.dirname(this.probeCacheFile), { recursive: true });
+      await mkdir15(path27.dirname(this.probeCacheFile), { recursive: true });
       await writeFile15(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.probes)), "utf8");
     } catch {
     }
@@ -12946,7 +13298,7 @@ var MeshService = class {
    * @returns {Promise<object>} status.
    */
   async status() {
-    const stateFile = path26.join(this.home, "wireguard", "state.json");
+    const stateFile = path27.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     return {
@@ -13011,10 +13363,10 @@ var MeshService = class {
     let host = String(member.ip ?? "");
     if (host === "") throw new Error(`member ${member.id} has no VPN address`);
     if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
-    const path32 = "/__gate/cluster/__gate/session/promote";
-    const response = await fetch(`http://${host}${path32}`, {
+    const path33 = "/__gate/cluster/__gate/session/promote";
+    const response = await fetch(`http://${host}${path33}`, {
       method: "POST",
-      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path32 }) }
+      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path33 }) }
     });
     const text = await response.text();
     if (!response.ok) throw new Error(`member ${member.name} refused the request: HTTP ${String(response.status)} ${text.slice(0, 120)}`);
@@ -13027,7 +13379,7 @@ var MeshService = class {
   }
   async members() {
     await this.#loadProbes();
-    const stateFile = path26.join(this.home, "wireguard", "state.json");
+    const stateFile = path27.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     const self = {
@@ -13163,11 +13515,11 @@ var MeshService = class {
     const address = String(ip ?? "").trim();
     if (address === "") return { ok: false, error: "member address is empty" };
     if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, error: "proxy port is invalid" };
-    const { state } = await readWireGuardState({ file: path26.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path27.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === address);
     if (peer === void 0 || peer === null) return { ok: false, error: "member is not in the WireGuard state" };
     const digest = createHash8("sha256").update(String(peer.publicKey ?? "")).digest("hex");
-    const key = path26.join(this.home, "wireguard", "ssh", `${digest}.key`);
+    const key = path27.join(this.home, "wireguard", "ssh", `${digest}.key`);
     if (!existsSync14(key)) return { ok: false, error: "no SSH key for this member" };
     const windows = String(peer.platform ?? "").toLowerCase().startsWith("win");
     const remote = windows ? `"%USERPROFILE%\\.dsh\\runtime\\node\\node.exe" --input-type=module - ${String(port)}` : `~/.dsh/runtime/node/bin/node --input-type=module - ${String(port)}`;
@@ -13293,14 +13645,15 @@ var MeshService = class {
     return { ok: true, ...memberConversationSummary(conversations), conversations };
   }
   /**
-   * Identity, work scope, keep flag and compaction settings for
+   * Identity, standard role, work scope and compaction settings for
    * conversations, keyed by conversation id.
    *
    * The file is only an optional hint book: a missing, unreadable, or damaged
    * file is the same as "nothing set yet", never a startup failure. Only the
    * fields that were actually set are stored; defaults are applied by readers
-   * ({@link effectiveCompressPercent}).
-   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, compressPercent?: number}>>} scopes.
+   * ({@link effectiveCompressPercent}). A legacy `keep` flag is ignored: the
+   * dispatch push that used it is gone.
+   * @returns {Promise<Record<string, {identity?: string, role?: string, scope?: string, avoidLongJobs?: boolean, note?: string, compressPercent?: number}>>} scopes.
    */
   async memberScopes() {
     try {
@@ -13311,16 +13664,17 @@ var MeshService = class {
         if (rawId.trim() === "") continue;
         if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
         const identity = savedScopeText(value.identity, MEMBER_IDENTITY_MAX);
+        const rawRole = savedScopeText(value.role, 20);
+        const role = rawRole !== null && MEMBER_ROLES.includes(rawRole) ? rawRole : null;
         const scope = savedScopeText(value.scope, MEMBER_SCOPE_MAX);
-        const keep = typeof value.keep === "boolean" ? value.keep : void 0;
         const avoidLongJobs = typeof value.avoidLongJobs === "boolean" ? value.avoidLongJobs : void 0;
         const note = savedScopeText(value.note, MEMBER_NOTE_MAX);
         const compressPercent = savedScopeNumber(value.compressPercent, (candidate) => candidate >= 1 && candidate <= 100);
-        if (identity === null && scope === null && keep === void 0 && avoidLongJobs === void 0 && note === null && compressPercent === void 0) continue;
+        if (identity === null && role === null && scope === null && avoidLongJobs === void 0 && note === null && compressPercent === void 0) continue;
         scopes[rawId.trim()] = {
           ...identity === null ? {} : { identity },
+          ...role === null ? {} : { role },
           ...scope === null ? {} : { scope },
-          ...keep === void 0 ? {} : { keep },
           ...avoidLongJobs === void 0 ? {} : { avoidLongJobs },
           ...note === null ? {} : { note },
           ...compressPercent === void 0 ? {} : { compressPercent }
@@ -13334,7 +13688,7 @@ var MeshService = class {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, compressPercent?: number}|null>} scope.
+   * @returns {Promise<{identity?: string, role?: string, scope?: string, avoidLongJobs?: boolean, note?: string, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? "").trim();
@@ -13346,13 +13700,14 @@ var MeshService = class {
    * Merge and save one conversation's identity/work scope and settings.
    *
    * Only the fields present in the patch change. An empty string clears that
-   * text field (the record is dropped when nothing remains). `keep` and
-   * `avoidLongJobs` are stored as given; only the self target is supposed to
-   * pass them. `note` is main-conversation-only metadata and is never injected
-   * or delivered to the member. `compressPercent` applies to both self and
-   * member conversations.
+   * text field (the record is dropped when nothing remains). `role` is the
+   * member's standard identity; only the member target is supposed to pass it.
+   * `avoidLongJobs` is stored as given and only the self target uses it. `note`
+   * is main-conversation-only metadata and is never injected or delivered to
+   * the member. `compressPercent` applies to both self and member
+   * conversations.
    * @param {string} conversationId conversation or session id.
-   * @param {{identity?: unknown, scope?: unknown, keep?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] fields to change.
+   * @param {{identity?: unknown, role?: unknown, scope?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] fields to change.
    * @returns {Promise<{ok: boolean, scopes: Record<string, object>, scope: object|null}>} saved scopes.
    */
   async setMemberScope(conversationId, patch = {}) {
@@ -13365,11 +13720,14 @@ var MeshService = class {
       if (normalized.identity === null) delete next.identity;
       else next.identity = normalized.identity;
     }
+    if (normalized.role !== void 0) {
+      if (normalized.role === null) delete next.role;
+      else next.role = normalized.role;
+    }
     if (normalized.scope !== void 0) {
       if (normalized.scope === null) delete next.scope;
       else next.scope = normalized.scope;
     }
-    if (normalized.keep !== void 0) next.keep = normalized.keep;
     if (normalized.avoidLongJobs !== void 0) next.avoidLongJobs = normalized.avoidLongJobs;
     if (normalized.note !== void 0) {
       if (normalized.note === null) delete next.note;
@@ -13382,6 +13740,107 @@ var MeshService = class {
     await writeFile15(this.memberScopesFile, `${JSON.stringify(scopes, null, 2)}
 `, "utf8");
     return { ok: true, scopes, scope: scopes[id] ?? null };
+  }
+  /**
+   * Every product stage state, keyed by project directory.
+   *
+   * A missing, unreadable, or damaged file is the same as "no stage yet"; one
+   * invalid project record is dropped instead of failing the whole read.
+   * @returns {Promise<Record<string, object>>} project directory -> state.
+   */
+  async productStages() {
+    try {
+      const parsed = JSON.parse(await readFile18(this.productStagesFile, "utf8"));
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      const stages = {};
+      for (const [rawKey, value] of Object.entries(parsed)) {
+        const key = productStageKey(rawKey);
+        if (key === "") continue;
+        const state = normalizeStoredProductStage(value);
+        if (state !== null) stages[key] = state;
+      }
+      return stages;
+    } catch {
+      return {};
+    }
+  }
+  /**
+   * The product stage of one project, or null.
+   * @param {string} cwd project directory.
+   * @returns {Promise<object|null>} state.
+   */
+  async productStage(cwd) {
+    const key = productStageKey(cwd);
+    if (key === "") return null;
+    const stages = await this.productStages();
+    return stages[key] ?? null;
+  }
+  /**
+   * Merge one stage patch and persist it.
+   *
+   * The transition rules live in `product-stage.mjs`: the product version moves
+   * only on D -> A, the sub-stage round follows the iteration, and a stage or
+   * round change clears the round's participation records. Writes are
+   * serialised because the member monitors record participation concurrently.
+   * @param {{cwd: string, stage?: unknown, round?: unknown, goals?: unknown, bySessionId?: string, now?: Date}} input stage patch.
+   * @returns {Promise<{state: object, previous: object|null}>} saved state and the state before this call.
+   */
+  async setProductStage({ cwd, stage, round: round2, goals, bySessionId = "", now = /* @__PURE__ */ new Date() }) {
+    const key = productStageKey(cwd);
+    if (key === "") throw new Error("set_product_stage needs a project directory");
+    const input = normalizeProductStageInput({ stage, round: round2, goals });
+    return await this.#updateProductStages((stages) => {
+      const previous = stages[key] ?? null;
+      const state = applyProductStage(previous, input, now);
+      state.updatedBy = String(bySessionId ?? "");
+      stages[key] = state;
+      return { state, previous };
+    });
+  }
+  /**
+   * Record that one member conversation answered inside the current stage round.
+   *
+   * Called once per accepted member reply, from both the `wait_member` path and
+   * the fallback delivery path (they share the same reply table). A project
+   * without a stage, or a reply that belongs to no known project, is ignored.
+   * @param {{cwd?: string, conversationId?: string, turn?: number|null, at?: string}} facts participation fact.
+   * @returns {Promise<boolean>} whether an active stage recorded the reply.
+   */
+  async noteMemberParticipation({ cwd, conversationId, turn = null, at = (/* @__PURE__ */ new Date()).toISOString() }) {
+    const key = productStageKey(cwd);
+    const id = typeof conversationId === "string" ? conversationId.trim() : "";
+    if (key === "" || id === "") return false;
+    return await this.#updateProductStages((stages) => {
+      const state = stages[key];
+      if (state === void 0) return false;
+      const current = state.participation[id];
+      const seen = Number.isSafeInteger(current?.turn) ? current.turn : -1;
+      if (Number.isSafeInteger(turn) && turn < seen) return true;
+      state.participation[id] = {
+        turn: Number.isSafeInteger(turn) ? turn : Number.isSafeInteger(current?.turn) ? current.turn : null,
+        at
+      };
+      return true;
+    });
+  }
+  /**
+   * Serialise one product-stage read/modify/write cycle.
+   * @param {(stages: Record<string, object>) => any} mutate mutation, returning the call's result.
+   * @returns {Promise<any>} the mutation's result after the file is written.
+   */
+  async #updateProductStages(mutate) {
+    const run3 = this.productStageWrites.then(async () => {
+      const stages = await this.productStages();
+      const result = mutate(stages);
+      await mkdir15(this.dataDir, { recursive: true });
+      await writeFile15(this.productStagesFile, `${JSON.stringify(stages, null, 2)}
+`, "utf8");
+      return result;
+    });
+    this.productStageWrites = run3.then(() => {
+    }, () => {
+    });
+    return await run3;
   }
   /**
    * Remove the temporary files a build leaves behind.
@@ -13408,7 +13867,7 @@ var MeshService = class {
     const removed = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path26.join(this.jobRoot, entry.name);
+      const dir = path27.join(this.jobRoot, entry.name);
       let state;
       try {
         state = await readState(dir);
@@ -13417,12 +13876,12 @@ var MeshService = class {
       }
       if (this.running.has(state.id) && state.id !== options.keep) continue;
       if (state.status === "created" || state.status === "needs-fix" || state.status === "learned") continue;
-      await rm15(path26.join(dir, "src"), { recursive: true, force: true });
-      if (state.id !== options.keep) await rm15(path26.join(dir, "smoke"), { recursive: true, force: true });
-      await rm15(path26.join(dir, "work-order"), { recursive: true, force: true });
+      await rm15(path27.join(dir, "src"), { recursive: true, force: true });
+      if (state.id !== options.keep) await rm15(path27.join(dir, "smoke"), { recursive: true, force: true });
+      await rm15(path27.join(dir, "work-order"), { recursive: true, force: true });
       if (options.keepDist !== true) {
-        if (state.status === "done") await this.#pruneDist(path26.join(dir, "dist"));
-        else await rm15(path26.join(dir, "dist"), { recursive: true, force: true });
+        if (state.status === "done") await this.#pruneDist(path27.join(dir, "dist"));
+        else await rm15(path27.join(dir, "dist"), { recursive: true, force: true });
       }
       removed.push(state.id);
     }
@@ -13441,7 +13900,7 @@ var MeshService = class {
     const entries = await readdir9(distDir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      await rm15(path26.join(distDir, entry.name), { recursive: true, force: true });
+      await rm15(path27.join(distDir, entry.name), { recursive: true, force: true });
     }
   }
   /**
@@ -13455,7 +13914,7 @@ var MeshService = class {
    */
   async #directLinks() {
     try {
-      const raw = JSON.parse(await readFile18(path26.join(this.home, "hysteria", "links.json"), "utf8"));
+      const raw = JSON.parse(await readFile18(path27.join(this.home, "hysteria", "links.json"), "utf8"));
       return Array.isArray(raw.links) ? raw.links : [];
     } catch {
       return [];
@@ -13552,7 +14011,7 @@ var MeshService = class {
       direct: request.direct === true
     });
     const buildStamp = await nextBuildStamp({
-      stateFile: path26.join(this.dataDir, "build-stamp.json"),
+      stateFile: path27.join(this.dataDir, "build-stamp.json"),
       packagesDir: this.packagesDir
     });
     const job = await createJob({
@@ -13784,14 +14243,14 @@ var MeshService = class {
     let user = "root";
     let identityFile;
     let port = 22;
-    const { state } = await readWireGuardState({ file: path26.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path27.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (Number.isSafeInteger(peer.sshPort)) port = peer.sshPort;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
         const digest = createHash8("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path26.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        const candidate = path27.join(this.home, "wireguard", "ssh", `${digest}.key`);
         if (existsSync14(candidate)) identityFile = candidate;
       }
     }
@@ -13879,8 +14338,8 @@ var MeshService = class {
     const state = await readState(dir);
     return {
       ...state,
-      logFile: path26.join(dir, "build.log"),
-      stateFile: path26.join(dir, "state.json"),
+      logFile: path27.join(dir, "build.log"),
+      stateFile: path27.join(dir, "state.json"),
       logTail: await readLogTail(dir, 60),
       running: this.running.has(id),
       workOrderMarkdown: state.workOrder?.markdown ?? null,
@@ -13898,7 +14357,7 @@ var MeshService = class {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       try {
-        const state = await readState(path26.join(this.jobRoot, entry.name));
+        const state = await readState(path27.join(this.jobRoot, entry.name));
         jobs.push(this.#summary(state));
       } catch {
       }
@@ -14068,7 +14527,7 @@ var MeshService = class {
       if (depth < 0) return;
       const entries = await readdir9(dir, { withFileTypes: true }).catch(() => []);
       for (const entry of entries) {
-        const file = path26.join(dir, entry.name);
+        const file = path27.join(dir, entry.name);
         if (entry.isDirectory()) {
           if (depth > 0) await walk(file, depth - 1);
           continue;
@@ -14085,7 +14544,7 @@ var MeshService = class {
       }
     };
     await walk(this.packagesDir, 0);
-    await walk(path26.join(this.dataDir, "upgrade"), 2);
+    await walk(path27.join(this.dataDir, "upgrade"), 2);
     packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
     return packages;
   }
@@ -14213,7 +14672,7 @@ var MeshService = class {
       if (!entry.isFile()) continue;
       const parsed = packagePlatformFromName(entry.name);
       if (parsed === null) continue;
-      const file = path26.join(this.packagesDir, entry.name);
+      const file = path27.join(this.packagesDir, entry.name);
       const info = await stat13(file).catch(() => null);
       if (info === null) continue;
       packages.push({
@@ -14328,7 +14787,7 @@ var MeshService = class {
   #applyInferredDeployment(member, deployJobs) {
     if (memberDeployment(member) !== null) return;
     const job = deployJobs.find((candidate) => candidate.status === "succeeded" && candidate.package !== void 0 && (candidate.member === member.id || candidate.target?.host === member.ip));
-    const parsed = packageInfo(path26.basename(job?.package ?? ""));
+    const parsed = packageInfo(path27.basename(job?.package ?? ""));
     if (parsed === null) return;
     member.deployment = { version: parsed.version, buildStamp: parsed.buildStamp, inferred: true };
   }
@@ -14655,11 +15114,11 @@ var MeshService = class {
    */
   async removePackage(request) {
     const name = typeof request?.name === "string" ? request.name.trim() : "";
-    if (name === "" || name !== path26.basename(name) || name.startsWith(".")) {
+    if (name === "" || name !== path27.basename(name) || name.startsWith(".")) {
       throw new Error("package name is invalid");
     }
     if (!/\.(?:7z|zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`);
-    const file = path26.join(this.packagesDir, name);
+    const file = path27.join(this.packagesDir, name);
     const info = await stat13(file).catch(() => null);
     if (info === null || !info.isFile()) throw new Error(`package not found: ${name}`);
     const removed = [];
@@ -14682,7 +15141,7 @@ var MeshService = class {
   async resolvePackage(input) {
     const raw = typeof input === "string" ? input.trim() : "";
     if (raw === "") throw new Error("package is required");
-    const candidates = path26.isAbsolute(raw) ? [raw] : [path26.join(this.packagesDir, raw), path26.join(this.repositoryRoot, "dist", raw)];
+    const candidates = path27.isAbsolute(raw) ? [raw] : [path27.join(this.packagesDir, raw), path27.join(this.repositoryRoot, "dist", raw)];
     for (const file of candidates) {
       const info = await stat13(file).catch(() => null);
       if (info?.isFile()) return file;
@@ -14764,7 +15223,7 @@ var MeshService = class {
           prefer: "gitee",
           ...link3 === null || typeof link3.url !== "string" || link3.url === "" ? {} : { proxy: link3.url }
         };
-        packagePath = path26.join(this.packagesDir, asset.name);
+        packagePath = path27.join(this.packagesDir, asset.name);
         os11 = asset.os;
       } else {
         packagePath = asset.name;
@@ -14778,11 +15237,11 @@ var MeshService = class {
     } else if (packageOnTarget !== null) {
       packagePath = String(packageOnTarget.path ?? "").trim();
       if (packagePath === "") throw new Error("packageOnTarget.path is required");
-      os11 = /win(?:dows)?/iu.test(path26.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+      os11 = /win(?:dows)?/iu.test(path27.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
     } else {
       packagePath = await this.resolvePackage(request.package);
-      const parsed = packagePlatformFromName(path26.basename(packagePath));
-      if (parsed === null) throw new Error(`\u4E0D\u662F dsh-mesh \u90E8\u7F72\u5305\uFF1A${path26.basename(packagePath)}`);
+      const parsed = packagePlatformFromName(path27.basename(packagePath));
+      if (parsed === null) throw new Error(`\u4E0D\u662F dsh-mesh \u90E8\u7F72\u5305\uFF1A${path27.basename(packagePath)}`);
       os11 = parsed.os;
     }
     if (member !== void 0) {
@@ -14911,7 +15370,7 @@ var MeshService = class {
     return {
       job,
       member: started.member,
-      logFile: path26.join(this.deployRoot, started.job.id, "deploy.log"),
+      logFile: path27.join(this.deployRoot, started.job.id, "deploy.log"),
       log: await this.deployLogs(started.job.id, 80)
     };
   }
@@ -14998,7 +15457,7 @@ var MeshService = class {
       target: { host: "127.0.0.1", user: os10.userInfo().username, port: null, os: "linux", appRoot: install.appRoot },
       services: ["dsh-web-app.service", "dsh-web-gate.service", "dsh-wireguard-control.service"],
       packagePath: input.packagePath,
-      release: typeof input.acquire?.name === "string" ? input.acquire.name : path26.basename(input.packagePath)
+      release: typeof input.acquire?.name === "string" ? input.acquire.name : path27.basename(input.packagePath)
     });
     return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: "pointer" };
   }
@@ -15009,7 +15468,7 @@ var MeshService = class {
    */
   async #queueJob(job) {
     const id = newJobId();
-    const dir = path26.join(this.deployRoot, id);
+    const dir = path27.join(this.deployRoot, id);
     await mkdir15(dir, { recursive: true });
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const bytes = job.plan?.package?.bytes ?? (await stat13(job.packagePath).catch(() => null))?.size ?? 0;
@@ -15051,7 +15510,7 @@ var MeshService = class {
    * @returns {Promise<{mode: string, unit: string|null}>} how it was started.
    */
   async #spawnRunner(dir, id) {
-    const script = path26.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
+    const script = path27.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
     if (!existsSync14(script)) throw new Error(`deploy runner is missing: ${script}`);
     const node = process.execPath;
     const unit = `dsh-mesh-job-${id.replace(/^deploy-/u, "")}`;
@@ -15098,26 +15557,26 @@ var MeshService = class {
   #localAppRoot() {
     const inspect = (candidate2) => {
       try {
-        if (existsSync14(path26.join(candidate2, "dsh-mesh.json")) && existsSync14(path26.join(candidate2, "releases"))) {
+        if (existsSync14(path27.join(candidate2, "dsh-mesh.json")) && existsSync14(path27.join(candidate2, "releases"))) {
           return { appRoot: candidate2, layout: "pointer" };
         }
       } catch {
       }
       return null;
     };
-    let candidate = path26.resolve(this.repositoryRoot, "..");
+    let candidate = path27.resolve(this.repositoryRoot, "..");
     for (let depth = 0; depth < 5; depth += 1) {
       const found = inspect(candidate);
       if (found !== null) return found;
-      const parent = path26.dirname(candidate);
+      const parent = path27.dirname(candidate);
       if (parent === candidate) break;
       candidate = parent;
     }
-    candidate = path26.resolve(this.home);
+    candidate = path27.resolve(this.home);
     for (let depth = 0; depth < 5; depth += 1) {
       const found = inspect(candidate);
       if (found !== null) return found;
-      const parent = path26.dirname(candidate);
+      const parent = path27.dirname(candidate);
       if (parent === candidate) break;
       candidate = parent;
     }
@@ -15135,7 +15594,7 @@ var MeshService = class {
     if (this.running.has(state.id) || state.status === "running") {
       throw new Error("\u7F16\u8BD1\u8FD8\u5728\u8FD0\u884C\uFF0C\u7ED3\u675F\u540E\u518D\u6E05\u7A7A\u65E5\u5FD7");
     }
-    await writeFile15(path26.join(dir, "build.log"), "", "utf8");
+    await writeFile15(path27.join(dir, "build.log"), "", "utf8");
     return { ok: true, id: state.id };
   }
   /**
@@ -15153,7 +15612,7 @@ var MeshService = class {
     const entries = await readdir9(this.jobRoot, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path26.join(this.jobRoot, entry.name);
+      const dir = path27.join(this.jobRoot, entry.name);
       const state = await readState(dir).catch(() => null);
       if (state === null) continue;
       if (this.running.has(state.id) || state.status === "running" || state.status === "queued") continue;
@@ -15241,13 +15700,13 @@ var MeshService = class {
     if (member.ip === "") throw new Error(`member ${member.id} has no VPN address`);
     let user = "root";
     let identityFile;
-    const { state } = await readWireGuardState({ file: path26.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path27.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
         const digest = createHash8("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path26.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        const candidate = path27.join(this.home, "wireguard", "ssh", `${digest}.key`);
         if (existsSync14(candidate)) identityFile = candidate;
       }
     }
@@ -15395,15 +15854,15 @@ var MeshService = class {
    */
   _jobDir(id) {
     if (typeof id !== "string" || !/^[A-Za-z0-9._-]+$/u.test(id)) throw new Error("invalid job id");
-    const dir = path26.resolve(this.jobRoot, id);
-    if (!dir.startsWith(`${path26.resolve(this.jobRoot)}${path26.sep}`)) throw new Error("invalid job id");
+    const dir = path27.resolve(this.jobRoot, id);
+    if (!dir.startsWith(`${path27.resolve(this.jobRoot)}${path27.sep}`)) throw new Error("invalid job id");
     return dir;
   }
 };
 
 // code/shared/event-stream.mjs
 import { mkdirSync, readdirSync, watch } from "node:fs";
-import path27 from "node:path";
+import path28 from "node:path";
 var HEARTBEAT_MS = 15e3;
 var DEBOUNCE_MS = 120;
 var EventHub = class {
@@ -15558,7 +16017,7 @@ var JobDirectoryWatcher = class {
     for (const entry of entries) {
       if (!entry.isDirectory() || this.watchers.has(entry.name)) continue;
       try {
-        const watcher = watch(path27.join(this.root, entry.name), { persistent: false }, (_event, file) => {
+        const watcher = watch(path28.join(this.root, entry.name), { persistent: false }, (_event, file) => {
           this.#queue(entry.name, String(file ?? ""));
         });
         watcher.on("error", () => {
@@ -15596,7 +16055,7 @@ var JobDirectoryWatcher = class {
 };
 
 // src/lib/job-events.mjs
-import path28 from "node:path";
+import path29 from "node:path";
 var LOG_THROTTLE_MS = 400;
 var LOG_LINES = 300;
 var JOB_ID = /^[A-Za-z0-9._-]+$/u;
@@ -15613,12 +16072,12 @@ function startJobEvents(options) {
   }
   const watchers = [
     new JobDirectoryWatcher({
-      root: path28.join(service.dataDir, "build"),
+      root: path29.join(service.dataDir, "build"),
       log,
       onChange: (dir, file) => handle("build", dir, file)
     }),
     new JobDirectoryWatcher({
-      root: path28.join(service.dataDir, "deploy"),
+      root: path29.join(service.dataDir, "deploy"),
       log,
       onChange: (dir, file) => handle("deploy", dir, file)
     })
@@ -15722,24 +16181,24 @@ function registerApi(ctx, service, scheduler = null) {
       try {
         const method = request.method ?? "GET";
         const url = new URL(request.url ?? "/", "http://local.invalid");
-        const path32 = url.pathname.slice(API_PREFIX.length) || "/";
-        if (method === "GET" && path32 === "/status") {
+        const path33 = url.pathname.slice(API_PREFIX.length) || "/";
+        if (method === "GET" && path33 === "/status") {
           writeJson(response, 200, await service.status());
           return;
         }
-        if (method === "GET" && path32 === "/members") {
+        if (method === "GET" && path33 === "/members") {
           writeJson(response, 200, await service.members());
           return;
         }
-        if (method === "GET" && path32 === "/member-tags") {
+        if (method === "GET" && path33 === "/member-tags") {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() });
           return;
         }
-        if (method === "GET" && path32 === "/member-conversations") {
+        if (method === "GET" && path33 === "/member-conversations") {
           writeJson(response, 200, await service.memberConversations(url.searchParams.get("session") ?? ""));
           return;
         }
-        if (method === "GET" && path32 === "/schedule") {
+        if (method === "GET" && path33 === "/schedule") {
           if (scheduler === null) {
             writeJson(response, 503, { ok: false, error: { code: "unavailable", message: "\u5B9A\u65F6\u4EFB\u52A1\u8FD8\u6CA1\u6709\u542F\u52A8\u3002" } });
             return;
@@ -15748,43 +16207,43 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, { ok: true, schedule: scheduler.status(member === "" ? void 0 : member) });
           return;
         }
-        if (method === "POST" && path32 === "/packages/delete") {
+        if (method === "POST" && path33 === "/packages/delete") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.removePackage({ name: typeof body.name === "string" ? body.name : "" }));
           return;
         }
-        if (method === "GET" && path32 === "/events") {
+        if (method === "GET" && path33 === "/events") {
           hub.subscribe(request, response);
           return;
         }
-        if (method === "GET" && path32 === "/jobs") {
+        if (method === "GET" && path33 === "/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() });
           return;
         }
-        if (method === "GET" && path32 === "/packages") {
+        if (method === "GET" && path33 === "/packages") {
           writeJson(response, 200, await service.packages());
           return;
         }
-        if (method === "GET" && path32 === "/release/latest") {
+        if (method === "GET" && path33 === "/release/latest") {
           writeJson(response, 200, await service.latestRelease({
             refresh: url.searchParams.get("refresh") === "1"
           }));
           return;
         }
-        if (method === "GET" && path32 === "/member-packages") {
+        if (method === "GET" && path33 === "/member-packages") {
           writeJson(response, 200, await service.memberPackages(url.searchParams.get("member") ?? ""));
           return;
         }
-        if (method === "GET" && path32 === "/release") {
+        if (method === "GET" && path33 === "/release") {
           writeJson(response, 200, await service.releaseSettings());
           return;
         }
-        if (method === "GET" && path32 === "/deploy/jobs") {
+        if (method === "GET" && path33 === "/deploy/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) });
           return;
         }
         if (method === "GET") {
-          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path32);
+          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path33);
           if (deployRead !== null) {
             const lines = Number.parseInt(url.searchParams.get("lines") ?? "200", 10);
             const job = await service.deployStatus(deployRead[1]);
@@ -15801,7 +16260,7 @@ function registerApi(ctx, service, scheduler = null) {
             });
             return;
           }
-          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path32);
+          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path33);
           if (read !== null) {
             if (read[2] === "/log") {
               const lines = Number.parseInt(url.searchParams.get("lines") ?? "80", 10);
@@ -15823,12 +16282,12 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 403, { ok: false, error: { code: "forbidden", message: `Missing the ${AGENT_HEADER} header.` } });
           return;
         }
-        if (method === "POST" && path32 === "/release") {
+        if (method === "POST" && path33 === "/release") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.saveReleaseSettings(body));
           return;
         }
-        if (path32 === "/deploy") {
+        if (path33 === "/deploy") {
           const body = await readJson2(request);
           const result = await service.deployMember({
             member: typeof body.member === "string" ? body.member : void 0,
@@ -15839,12 +16298,12 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 202, result);
           return;
         }
-        if (path32 === "/session/promote") {
+        if (path33 === "/session/promote") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.promoteSession(String(body.member ?? "")));
           return;
         }
-        if (path32 === "/member-tags") {
+        if (path33 === "/member-tags") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.setMemberTag(
             typeof body.id === "string" ? body.id : "",
@@ -15852,16 +16311,16 @@ function registerApi(ctx, service, scheduler = null) {
           ));
           return;
         }
-        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path32);
+        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path33);
         if (clearLog !== null) {
           writeJson(response, 200, await service.clearBuildLog(clearLog[1]));
           return;
         }
-        if (path32 === "/build/logs/clear") {
+        if (path33 === "/build/logs/clear") {
           writeJson(response, 200, await service.clearFinishedBuilds());
           return;
         }
-        if (path32 === "/deploy/cancel") {
+        if (path33 === "/deploy/cancel") {
           const body = await readJson2(request);
           const job = await service.cancelDeploy(typeof body.id === "string" ? body.id : "");
           if (job === null) {
@@ -15871,14 +16330,14 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, { ok: true, job });
           return;
         }
-        if (path32 === "/deploy/rollback") {
+        if (path33 === "/deploy/rollback") {
           const body = await readJson2(request);
           writeJson(response, 202, await service.rollbackMember({
             member: typeof body.member === "string" ? body.member : ""
           }));
           return;
         }
-        if (path32 === "/upgrade" || path32 === "/test-upgrade") {
+        if (path33 === "/upgrade" || path33 === "/test-upgrade") {
           const body = await readJson2(request);
           const request_ = {
             member: typeof body.member === "string" ? body.member : void 0,
@@ -15892,11 +16351,11 @@ function registerApi(ctx, service, scheduler = null) {
             ...typeof body.proxyMember === "string" && body.proxyMember.trim() !== "" ? { proxyMember: body.proxyMember.trim() } : {},
             ...body.direct === true ? { direct: true } : {}
           };
-          const test = path32 === "/test-upgrade" || body.test === true;
+          const test = path33 === "/test-upgrade" || body.test === true;
           writeJson(response, 202, test ? await service.testUpgradeMember(request_) : await service.upgradeMember(request_));
           return;
         }
-        if (path32 === "/schedule") {
+        if (path33 === "/schedule") {
           if (scheduler === null) {
             writeJson(response, 503, { ok: false, error: { code: "unavailable", message: "\u5B9A\u65F6\u4EFB\u52A1\u8FD8\u6CA1\u6709\u542F\u52A8\u3002" } });
             return;
@@ -15918,7 +16377,7 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, { ok: true, schedule: await scheduler.update(patch) });
           return;
         }
-        if (path32 === "/build") {
+        if (path33 === "/build") {
           const body = await readJson2(request);
           const job = await service.startBuild({
             source: typeof body.source === "string" ? body.source : void 0,
@@ -15936,12 +16395,12 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 202, { ok: true, job });
           return;
         }
-        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path32);
+        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path33);
         if (resume !== null) {
           writeJson(response, 202, { ok: true, job: await service.resumeBuild(resume[1]) });
           return;
         }
-        const match = /^\/build\/([^/]+)\/learn$/u.exec(path32);
+        const match = /^\/build\/([^/]+)\/learn$/u.exec(path33);
         if (match !== null) {
           writeJson(response, 200, { ok: true, job: await service.learn(match[1]) });
           return;
@@ -16011,8 +16470,8 @@ import { randomUUID as randomUUID3 } from "node:crypto";
 
 // src/lib/member-roster.mjs
 import { readFile as readFile19 } from "node:fs/promises";
-import path29 from "node:path";
-var MEMBER_ROSTER_PATH = path29.join(".coder", "members", "all.md");
+import path30 from "node:path";
+var MEMBER_ROSTER_PATH = path30.join(".coder", "members", "all.md");
 var FIELD = /^(工作区名称|身份|工作范围|备注)\s*[：:]\s*(.*)$/u;
 var HOST_IN_NOTE = /(?:宿主|主机|host)\s*[：:]?\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3}|[A-Za-z0-9][A-Za-z0-9._-]*)/iu;
 function memberRosterHost(note) {
@@ -16073,7 +16532,7 @@ async function readMemberRoster(cwd) {
   if (dir === "") return null;
   let text;
   try {
-    text = await readFile19(path29.join(dir, MEMBER_ROSTER_PATH), "utf8");
+    text = await readFile19(path30.join(dir, MEMBER_ROSTER_PATH), "utf8");
   } catch {
     return null;
   }
@@ -16145,8 +16604,6 @@ function formatMemberGapLines(gaps) {
 
 // src/lib/member-context.mjs
 var MEMBER_STATUS_INTERVAL_MS = 6e4;
-var MEMBER_REVIEW_INTERVAL_MS = 10 * 6e4;
-var PUSH_COMPACT_TIMEOUT_MS = 18e4;
 var LONG_JOB_WARN_MS = 6e4;
 var HOST_CACHE_MS = 5 * 6e4;
 var LONG_JOBS_MAX = 20;
@@ -16155,52 +16612,10 @@ function formatMemberPercent(value) {
   const amount = Number.isFinite(value) ? value : DEFAULT_COMPRESS_PERCENT;
   return `${amount >= 100 ? String(Math.round(amount)) : amount.toFixed(1).replace(/\.0$/u, "")}%`;
 }
-function measureMemberContextPercent(ctx, agent) {
-  const session = agent?.session;
-  if (session === void 0 || session === null) return null;
-  const nonNegative = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-  let pressure;
-  const projections = typeof ctx?.get === "function" ? ctx.get("sessionProjections") : void 0;
-  if (typeof projections?.snapshot === "function") {
-    try {
-      pressure = projections.snapshot(session, ["contextPressure"]).values.contextPressure;
-    } catch {
-    }
-  }
-  if (pressure === void 0) {
-    const meter = typeof ctx?.get === "function" ? ctx.get("tokenMeter") : void 0;
-    if (typeof meter?.contextPressure === "function") {
-      try {
-        pressure = meter.contextPressure(session);
-      } catch {
-      }
-    }
-  }
-  if (pressure === null || typeof pressure !== "object") return null;
-  const usedTokens = nonNegative(pressure.projectedTokens) ?? nonNegative(pressure.pressureTokens);
-  const maxTokens = nonNegative(pressure.contextWindow);
-  if (usedTokens === null || maxTokens === null || maxTokens <= 0) return null;
-  return Math.round(usedTokens / maxTokens * 1e3) / 10;
-}
 function agentCwd(agent) {
   const session = agent?.session;
   const cwd = session?.header?.cwd ?? session?.meta?.cwd ?? session?.cwd;
   return typeof cwd === "string" ? cwd.trim() : "";
-}
-async function compactMainAgent(ctx, agent) {
-  const presets = typeof ctx?.get === "function" ? ctx.get("agentPresets") : void 0;
-  const scoped = typeof presets?.serviceFor === "function" ? presets.serviceFor(agent, "compaction") : void 0;
-  const compaction = scoped ?? (typeof ctx?.get === "function" ? ctx.get("compaction") : void 0);
-  if (compaction === void 0 || compaction === null || typeof compaction.compactNow !== "function") {
-    return { ok: false, reason: "no compaction service" };
-  }
-  if (agent.status !== "idle") return { ok: false, reason: "agent is not idle" };
-  try {
-    const result = await compaction.compactNow(agent, AbortSignal.timeout(PUSH_COMPACT_TIMEOUT_MS));
-    return { ok: true, result };
-  } catch (error) {
-    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
-  }
 }
 function scopeForTask(task, scopes = {}) {
   const stored = scopes[String(task?.conversationId ?? "")];
@@ -16241,7 +16656,7 @@ function formatMemberConversationLine(task, scopes = {}) {
   return `- \u8EAB\u4EFD\uFF1A${profile?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u533A\uFF1A${entry.workspace}\uFF1B\u4F1A\u8BDD\uFF1A${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF0C${entry.statusLabel}${turn}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${profile?.scope ?? "\u672A\u8BBE\u7F6E"}${explicitCompress}${noteText}`;
 }
 function formatSelfLine(selfId, selfScope) {
-  return `- \u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF08\u81EA\u8EAB\uFF0C\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${selfScope?.keep === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
+  return `- \u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF08\u81EA\u8EAB\uFF0C\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
 }
 function formatMemberStatusSnapshot(tasks, options = {}) {
   const list = Array.isArray(tasks) ? tasks : [];
@@ -16251,8 +16666,11 @@ function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfScope = options.selfScope ?? null;
   const scopes = options.scopes ?? {};
   const gapLines = Array.isArray(options.gaps) ? options.gaps : [];
+  const stage = options.stage ?? null;
+  const stageLines = stage === null ? list.length === 0 ? [] : ['- \u8FD8\u6CA1\u6709\u8BBE\u7F6E\u4EA7\u54C1\u9636\u6BB5\uFF1A\u7528 set_product_stage \u8BBE\u7F6E\u7248\u672C\u3001\u9636\u6BB5\u4E0E\u76EE\u6807\uFF08\u5982 { "stage": "A" }\uFF09\u3002'] : formatProductStageLines(stage, list, scopes);
   const lines = [
     `[\u6210\u5458\u4E0A\u4E0B\u6587] \u672C\u5BF9\u8BDD\u8DDF\u8E2A ${String(list.length)} \u4E2A\u6210\u5458\u4F1A\u8BDD\uFF0C\u5176\u4E2D ${String(running.length)} \u4E2A\u8FDB\u884C\u4E2D\uFF08\u5FEB\u7167 ${new Date(at).toISOString()}\uFF09\u3002`,
+    ...stageLines,
     formatSelfLine(selfId, selfScope),
     ...list.map((task) => formatMemberConversationLine(task, scopes)),
     ...gapLines
@@ -16275,25 +16693,6 @@ function formatMemberStatusSnapshot(tasks, options = {}) {
   if (selfHint !== "") lines.push(selfHint);
   return lines.join("\n");
 }
-function formatMemberDispatchPush(tasks, options = {}) {
-  const list = Array.isArray(tasks) ? tasks : [];
-  const running = list.filter((task) => task?.status === "running" || task?.status === "starting");
-  const at = Number.isFinite(options.now) ? options.now : Date.now();
-  const selfId = String(options.selfId ?? "");
-  const selfScope = options.selfScope ?? null;
-  const scopes = options.scopes ?? {};
-  return [
-    "[\u6210\u5458\u8C03\u5EA6] \u672C\u5BF9\u8BDD\u5DF2\u7A7A\u95F2\u3002\u8BF7\u7ACB\u5373\u7528 subagent \u65B0\u5EFA\u4E00\u4E2A\u5B50\u4EE3\u7406\u505A\u53EA\u8BFB\u5BA1\u67E5\uFF1A\u8BFB\u672C\u5DE5\u4F5C\u533A\u7684 `.coder/members/all.md`\u3001`.coder/members/flow.md` \u548C\u73B0\u6709 gap\uFF08`.coder/issues/open.md`\u3001`.coder/plan/todo.md`\u3001`.coder/plan/goal.md` \u7B49\uFF09\uFF0C\u5224\u65AD\u662F\u5426\u53EF\u4EE5\u6FC0\u6D3B\u90E8\u5206\u73B0\u6709\u7A7A\u95F2\u6210\u5458\u5BF9\u8BDD\u3002",
-    "- \u5B50\u4EE3\u7406\u53EA\u8BFB\uFF1A\u4E0D\u6539\u4EE3\u7801\u3001\u4E0D\u8DD1\u91CD\u6D3B\uFF1B\u7ED3\u8BBA\u9010\u6761\u7ED9\u51FA\u53EF\u6FC0\u6D3B\u7684\u6210\u5458\u4F1A\u8BDD\uFF08conversationId\uFF09\u3001\u5EFA\u8BAE\u4EFB\u52A1\u4E0E\u4F9D\u636E\uFF1B\u4E0D\u5EFA\u8BAE\u6FC0\u6D3B\u7684\u5199\u539F\u56E0\u3002",
-    "- \u53EA\u8003\u8651\u7A7A\u95F2\u6210\u5458\u4F1A\u8BDD\uFF1B\u8FDB\u884C\u4E2D/\u5F02\u5E38\u4E2D\u6B62\u7684\u4E00\u5F8B\u8DF3\u8FC7\uFF0C\u7981\u6B62\u91CD\u542F\u3001\u5F52\u6863\u6216\u65B0\u5EFA\u540C\u540D\u4F1A\u8BDD\u2014\u2014\u6D3E\u6D3B\u5FC5\u987B\u5E26\u539F conversationId \u7EE7\u7EED\u3002",
-    "- \u540D\u518C\u91CC\u5217\u51FA\u4F46\u8FD8\u6CA1\u6709\u6210\u5458\u5BF9\u8BDD\u7684\u6210\u5458\u5FC5\u987B\u5EFA\u51FA\u6765\uFF08\u89C1\u4E0B\u9762\u7684 [\u6210\u5458\u7F3A\u53E3]\uFF09\uFF0C\u9664\u975E\u5B83\u7684\u5BBF\u4E3B\u4E3B\u673A\u660E\u786E\u4E0D\u53EF\u7528\u3002",
-    "- \u5BA1\u67E5\u7ED3\u8BBA\u4EA4\u56DE\u672C\u5BF9\u8BDD\uFF0C\u7531\u672C\u5BF9\u8BDD\u7528 call_member \u51B3\u5B9A\u662F\u5426\u6D3E\u6D3B\u3002",
-    `- \u5F53\u524D\u6210\u5458\u4F1A\u8BDD\uFF08\u672C\u5BF9\u8BDD\u8DDF\u8E2A ${String(list.length)} \u4E2A\uFF0C\u5176\u4E2D ${String(running.length)} \u4E2A\u8FDB\u884C\u4E2D\uFF1B\u5FEB\u7167 ${new Date(at).toISOString()}\uFF09\uFF1A`,
-    ...list.map((task) => formatMemberConversationLine(task, scopes)),
-    formatSelfLine(selfId, selfScope),
-    ...Array.isArray(options.gaps) ? options.gaps : []
-  ].join("\n");
-}
 function createMemberContext({
   ctx,
   memberTasks,
@@ -16301,19 +16700,21 @@ function createMemberContext({
   log = () => {
   },
   intervalMs = MEMBER_STATUS_INTERVAL_MS,
-  reviewIntervalMs = MEMBER_REVIEW_INTERVAL_MS,
   now = () => Date.now()
 }) {
   const lastInjection = /* @__PURE__ */ new Map();
-  const lastReviewEnd = /* @__PURE__ */ new Map();
-  const reviewPending = /* @__PURE__ */ new Set();
-  const turns = /* @__PURE__ */ new Map();
   const longJobs = /* @__PURE__ */ new Map();
   const disposers = [];
   let closed = false;
   async function readScopes() {
     if (typeof service?.memberScopes !== "function") return {};
     return await service.memberScopes().catch(() => ({}));
+  }
+  async function stageFor(agent) {
+    if (typeof service?.productStage !== "function") return null;
+    const cwd = agentCwd(agent);
+    if (cwd === "") return null;
+    return await service.productStage(cwd).catch(() => null);
   }
   let hostsCache = { at: 0, rows: null };
   async function memberHosts() {
@@ -16346,22 +16747,11 @@ function createMemberContext({
     const at = now();
     const last = lastInjection.get(sessionId);
     if (typeof last === "number" && Number.isFinite(last) && at >= last && at - last < intervalMs) return null;
-    const running = await memberTasks.inFlightForOrigin(sessionId);
+    const [running, stage] = await Promise.all([
+      memberTasks.inFlightForOrigin(sessionId),
+      stageFor(agent)
+    ]);
     if (!Array.isArray(running)) return null;
-    const pendingJobs = (longJobs.get(sessionId)?.length ?? 0) > 0;
-    if (running.length === 0 && !pendingJobs) {
-      const [tasks2, scopes2] = await Promise.all([
-        memberTasks.listForOrigin(sessionId),
-        readScopes()
-      ]);
-      const gaps2 = await rosterGaps(agent, tasks2, scopes2);
-      const gapLines2 = formatMemberGapLines(gaps2);
-      if (gapLines2.length === 0) return null;
-      return {
-        text: formatMemberStatusSnapshot(tasks2, { now: at, selfId: sessionId, selfScope: scopes2[sessionId] ?? null, scopes: scopes2, gaps: gapLines2 }),
-        at
-      };
-    }
     const [tasks, scopes] = await Promise.all([
       memberTasks.listForOrigin(sessionId),
       readScopes()
@@ -16371,9 +16761,9 @@ function createMemberContext({
     const hintJobs = selfScope?.avoidLongJobs === true ? taken : [];
     const gaps = await rosterGaps(agent, tasks, scopes);
     const gapLines = formatMemberGapLines(gaps);
-    if (running.length === 0 && hintJobs.length === 0 && gapLines.length === 0) return null;
+    if (running.length === 0 && hintJobs.length === 0 && gapLines.length === 0 && stage === null) return null;
     return {
-      text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes, longJobs: hintJobs, gaps: gapLines }),
+      text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes, longJobs: hintJobs, gaps: gapLines, stage }),
       at
     };
   }
@@ -16424,98 +16814,22 @@ function createMemberContext({
       return decision;
     }
   }
-  async function maybeReview(sessionId, turn) {
-    if (closed) return;
-    const [tasks, scopes] = await Promise.all([
-      memberTasks.listForOrigin(sessionId).catch(() => []),
-      readScopes()
-    ]);
-    if (closed || turns.get(sessionId) !== turn) return;
-    const selfScope = scopes[sessionId] ?? null;
-    const rosterCwd = agentCwd(typeof ctx?.get === "function" ? ctx.get("agents")?.get(sessionId) : void 0);
-    const roster = rosterCwd === "" ? null : await readMemberRoster(rosterCwd).catch(() => null);
-    if (tasks.length === 0 && selfScope === null && roster === null) return;
-    if (selfScope?.keep !== true) return;
-    const last = lastReviewEnd.get(sessionId);
-    if (typeof last === "number" && now() - last <= reviewIntervalMs) return;
-    await new Promise((resolve) => setImmediate(resolve));
-    if (closed || turns.get(sessionId) !== turn) return;
-    const agent = typeof ctx?.get === "function" ? ctx.get("agents")?.get(sessionId) : void 0;
-    if (agent === void 0 || agent === null || agent.status !== "idle") return;
-    const threshold = effectiveCompressPercent(selfScope);
-    const beforePercent = measureMemberContextPercent(ctx, agent);
-    let compressionLine;
-    if (beforePercent !== null && beforePercent > threshold) {
-      const outcome = await compactMainAgent(ctx, agent);
-      if (closed || turns.get(sessionId) !== turn || agent.status !== "idle") {
-        log(`member dispatch push abandoned: conversation resumed while compacting (context ${formatMemberPercent(beforePercent)}, threshold ${formatMemberPercent(threshold)})`);
-        return;
-      }
-      if (outcome.ok) {
-        if (outcome.result === null) {
-          compressionLine = `no compactable range\uFF08\u4E0A\u4E0B\u6587 ${formatMemberPercent(beforePercent)}\uFF0C\u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
-        } else {
-          const afterPercent = measureMemberContextPercent(ctx, agent);
-          compressionLine = `compressed ${formatMemberPercent(beforePercent)} -> ${afterPercent === null ? "\u672A\u6D4B" : formatMemberPercent(afterPercent)}\uFF08\u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
-        }
-      } else {
-        compressionLine = `compression skipped: ${outcome.reason}\uFF08\u4E0A\u4E0B\u6587 ${formatMemberPercent(beforePercent)}\uFF0C\u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
-      }
-    } else if (beforePercent === null) {
-      compressionLine = `context not measured\uFF08\u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
-    } else {
-      compressionLine = `no compression\uFF08\u4E0A\u4E0B\u6587 ${formatMemberPercent(beforePercent)} <= \u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
-    }
-    const at = now();
-    const gaps = roster === null ? null : memberRosterGaps(roster, tasks, scopes, { hosts: await memberHosts().catch(() => null) ?? [] });
-    const text = formatMemberDispatchPush(tasks, { now: at, selfId: sessionId, selfScope, scopes, gaps: formatMemberGapLines(gaps) });
-    try {
-      agent.followup({
-        id: randomUUID3(),
-        role: "user",
-        content: [{ type: "text", text }],
-        source: { kind: MEMBER_CONTEXT_SOURCE, form: "push" }
-      });
-      reviewPending.add(sessionId);
-      lastInjection.set(sessionId, at);
-      log(`member dispatch push to ${sessionId}: ${compressionLine}`);
-    } catch (error) {
-      log(`member dispatch push failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
   function onEvent(session, event) {
     if (closed || session === void 0 || event === void 0) return;
     const sessionId = String(session.id ?? "");
     if (sessionId === "" || isMemberSession(sessionId)) return;
-    if (event.type === "job/settled") {
-      const data = event.data ?? {};
-      const startedAt = Number(data.startedAt);
-      const finishedAt = Number.isFinite(Number(data.finishedAt)) ? Number(data.finishedAt) : Number(event.time);
-      if (Number.isFinite(startedAt) && Number.isFinite(finishedAt)) {
-        recordLongJob(sessionId, {
-          jobId: data.jobId,
-          kind: data.kind,
-          label: data.label,
-          startedAt,
-          finishedAt,
-          durationMs: finishedAt - startedAt
-        });
-      }
-      return;
-    }
-    if (event.type === "turn/start") {
-      turns.set(sessionId, Number.isSafeInteger(event.data?.turn) ? event.data.turn : null);
-      return;
-    }
-    if (event.type !== "turn/end") return;
-    const turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : turns.get(sessionId) ?? null;
-    turns.set(sessionId, turn);
-    if (reviewPending.delete(sessionId)) {
-      lastReviewEnd.set(sessionId, now());
-      return;
-    }
-    void maybeReview(sessionId, turn).catch((error) => {
-      log(`member status review failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (event.type !== "job/settled") return;
+    const data = event.data ?? {};
+    const startedAt = Number(data.startedAt);
+    const finishedAt = Number.isFinite(Number(data.finishedAt)) ? Number(data.finishedAt) : Number(event.time);
+    if (!Number.isFinite(startedAt) || !Number.isFinite(finishedAt)) return;
+    recordLongJob(sessionId, {
+      jobId: data.jobId,
+      kind: data.kind,
+      label: data.label,
+      startedAt,
+      finishedAt,
+      durationMs: finishedAt - startedAt
     });
   }
   if (typeof ctx?.on === "function") {
@@ -16525,9 +16839,6 @@ function createMemberContext({
       const id = String(session?.id ?? "");
       if (id === "") return;
       lastInjection.delete(id);
-      lastReviewEnd.delete(id);
-      reviewPending.delete(id);
-      turns.delete(id);
       longJobs.delete(id);
     }));
   }
@@ -16535,9 +16846,6 @@ function createMemberContext({
     handler,
     onEvent,
     lastInjection,
-    lastReviewEnd,
-    reviewPending,
-    turns,
     dispose() {
       closed = true;
       for (const dispose of disposers.splice(0)) {
@@ -16547,9 +16855,6 @@ function createMemberContext({
         }
       }
       lastInjection.clear();
-      lastReviewEnd.clear();
-      reviewPending.clear();
-      turns.clear();
       longJobs.clear();
     }
   };
@@ -16734,8 +17039,8 @@ function registerTools(ctx, toolsCtx, service) {
       "\u628A\u4E00\u884C\u7ED3\u679C\u3001\u4EE3\u7406\u7AEF\u53E3\u548C hub \u7684 git token \u6CE8\u5165\u76EE\u6807\u4F1A\u8BDD\uFF08\u6CA1\u6709\u76F4\u8FDE\u914D\u7F6E\u5C31\u4E0D\u62A5\u51FA\u7F51\uFF09\uFF1B\u5E76\u7981\u7528\u8BE5\u4F1A\u8BDD\u7684 ask_user_question\uFF0C",
       "\u6BCF\u6B21\u6295\u9012\u524D\u8FD8\u4F1A\u5BF9\u5F53\u524D live agent \u91CD\u65B0\u5E94\u7528\u4E00\u6B21\uFF08\u6210\u5458\u81EA\u5DF1 Web UI \u6062\u590D\u7684\u4F1A\u8BDD\u4E5F\u8986\u76D6\uFF09\uFF1A",
       "\u6210\u5458\u9700\u8981\u4FE1\u606F\u65F6\u4F1A\u5728\u56DE\u590D\u91CC\u63D0\u95EE\u5E76\u505C\u4E0B\uFF0C\u7528 call_member \u5E26 conversationId \u56DE\u7B54\u3002",
-      "`identity` / `scope` \u53EF\u9009\uFF1A\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8EAB\u4EFD/\u89D2\u8272\u548C\u8D1F\u8D23\u7684\u5DE5\u4F5C\u8303\u56F4\uFF0C\u6309\u4F1A\u8BDDid \u6301\u4E45\u5316\u5230 member-scopes.json\uFF1B",
-      "\u65B0\u5EFA\u5BF9\u8BDD\u65F6\u968F mesh.profile \u6CE8\u5165\u6210\u5458\u7684\u7CFB\u7EDF\u4E0A\u4E0B\u6587\uFF0C\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u65F6\u4F1A\u5408\u5E76\u8BE5\u4F1A\u8BDD\u7684\u8BBE\u7F6E\u5E76\u5728\u6D88\u606F\u524D\u52A0\u4E00\u884C\u3010\u6210\u5458\u8EAB\u4EFD\u3011\u8BF4\u660E\u3002",
+      "`identity` / `role` / `scope` \u53EF\u9009\uFF1A\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8EAB\u4EFD\u3001\u6807\u51C6\u8EAB\u4EFD\uFF08\u4EA7\u54C1\u7ECF\u7406 / \u7814\u7A76\u5458 / \u5F00\u53D1 / \u6D4B\u8BD5 / \u4E1A\u52A1\uFF09\u548C\u8D1F\u8D23\u7684\u5DE5\u4F5C\u8303\u56F4\uFF0C\u6309\u4F1A\u8BDDid \u6301\u4E45\u5316\u5230 member-scopes.json\uFF1B",
+      "\u65B0\u5EFA\u5BF9\u8BDD\u65F6\u628A\u672C\u6B21\u8EAB\u4EFD/\u8303\u56F4\u4F5C\u4E3A\u3010\u6210\u5458\u8EAB\u4EFD\u3011\u524D\u7F00\u653E\u8FDB prompt\uFF0C\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u65F6\u5408\u5E76\u8BE5\u4F1A\u8BDD\u7684\u8BBE\u7F6E\u5E76\u5728\u6D88\u606F\u524D\u52A0\u4E00\u884C\u3010\u6210\u5458\u8EAB\u4EFD\u3011\u8BF4\u660E\u3002",
       "\u4E5F\u53EF\u4EE5\u5728\u4EFB\u4F55\u65F6\u5019\u7528 set_member_scope \u5355\u72EC\u8BBE\u7F6E\u4EFB\u610F\u4F1A\u8BDD\u6216\u81EA\u8EAB\u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u3002",
       "\u8FD4\u56DE\u503C\u5E26 data.logFile\uFF0C\u6307\u5411\u8BE5\u4EFB\u52A1\u7684\u65E5\u5FD7\u6587\u4EF6\uFF1B\u4F1A\u8BDDid\u5728 text \u548C data.conversationId \u4E2D\u3002",
       "",
@@ -16749,7 +17054,8 @@ function registerTools(ctx, toolsCtx, service) {
         conversationId: { type: "string", description: "\u8981\u7EE7\u7EED\u7684\u4F1A\u8BDDid\uFF08call_member / wait_member \u8FD4\u56DE\uFF09\u3002\u7701\u7565\u5C31\u65B0\u5EFA\u5BF9\u8BDD\u3002" },
         cwd: { type: "string", description: "\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u6210\u5458 B \u4E0A\u7684\u5DE5\u4F5C\u76EE\u5F55\uFF08\u7EDD\u5BF9\u8DEF\u5F84\uFF0C\u53EF\u7A7A\uFF09\u3002" },
         workspace: { type: "string", description: "\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u6210\u5458 B \u4E0A\u7684\u4EFB\u52A1\u5DE5\u4F5C\u533A\u540D\u79F0\uFF1B\u5B9E\u9645\u76EE\u5F55\u56FA\u5B9A\u4E3A\u6210\u5458\u672C\u673A\u7684 ~/.dsh/workspaces/<name>\u3002\u548C cwd \u4E8C\u9009\u4E00\u3002" },
-        identity: { type: "string", description: "\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8EAB\u4EFD/\u89D2\u8272\uFF08\u4F8B\u5982 \u5F00\u53D1\u3001\u6D4B\u8BD5\u3001\u7F51\u5173\u3001\u5BA2\u6237 A\uFF09\uFF0C\u6700\u957F 40 \u5B57\u7B26\uFF1B\u4E0E\u5DF2\u6709\u8BBE\u7F6E\u5408\u5E76\uFF0C\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002" },
+        identity: { type: "string", description: "\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8EAB\u4EFD/\u89D2\u8272\uFF08\u4F8B\u5982 \u5185\u6838\u5F00\u53D1\u3001\u524D\u7AEF\u5F00\u53D1\u3001\u7F51\u5173\uFF09\uFF0C\u6700\u957F 40 \u5B57\u7B26\uFF1B\u4E0E\u5DF2\u6709\u8BBE\u7F6E\u5408\u5E76\uFF0C\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002" },
+        role: { type: "string", enum: [...MEMBER_ROLES, ""], description: `\u6807\u51C6\u8EAB\u4EFD\uFF0C\u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF0C\u9636\u6BB5\u53C2\u4E0E\u6821\u9A8C\u6309\u5B83\u5224\u65AD\uFF1B\u53EF\u9009\uFF1A${MEMBER_ROLES.join(" / ")}\u3002\u4E0E\u5DF2\u6709\u8BBE\u7F6E\u5408\u5E76\uFF0C\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002` },
         scope: { type: "string", description: "\u8FD9\u4E2A\u4F1A\u8BDD\u8D1F\u8D23\u7684\u5DE5\u4F5C\u8303\u56F4\uFF08\u4F8B\u5982 dsh-mesh \u63D2\u4EF6\u5F00\u53D1\u4E0E\u6784\u5EFA\u3001\u8DE8\u5E73\u53F0\u9A8C\u6536\uFF09\uFF0C\u6700\u957F 120 \u5B57\u7B26\uFF1B\u4E0E\u5DF2\u6709\u8BBE\u7F6E\u5408\u5E76\uFF0C\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002" }
       },
       required: ["prompt"],
@@ -16779,6 +17085,7 @@ function registerTools(ctx, toolsCtx, service) {
             cwd: args.cwd,
             workspace: args.workspace,
             identity: args.identity,
+            role: args.role,
             scope: args.scope,
             agent: exec.agent,
             notify: true,
@@ -16826,6 +17133,7 @@ function registerTools(ctx, toolsCtx, service) {
           member: args.member,
           prompt: args.prompt,
           identity: args.identity,
+          role: args.role,
           scope: args.scope,
           agent: exec.agent,
           signal: exec.signal
@@ -16866,20 +17174,18 @@ function registerTools(ctx, toolsCtx, service) {
   const setMemberScopeDefinition = {
     name: "set_member_scope",
     description: [
-      "\u8BBE\u7F6E\u4E00\u4E2A\u6210\u5458\u4F1A\u8BDD\u6216\u5F53\u524D\u4E3B\u5BF9\u8BDD\uFF08\u81EA\u8EAB\uFF09\u7684\u8EAB\u4EFD\u3001\u5DE5\u4F5C\u8303\u56F4\uFF0C\u4EE5\u53CA\u6D3E\u6D3B\u63A8\u9001\u548C\u81EA\u52A8\u538B\u7F29\u53C2\u6570\u3002",
+      "\u8BBE\u7F6E\u4E00\u4E2A\u6210\u5458\u4F1A\u8BDD\u6216\u5F53\u524D\u4E3B\u5BF9\u8BDD\uFF08\u81EA\u8EAB\uFF09\u7684\u8EAB\u4EFD\u3001\u6807\u51C6\u8EAB\u4EFD\u3001\u5DE5\u4F5C\u8303\u56F4\u4EE5\u53CA\u81EA\u52A8\u538B\u7F29\u53C2\u6570\u3002",
       "",
       "`conversationId` \u7701\u7565\u3001`self`\u3001`local` \u6216\u7B49\u4E8E\u5F53\u524D\u4F1A\u8BDD id \u65F6\u8BBE\u7F6E\u201C\u81EA\u8EAB\u201D\uFF1B\u5176\u4ED6\u503C\u4F5C\u4E3A\u6210\u5458\u4F1A\u8BDD id\u3002",
-      "`identity` / `scope` / `note` \u662F\u53EF\u9009\u7684\u5B57\u7B26\u4E32\uFF0C\u53EA\u4F20\u8981\u6539\u7684\u5B57\u6BB5\uFF1B\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002",
+      "`identity` / `role` / `scope` / `note` \u662F\u53EF\u9009\u7684\u5B57\u7B26\u4E32\uFF0C\u53EA\u4F20\u8981\u6539\u7684\u5B57\u6BB5\uFF1B\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002",
       "identity \u6700\u957F 40 \u5B57\u7B26\uFF0Cscope \u6700\u957F 120 \u5B57\u7B26\uFF0Cnote\uFF08\u5907\u6CE8\uFF09\u6700\u957F 500 \u5B57\u7B26\u3002",
+      "`role` \u662F\u6210\u5458\u7684\u6807\u51C6\u8EAB\u4EFD\uFF0C\u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF1A\u4EA7\u54C1\u7ECF\u7406 / \u7814\u7A76\u5458 / \u5F00\u53D1 / \u6D4B\u8BD5 / \u4E1A\u52A1\uFF1Bset_product_stage \u7684\u9636\u6BB5\u53C2\u4E0E\u6821\u9A8C\u6309\u5B83\u5224\u65AD\u3002\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5FFD\u7565\u3002",
       "`note` \u4EC5\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF1A\u5B83\u4E0D\u4F1A\u6CE8\u5165\u6210\u5458\u7684\u7CFB\u7EDF\u4E0A\u4E0B\u6587\uFF0C\u4E5F\u4E0D\u4F1A\u968F call_member \u6295\u9012\uFF0C\u53EA\u5728\u4E3B\u5BF9\u8BDD\u7684 status_member \u548C\u6210\u5458\u4E0A\u4E0B\u6587\u91CC\u53EF\u89C1\uFF1B\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5FFD\u7565\u3002",
-      "`keep` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u663E\u5F0F\u4F20 keep=true \u65F6\uFF0C\u4E3B\u5BF9\u8BDD\u5728 turn \u7ED3\u675F\u540E\u3001\u82E5\u8DDD\u4E0A\u4E00\u6B21\u6210\u5458\u72B6\u6001 review \u7ED3\u675F\u5DF2\u8D85\u8FC7 10 \u5206\u949F\uFF0C\u4F1A\u6536\u5230\u4E00\u6761\u6D3E\u6D3B\u6307\u4EE4\uFF0C\u8981\u6C42\u65B0\u5EFA\u5B50\u4EE3\u7406 review `.coder/members` \u548C\u73B0\u6709 gap\uFF0C\u5224\u65AD\u80FD\u5426\u6FC0\u6D3B\u7A7A\u95F2\u6210\u5458\u4F1A\u8BDD\uFF1B\u4E0D\u4F20 keep \u4E0D\u6539\u53D8\u5DF2\u4FDD\u5B58\u7684\u503C\uFF0C\u4ECE\u672A\u8BBE\u7F6E\u8FC7\u5373\u4E3A\u5173\u95ED\u3002",
-      "`avoidLongJobs` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0C\u4E3B\u5BF9\u8BDD\u4E0B\u4E00\u6B21\u72B6\u6001\u5FEB\u7167\u4F1A\u68C0\u67E5\u8DDD\u4E0A\u4E00\u6B21\u5FEB\u7167\u4E4B\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5728\u6CE8\u5165\u91CC\u5217\u51FA\u8FD9\u4E9B job \u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
-      `\`compressPercent\`\uFF1A\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u6570\u5B57 1\u2013100\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_COMPRESS_PERCENT)}\uFF09\uFF1B\u4E3B\u5BF9\u8BDD\u548C\u6210\u5458\u4F1A\u8BDD\u90FD\u751F\u6548\uFF1A\u4E3B\u5BF9\u8BDD\u63A8\u9001\u6D3E\u6D3B\u6307\u4EE4\u524D\u3001\u6216\u6210\u5458\u4F1A\u8BDD\u4E0B\u4E00\u6B21\u6295\u9012\u524D\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u538B\u7F29\u3002`,
-      "\u7ED9\u81EA\u8EAB\u8BBE\u7F6E identity/scope \u4E0D\u4F1A\u987A\u5E26\u5F00\u542F keep\uFF1B\u9700\u8981\u63A8\u9001\u5C31\u663E\u5F0F\u4F20 keep=true\u3002",
-      "\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6 keep \u548C avoidLongJobs \u88AB\u5FFD\u7565\uFF0C\u8FD4\u56DE\u6587\u5B57\u4F1A\u8BF4\u660E\u3002",
-      "\u81F3\u5C11\u63D0\u4F9B identity\u3001scope\u3001note\u3001keep\u3001avoidLongJobs\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001scope\u3001note \u6216 compressPercent \u4E4B\u4E00\u3002",
+      "`avoidLongJobs` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0C\u4E3B\u5BF9\u8BDD\u4E0B\u4E00\u6B21\u72B6\u6001\u5FEB\u7167\u4F1A\u5217\u51FA\u8DDD\u4E0A\u4E00\u6B21\u5FEB\u7167\u4E4B\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
+      `\`compressPercent\`\uFF1A\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u6570\u5B57 1\u2013100\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_COMPRESS_PERCENT)}\uFF09\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0B\u4E00\u6B21 call_member \u6295\u9012\u524D\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u538B\u7F29\u3002`,
+      "\u81F3\u5C11\u63D0\u4F9B identity\u3001role\u3001scope\u3001note\u3001avoidLongJobs\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001role\u3001scope\u3001note \u6216 compressPercent \u4E4B\u4E00\u3002",
       "\u6210\u5458\u4F1A\u8BDD\u53EF\u4EE5\u672A\u88AB\u672C\u673A\u8DDF\u8E2A\uFF0C\u8BBE\u7F6E\u4ECD\u4F1A\u4FDD\u5B58\uFF0C\u53EA\u662F\u4E0D\u4F1A\u540C\u6B65\u4EFB\u52A1\u5FEB\u7167\u3002",
-      "\u8FD9\u4E2A\u5DE5\u5177\u53EA\u4FDD\u5B58\u8BBE\u7F6E\uFF0C\u4E0D\u7ED9\u6210\u5458\u4F1A\u8BDD\u53D1\u6D88\u606F\u3001\u4E0D\u81EA\u52A8\u52A0\u6295\u9012\u524D\u7F00\uFF1B\u968F\u5BF9\u8BDD\u4E00\u8D77\u8BBE\u7F6E/\u66F4\u65B0\u7528 call_member \u7684 identity/scope \u53C2\u6570\u3002"
+      "\u8FD9\u4E2A\u5DE5\u5177\u53EA\u4FDD\u5B58\u8BBE\u7F6E\uFF0C\u4E0D\u7ED9\u6210\u5458\u4F1A\u8BDD\u53D1\u6D88\u606F\u3001\u4E0D\u81EA\u52A8\u52A0\u6295\u9012\u524D\u7F00\uFF1B\u968F\u5BF9\u8BDD\u4E00\u8D77\u8BBE\u7F6E/\u66F4\u65B0\u7528 call_member \u7684 identity/role/scope \u53C2\u6570\u3002"
     ].join("\n"),
     parameters: {
       type: "object",
@@ -16890,7 +17196,12 @@ function registerTools(ctx, toolsCtx, service) {
         },
         identity: {
           type: "string",
-          description: "\u8EAB\u4EFD/\u89D2\u8272\uFF08\u4F8B\u5982 \u5F00\u53D1\u3001\u6D4B\u8BD5\u3001\u7F51\u5173\u3001\u5BA2\u6237 A\uFF09\uFF0C\u6700\u957F 40 \u5B57\u7B26\uFF1B\u7A7A\u5B57\u7B26\u4E32\u6E05\u9664\u3002"
+          description: "\u8EAB\u4EFD/\u89D2\u8272\uFF08\u4F8B\u5982 \u5185\u6838\u5F00\u53D1\u3001\u524D\u7AEF\u5F00\u53D1\u3001\u7F51\u5173\uFF09\uFF0C\u6700\u957F 40 \u5B57\u7B26\uFF1B\u7A7A\u5B57\u7B26\u4E32\u6E05\u9664\u3002"
+        },
+        role: {
+          type: "string",
+          enum: [...MEMBER_ROLES, ""],
+          description: `\u6807\u51C6\u8EAB\u4EFD\uFF0C\u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF0C\u9636\u6BB5\u53C2\u4E0E\u6821\u9A8C\u6309\u5B83\u5224\u65AD\uFF1A${MEMBER_ROLES.join(" / ")}\uFF1B\u7A7A\u5B57\u7B26\u4E32\u6E05\u9664\u3002\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5FFD\u7565\u3002`
         },
         scope: {
           type: "string",
@@ -16900,10 +17211,6 @@ function registerTools(ctx, toolsCtx, service) {
           type: "string",
           description: "\u5907\u6CE8\uFF0C\u4EC5\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF0C\u6700\u957F 500 \u5B57\u7B26\uFF1B\u53EA\u5B58\u672C\u673A\u3001\u53EA\u5728\u4E3B\u5BF9\u8BDD\u53EF\u89C1\uFF0C\u4E0D\u4F1A\u6CE8\u5165\u6216\u6295\u9012\u7ED9\u6210\u5458\uFF1B\u7A7A\u5B57\u7B26\u4E32\u6E05\u9664\u3002\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5FFD\u7565\u3002"
         },
-        keep: {
-          type: "boolean",
-          description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF08\u9700\u8981\u663E\u5F0F\u5F00\u542F\uFF09\uFF1B\u63A7\u5236\u4E3B\u5BF9\u8BDD turn \u7ED3\u675F\u540E\u662F\u5426\u89E6\u53D1\u6D3E\u6D3B\u5BA1\u67E5\uFF08\u8DDD\u4E0A\u6B21 review \u7ED3\u675F\u8D85\u8FC7 10 \u5206\u949F\u65F6\u63A8\u9001\u4E00\u6761\u6307\u4EE4\uFF0C\u8981\u6C42\u65B0\u5EFA\u5B50\u4EE3\u7406 review `.coder/members` \u4E0E\u73B0\u6709 gap\uFF0C\u5224\u65AD\u80FD\u5426\u6FC0\u6D3B\u7A7A\u95F2\u6210\u5458\u4F1A\u8BDD\uFF09\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
-        },
         avoidLongJobs: {
           type: "boolean",
           description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF1B\u5F00\u542F\u540E\u72B6\u6001\u5FEB\u7167\u4F1A\u5217\u51FA\u4E24\u6B21\u5FEB\u7167\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
@@ -16912,7 +17219,7 @@ function registerTools(ctx, toolsCtx, service) {
           type: "number",
           minimum: 1,
           maximum: 100,
-          description: "\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u767E\u5206\u6BD4\uFF0C\u9ED8\u8BA4 35\uFF09\uFF1B\u4E3B\u5BF9\u8BDD\u548C\u6210\u5458\u4F1A\u8BDD\u90FD\u751F\u6548\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u8BE5\u503C\u624D\u538B\u7F29\u3002"
+          description: "\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u767E\u5206\u6BD4\uFF0C\u9ED8\u8BA4 35\uFF09\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0B\u6B21\u6295\u9012\u524D\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u8BE5\u503C\u5C31\u5148\u538B\u7F29\u3002"
         }
       },
       additionalProperties: false
@@ -16930,23 +17237,23 @@ function registerTools(ctx, toolsCtx, service) {
       const rawId = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
       const isSelf = rawId === "" || rawId === "self" || rawId === "local" || selfId !== "" && rawId === selfId;
       const hasIdentity = args.identity !== void 0;
+      const hasRole = args.role !== void 0;
       const hasScope = args.scope !== void 0;
       const hasNote = args.note !== void 0;
-      const hasKeep = args.keep !== void 0;
       const hasAvoidLongJobs = args.avoidLongJobs !== void 0;
       const hasCompressPercent = args.compressPercent !== void 0;
-      if (!hasIdentity && !hasScope && !hasNote && !hasKeep && !hasAvoidLongJobs && !hasCompressPercent) {
-        throw new Error("identity, scope, note, keep, avoidLongJobs, or compressPercent is required");
+      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasAvoidLongJobs && !hasCompressPercent) {
+        throw new Error("identity, role, scope, note, avoidLongJobs, or compressPercent is required");
       }
       if (isSelf && selfId === "") throw new Error("cannot set the current session scope: no current session");
-      if (!isSelf && !hasIdentity && !hasScope && !hasNote && !hasCompressPercent) {
-        throw new Error("keep and avoidLongJobs only apply to the current session; set identity, scope, note, or compressPercent for a member conversation");
+      if (!isSelf && !hasIdentity && !hasRole && !hasScope && !hasNote && !hasCompressPercent) {
+        throw new Error("avoidLongJobs only applies to the current session; set identity, role, scope, note, or compressPercent for a member conversation");
       }
       const patch = {
         ...hasIdentity ? { identity: args.identity } : {},
+        ...!isSelf && hasRole ? { role: args.role } : {},
         ...hasScope ? { scope: args.scope } : {},
         ...!isSelf && hasNote ? { note: args.note } : {},
-        ...isSelf && hasKeep ? { keep: args.keep } : {},
         ...isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {},
         ...hasCompressPercent ? { compressPercent: args.compressPercent } : {}
       };
@@ -16954,19 +17261,20 @@ function registerTools(ctx, toolsCtx, service) {
       const targetId = isSelf ? selfId : rawId;
       const saved = await service.setMemberScope(targetId, patch);
       const scope = saved.scope ?? null;
-      const tracked = isSelf ? false : await memberTasks.syncTaskScope(targetId, scope, { profile: hasIdentity || hasScope });
+      const tracked = isSelf ? false : await memberTasks.syncTaskScope(targetId, scope, { profile: hasIdentity || hasRole || hasScope });
       const compressThreshold = effectiveCompressPercent(scope);
       const lines = [
-        isSelf ? `\u5DF2\u8BBE\u7F6E\u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId}\uFF09\u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u4E0E\u63A8\u9001\u914D\u7F6E\u3002` : `\u5DF2\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD ${targetId} \u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u4E0E\u538B\u7F29\u9608\u503C\u3002`,
+        isSelf ? `\u5DF2\u8BBE\u7F6E\u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId}\uFF09\u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u4E0E\u914D\u7F6E\u3002` : `\u5DF2\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD ${targetId} \u7684\u8EAB\u4EFD\u3001\u6807\u51C6\u8EAB\u4EFD\u4E0E\u538B\u7F29\u9608\u503C\u3002`,
+        ...!isSelf ? [`\u6807\u51C6\u8EAB\u4EFD\uFF1A${scope?.role ?? "\u672A\u8BBE\u7F6E"}`] : [],
         `\u8EAB\u4EFD\uFF1A${scope?.identity ?? "\u672A\u8BBE\u7F6E"}`,
         `\u5DE5\u4F5C\u8303\u56F4\uFF1A${scope?.scope ?? "\u672A\u8BBE\u7F6E"}`,
         ...!isSelf ? [`\u5907\u6CE8\uFF1A${scope?.note ?? "\u672A\u8BBE\u7F6E"}`] : [],
         ...isSelf ? [
-          `\u4FDD\u6301\u76EE\u6807\uFF1A${scope?.keep === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
           `\u907F\u514D\u8017\u65F6\uFF1A${scope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
-          `\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%\uFF08\u4E3B\u5BF9\u8BDD\u63A8\u9001\u524D\u548C\u6210\u5458\u4F1A\u8BDD\u6295\u9012\u524D\u751F\u6548\uFF09`
+          `\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%`
         ] : [`\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%\uFF08\u6295\u9012\u524D\u8D85\u8FC7\u8BE5\u5360\u6BD4\u81EA\u52A8\u538B\u7F29\uFF09`],
-        ...!isSelf && (hasKeep || hasAvoidLongJobs) ? ["keep / avoidLongJobs \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
+        ...!isSelf && hasAvoidLongJobs ? ["avoidLongJobs \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
+        ...isSelf && hasRole ? ["role \u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...isSelf && hasNote ? ["note \u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...!isSelf && !tracked ? ["\u672C\u673A\u672A\u8DDF\u8E2A\u8BE5\u4F1A\u8BDD\uFF0C\u53EA\u4FDD\u5B58\u8BBE\u7F6E\u3002"] : []
       ];
@@ -16979,12 +17287,111 @@ function registerTools(ctx, toolsCtx, service) {
           self: isSelf,
           scope,
           compressPercent: compressThreshold,
+          role: !isSelf ? scope?.role ?? null : null,
           avoidLongJobs: scope?.avoidLongJobs === true,
           tracked,
           note: !isSelf ? scope?.note ?? null : null,
-          ignoredKeep: !isSelf && hasKeep,
+          ignoredRole: isSelf && hasRole,
           ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
           ignoredNote: isSelf && hasNote
+        }
+      };
+    }
+  };
+  function goalSchema(label) {
+    return {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        text: { type: "string", maxLength: 300, description: `${label}\u6587\u672C\uFF1B\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002` },
+        status: {
+          type: "string",
+          enum: ["\u672A\u5F00\u59CB", "\u8FDB\u884C\u4E2D", "\u5DF2\u8FBE\u6210", "\u672A\u8FBE\u6210", ""],
+          description: `${label}\u72B6\u6001\uFF1B\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u56DE\u5230\u300C\u672A\u5F00\u59CB\u300D\u3002`
+        }
+      }
+    };
+  }
+  const setProductStageDefinition = {
+    name: "set_product_stage",
+    description: [
+      "\u8BBE\u7F6E\u5F53\u524D\u9879\u76EE\u7684\u4EA7\u54C1\u7248\u672C\u3001\u5927\u9636\u6BB5\u3001\u5B50\u9636\u6BB5\u8F6E\u6B21\u548C\u76EE\u6807\u72B6\u6001\u3002",
+      "",
+      "\u5927\u9636\u6BB5\uFF1AA \u8BA1\u5212\u4E0E\u76EE\u6807\uFF08\u6240\u6709\u6210\u5458\u53C2\u4E0E\u63D0\u51FA\u5EFA\u8BAE\uFF0C\u6700\u540E\u7531\u4E3B\u5BF9\u8BDD\u51B3\u5B9A\u672C\u8F6E\u8BA1\u5212\u4E0E\u76EE\u6807\uFF09\uFF1B",
+      "B \u5F00\u53D1\u4E0E\u6D4B\u8BD5\uFF08\u5F00\u53D1/\u6D4B\u8BD5/\u7814\u7A76\u5458\u53C2\u4E0E\uFF1B\u672C\u8F6E\u5F00\u53D1\u7684\u529F\u80FD\u6CA1\u6709 BUG\uFF0C\u7591\u96BE\u6742\u75C7\u9664\u5916\uFF09\uFF1B",
+      "C \u4EA7\u54C1\u7ECF\u7406\u4F7F\u7528\uFF08\u4EA7\u54C1\u7ECF\u7406\u771F\u5B9E\u4F7F\u7528\uFF0C\u53D1\u73B0\u95EE\u9898\u56DE\u5230 B \u9636\u6BB5\uFF0C\u76F4\u5230\u4EA7\u54C1\u7ECF\u7406\u653E\u884C\uFF09\uFF1B",
+      "D \u4E1A\u52A1\u4ECB\u5165\uFF08\u4E1A\u52A1\u4EBA\u5458\u5F00\u5C55\u4E1A\u52A1\u5DE5\u4F5C\uFF0C\u53D1\u73B0\u95EE\u9898\u56DE\u5230 C \u9636\u6BB5\uFF0C\u4E1A\u52A1\u653E\u884C\u540E\u56DE\u5230 A \u9636\u6BB5\uFF09\u3002",
+      "\u4EA7\u54C1\u7248\u672C\u81EA\u52A8\u7EF4\u62A4\uFF0C\u4E0D\u9700\u8981\u4F20\u5165\uFF1AD \u5B8C\u6210\u8FDB\u5165 A \u65F6\u5347\u7248\uFF08\u540C\u4E00\u5929\u5C0F\u7248\u672C +1\uFF0C\u8DE8\u5929\u91CD\u7F6E\u4E3A\u5F53\u5929 .1\uFF09\u3002",
+      "`goals` \u53EA\u6539\u4F20\u5165\u7684\u76EE\u6807\uFF1Aproduct \u4EA7\u54C1\u76EE\u6807 / dev \u5F00\u53D1\u76EE\u6807 / research \u7814\u7A76\u76EE\u6807\uFF1B\u6BCF\u9879 { text, status }\uFF0Cstatus \u53D6 \u672A\u5F00\u59CB / \u8FDB\u884C\u4E2D / \u5DF2\u8FBE\u6210 / \u672A\u8FBE\u6210\u3002",
+      "`round` \u662F\u5B50\u9636\u6BB5\u8F6E\u6B21\uFF08\u7B2C\u51E0\u8F6E\u8FED\u4EE3\uFF09\uFF1A\u7701\u7565\u65F6 D \u8FDB\u5165 A \u81EA\u52A8 +1\uFF0C\u5176\u4ED6\u9636\u6BB5\u6CBF\u7528\u5F53\u524D\u8F6E\u6B21\uFF1B\u4E5F\u53EF\u4EE5\u663E\u5F0F\u6307\u5B9A\u3002",
+      "`stage` \u7701\u7565\u65F6\u6CBF\u7528\u5F53\u524D\u9636\u6BB5\uFF08\u9996\u6B21\u8C03\u7528\u9ED8\u8BA4 A\uFF09\uFF0C\u53EA\u66F4\u65B0\u76EE\u6807\u72B6\u6001\u65F6\u53EF\u4EE5\u7701\u7565\u3002",
+      "\u9636\u6BB5\u6309\u9879\u76EE\u76EE\u5F55\u4FDD\u5B58\uFF0C\u540C\u4E00\u5DE5\u4F5C\u533A\u7684\u4E3B\u5BF9\u8BDD\u5171\u4EAB\u3002\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u63D0\u793A\u672C\u8F6E\u54EA\u4E9B\u6210\u5458\u8FD8\u6CA1\u6709\u53C2\u4E0E\u3001\u4EA7\u54C1\u7248\u672C\u7684\u76EE\u6807\u4E0E\u72B6\u6001\uFF0C\u4EE5\u53CA\u4E0B\u4E00\u6B65\u7684\u5404\u79CD\u8C03\u7528\u65B9\u5F0F\u3002",
+      "\u6210\u5458\u7684\u6807\u51C6\u8EAB\u4EFD\u7531 set_member_scope \u7684 role \u8BBE\u7F6E\uFF08\u4EA7\u54C1\u7ECF\u7406 / \u7814\u7A76\u5458 / \u5F00\u53D1 / \u6D4B\u8BD5 / \u4E1A\u52A1\uFF09\uFF1B\u6CA1\u6709\u8BBE\u7F6E\u6807\u51C6\u8EAB\u4EFD\u7684\u6210\u5458\u4F1A\u5728\u9636\u6BB5\u6821\u9A8C\u4E2D\u88AB\u63D0\u793A\u3002"
+    ].join("\n"),
+    parameters: {
+      type: "object",
+      properties: {
+        stage: {
+          type: "string",
+          enum: ["A", "B", "C", "D"],
+          description: "\u5927\u9636\u6BB5\uFF1AA \u8BA1\u5212\u4E0E\u76EE\u6807\u3001B \u5F00\u53D1\u4E0E\u6D4B\u8BD5\u3001C \u4EA7\u54C1\u7ECF\u7406\u4F7F\u7528\u3001D \u4E1A\u52A1\u4ECB\u5165\u3002"
+        },
+        round: {
+          type: "integer",
+          minimum: 1,
+          maximum: 999,
+          description: "\u5B50\u9636\u6BB5\u8F6E\u6B21\uFF08\u7B2C\u51E0\u8F6E\u8FED\u4EE3\uFF09\uFF1B\u7701\u7565\u65F6\u6309\u6D41\u7A0B\u81EA\u52A8\u51B3\u5B9A\u3002"
+        },
+        goals: {
+          type: "object",
+          additionalProperties: false,
+          description: "\u4E09\u4E2A\u76EE\u6807\u53CA\u72B6\u6001\uFF0C\u53EA\u6539\u4F20\u5165\u7684\u9879\u3002",
+          properties: {
+            product: goalSchema("\u4EA7\u54C1\u76EE\u6807"),
+            dev: goalSchema("\u5F00\u53D1\u76EE\u6807"),
+            research: goalSchema("\u7814\u7A76\u76EE\u6807")
+          }
+        }
+      },
+      additionalProperties: false
+    },
+    output: {
+      schema: { type: "object", additionalProperties: true },
+      render: (_args, value) => [{
+        type: "text",
+        text: typeof value?.text === "string" ? value.text : JSON.stringify(value, null, 2)
+      }]
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      if (typeof service.productStage !== "function" || typeof service.setProductStage !== "function") {
+        throw new Error("product stages are not available");
+      }
+      const cwd = projectDirOf(exec?.agent);
+      if (cwd === "") throw new Error("set_product_stage needs a conversation with a project directory");
+      const originSessionId = originSessionOf(exec.agent);
+      if (isMemberSession(originSessionId)) {
+        throw new Error("set_product_stage is only available in a main conversation; report the result back to the initiator");
+      }
+      const previous = await service.productStage(cwd);
+      const saved = await service.setProductStage({
+        cwd,
+        stage: args.stage,
+        round: args.round,
+        goals: args.goals,
+        bySessionId: originSessionId
+      });
+      const tasks = await memberTasks.listForOrigin(originSessionId).catch(() => []);
+      const scopes = await service.memberScopes().catch(() => ({}));
+      const warnings = productStageWarnings(saved.previous, tasks, scopes);
+      return {
+        ok: true,
+        text: formatProductStageResult(saved.state, { created: previous === null, tasks, scopes, warnings }),
+        data: {
+          state: saved.state,
+          previous: saved.previous,
+          warnings,
+          project: cwd
         }
       };
     }
@@ -17494,7 +17901,7 @@ sha256 ${data.sha256}
       };
     }
   };
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, waitMemberDefinition, statusMemberDefinition, removeMemberDefinition, membersDefinition, repackDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, setProductStageDefinition, waitMemberDefinition, statusMemberDefinition, removeMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool);
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`);
@@ -17511,6 +17918,7 @@ function formatTaskProfileLine(task) {
   const profile = memberTaskProfile(task);
   if (profile === null) return "";
   const parts = [];
+  if (typeof profile.role === "string" && profile.role !== "") parts.push(`\u6807\u51C6\u8EAB\u4EFD\uFF1A${profile.role}`);
   if (profile.identity !== null) parts.push(`\u8EAB\u4EFD\uFF1A${profile.identity}`);
   if (profile.scope !== null) parts.push(`\u8D1F\u8D23\u8303\u56F4\uFF1A${profile.scope}`);
   return parts.join("\uFF1B");
@@ -17568,6 +17976,10 @@ function originSessionOf(agent) {
   if (typeof sessionId === "string" && sessionId !== "") return sessionId;
   return typeof agent?.id === "string" ? agent.id : "";
 }
+function projectDirOf(agent) {
+  const cwd = agent?.session?.header?.cwd ?? agent?.session?.meta?.cwd ?? agent?.session?.cwd;
+  return typeof cwd === "string" ? cwd.trim() : "";
+}
 function conversationListBlock(tasks, currentConversationId, options = {}) {
   const list = Array.isArray(tasks) ? tasks : [];
   const withProfile = options.withProfile === true;
@@ -17576,7 +17988,7 @@ function conversationListBlock(tasks, currentConversationId, options = {}) {
     const entry = describeMemberTask(task, currentConversationId);
     const stored = scopes[String(task.conversationId ?? "")];
     const profile = stored !== void 0 ? memberTaskProfile({ profile: stored }) : memberTaskProfile(task);
-    return { ...entry, profile, identity: profile?.identity ?? null, scope: profile?.scope ?? null };
+    return { ...entry, profile, role: profile?.role ?? null, identity: profile?.identity ?? null, scope: profile?.scope ?? null };
   }) : list.map((task) => describeMemberTask(task, currentConversationId));
   if (conversations.length === 0) {
     return { lines: ["\u672C\u5BF9\u8BDD\u8FD8\u6CA1\u6709\u8DDF\u8E2A\u4EFB\u4F55\u6210\u5458\u4F1A\u8BDD\u3002"], conversations };
@@ -17679,6 +18091,7 @@ function describeStatus(found, memberTasks, scopes = {}) {
     memberIp: task.memberIp,
     workspace: liveWorkspace !== "" ? liveWorkspace : memberTaskWorkspace(task),
     profile,
+    role: profile?.role ?? null,
     identity: profile?.identity ?? null,
     scope: profile?.scope ?? null,
     note,
@@ -17703,7 +18116,7 @@ function formatStatusBlock(entry) {
     entry.liveStatus === "" ? `\u72B6\u6001\uFF1A${entry.statusLabel}\uFF08\u76EE\u6807\u4E0D\u53EF\u8FBE\uFF1A${entry.liveError ?? "unknown"}\uFF09` : `\u72B6\u6001\uFF1A${entry.statusLabel}\uFF08\u76EE\u6807\u5B9E\u65F6\uFF09`,
     `\u672C\u673A\u4EFB\u52A1\uFF1A${entry.taskStatus}${entry.turns === null ? "" : `\uFF0C\u8F6E\u6B21 ${String(entry.turns)}`}`,
     `\u5DE5\u4F5C\u533A\uFF1A${entry.workspace ?? "unknown"}`,
-    `\u8EAB\u4EFD\uFF1A${entry.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${entry.scope ?? "\u672A\u8BBE\u7F6E"}`,
+    `\u6807\u51C6\u8EAB\u4EFD\uFF1A${entry.role ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u8EAB\u4EFD\uFF1A${entry.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${entry.scope ?? "\u672A\u8BBE\u7F6E"}`,
     `\u5907\u6CE8\uFF1A${entry.note ?? "\u672A\u8BBE\u7F6E"}`,
     formatContextLine(entry.context),
     entry.messages.length === 0 ? "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\uFF1A(\u6CA1\u6709\u8BB0\u5F55)" : "\u6700\u8FD1\u4E24\u6B21\u7528\u6237\u6D88\u606F\uFF08\u65E7\u2192\u65B0\uFF09\uFF1A",
@@ -17810,7 +18223,7 @@ import { createHash as createHash9, randomBytes as randomBytes3, randomUUID as r
 import { existsSync as existsSync15, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http3 from "node:http";
 import { homedir as homedir3, tmpdir as tmpdir5 } from "node:os";
-import path30 from "node:path";
+import path31 from "node:path";
 import { promisify as promisify4 } from "node:util";
 
 // code/shared/conversation-meta.mjs
@@ -18030,20 +18443,20 @@ function readEnvFile2(file) {
 function configCandidates() {
   const candidates = [];
   const explicit = process.env.DSH_INTEROP_CONFIG;
-  if (typeof explicit === "string" && explicit.trim() !== "") candidates.push(path30.resolve(explicit));
+  if (typeof explicit === "string" && explicit.trim() !== "") candidates.push(path31.resolve(explicit));
   const packageRoot = process.env.DSH_PACKAGE_ROOT;
   if (typeof packageRoot === "string" && packageRoot.trim() !== "") {
-    candidates.push(path30.join(packageRoot, "config", "interop.env"));
+    candidates.push(path31.join(packageRoot, "config", "interop.env"));
   }
   const home = process.env.DSH_HOME;
   if (typeof home === "string" && home.trim() !== "") {
-    candidates.push(path30.join(path30.dirname(home), "config", "interop.env"));
-    candidates.push(path30.join(home, "config", "interop.env"));
+    candidates.push(path31.join(path31.dirname(home), "config", "interop.env"));
+    candidates.push(path31.join(home, "config", "interop.env"));
   }
   let current = process.cwd();
   for (let depth = 0; depth < 7; depth += 1) {
-    candidates.push(path30.join(current, "config", "interop.env"));
-    const parent = path30.dirname(current);
+    candidates.push(path31.join(current, "config", "interop.env"));
+    const parent = path31.dirname(current);
     if (parent === current) break;
     current = parent;
   }
@@ -18062,7 +18475,7 @@ function asBool(value, fallback) {
 }
 function resolveInteropSettings(config = {}) {
   const file = findInteropConfig();
-  const root = file === null ? null : path30.dirname(path30.dirname(file));
+  const root = file === null ? null : path31.dirname(path31.dirname(file));
   const values = file === null ? {} : readEnvFile2(file);
   const setting = (name, fallback) => {
     const fromEnv = process.env[name];
@@ -18074,11 +18487,11 @@ function resolveInteropSettings(config = {}) {
     setting("DSH_INTEROP_USE_GATE_PASSWORD", config.interopUseGatePassword === true ? "1" : "0"),
     false
   );
-  const dataDir = root === null ? path30.join(process.env.DSH_HOME ?? path30.join(process.cwd(), ".dsh"), "mesh", "interop") : path30.join(root, "data");
-  const tokenFile = path30.join(dataDir, "interop-token");
+  const dataDir = root === null ? path31.join(process.env.DSH_HOME ?? path31.join(process.cwd(), ".dsh"), "mesh", "interop") : path31.join(root, "data");
+  const tokenFile = path31.join(dataDir, "interop-token");
   let gatePassword = typeof process.env.DSH_GATE_PASSWORD === "string" ? process.env.DSH_GATE_PASSWORD : "";
   if (useGatePassword && gatePassword === "" && root !== null) {
-    gatePassword = readEnvFile2(path30.join(root, "config", "gate.env")).DSH_GATE_PASSWORD ?? "";
+    gatePassword = readEnvFile2(path31.join(root, "config", "gate.env")).DSH_GATE_PASSWORD ?? "";
   }
   let token = "";
   if (useGatePassword) {
@@ -18110,15 +18523,15 @@ function resolveInteropSettings(config = {}) {
   const reasoning = setting("DSH_INTEROP_REASONING_EFFORT", "");
   const workdir = setting(
     "DSH_WORKDIR",
-    root === null ? process.cwd() : path30.join(root, "workspace")
+    root === null ? process.cwd() : path31.join(root, "workspace")
   );
   return {
     file,
     root,
     dataDir,
     tokenFile,
-    logFile: path30.join(dataDir, "interop-service.log"),
-    stateFile: path30.join(dataDir, "conversations.json"),
+    logFile: path31.join(dataDir, "interop-service.log"),
+    stateFile: path31.join(dataDir, "conversations.json"),
     token,
     useGatePassword,
     tokenSource: useGatePassword ? "gate password" : file === null ? "generated token file" : "interop.env",
@@ -18130,10 +18543,10 @@ function resolveInteropSettings(config = {}) {
     approve: asBool(setting("DSH_INTEROP_APPROVE", "0"), false),
     preset,
     agentPreset,
-    workdir: path30.resolve(workdir),
+    workdir: path31.resolve(workdir),
     // Task workspaces are always below this root, so a workspace name sent by
     // the panel can never address an arbitrary directory on the member.
-    workspaceRoot: path30.resolve(setting("DSH_WORKSPACES_DIR", path30.join(homedir3(), ".dsh", "workspaces"))),
+    workspaceRoot: path31.resolve(setting("DSH_WORKSPACES_DIR", path31.join(homedir3(), ".dsh", "workspaces"))),
     requestTimeoutMs: Number.parseInt(setting("DSH_INTEROP_REQUEST_TIMEOUT_MS", "180000"), 10)
   };
 }
@@ -18147,19 +18560,19 @@ function normalizeWorkspaceName(value) {
   return name;
 }
 function workspacePath(settings, name) {
-  return path30.join(workspaceRootOf(settings), name);
+  return path31.join(workspaceRootOf(settings), name);
 }
 function sameDirectory(left, right) {
   if (typeof left !== "string" || left === "" || typeof right !== "string" || right === "") return false;
   try {
-    return path30.resolve(left) === path30.resolve(right);
+    return path31.resolve(left) === path31.resolve(right);
   } catch {
     return false;
   }
 }
 function workspaceRootOf(settings) {
   const root = settings.workspaceRoot;
-  return typeof root === "string" && root.trim() !== "" ? path30.resolve(root) : path30.join(homedir3(), ".dsh", "workspaces");
+  return typeof root === "string" && root.trim() !== "" ? path31.resolve(root) : path31.join(homedir3(), ".dsh", "workspaces");
 }
 function listWorkspaces(settings) {
   const dir = workspaceRootOf(settings);
@@ -18171,7 +18584,7 @@ function listWorkspaces(settings) {
   try {
     for (const entry of readdirSync2(dir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      workspaces.push({ name: entry.name, path: path30.join(dir, entry.name) });
+      workspaces.push({ name: entry.name, path: path31.join(dir, entry.name) });
     }
   } catch {
   }
@@ -18204,9 +18617,9 @@ function writeScratch(body) {
   }
   const hint = typeof body.name === "string" && body.name.trim() !== "" ? body.name.trim() : "message";
   const safe = hint.replace(/[^A-Za-z0-9._-]/gu, "-").slice(0, 60) || "message";
-  const dir = path30.join(tmpdir5(), "dsh-mesh-messages");
+  const dir = path31.join(tmpdir5(), "dsh-mesh-messages");
   mkdirSync2(dir, { recursive: true });
-  const file = path30.join(dir, `${safe}-${Date.now().toString(36)}-${randomUUID4().slice(0, 8)}.md`);
+  const file = path31.join(dir, `${safe}-${Date.now().toString(36)}-${randomUUID4().slice(0, 8)}.md`);
   writeFileSync(file, text, "utf8");
   return { path: file, bytes: Buffer.byteLength(text, "utf8") };
 }
@@ -18278,7 +18691,7 @@ function createInteropService(options) {
   const logLine = options.log ?? (() => {
   });
   const retry = options.retry !== false;
-  const upgradePlanFile = typeof options.upgradePlanFile === "string" && options.upgradePlanFile !== "" ? options.upgradePlanFile : path30.join(settings.dataDir, "upgrade-plan.json");
+  const upgradePlanFile = typeof options.upgradePlanFile === "string" && options.upgradePlanFile !== "" ? options.upgradePlanFile : path31.join(settings.dataDir, "upgrade-plan.json");
   const conversations = /* @__PURE__ */ new Map();
   const bySession = /* @__PURE__ */ new Map();
   const handles = /* @__PURE__ */ new Map();
@@ -18684,12 +19097,12 @@ data: ${JSON.stringify(payload)}
     const id = randomUUID4();
     const registry = typeof ctx.get === "function" ? ctx.get("workspaceRegistry") : ctx.workspaceRegistry;
     const requested = normalizeWorkspaceName(request.workspace);
-    const explicitCwd = typeof request.cwd === "string" && request.cwd !== "" ? path30.resolve(request.cwd) : "";
+    const explicitCwd = typeof request.cwd === "string" && request.cwd !== "" ? path31.resolve(request.cwd) : "";
     const workspace = requested !== "" ? requested : explicitCwd === "" ? DEFAULT_WORKSPACE2 : "";
     const cwd = requested !== "" ? requested === DEFAULT_WORKSPACE2 ? defaultWorkspaceDirectory(registry, settings) : workspacePath(settings, requested) : explicitCwd !== "" ? explicitCwd : defaultWorkspaceDirectory(registry, settings);
     const occupied = [...conversations.values()].filter((conversation2) => !sessionArchived(conversation2) && sameDirectory(conversation2.cwd, cwd));
     if (occupied.length > 0) {
-      const busyName = workspace !== "" ? workspace : path30.basename(cwd) || cwd;
+      const busyName = workspace !== "" ? workspace : path31.basename(cwd) || cwd;
       const first = occupied[0];
       const label = occupied.map((conversation2) => `${conversation2.id}\uFF08${conversation2.status}\uFF09`).join("\u3001");
       throw httpError(
@@ -18767,7 +19180,7 @@ data: ${JSON.stringify(payload)}
         conversation.status = "running";
         conversation.idle = false;
       }
-      await attachWorkspaceSession(registry, cwd, workspace !== "" ? workspace : path30.basename(cwd) || DEFAULT_WORKSPACE2, id);
+      await attachWorkspaceSession(registry, cwd, workspace !== "" ? workspace : path31.basename(cwd) || DEFAULT_WORKSPACE2, id);
       scheduleSave();
       return conversation;
     } catch (error) {
@@ -18905,7 +19318,7 @@ data: ${JSON.stringify(payload)}
     scheduleSave();
   }
   async function removeWorkspaceFor(cwd) {
-    const directory = path30.resolve(cwd);
+    const directory = path31.resolve(cwd);
     const registry = workspaceRegistry();
     let recordRemoved = false;
     if (registry !== void 0 && registry !== null && typeof registry.list === "function" && typeof registry.delete === "function") {
@@ -18921,9 +19334,9 @@ data: ${JSON.stringify(payload)}
       }
     }
     let directoryRemoved = false;
-    const root = path30.resolve(workspaceRootOf(settings));
-    const relative = path30.relative(root, directory);
-    const inside = relative !== "" && !relative.startsWith("..") && !path30.isAbsolute(relative);
+    const root = path31.resolve(workspaceRootOf(settings));
+    const relative = path31.relative(root, directory);
+    const inside = relative !== "" && !relative.startsWith("..") && !path31.isAbsolute(relative);
     if (inside) {
       try {
         rmSync(directory, { recursive: true, force: true });
@@ -19419,8 +19832,8 @@ data: ${JSON.stringify(event)}
 // src/index.ts
 var inject = ["webServer"];
 function dataDirectory() {
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path31.join(homedir4(), ".dsh");
-  return path31.join(home, "mesh");
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path32.join(homedir4(), ".dsh");
+  return path32.join(home, "mesh");
 }
 async function apply(ctx, config = {}) {
   const service = new MeshService({
@@ -19453,7 +19866,7 @@ async function apply(ctx, config = {}) {
   } catch (error) {
     console.error(`mesh: tools service is unavailable: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const upgradePlanFile = path31.join(dataDirectory(), "upgrade-plan.json");
+  const upgradePlanFile = path32.join(dataDirectory(), "upgrade-plan.json");
   if (config.interopEmbedded !== false) {
     try {
       ctx.inject(["agents"], (agentsCtx) => {

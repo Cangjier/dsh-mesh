@@ -2,8 +2,8 @@
 
 - 插件：`@local/dsh-mesh`
 - 工具注册：`src/lib/tools.mjs` → `registerTools()`
-- 当前共 9 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`set_member_scope`、`wait_member`、`status_member`、`remove_member`
-- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续（不再有 `compress` 参数），`set_member_scope` 单独设置任意会话或自身的身份/工作范围、派活推送开关和自动压缩阈值，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）；`remove_member` 输入会话id，在目标成员上归档、删除对话、删除工作区记录并清空工作区目录，同时删掉本机跟踪记录。
+- 当前共 10 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`set_member_scope`、`set_product_stage`、`wait_member`、`status_member`、`remove_member`
+- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续（不再有 `compress` 参数），`set_member_scope` 单独设置任意会话或自身的身份、标准身份、工作范围和自动压缩阈值，`set_product_stage` 维护产品版本、A/B/C/D 大阶段、子阶段轮次和目标状态，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）；`remove_member` 输入会话id，在目标成员上归档、删除对话、删除工作区记录并清空工作区目录，同时删掉本机跟踪记录。
 - 所有工具统一返回 `{ ok, text, data }`。`text` 是给人看的摘要，`data` 是结构化结果。
 - 同步执行的工具会在 `text` 和 `data` 里都返回日志文件地址，便于调用结束后继续读取完整日志。
 
@@ -15,8 +15,9 @@
 | `deploy` | SSH 部署/升级，等待结束 | `host` `package` | `false` |
 | `repack` | 用当前仓库刷新已有离线包 | `package` | `false` |
 | `members` | 只读成员发现 | 无 | `true` |
-| `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `cwd` / `workspace` / `identity` / `scope` | `false` |
-| `set_member_scope` | 设置成员会话或自身的身份/工作范围、备注、派活推送开关与压缩阈值 | `conversationId` / `identity` / `scope` / `note` / `keep` / `avoidLongJobs` / `compressPercent` | `false` |
+| `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `cwd` / `workspace` / `identity` / `role` / `scope` | `false` |
+| `set_member_scope` | 设置成员会话或自身的身份、标准身份、工作范围、备注与压缩阈值 | `conversationId` / `identity` / `role` / `scope` / `note` / `avoidLongJobs` / `compressPercent` | `false` |
+| `set_product_stage` | 设置产品阶段、子阶段轮次和三个目标及状态；版本自动维护 | `stage` / `round` / `goals` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
 | `status_member` | 目标会话状态 + 身份/工作范围 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区/身份/工作范围，已归档的不列出）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
 | `remove_member` | 彻底删除一个对话、它的工作区记录和目录，并停止本机跟踪 | `conversationId` | `false` |
@@ -33,7 +34,8 @@ $DSH_HOME/mesh/
   deploy/                  部署 job
   member-tasks/            成员任务
   member-tags.json         成员标签
-  member-scopes.json       按会话存的身份 / 工作范围 / keep / compressPercent
+  member-scopes.json       按会话存的身份 / 标准身份 / 工作范围 / 备注 / 压缩阈值
+  product-stages.json      按项目目录存的产品版本 / 阶段 / 轮次 / 目标 / 本轮参与
   schedule.json            自动编译 / 每成员自动升级设置与上次结果
   cache/sources/           源码 tarball 缓存
 ```
@@ -398,12 +400,13 @@ call_member { "member": "10.66.66.3", "prompt": "检查磁盘" }
 返回值还包含 `currentConversationId` 和 `conversations`：本对话跟踪的所有成员会话
 （会话id、`进行中` / `空闲` / `异常中止`、工作区、轮次），当前会话 `current: true`。
 
-**身份与工作范围**：两个值按**会话 id** 合并保存到 `$DSH_HOME/mesh/member-scopes.json`
-（`{ "<conversationId>": { identity, scope, note, keep, avoidLongJobs, compressPercent } }`，只存显式设置过的字段；
-自身用当前主对话 session id，`keep` / `avoidLongJobs` 只对自身有意义，`compressPercent` 对自身和成员会话都生效）。身份/范围随最终 prompt 注入，不再写成员的系统上下文：新建对话时把本次有效 scope 作为
-`【成员身份】你的身份：…；负责范围：…。` 前缀放进 prompt；继续已有对话时合并该会话的 scope，
-只有本次显式传 identity/scope 才追加这个前缀（只写已设置的部分）。返回的 `text` 显示
-`身份：…；负责范围：…`；完全没有设置时提示用 `call_member` 的 `identity`/`scope` 或
+**身份、标准身份与工作范围**：三个值按**会话 id** 合并保存到 `$DSH_HOME/mesh/member-scopes.json`
+（`{ "<conversationId>": { identity, role, scope, note, avoidLongJobs, compressPercent } }`，只存显式设置过的字段；
+自身用当前主对话 session id，`role` / `note` 只对成员会话有意义，`avoidLongJobs` 只对自身有意义，
+`compressPercent` 对成员会话的投递生效）。身份/范围随最终 prompt 注入，不再写成员的系统上下文：新建对话时把本次有效 profile 作为
+`【成员身份】你的标准身份：…；你的身份：…；负责范围：…。` 前缀放进 prompt；继续已有对话时合并该会话的 scope，
+只有本次显式传 identity/role/scope 才追加这个前缀（只写已设置的部分）。返回的 `text` 显示
+`标准身份：…；身份：…；负责范围：…`；完全没有设置时提示用 `call_member` 的 `identity`/`role`/`scope` 或
 `set_member_scope` 补齐，`data.profile` 是本次有效 profile（缺失为 `null`）。
 仓库不再有“成员机器档案/继承”的概念。
 
@@ -598,69 +601,93 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 响应新增顶层 `context`，`POST /compact` 返回 `compacted` / `shadowedCount` /
 `shadowedTokenCount` / `summary` / `context`。
 
-### 6.6 成员会话状态快照（`agent/pre-step` 注入）
+### 6.6 成员上下文快照（`agent/pre-step` 注入）
 
-本对话有进行中的成员会话时，插件每 60 秒最多把一份状态快照附加到当前 step 的请求：
+本对话有进行中的成员会话、有生效的产品阶段、有名册缺口，或（开启 `avoidLongJobs` 后）上次快照以来有超过 1 分钟的已结束 job 时，插件每 60 秒最多把一份快照附加到当前 step 的请求：
 
 ```text
 [成员上下文] 本对话跟踪 2 个成员会话，其中 1 个进行中（快照 ...）。
-- 自身（会话 <selfId>）：身份：…；工作范围：…；保持目标：开启/关闭（只对主对话生效）；避免耗时：开启/关闭（只对主对话生效）；压缩阈值：35%
-- conv-a（B 10.66.66.2，工作区 dsh-mesh，进行中，第 2 轮）身份：…；工作范围：…；压缩阈值：10%
-- conv-b（B 10.66.66.2，工作区 unknown，空闲，第 1 轮）身份：未设置；工作范围：未设置
+[产品阶段] 20261126.1 · B 阶段（第 1 轮迭代）· 开发与测试
+- 阶段要求：开发、测试、研究员参与；本轮开发的功能没有 BUG（疑难杂症除外）。
+- 产品目标：可用的成员面板（进行中）
+- 开发目标：无 BUG（进行中）
+- 研究目标：未设置
+- 本轮参与：1/3（开发 c1）
+- 未参与：测试 c2、研究员 c3
+- 标准身份未设置：c4（身份 前端开发1）；用 set_member_scope { "conversationId": "c4", "role": "开发" } 设置。
+- 下一步（set_product_stage）：进入 C 阶段 { "stage": "C" }；回 A 阶段重新计划 { "stage": "A" }。
+- 子阶段或目标：同一阶段下一轮 { "stage": "B", "round": 2 }；只更新目标状态 { "goals": { "dev": { "status": "已达成" } } }。
+- 身份：网关（自身，会话 <selfId>）；工作范围：成员发现；避免耗时：关闭（只对主对话生效）；压缩阈值：35%
+- 身份：开发；工作区：dsh-mesh；会话：c1（B 10.66.66.2，进行中，第 2 轮）；工作范围：…
+- 身份：未设置；工作区：unknown；会话：c2（B 10.66.66.2，空闲，第 1 轮）；工作范围：未设置；压缩阈值：10%
 ```
-
-快照末尾不再追加 `wait_member` 提示。
 
 - 通过 `agent/pre-step` 把消息附加到 `decision.messages`，和 time-context 同一条路径；
 - **不新开 turn**，不调用 `followup` / `steer`，不是用户输入；
 - 注入消息的 `source.kind` 是 `member-context`（不是 `user`），带
   `form: "snapshot"` 和 `sections`；
-- 没有进行中的会话、或距上次注入不足 60 秒时不注入；
+- 没有进行中的会话、没有产品阶段、没有名册缺口、没有耗时提醒时不注入；距上次注入不足 60 秒不注入；
+- 产品阶段块在自身行之前，包含版本、阶段、轮次、阶段要求、三个目标及状态、本轮参与度、未参与/缺身份提示和下一步调用方式；
 - 身份/工作范围优先取 `member-scopes.json`（按 conversationId），回退任务 profile 快照；已归档的会话不进入快照；
-- 成员行在设置了备注时追加 `；备注：…`（备注只在主对话可见，不注入成员）；自身行显示有效配置：保持目标（`keep`，默认关闭，需显式开启）、避免耗时（`avoidLongJobs`，默认关闭）和压缩阈值
+- 成员行在设置了备注时追加 `；备注：…`（备注只在主对话可见，不注入成员）；自身行显示有效配置：避免耗时（`avoidLongJobs`，默认关闭）和压缩阈值
   （`compressPercent`，默认 35%）；成员行只在显式设置过 `compressPercent` 时显示该阈值；
 - 缺成员会话身份/工作范围时聚合提示 `call_member` / `set_member_scope`；自身缺失时提示
   `set_member_scope`（省略 conversationId 或传 `self`）；全齐时不提示；
+- 跟踪了成员会话但还没有产品阶段时，提示用 `set_product_stage` 建立（如 `{ "stage": "A" }`）；
 - 读取任务表失败只记日志并吞掉，step 的 decision 原样返回，不影响 agent loop；
 - 每个会话的注入时钟在 `session/disposed` 时清掉。
 - 自身开启 `avoidLongJobs` 后，快照还会列出「距上一次快照之间结束、耗时超过 1 分钟」的
   job（kind、标签、耗时），并在末尾建议用 `call_member` 交给成员对话执行；没有进行中的
   成员会话时，这类提醒也可以单独触发一次注入。窗口每次快照消费一次，同一 job 不重复提示。
 
-### 6.6.1 主对话 turn 结束后的派活审查
+### 6.6.1 产品阶段与 `set_product_stage`
 
-主对话 `turn/end` 后，若该会话不是 interop 创建的成员会话、`keep === true`（默认 false）、且有被跟踪的
-成员任务或自身 scope，插件检查**距上一次成员状态 review 结束**是否已超过 **10 分钟**
-（`MEMBER_REVIEW_INTERVAL_MS`；首次没有记录即视为超过）。没有静默等待，也不再有可配置的推送延迟；
-超过时在本 turn 收尾（`session/event` 先于 agent 回到 idle 触发，故等一个宏任务）后用
-`agent.followup(...)` 投递派活指令。投递前先测量主对话上下文占比：超过
-`compressPercent`（默认 35%）就用 `agentPresets.serviceFor(agent, 'compaction') ?? ctx.compaction`
-的 `compactNow()` 压缩；压缩失败只记日志、仍继续投递；压缩期间开始了新 turn 或 agent 不再 idle
-则放弃本次投递。推送日志记录是否压缩和压缩前后占比。
+阶段状态按**项目目录**（主对话会话的工作目录）保存到 `$DSH_HOME/mesh/product-stages.json`，
+同一工作区的主对话共享：
 
-review 的结束时间由**派活指令拉起的那一轮**决定：投递后该会话标记 `reviewPending`，它下一次
-`turn/end` 把 `lastReviewEnd` 刷成当前时刻并消费标记。因此 review 跑了 20 分钟，也要等它结束
-后再过 10 分钟才会触发下一次；普通 turn 结束只在窗口已过时投递，不会重置窗口。
-
-```text
-[成员调度] 本对话已空闲。请立即用 subagent 新建一个子代理做只读审查：读本工作区的
-`.coder/members/all.md`、`.coder/members/flow.md` 和现有 gap（`.coder/issues/open.md`、
-`.coder/plan/todo.md`、`.coder/plan/goal.md` 等），判断是否可以激活部分现有空闲成员对话。
-- 子代理只读：不改代码、不跑重活；结论逐条给出可激活的成员会话（conversationId）、建议任务与依据；不建议激活的写原因。
-- 只考虑空闲成员会话；进行中/异常中止的一律跳过，禁止重启、归档或新建同名会话——派活必须带原 conversationId 继续。
-- 审查结论交回本对话，由本对话用 call_member 决定是否派活。
-- 当前成员会话（本对话跟踪 2 个，其中 1 个进行中；快照 ...）：
-- <成员行，与 6.6 快照相同的 conversationId/成员/IP/工作区/状态/身份/工作范围/备注>
-- 自身（会话 <selfId>）：身份：…；工作范围：…；保持目标：开启（只对主对话生效）；…
+```json
+{
+  "/root/ws/dsh-plugins/dsh-mesh": {
+    "version": "20261126.1",
+    "stage": "B",
+    "round": 1,
+    "goals": {
+      "product": { "text": "可用的成员面板", "status": "进行中" },
+      "dev": { "text": "无 BUG", "status": "进行中" }
+    },
+    "participation": { "<conversationId>": { "turn": 2, "at": "2026-11-26T02:00:00.000Z" } },
+    "updatedAt": "2026-11-26T02:00:00.000Z",
+    "updatedBy": "<主对话 session id>"
+  }
+}
 ```
 
-- 消息 `role: "user"`，`source: { kind: "member-context", form: "push" }`，不是普通用户输入；
-- 推送内容不再是状态快照的复述；成员状态行只作为审查事实（谁空闲、谁在跑），
-  决定由子代理 review 后交回主对话执行；
-- 不做内容签名去重：只要距上次 review 结束超过 10 分钟，下一次 turn 结束就再次审查；
-- 任务进展/完成或 scope 变化会影响派活指令里的成员行，但不再是触发条件；
-- 成员会话由 `src/lib/member-sessions.mjs` 标记，永不主动推送；
-- 推送失败只记日志，不影响会话；`turn/start` 不再取消任何计时（没有计时器）。
+四个大阶段：
+
+| 阶段 | 要求 |
+|---|---|
+| `A` | 计划与目标：所有成员参与并提出建议，最后由主对话决定本轮计划与目标 |
+| `B` | 开发与测试：开发、测试、研究员参与；本轮开发的功能没有 BUG（疑难杂症除外） |
+| `C` | 产品经理使用：产品经理真实使用，发现问题回到 B 阶段，直到产品经理放行 |
+| `D` | 业务介入：业务人员开展业务工作，发现问题回到 C 阶段，业务放行后回到 A 阶段 |
+
+规则：
+
+- **产品版本** `YYYYMMDD.N` 自动维护、不需要传入：只在 `D -> A` 时移动，同一天小版本 `+1`，跨天重置为当天 `.1`；首次调用建立当天 `.1`。
+- **子阶段轮次** `round`：默认 `D -> A` 自动 `+1`，其他阶段沿用当前轮次；显式传 `round` 可开启新一轮（阶段或轮次变化会清空本轮参与记录）。
+- **目标**：`product` 产品目标 / `dev` 开发目标 / `research` 研究目标；每项 `{ text, status }`，`status` 取 未开始 / 进行中 / 已达成 / 未达成。只改传入的项，`text` 为空表示清除该目标。
+- **参与度**：成员的一轮回复被接受时（`wait_member` 取走和兜底投递共用同一张回复表）自动记到当前 `(stage, round)`；阶段或轮次变化后重新计。
+- **退出检查**：离开 A 要求所有成员参与且产品目标已设置；离开 B 要求开发目标状态为「已达成」；离开 C 要求产品目标状态为「已达成」；任何阶段都会点名未参与的成员、没有对应身份的成员会话、没有设置标准身份的会话。工具结果以 `[放行检查]` 列出这些警告，不阻断阶段流转，由主对话决定是否放行。
+- 成员的标准身份由 `set_member_scope` 的 `role` 设置（产品经理 / 研究员 / 开发 / 测试 / 业务）；未设置的成员在快照里被点名，不按自由文本 `identity` 推断。
+
+```text
+set_product_stage { "stage": "A", "goals": { "product": { "text": "可用的成员面板" } } }
+set_product_stage { "stage": "B" }
+set_product_stage { "goals": { "dev": { "status": "已达成" } } }
+set_product_stage { "stage": "A" }
+  → D 放行后回 A：版本 20261126.1 → 20261126.2，轮次 +1
+set_product_stage { "stage": "C", "round": 2 }
+```
 
 ### 6.7 任务文件
 
@@ -730,34 +757,33 @@ status_member { "conversationIds": ["<会话id1>", "<会话id2>"] }
 
 ```text
 set_member_scope { "identity": "开发", "scope": "插件开发" }
-set_member_scope { "conversationId": "self", "keep": true }
 set_member_scope { "conversationId": "self", "avoidLongJobs": true }
-set_member_scope { "conversationId": "<成员会话id>", "note": "只读复核，不要改内核文件" }
+set_member_scope { "conversationId": "<成员会话id>", "role": "测试", "note": "只读复核，不要改内核文件" }
 set_member_scope { "compressPercent": 35 }
-set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "scope": "跨平台验收", "compressPercent": 10 }
+set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "role": "测试", "scope": "跨平台验收", "compressPercent": 10 }
 ```
 
 - `conversationId` 省略、`self`、`local` 或等于当前会话 id → 设置“自身”；其他值作为成员会话 id。
-- `identity` / `scope` / `note` 只传要改的字段，空字符串清除；identity ≤40 字符，scope ≤120 字符，
+- `identity` / `role` / `scope` / `note` 只传要改的字段，空字符串清除；identity ≤40 字符，scope ≤120 字符，
   note ≤500 字符。
+- `role`（标准身份）只对成员会话生效，取值只能是 产品经理 / 研究员 / 开发 / 测试 / 业务；
+  `set_product_stage` 的阶段参与校验按它判断谁该参与。设置自身时忽略，返回文字会说明。
 - `note`（备注）只对成员会话生效：只写本机的 `member-scopes.json`，**不注入成员系统上下文、
   不随 `call_member` 投递**；只在主对话的 `status_member` 和成员上下文快照里可见。设置自身
   时忽略，返回文字会说明。
-- `keep` 默认 false，只对自身生效：需要 turn 结束后的派活审查时显式传 `keep: true`；给自身设置
-  identity/scope 不会顺带开启它。设置成员会话时忽略，返回文字会说明。
 - `avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，下一次状态快照会检查距上一次快照
   之间结束、耗时超过 1 分钟的 job，并在注入里列出它们、建议交给成员对话执行；设置成员会话
   时忽略，返回文字会说明。
-- `compressPercent`：自动压缩阈值，数字 1–100，默认 35；主对话推送派活指令前和成员会话下一次
-  投递前都用它，自身和成员会话都可设置。
+- `compressPercent`：自动压缩阈值，数字 1–100，默认 35；成员会话下一次 `call_member` 投递前
+  用它检查上下文占比。派活推送移除后，主对话自身不再有推送前压缩时机，该值仍会保存并显示。
 - `compressPercent` 目前只能设置数值，不支持直接清除；要恢复默认就设回 `35`。
-- 至少提供 `identity` / `scope` / `note` / `keep` / `avoidLongJobs` / `compressPercent` 之一；设置成员会话时
-  必须有 `identity` / `scope` / `compressPercent` 之一（允许只设 `compressPercent`）。
-- 返回文字显示有效值（例如 `保持目标：关闭`、`压缩阈值：35%`）以及被忽略的字段。
+- 至少提供 `identity` / `role` / `scope` / `note` / `avoidLongJobs` / `compressPercent` 之一；设置成员会话时
+  必须有 `identity` / `role` / `scope` / `note` / `compressPercent` 之一（允许只设 `compressPercent`）。
+- 返回文字显示有效值（例如 `标准身份：测试`、`压缩阈值：35%`）以及被忽略的字段。
 - “自身”写入当前 session id；成员会话写入 conversationId，并同步本机跟踪任务的 profile
   快照。未跟踪的 conversationId 仍保存，返回注明“本机未跟踪该会话，只保存设置”。
 - 不给成员会话投递消息，也不自动在下次投递加前缀；随对话设置/更新仍用 `call_member` 的
-  `identity` / `scope`。
+  `identity` / `role` / `scope`。
 
 ### 6.10 `remove_member`
 

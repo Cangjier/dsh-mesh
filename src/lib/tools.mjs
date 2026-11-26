@@ -17,10 +17,11 @@
 import { DEFAULT_COMPRESS_PERCENT, MemberTaskService, describeMemberTask, memberTaskProfile, memberTaskResultAlreadyDelivered, memberTaskWorkspace } from './member-tasks.mjs'
 import { createMemberContext, formatMemberScopeMissingHint } from './member-context.mjs'
 import {
-  MEMBER_NOTE_MAX,
   effectiveCompressPercent,
   normalizeMemberScopePatch,
 } from './service.mjs'
+import { MEMBER_ROLES, formatProductStageResult, productStageWarnings } from './product-stage.mjs'
+import { isMemberSession } from './member-sessions.mjs'
 
 /**
  * Register the tools on an injected `tools` context.
@@ -215,8 +216,8 @@ export function registerTools(ctx, toolsCtx, service) {
       '把一行结果、代理端口和 hub 的 git token 注入目标会话（没有直连配置就不报出网）；并禁用该会话的 ask_user_question，',
       '每次投递前还会对当前 live agent 重新应用一次（成员自己 Web UI 恢复的会话也覆盖）：',
       '成员需要信息时会在回复里提问并停下，用 call_member 带 conversationId 回答。',
-      '`identity` / `scope` 可选：这个会话的身份/角色和负责的工作范围，按会话id 持久化到 member-scopes.json；',
-      '新建对话时随 mesh.profile 注入成员的系统上下文，继续已有对话时会合并该会话的设置并在消息前加一行【成员身份】说明。',
+      '`identity` / `role` / `scope` 可选：这个会话的身份、标准身份（产品经理 / 研究员 / 开发 / 测试 / 业务）和负责的工作范围，按会话id 持久化到 member-scopes.json；',
+      '新建对话时把本次身份/范围作为【成员身份】前缀放进 prompt，继续已有对话时合并该会话的设置并在消息前加一行【成员身份】说明。',
       '也可以在任何时候用 set_member_scope 单独设置任意会话或自身的身份/工作范围。',
       '返回值带 data.logFile，指向该任务的日志文件；会话id在 text 和 data.conversationId 中。',
       '',
@@ -230,7 +231,8 @@ export function registerTools(ctx, toolsCtx, service) {
         conversationId: { type: 'string', description: '要继续的会话id（call_member / wait_member 返回）。省略就新建对话。' },
         cwd: { type: 'string', description: '新建对话：成员 B 上的工作目录（绝对路径，可空）。' },
         workspace: { type: 'string', description: '新建对话：成员 B 上的任务工作区名称；实际目录固定为成员本机的 ~/.dsh/workspaces/<name>。和 cwd 二选一。' },
-        identity: { type: 'string', description: '这个会话的身份/角色（例如 开发、测试、网关、客户 A），最长 40 字符；与已有设置合并，空字符串表示清除。' },
+        identity: { type: 'string', description: '这个会话的身份/角色（例如 内核开发、前端开发、网关），最长 40 字符；与已有设置合并，空字符串表示清除。' },
+        role: { type: 'string', enum: [...MEMBER_ROLES, ''], description: `标准身份，只对成员会话生效，阶段参与校验按它判断；可选：${MEMBER_ROLES.join(' / ')}。与已有设置合并，空字符串表示清除。` },
         scope: { type: 'string', description: '这个会话负责的工作范围（例如 dsh-mesh 插件开发与构建、跨平台验收），最长 120 字符；与已有设置合并，空字符串表示清除。' },
       },
       required: ['prompt'],
@@ -260,6 +262,7 @@ export function registerTools(ctx, toolsCtx, service) {
             cwd: args.cwd,
             workspace: args.workspace,
             identity: args.identity,
+            role: args.role,
             scope: args.scope,
             agent: exec.agent,
             notify: true,
@@ -314,6 +317,7 @@ export function registerTools(ctx, toolsCtx, service) {
           member: args.member,
           prompt: args.prompt,
           identity: args.identity,
+          role: args.role,
           scope: args.scope,
           agent: exec.agent,
           signal: exec.signal,
@@ -367,20 +371,18 @@ export function registerTools(ctx, toolsCtx, service) {
   const setMemberScopeDefinition = {
     name: 'set_member_scope',
     description: [
-      '设置一个成员会话或当前主对话（自身）的身份、工作范围，以及派活推送和自动压缩参数。',
+      '设置一个成员会话或当前主对话（自身）的身份、标准身份、工作范围以及自动压缩参数。',
       '',
       '`conversationId` 省略、`self`、`local` 或等于当前会话 id 时设置“自身”；其他值作为成员会话 id。',
-      '`identity` / `scope` / `note` 是可选的字符串，只传要改的字段；空字符串表示清除。',
+      '`identity` / `role` / `scope` / `note` 是可选的字符串，只传要改的字段；空字符串表示清除。',
       'identity 最长 40 字符，scope 最长 120 字符，note（备注）最长 500 字符。',
+      '`role` 是成员的标准身份，只对成员会话生效：产品经理 / 研究员 / 开发 / 测试 / 业务；set_product_stage 的阶段参与校验按它判断。设置自身时忽略。',
       '`note` 仅对成员会话生效：它不会注入成员的系统上下文，也不会随 call_member 投递，只在主对话的 status_member 和成员上下文里可见；设置自身时忽略。',
-      '`keep` 默认 false，只对自身/主对话生效：显式传 keep=true 时，主对话在 turn 结束后、若距上一次成员状态 review 结束已超过 10 分钟，会收到一条派活指令，要求新建子代理 review `.coder/members` 和现有 gap，判断能否激活空闲成员会话；不传 keep 不改变已保存的值，从未设置过即为关闭。',
-      '`avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，主对话下一次状态快照会检查距上一次快照之间结束、耗时超过 1 分钟的 job，并在注入里列出这些 job 并建议交给成员对话执行。设置成员会话时忽略。',
-      `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；主对话和成员会话都生效：主对话推送派活指令前、或成员会话下一次投递前，上下文占比超过阈值就先压缩。`,
-      '给自身设置 identity/scope 不会顺带开启 keep；需要推送就显式传 keep=true。',
-      '设置成员会话时 keep 和 avoidLongJobs 被忽略，返回文字会说明。',
-      '至少提供 identity、scope、note、keep、avoidLongJobs、compressPercent 之一；设置成员会话时必须有 identity、scope、note 或 compressPercent 之一。',
+      '`avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，主对话下一次状态快照会列出距上一次快照之间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
+      `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；成员会话下一次 call_member 投递前，上下文占比超过阈值就先压缩。`,
+      '至少提供 identity、role、scope、note、avoidLongJobs、compressPercent 之一；设置成员会话时必须有 identity、role、scope、note 或 compressPercent 之一。',
       '成员会话可以未被本机跟踪，设置仍会保存，只是不会同步任务快照。',
-      '这个工具只保存设置，不给成员会话发消息、不自动加投递前缀；随对话一起设置/更新用 call_member 的 identity/scope 参数。',
+      '这个工具只保存设置，不给成员会话发消息、不自动加投递前缀；随对话一起设置/更新用 call_member 的 identity/role/scope 参数。',
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -391,7 +393,12 @@ export function registerTools(ctx, toolsCtx, service) {
         },
         identity: {
           type: 'string',
-          description: '身份/角色（例如 开发、测试、网关、客户 A），最长 40 字符；空字符串清除。',
+          description: '身份/角色（例如 内核开发、前端开发、网关），最长 40 字符；空字符串清除。',
+        },
+        role: {
+          type: 'string',
+          enum: [...MEMBER_ROLES, ''],
+          description: `标准身份，只对成员会话生效，阶段参与校验按它判断：${MEMBER_ROLES.join(' / ')}；空字符串清除。设置自身时忽略。`,
         },
         scope: {
           type: 'string',
@@ -401,10 +408,6 @@ export function registerTools(ctx, toolsCtx, service) {
           type: 'string',
           description: '备注，仅对成员会话生效，最长 500 字符；只存本机、只在主对话可见，不会注入或投递给成员；空字符串清除。设置自身时忽略。',
         },
-        keep: {
-          type: 'boolean',
-          description: '只对自身/主对话生效，默认 false（需要显式开启）；控制主对话 turn 结束后是否触发派活审查（距上次 review 结束超过 10 分钟时推送一条指令，要求新建子代理 review `.coder/members` 与现有 gap，判断能否激活空闲成员会话）。设置成员会话时忽略。',
-        },
         avoidLongJobs: {
           type: 'boolean',
           description: '只对自身/主对话生效，默认 false；开启后状态快照会列出两次快照间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
@@ -413,7 +416,7 @@ export function registerTools(ctx, toolsCtx, service) {
           type: 'number',
           minimum: 1,
           maximum: 100,
-          description: '自动压缩阈值（百分比，默认 35）；主对话和成员会话都生效，上下文占比超过该值才压缩。',
+          description: '自动压缩阈值（百分比，默认 35）；成员会话下次投递前上下文占比超过该值就先压缩。',
         },
       },
       additionalProperties: false,
@@ -431,23 +434,23 @@ export function registerTools(ctx, toolsCtx, service) {
       const rawId = typeof args.conversationId === 'string' ? args.conversationId.trim() : ''
       const isSelf = rawId === '' || rawId === 'self' || rawId === 'local' || (selfId !== '' && rawId === selfId)
       const hasIdentity = args.identity !== undefined
+      const hasRole = args.role !== undefined
       const hasScope = args.scope !== undefined
       const hasNote = args.note !== undefined
-      const hasKeep = args.keep !== undefined
       const hasAvoidLongJobs = args.avoidLongJobs !== undefined
       const hasCompressPercent = args.compressPercent !== undefined
-      if (!hasIdentity && !hasScope && !hasNote && !hasKeep && !hasAvoidLongJobs && !hasCompressPercent) {
-        throw new Error('identity, scope, note, keep, avoidLongJobs, or compressPercent is required')
+      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasAvoidLongJobs && !hasCompressPercent) {
+        throw new Error('identity, role, scope, note, avoidLongJobs, or compressPercent is required')
       }
       if (isSelf && selfId === '') throw new Error('cannot set the current session scope: no current session')
-      if (!isSelf && !hasIdentity && !hasScope && !hasNote && !hasCompressPercent) {
-        throw new Error('keep and avoidLongJobs only apply to the current session; set identity, scope, note, or compressPercent for a member conversation')
+      if (!isSelf && !hasIdentity && !hasRole && !hasScope && !hasNote && !hasCompressPercent) {
+        throw new Error('avoidLongJobs only applies to the current session; set identity, role, scope, note, or compressPercent for a member conversation')
       }
       const patch = {
         ...(hasIdentity ? { identity: args.identity } : {}),
+        ...(!isSelf && hasRole ? { role: args.role } : {}),
         ...(hasScope ? { scope: args.scope } : {}),
         ...(!isSelf && hasNote ? { note: args.note } : {}),
-        ...(isSelf && hasKeep ? { keep: args.keep } : {}),
         ...(isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {}),
         ...(hasCompressPercent ? { compressPercent: args.compressPercent } : {}),
       }
@@ -457,29 +460,30 @@ export function registerTools(ctx, toolsCtx, service) {
       const targetId = isSelf ? selfId : rawId
       const saved = await service.setMemberScope(targetId, patch)
       const scope = saved.scope ?? null
-      // Only identity/scope change the task's profile snapshot; setting just
-      // keep/avoidLongJobs/compressPercent must preserve the old profile.
+      // Only the profile fields change the task's profile snapshot; setting
+      // just avoidLongJobs/compressPercent must preserve the old profile.
       const tracked = isSelf
         ? false
-        : await memberTasks.syncTaskScope(targetId, scope, { profile: hasIdentity || hasScope })
+        : await memberTasks.syncTaskScope(targetId, scope, { profile: hasIdentity || hasRole || hasScope })
       const compressThreshold = effectiveCompressPercent(scope)
       const lines = [
         isSelf
-          ? `已设置自身（会话 ${selfId}）的身份/工作范围与推送配置。`
-          : `已设置成员会话 ${targetId} 的身份/工作范围与压缩阈值。`,
+          ? `已设置自身（会话 ${selfId}）的身份/工作范围与配置。`
+          : `已设置成员会话 ${targetId} 的身份、标准身份与压缩阈值。`,
+        ...(!isSelf ? [`标准身份：${scope?.role ?? '未设置'}`] : []),
         `身份：${scope?.identity ?? '未设置'}`,
         `工作范围：${scope?.scope ?? '未设置'}`,
         ...(!isSelf ? [`备注：${scope?.note ?? '未设置'}`] : []),
         ...(isSelf
           ? [
-              `保持目标：${scope?.keep === true ? '开启' : '关闭'}（只对主对话生效）`,
               `避免耗时：${scope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）`,
-              `压缩阈值：${formatOneDecimal(compressThreshold)}%（主对话推送前和成员会话投递前生效）`,
+              `压缩阈值：${formatOneDecimal(compressThreshold)}%`,
             ]
           : [`压缩阈值：${formatOneDecimal(compressThreshold)}%（投递前超过该占比自动压缩）`]),
-        ...(!isSelf && (hasKeep || hasAvoidLongJobs)
-          ? ['keep / avoidLongJobs 只对主对话自身生效，设置成员会话时已忽略。']
+        ...(!isSelf && hasAvoidLongJobs
+          ? ['avoidLongJobs 只对主对话自身生效，设置成员会话时已忽略。']
           : []),
+        ...(isSelf && hasRole ? ['role 只对成员会话生效，设置自身时已忽略。'] : []),
         ...(isSelf && hasNote ? ['note 只对成员会话生效，设置自身时已忽略。'] : []),
         ...(!isSelf && !tracked ? ['本机未跟踪该会话，只保存设置。'] : []),
       ]
@@ -492,12 +496,120 @@ export function registerTools(ctx, toolsCtx, service) {
           self: isSelf,
           scope,
           compressPercent: compressThreshold,
+          role: !isSelf ? (scope?.role ?? null) : null,
           avoidLongJobs: scope?.avoidLongJobs === true,
           tracked,
           note: !isSelf ? (scope?.note ?? null) : null,
-          ignoredKeep: !isSelf && hasKeep,
+          ignoredRole: isSelf && hasRole,
           ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
           ignoredNote: isSelf && hasNote,
+        },
+      }
+    },
+  }
+
+  /**
+   * One goal object schema for `set_product_stage`.
+   * @param {string} label goal label.
+   * @returns {object} JSON schema.
+   */
+  function goalSchema(label) {
+    return {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string', maxLength: 300, description: `${label}文本；空字符串表示清除。` },
+        status: {
+          type: 'string',
+          enum: ['未开始', '进行中', '已达成', '未达成', ''],
+          description: `${label}状态；空字符串表示回到「未开始」。`,
+        },
+      },
+    }
+  }
+
+  const setProductStageDefinition = {
+    name: 'set_product_stage',
+    description: [
+      '设置当前项目的产品版本、大阶段、子阶段轮次和目标状态。',
+      '',
+      '大阶段：A 计划与目标（所有成员参与提出建议，最后由主对话决定本轮计划与目标）；',
+      'B 开发与测试（开发/测试/研究员参与；本轮开发的功能没有 BUG，疑难杂症除外）；',
+      'C 产品经理使用（产品经理真实使用，发现问题回到 B 阶段，直到产品经理放行）；',
+      'D 业务介入（业务人员开展业务工作，发现问题回到 C 阶段，业务放行后回到 A 阶段）。',
+      '产品版本自动维护，不需要传入：D 完成进入 A 时升版（同一天小版本 +1，跨天重置为当天 .1）。',
+      '`goals` 只改传入的目标：product 产品目标 / dev 开发目标 / research 研究目标；每项 { text, status }，status 取 未开始 / 进行中 / 已达成 / 未达成。',
+      '`round` 是子阶段轮次（第几轮迭代）：省略时 D 进入 A 自动 +1，其他阶段沿用当前轮次；也可以显式指定。',
+      '`stage` 省略时沿用当前阶段（首次调用默认 A），只更新目标状态时可以省略。',
+      '阶段按项目目录保存，同一工作区的主对话共享。成员上下文会提示本轮哪些成员还没有参与、产品版本的目标与状态，以及下一步的各种调用方式。',
+      '成员的标准身份由 set_member_scope 的 role 设置（产品经理 / 研究员 / 开发 / 测试 / 业务）；没有设置标准身份的成员会在阶段校验中被提示。',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      properties: {
+        stage: {
+          type: 'string',
+          enum: ['A', 'B', 'C', 'D'],
+          description: '大阶段：A 计划与目标、B 开发与测试、C 产品经理使用、D 业务介入。',
+        },
+        round: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 999,
+          description: '子阶段轮次（第几轮迭代）；省略时按流程自动决定。',
+        },
+        goals: {
+          type: 'object',
+          additionalProperties: false,
+          description: '三个目标及状态，只改传入的项。',
+          properties: {
+            product: goalSchema('产品目标'),
+            dev: goalSchema('开发目标'),
+            research: goalSchema('研究目标'),
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{
+        type: 'text',
+        text: typeof value?.text === 'string' ? value.text : JSON.stringify(value, null, 2),
+      }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      if (typeof service.productStage !== 'function' || typeof service.setProductStage !== 'function') {
+        throw new Error('product stages are not available')
+      }
+      const cwd = projectDirOf(exec?.agent)
+      if (cwd === '') throw new Error('set_product_stage needs a conversation with a project directory')
+      const originSessionId = originSessionOf(exec.agent)
+      // A member conversation reports its result back to the initiator; the
+      // stage machine belongs to the main conversation that orchestrates it.
+      if (isMemberSession(originSessionId)) {
+        throw new Error('set_product_stage is only available in a main conversation; report the result back to the initiator')
+      }
+      const previous = await service.productStage(cwd)
+      const saved = await service.setProductStage({
+        cwd,
+        stage: args.stage,
+        round: args.round,
+        goals: args.goals,
+        bySessionId: originSessionId,
+      })
+      const tasks = await memberTasks.listForOrigin(originSessionId).catch(() => [])
+      const scopes = await service.memberScopes().catch(() => ({}))
+      const warnings = productStageWarnings(saved.previous, tasks, scopes)
+      return {
+        ok: true,
+        text: formatProductStageResult(saved.state, { created: previous === null, tasks, scopes, warnings }),
+        data: {
+          state: saved.state,
+          previous: saved.previous,
+          warnings,
+          project: cwd,
         },
       }
     },
@@ -1041,7 +1153,7 @@ export function registerTools(ctx, toolsCtx, service) {
     },
   }
 
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, waitMemberDefinition, statusMemberDefinition, removeMemberDefinition, membersDefinition, repackDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, setProductStageDefinition, waitMemberDefinition, statusMemberDefinition, removeMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool)
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`)
@@ -1077,6 +1189,7 @@ function formatTaskProfileLine(task) {
   const profile = memberTaskProfile(task)
   if (profile === null) return ''
   const parts = []
+  if (typeof profile.role === 'string' && profile.role !== '') parts.push(`标准身份：${profile.role}`)
   if (profile.identity !== null) parts.push(`身份：${profile.identity}`)
   if (profile.scope !== null) parts.push(`负责范围：${profile.scope}`)
   return parts.join('；')
@@ -1206,6 +1319,16 @@ function originSessionOf(agent) {
 }
 
 /**
+ * The project directory the executing conversation runs in.
+ * @param {object} [agent] executing agent.
+ * @returns {string} absolute directory, or '' when unknown.
+ */
+function projectDirOf(agent) {
+  const cwd = agent?.session?.header?.cwd ?? agent?.session?.meta?.cwd ?? agent?.session?.cwd
+  return typeof cwd === 'string' ? cwd.trim() : ''
+}
+
+/**
  * The conversation list every `call_member` / `wait_member` result carries.
  *
  * These are the conversations this initiator tracks (same origin session), not
@@ -1225,7 +1348,7 @@ function conversationListBlock(tasks, currentConversationId, options = {}) {
         const entry = describeMemberTask(task, currentConversationId)
         const stored = scopes[String(task.conversationId ?? '')]
         const profile = stored !== undefined ? memberTaskProfile({ profile: stored }) : memberTaskProfile(task)
-        return { ...entry, profile, identity: profile?.identity ?? null, scope: profile?.scope ?? null }
+        return { ...entry, profile, role: profile?.role ?? null, identity: profile?.identity ?? null, scope: profile?.scope ?? null }
       })
     : list.map(task => describeMemberTask(task, currentConversationId))
   if (conversations.length === 0) {
@@ -1387,6 +1510,7 @@ function describeStatus(found, memberTasks, scopes = {}) {
     memberIp: task.memberIp,
     workspace: liveWorkspace !== '' ? liveWorkspace : memberTaskWorkspace(task),
     profile,
+    role: profile?.role ?? null,
     identity: profile?.identity ?? null,
     scope: profile?.scope ?? null,
     note,
@@ -1425,7 +1549,7 @@ function formatStatusBlock(entry) {
       : `状态：${entry.statusLabel}（目标实时）`,
     `本机任务：${entry.taskStatus}${entry.turns === null ? '' : `，轮次 ${String(entry.turns)}`}`,
     `工作区：${entry.workspace ?? 'unknown'}`,
-    `身份：${entry.identity ?? '未设置'}；工作范围：${entry.scope ?? '未设置'}`,
+    `标准身份：${entry.role ?? '未设置'}；身份：${entry.identity ?? '未设置'}；工作范围：${entry.scope ?? '未设置'}`,
     `备注：${entry.note ?? '未设置'}`,
     formatContextLine(entry.context),
     entry.messages.length === 0 ? '最近两次用户消息：(没有记录)' : '最近两次用户消息（旧→新）：',

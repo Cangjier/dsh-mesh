@@ -63,6 +63,13 @@ import { linkFor, resolveBuildEgress, resolveDeployLinkProxy } from './egress-pl
 import { EGRESS_PROBE_SOURCE } from './egress-probe.mjs'
 import { memberConversationEntries, memberConversationSummary } from './member-ui.mjs'
 import {
+  MEMBER_ROLES,
+  applyProductStage,
+  normalizeProductStageInput,
+  normalizeStoredProductStage,
+  productStageKey,
+} from './product-stage.mjs'
+import {
   isAllowedPackagePath,
   listPackagesScript,
   normalizeLatestManifest,
@@ -106,12 +113,13 @@ export const MEMBER_NOTE_MAX = 500
  *
  * `undefined` means "leave this field alone", an empty string means "clear
  * this field" and is reported as `null`, and a non-empty string is trimmed and
- * length-checked. `keep` and `avoidLongJobs` are booleans if present; `note` is a trimmed
- * string (at most {@link MEMBER_NOTE_MAX}) that is never delivered to the member.
- * `compressPercent` a number within 1..100. The caller merges the result into
- * the stored record.
- * @param {{identity?: unknown, scope?: unknown, keep?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] raw patch.
- * @returns {{identity?: string|null, scope?: string|null, keep?: boolean, avoidLongJobs?: boolean, note?: string|null, compressPercent?: number}} normalised patch.
+ * length-checked. `role` is the member's standard identity and must be one of
+ * {@link MEMBER_ROLES}; `avoidLongJobs` is a boolean if present; `note` is a
+ * trimmed string (at most {@link MEMBER_NOTE_MAX}) that is never delivered to
+ * the member. `compressPercent` a number within 1..100. The caller merges the
+ * result into the stored record.
+ * @param {{identity?: unknown, role?: unknown, scope?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] raw patch.
+ * @returns {{identity?: string|null, role?: string|null, scope?: string|null, avoidLongJobs?: boolean, note?: string|null, compressPercent?: number}} normalised patch.
  */
 export function normalizeMemberScopePatch(patch = {}) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
@@ -125,6 +133,14 @@ export function normalizeMemberScopePatch(patch = {}) {
       throw new Error(`identity is too long: ${String(text.length)} > ${String(MEMBER_IDENTITY_MAX)} characters`)
     }
     normalized.identity = text === '' ? null : text
+  }
+  if (patch.role !== undefined) {
+    if (typeof patch.role !== 'string') throw new Error('role must be a string')
+    const role = patch.role.trim()
+    if (role !== '' && !MEMBER_ROLES.includes(role)) {
+      throw new Error(`role must be one of ${MEMBER_ROLES.join(', ')}: ${role}`)
+    }
+    normalized.role = role === '' ? null : role
   }
   if (patch.scope !== undefined) {
     if (typeof patch.scope !== 'string') throw new Error('scope must be a string')
@@ -141,10 +157,6 @@ export function normalizeMemberScopePatch(patch = {}) {
       throw new Error(`note is too long: ${String(text.length)} > ${String(MEMBER_NOTE_MAX)} characters`)
     }
     normalized.note = text === '' ? null : text
-  }
-  if (patch.keep !== undefined) {
-    if (typeof patch.keep !== 'boolean') throw new Error('keep must be a boolean')
-    normalized.keep = patch.keep
   }
   if (patch.avoidLongJobs !== undefined) {
     if (typeof patch.avoidLongJobs !== 'boolean') throw new Error('avoidLongJobs must be a boolean')
@@ -166,8 +178,7 @@ export function normalizeMemberScopePatch(patch = {}) {
 /**
  * The effective pre-delivery compaction threshold for one stored scope.
  *
- * Applies to the main conversation's status push and to a member
- * conversation's next delivery; a missing value means
+ * Applies to a member conversation's next delivery; a missing value means
  * {@link DEFAULT_COMPRESS_PERCENT}.
  * @param {{compressPercent?: number}|null} scope stored scope.
  * @returns {number} percentage.
@@ -335,6 +346,9 @@ export class MeshService {
     this.deployRoot = path.join(this.dataDir, 'deploy')
     this.memberTagsFile = path.join(this.dataDir, 'member-tags.json')
     this.memberScopesFile = path.join(this.dataDir, 'member-scopes.json')
+    this.productStagesFile = path.join(this.dataDir, 'product-stages.json')
+    /** Serialises product-stage writes from the tool and the member monitors. */
+    this.productStageWrites = Promise.resolve()
     /** @type {Map<string, {at: string, counts: object}>} members already asked to stop their conversations */
     this.announcedUpgrades = new Map()
     this.packagesDir = path.join(os.homedir(), '.dsh', 'packages')
@@ -819,14 +833,15 @@ export class MeshService {
   }
 
   /**
-   * Identity, work scope, keep flag and compaction settings for
+   * Identity, standard role, work scope and compaction settings for
    * conversations, keyed by conversation id.
    *
    * The file is only an optional hint book: a missing, unreadable, or damaged
    * file is the same as "nothing set yet", never a startup failure. Only the
    * fields that were actually set are stored; defaults are applied by readers
-   * ({@link effectiveCompressPercent}).
-   * @returns {Promise<Record<string, {identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, compressPercent?: number}>>} scopes.
+   * ({@link effectiveCompressPercent}). A legacy `keep` flag is ignored: the
+   * dispatch push that used it is gone.
+   * @returns {Promise<Record<string, {identity?: string, role?: string, scope?: string, avoidLongJobs?: boolean, note?: string, compressPercent?: number}>>} scopes.
    */
   async memberScopes() {
     try {
@@ -837,17 +852,18 @@ export class MeshService {
         if (rawId.trim() === '') continue
         if (value === null || typeof value !== 'object' || Array.isArray(value)) continue
         const identity = savedScopeText(value.identity, MEMBER_IDENTITY_MAX)
+        const rawRole = savedScopeText(value.role, 20)
+        const role = rawRole !== null && MEMBER_ROLES.includes(rawRole) ? rawRole : null
         const scope = savedScopeText(value.scope, MEMBER_SCOPE_MAX)
-        const keep = typeof value.keep === 'boolean' ? value.keep : undefined
         const avoidLongJobs = typeof value.avoidLongJobs === 'boolean' ? value.avoidLongJobs : undefined
         const note = savedScopeText(value.note, MEMBER_NOTE_MAX)
         const compressPercent = savedScopeNumber(value.compressPercent, candidate => candidate >= 1 && candidate <= 100)
-        if (identity === null && scope === null && keep === undefined && avoidLongJobs === undefined
+        if (identity === null && role === null && scope === null && avoidLongJobs === undefined
           && note === null && compressPercent === undefined) continue
         scopes[rawId.trim()] = {
           ...(identity === null ? {} : { identity }),
+          ...(role === null ? {} : { role }),
           ...(scope === null ? {} : { scope }),
-          ...(keep === undefined ? {} : { keep }),
           ...(avoidLongJobs === undefined ? {} : { avoidLongJobs }),
           ...(note === null ? {} : { note }),
           ...(compressPercent === undefined ? {} : { compressPercent }),
@@ -862,7 +878,7 @@ export class MeshService {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, scope?: string, keep?: boolean, avoidLongJobs?: boolean, note?: string, compressPercent?: number}|null>} scope.
+   * @returns {Promise<{identity?: string, role?: string, scope?: string, avoidLongJobs?: boolean, note?: string, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? '').trim()
@@ -875,13 +891,14 @@ export class MeshService {
    * Merge and save one conversation's identity/work scope and settings.
    *
    * Only the fields present in the patch change. An empty string clears that
-   * text field (the record is dropped when nothing remains). `keep` and
-   * `avoidLongJobs` are stored as given; only the self target is supposed to
-   * pass them. `note` is main-conversation-only metadata and is never injected
-   * or delivered to the member. `compressPercent` applies to both self and
-   * member conversations.
+   * text field (the record is dropped when nothing remains). `role` is the
+   * member's standard identity; only the member target is supposed to pass it.
+   * `avoidLongJobs` is stored as given and only the self target uses it. `note`
+   * is main-conversation-only metadata and is never injected or delivered to
+   * the member. `compressPercent` applies to both self and member
+   * conversations.
    * @param {string} conversationId conversation or session id.
-   * @param {{identity?: unknown, scope?: unknown, keep?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] fields to change.
+   * @param {{identity?: unknown, role?: unknown, scope?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] fields to change.
    * @returns {Promise<{ok: boolean, scopes: Record<string, object>, scope: object|null}>} saved scopes.
    */
   async setMemberScope(conversationId, patch = {}) {
@@ -894,11 +911,14 @@ export class MeshService {
       if (normalized.identity === null) delete next.identity
       else next.identity = normalized.identity
     }
+    if (normalized.role !== undefined) {
+      if (normalized.role === null) delete next.role
+      else next.role = normalized.role
+    }
     if (normalized.scope !== undefined) {
       if (normalized.scope === null) delete next.scope
       else next.scope = normalized.scope
     }
-    if (normalized.keep !== undefined) next.keep = normalized.keep
     if (normalized.avoidLongJobs !== undefined) next.avoidLongJobs = normalized.avoidLongJobs
     if (normalized.note !== undefined) {
       if (normalized.note === null) delete next.note
@@ -910,6 +930,109 @@ export class MeshService {
     await mkdir(this.dataDir, { recursive: true })
     await writeFile(this.memberScopesFile, `${JSON.stringify(scopes, null, 2)}\n`, 'utf8')
     return { ok: true, scopes, scope: scopes[id] ?? null }
+  }
+
+  /**
+   * Every product stage state, keyed by project directory.
+   *
+   * A missing, unreadable, or damaged file is the same as "no stage yet"; one
+   * invalid project record is dropped instead of failing the whole read.
+   * @returns {Promise<Record<string, object>>} project directory -> state.
+   */
+  async productStages() {
+    try {
+      const parsed = JSON.parse(await readFile(this.productStagesFile, 'utf8'))
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+      const stages = {}
+      for (const [rawKey, value] of Object.entries(parsed)) {
+        const key = productStageKey(rawKey)
+        if (key === '') continue
+        const state = normalizeStoredProductStage(value)
+        if (state !== null) stages[key] = state
+      }
+      return stages
+    } catch {
+      return {}
+    }
+  }
+
+  /**
+   * The product stage of one project, or null.
+   * @param {string} cwd project directory.
+   * @returns {Promise<object|null>} state.
+   */
+  async productStage(cwd) {
+    const key = productStageKey(cwd)
+    if (key === '') return null
+    const stages = await this.productStages()
+    return stages[key] ?? null
+  }
+
+  /**
+   * Merge one stage patch and persist it.
+   *
+   * The transition rules live in `product-stage.mjs`: the product version moves
+   * only on D -> A, the sub-stage round follows the iteration, and a stage or
+   * round change clears the round's participation records. Writes are
+   * serialised because the member monitors record participation concurrently.
+   * @param {{cwd: string, stage?: unknown, round?: unknown, goals?: unknown, bySessionId?: string, now?: Date}} input stage patch.
+   * @returns {Promise<{state: object, previous: object|null}>} saved state and the state before this call.
+   */
+  async setProductStage({ cwd, stage, round, goals, bySessionId = '', now = new Date() }) {
+    const key = productStageKey(cwd)
+    if (key === '') throw new Error('set_product_stage needs a project directory')
+    const input = normalizeProductStageInput({ stage, round, goals })
+    return await this.#updateProductStages((stages) => {
+      const previous = stages[key] ?? null
+      const state = applyProductStage(previous, input, now)
+      state.updatedBy = String(bySessionId ?? '')
+      stages[key] = state
+      return { state, previous }
+    })
+  }
+
+  /**
+   * Record that one member conversation answered inside the current stage round.
+   *
+   * Called once per accepted member reply, from both the `wait_member` path and
+   * the fallback delivery path (they share the same reply table). A project
+   * without a stage, or a reply that belongs to no known project, is ignored.
+   * @param {{cwd?: string, conversationId?: string, turn?: number|null, at?: string}} facts participation fact.
+   * @returns {Promise<boolean>} whether an active stage recorded the reply.
+   */
+  async noteMemberParticipation({ cwd, conversationId, turn = null, at = new Date().toISOString() }) {
+    const key = productStageKey(cwd)
+    const id = typeof conversationId === 'string' ? conversationId.trim() : ''
+    if (key === '' || id === '') return false
+    return await this.#updateProductStages((stages) => {
+      const state = stages[key]
+      if (state === undefined) return false
+      const current = state.participation[id]
+      const seen = Number.isSafeInteger(current?.turn) ? current.turn : -1
+      if (Number.isSafeInteger(turn) && turn < seen) return true
+      state.participation[id] = {
+        turn: Number.isSafeInteger(turn) ? turn : (Number.isSafeInteger(current?.turn) ? current.turn : null),
+        at,
+      }
+      return true
+    })
+  }
+
+  /**
+   * Serialise one product-stage read/modify/write cycle.
+   * @param {(stages: Record<string, object>) => any} mutate mutation, returning the call's result.
+   * @returns {Promise<any>} the mutation's result after the file is written.
+   */
+  async #updateProductStages(mutate) {
+    const run = this.productStageWrites.then(async () => {
+      const stages = await this.productStages()
+      const result = mutate(stages)
+      await mkdir(this.dataDir, { recursive: true })
+      await writeFile(this.productStagesFile, `${JSON.stringify(stages, null, 2)}\n`, 'utf8')
+      return result
+    })
+    this.productStageWrites = run.then(() => {}, () => {})
+    return await run
   }
 
   /**

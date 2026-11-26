@@ -1,0 +1,365 @@
+import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import test from 'node:test'
+import {
+  MEMBER_ROLES,
+  applyProductStage,
+  formatProductStageLines,
+  formatProductStageResult,
+  nextProductVersion,
+  normalizeProductStageInput,
+  normalizeStoredProductStage,
+  productStageParticipants,
+  productStageWarnings,
+  roleOfScope,
+  stageRequiredRoles,
+} from '../src/lib/product-stage.mjs'
+import { MeshService } from '../src/lib/service.mjs'
+import { registerTools } from '../src/lib/tools.mjs'
+import { markMemberSession, unmarkMemberSession } from '../src/lib/member-sessions.mjs'
+
+/** A fixed local day for the version rules. */
+const DAY = new Date(2026, 10, 26, 10, 0, 0)
+const NEXT_DAY = new Date(2026, 10, 27, 9, 0, 0)
+
+test('the product version bumps on the same day and resets on a new day', () => {
+  assert.equal(nextProductVersion(null, DAY), '20261126.1')
+  assert.equal(nextProductVersion('', DAY), '20261126.1')
+  assert.equal(nextProductVersion('20261126.1', DAY), '20261126.2')
+  assert.equal(nextProductVersion('20261126.9', DAY), '20261126.10')
+  assert.equal(nextProductVersion('20261125.7', DAY), '20261126.1')
+  assert.equal(nextProductVersion('20261127.3', DAY), '20261126.1', 'a future date resets to today')
+  assert.equal(nextProductVersion('not-a-version', DAY), '20261126.1')
+  assert.equal(nextProductVersion('20261126.2', NEXT_DAY), '20261127.1')
+})
+
+test('a first call creates one version, round and goal set', () => {
+  const state = applyProductStage(null, {
+    stage: 'A',
+    goals: { product: { text: '可用的成员面板' } },
+  }, DAY)
+  assert.equal(state.version, '20261126.1')
+  assert.equal(state.stage, 'A')
+  assert.equal(state.round, 1)
+  assert.deepEqual(state.goals, { product: { text: '可用的成员面板', status: '未开始' } })
+  assert.deepEqual(state.participation, {})
+  assert.equal(state.updatedAt, DAY.toISOString())
+})
+
+test('only a released D returning to A moves the version and the round', () => {
+  const a = applyProductStage(null, { stage: 'A' }, DAY)
+  const b = applyProductStage(a, { stage: 'B' }, DAY)
+  assert.equal(b.version, '20261126.1')
+  assert.equal(b.round, 1)
+  const c = applyProductStage(b, { stage: 'C' }, DAY)
+  assert.equal(c.version, '20261126.1')
+  const d = applyProductStage(c, { stage: 'D' }, DAY)
+  assert.equal(d.version, '20261126.1')
+  const again = applyProductStage(d, { stage: 'A' }, DAY)
+  assert.equal(again.version, '20261126.2')
+  assert.equal(again.round, 2)
+  const tomorrow = applyProductStage({ ...d, participation: { c1: { turn: 3, at: '' } } }, { stage: 'A' }, NEXT_DAY)
+  assert.equal(tomorrow.version, '20261127.1')
+  assert.equal(tomorrow.round, 2)
+  assert.deepEqual(tomorrow.participation, {}, 'a new iteration has no participants yet')
+})
+
+test('a same-stage goal update keeps the version, round and participation', () => {
+  const a = applyProductStage(null, { stage: 'A' }, DAY)
+  a.participation = { c1: { turn: 1, at: DAY.toISOString() } }
+  const updated = applyProductStage(a, { goals: { dev: { text: '无 BUG', status: '进行中' } } }, DAY)
+  assert.equal(updated.stage, 'A')
+  assert.equal(updated.version, '20261126.1')
+  assert.equal(updated.round, 1)
+  assert.deepEqual(updated.participation, a.participation)
+  assert.deepEqual(updated.goals.dev, { text: '无 BUG', status: '进行中' })
+})
+
+test('an explicit sub-stage round starts a new round and clears participation', () => {
+  const b = { ...applyProductStage(null, { stage: 'B' }, DAY), participation: { c1: { turn: 2, at: '' } } }
+  const next = applyProductStage(b, { round: 2 }, DAY)
+  assert.equal(next.stage, 'B')
+  assert.equal(next.round, 2)
+  assert.equal(next.version, b.version)
+  assert.deepEqual(next.participation, {})
+})
+
+test('the stage input is validated before anything is saved', () => {
+  assert.deepEqual(normalizeProductStageInput({ stage: ' b ' }), { stage: 'B' })
+  assert.deepEqual(normalizeProductStageInput({ round: 3 }), { round: 3 })
+  assert.throws(() => normalizeProductStageInput({ stage: 'E' }), /stage must be one of A, B, C, D/u)
+  assert.throws(() => normalizeProductStageInput({ stage: 1 }), /stage must be a string/u)
+  assert.throws(() => normalizeProductStageInput({ round: 0 }), /round must be an integer/u)
+  assert.throws(() => normalizeProductStageInput({ round: 1.5 }), /round must be an integer/u)
+  assert.throws(() => normalizeProductStageInput({ goals: { business: { text: 'x' } } }), /unknown goal: business/u)
+  assert.throws(() => normalizeProductStageInput({ goals: { dev: { status: '完成' } } }), /goal status must be one of/u)
+  assert.throws(() => normalizeProductStageInput({ goals: { dev: { text: 'x', extra: true } } }), /unknown dev goal field/u)
+  assert.throws(() => normalizeProductStageInput({ goals: { dev: { text: 'x'.repeat(301) } } }), /goal text is too long/u)
+  assert.throws(() => normalizeProductStageInput({}), /stage, round, or goals is required/u)
+})
+
+test('goal text and status can be cleared independently', () => {
+  const a = applyProductStage(null, {
+    stage: 'A',
+    goals: { product: { text: '目标', status: '已达成' } },
+  }, DAY)
+  const cleared = applyProductStage(a, normalizeProductStageInput({ goals: { product: { status: '' } } }), DAY)
+  assert.deepEqual(cleared.goals.product, { text: '目标', status: '未开始' }, 'a text goal defaults to 未开始')
+  const removed = applyProductStage(cleared, normalizeProductStageInput({ goals: { product: { text: '' } } }), DAY)
+  assert.deepEqual(removed.goals, {})
+})
+
+test('a corrupt stored state is ignored instead of breaking the reader', () => {
+  const good = {
+    version: '20261126.2',
+    stage: 'B',
+    round: 3,
+    goals: { dev: { text: '无 BUG', status: '进行中' } },
+    participation: { c1: { turn: 2, at: '2026-11-26T02:00:00.000Z' }, bad: 'x' },
+    updatedAt: '2026-11-26T02:00:00.000Z',
+    updatedBy: 'session-a',
+  }
+  assert.deepEqual(normalizeStoredProductStage(good), {
+    version: '20261126.2',
+    stage: 'B',
+    round: 3,
+    goals: { dev: { text: '无 BUG', status: '进行中' } },
+    participation: { c1: { turn: 2, at: '2026-11-26T02:00:00.000Z' } },
+    updatedAt: '2026-11-26T02:00:00.000Z',
+    updatedBy: 'session-a',
+  })
+  assert.equal(normalizeStoredProductStage({ ...good, stage: 'E' }), null)
+  assert.equal(normalizeStoredProductStage({ ...good, version: 'x' }), null)
+  assert.equal(normalizeStoredProductStage({ ...good, round: 0 }), null)
+  assert.equal(normalizeStoredProductStage(null), null)
+})
+
+test('the standard role is read from a scope only when it is one of the five', () => {
+  assert.equal(roleOfScope({ role: '开发' }), '开发')
+  assert.equal(roleOfScope({ role: ' 测试 ' }), '测试')
+  assert.equal(roleOfScope({ role: '老板' }), null)
+  assert.equal(roleOfScope({ identity: '开发' }), null, 'free-text identity is not a standard role')
+  assert.equal(roleOfScope(null), null)
+  assert.deepEqual(MEMBER_ROLES, ['产品经理', '研究员', '开发', '测试', '业务'])
+  assert.deepEqual(stageRequiredRoles('B'), ['开发', '测试', '研究员'])
+  assert.deepEqual(stageRequiredRoles('C'), ['产品经理'])
+  assert.deepEqual(stageRequiredRoles('D'), ['业务'])
+})
+
+test('participation is counted for every member in A and for the stage roles later', () => {
+  const tasks = [
+    { conversationId: 'c1', statusLabel: '空闲', profile: { name: 'B', identity: '内核', role: '开发' } },
+    { conversationId: 'c2', statusLabel: '进行中' },
+    { conversationId: 'c3', statusLabel: '空闲' },
+  ]
+  const scopes = { c3: { role: '测试' } }
+  const b = {
+    version: '20261126.1',
+    stage: 'B',
+    round: 1,
+    goals: {},
+    participation: { c1: { turn: 2, at: '' } },
+  }
+  const view = productStageParticipants(b, tasks, scopes)
+  assert.deepEqual(view.required.map(entry => entry.conversationId), ['c1', 'c3'])
+  assert.deepEqual(view.missing.map(entry => entry.conversationId), ['c3'])
+  assert.deepEqual(view.missingRoles, ['研究员'])
+  assert.deepEqual(view.roleLess.map(entry => entry.conversationId), ['c2'])
+
+  const a = productStageParticipants({ ...b, stage: 'A' }, tasks, scopes)
+  assert.deepEqual(a.required.map(entry => entry.conversationId), ['c1', 'c2', 'c3'])
+  assert.deepEqual(a.missing.map(entry => entry.conversationId), ['c2', 'c3'])
+})
+
+test('the stage block leads with the version, goals, participation and next calls', () => {
+  const tasks = [
+    { conversationId: 'c1', statusLabel: '空闲', profile: { name: 'B', role: '开发' } },
+  ]
+  const state = {
+    version: '20261126.2',
+    stage: 'B',
+    round: 2,
+    goals: { product: { text: '可用的成员面板', status: '进行中' }, research: { text: '并发模型', status: '已达成' } },
+    participation: {},
+  }
+  const text = formatProductStageLines(state, tasks, {}).join('\n')
+  assert.match(text, /\[产品阶段\] 20261126\.2 · B 阶段（第 2 轮迭代）· 开发与测试/u)
+  assert.match(text, /- 阶段要求：开发、测试、研究员参与/u)
+  assert.match(text, /- 产品目标：可用的成员面板（进行中）/u)
+  assert.match(text, /- 开发目标：未设置/u)
+  assert.match(text, /- 研究目标：并发模型（已达成）/u)
+  assert.match(text, /- 本轮参与：0\/1/u)
+  assert.match(text, /- 未参与：开发 c1/u)
+  assert.match(text, /- 没有成员会话的标准身份：测试、研究员/u)
+  assert.match(text, /- 下一步（set_product_stage）：进入 C 阶段/u)
+  assert.match(text, /同一阶段下一轮 \{ "stage": "B", "round": 3 \}/u)
+})
+
+test('the tool result reports a creation and the previous stage warnings', () => {
+  const state = {
+    version: '20261126.2',
+    stage: 'B',
+    round: 2,
+    goals: { product: { text: '目标', status: '进行中' } },
+    participation: {},
+  }
+  const text = formatProductStageResult(state, {
+    created: true,
+    tasks: [{ conversationId: 'c1', statusLabel: '空闲', profile: { name: 'B', role: '开发' } }],
+    scopes: {},
+    warnings: ['离开 A 阶段时还有成员没有参与本轮：开发 c1'],
+  })
+  assert.match(text, /^产品阶段已建立：20261126\.2 · B 阶段（第 2 轮迭代）/u)
+  assert.match(text, /\[放行检查\]/u)
+  assert.match(text, /- 离开 A 阶段时还有成员没有参与本轮：开发 c1/u)
+})
+
+test('leaving a stage warns about missing participants and unmet goals', () => {
+  const tasks = [{ conversationId: 'c1', statusLabel: '空闲', profile: { name: 'B', role: '开发' } }]
+  const a = {
+    version: '20261126.1', stage: 'A', round: 1, goals: {}, participation: {},
+  }
+  const warnings = productStageWarnings(a, tasks, {})
+  assert.deepEqual(warnings, [
+    '离开 A 阶段时还有成员没有参与本轮：开发 c1',
+    '离开 A 阶段时产品目标还没有设置',
+  ])
+
+  const b = {
+    version: '20261126.1', stage: 'B', round: 1,
+    goals: { dev: { text: '无 BUG', status: '进行中' } },
+    participation: { c1: { turn: 1, at: '' } },
+  }
+  assert.deepEqual(productStageWarnings(b, tasks, {}), [
+    '离开 B 阶段时没有这些身份的成员会话：测试、研究员',
+    '离开 B 阶段时开发目标状态不是「已达成」',
+  ])
+
+  const c = {
+    version: '20261126.1', stage: 'C', round: 1,
+    goals: { product: { text: '目标', status: '进行中' } },
+    participation: { c1: { turn: 1, at: '' } },
+  }
+  assert.deepEqual(productStageWarnings(c, tasks, {}), [
+    '离开 C 阶段时没有这些身份的成员会话：产品经理',
+    '离开 C 阶段时产品目标状态不是「已达成」',
+  ])
+  assert.deepEqual(productStageWarnings(null, tasks, {}), [])
+})
+
+test('the service persists one stage per project and resets participation on a transition', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-stage-service-'))
+  const dataDir = path.join(dir, 'mesh')
+  try {
+    const service = new MeshService({ dataDir, config: {}, log: () => {} })
+    assert.equal(await service.productStage('/root/ws/project'), null)
+
+    const first = await service.setProductStage({
+      cwd: '/root/ws/project',
+      stage: 'A',
+      goals: { product: { text: '目标' } },
+      bySessionId: 'session-a',
+      now: DAY,
+    })
+    assert.equal(first.previous, null)
+    assert.equal(first.state.updatedBy, 'session-a')
+    assert.equal(first.state.version, '20261126.1')
+    assert.deepEqual(await service.productStage('/root/ws/project'), first.state)
+
+    assert.equal(await service.noteMemberParticipation({
+      cwd: '/root/ws/project',
+      conversationId: 'c1',
+      turn: 2,
+      at: '2026-11-26T02:00:00.000Z',
+    }), true)
+    const withReply = await service.productStage('/root/ws/project')
+    assert.deepEqual(withReply.participation, { c1: { turn: 2, at: '2026-11-26T02:00:00.000Z' } })
+
+    const moved = await service.setProductStage({ cwd: '/root/ws/project', stage: 'B', now: DAY })
+    assert.equal(moved.state.version, '20261126.1')
+    assert.deepEqual(moved.state.participation, {})
+
+    assert.equal(await service.noteMemberParticipation({ cwd: '/root/ws/unknown', conversationId: 'c1', turn: 1 }), false)
+    assert.equal(await service.noteMemberParticipation({ cwd: '/root/ws/project', conversationId: '', turn: 1 }), false)
+    await assert.rejects(service.setProductStage({ cwd: '', stage: 'A' }), /project directory/u)
+    await assert.rejects(service.setProductStage({ cwd: '/root/ws/project', stage: 'E' }), /stage must be one of/u)
+
+    const saved = JSON.parse(await readFile(path.join(dataDir, 'product-stages.json'), 'utf8'))
+    assert.equal(saved[path.resolve('/root/ws/project')].stage, 'B')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a corrupt product stage file reads as no stage', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-stage-corrupt-'))
+  const dataDir = path.join(dir, 'mesh')
+  try {
+    const service = new MeshService({ dataDir, config: {}, log: () => {} })
+    await mkdir(dataDir, { recursive: true })
+    await writeFile(path.join(dataDir, 'product-stages.json'), JSON.stringify({
+      '/root/ws/good': { version: '20261126.3', stage: 'C', round: 2, goals: {} },
+      '/root/ws/bad': { version: 'x', stage: 'A', round: 1 },
+    }), 'utf8')
+    const stages = await service.productStages()
+    assert.deepEqual(Object.keys(stages), ['/root/ws/good'])
+    assert.equal(stages['/root/ws/good'].version, '20261126.3')
+
+    await writeFile(path.join(dataDir, 'product-stages.json'), '{not json', 'utf8')
+    assert.deepEqual(await service.productStages(), {})
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the set_product_stage tool writes the project state and reports the next calls', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-stage-tool-'))
+  const dataDir = path.join(dir, 'mesh')
+  let service
+  try {
+    service = new MeshService({ dataDir, config: {}, log: () => {} })
+    const tools = []
+    const ctx = {
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      effect: () => () => {},
+      get: () => undefined,
+    }
+    registerTools(ctx, { tools: { register: tool => { tools.push(tool) } } }, service)
+    const set = tools.find(tool => tool.name === 'set_product_stage')
+    const agent = { id: 'main-1', session: { id: 'main-1', header: { cwd: '/root/ws/project' } } }
+
+    const created = await set.execute({ stage: 'A', goals: { product: { text: '目标' } } }, { agent })
+    assert.equal(created.ok, true)
+    assert.match(created.text, /^产品阶段已建立：\d{8}\.1 · A 阶段（第 1 轮迭代）/u)
+    assert.match(created.text, /- 产品目标：目标（未开始）/u)
+    assert.match(created.text, /- 下一步（set_product_stage）：进入 B 阶段/u)
+    const stored = await service.productStage('/root/ws/project')
+    assert.equal(stored.stage, 'A')
+    assert.equal(stored.updatedBy, 'main-1')
+
+    const updated = await set.execute({ goals: { dev: { status: '进行中' } } }, { agent })
+    assert.match(updated.text, /^产品阶段已更新/u, 'a goal-only call keeps the stage')
+    assert.equal((await service.productStage('/root/ws/project')).stage, 'A')
+
+    await assert.rejects(
+      () => set.execute({ stage: 'B' }, { agent: { id: 'main-2', session: { id: 'main-2' } } }),
+      /project directory/u,
+    )
+    await assert.rejects(() => set.execute({ stage: 'E' }, { agent }), /stage must be one of A, B, C, D/u)
+
+    markMemberSession('main-1')
+    try {
+      await assert.rejects(
+        () => set.execute({ stage: 'B' }, { agent }),
+        /only available in a main conversation/u,
+      )
+    } finally {
+      unmarkMemberSession('main-1')
+    }
+  } finally {
+    await service?.memberTasks?.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

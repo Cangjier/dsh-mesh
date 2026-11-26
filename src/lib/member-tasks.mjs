@@ -242,33 +242,36 @@ export function memberTaskWorkspace(task) {
  * The identity/scope snapshot stored on one task, normalised.
  *
  * Tasks created before profiles existed have no snapshot at all; a snapshot
- * with neither identity nor scope is the same "not set" state. The member name
- * travels with the snapshot because it is what the target conversation sees.
+ * with neither identity, role nor scope is the same "not set" state. The
+ * member name travels with the snapshot because it is what the target
+ * conversation sees.
  * @param {object} task task record.
- * @returns {{name: string|null, identity: string|null, scope: string|null}|null} profile, or null.
+ * @returns {{name: string|null, identity: string|null, role?: string, scope: string|null}|null} profile, or null.
  */
 export function memberTaskProfile(task) {
   const profile = task?.profile
   if (profile === null || typeof profile !== 'object' || Array.isArray(profile)) return null
   const identity = typeof profile.identity === 'string' && profile.identity.trim() !== '' ? profile.identity.trim() : null
+  const role = typeof profile.role === 'string' && profile.role.trim() !== '' ? profile.role.trim() : null
   const scope = typeof profile.scope === 'string' && profile.scope.trim() !== '' ? profile.scope.trim() : null
-  if (identity === null && scope === null) return null
+  if (identity === null && role === null && scope === null) return null
   const name = typeof profile.name === 'string' && profile.name.trim() !== '' ? profile.name.trim() : null
-  return { name, identity, scope }
+  return { name, identity, ...(role === null ? {} : { role }), scope }
 }
 
 /**
  * Turn one stored session scope into the profile snapshot a task keeps.
- * @param {{identity?: string, scope?: string}|null} scope stored scope.
+ * @param {{identity?: string, role?: string, scope?: string}|null} scope stored scope.
  * @param {unknown} name member name.
- * @returns {{name: string|null, identity: string|null, scope: string|null}|null} profile, or null.
+ * @returns {{name: string|null, identity: string|null, role?: string, scope: string|null}|null} profile, or null.
  */
 export function profileFromScope(scope, name) {
   const identity = typeof scope?.identity === 'string' && scope.identity.trim() !== '' ? scope.identity.trim() : null
+  const role = typeof scope?.role === 'string' && scope.role.trim() !== '' ? scope.role.trim() : null
   const scopeText = typeof scope?.scope === 'string' && scope.scope.trim() !== '' ? scope.scope.trim() : null
-  if (identity === null && scopeText === null) return null
+  if (identity === null && role === null && scopeText === null) return null
   const member = typeof name === 'string' && name.trim() !== '' ? name.trim() : null
-  return { name: member, identity, scope: scopeText }
+  return { name: member, identity, ...(role === null ? {} : { role }), scope: scopeText }
 }
 
 /**
@@ -276,13 +279,14 @@ export function profileFromScope(scope, name) {
  *
  * A new conversation has no previous scope, so a clear (`null`) simply means
  * that field stays unset.
- * @param {{identity?: string|null, scope?: string|null}} patch normalised patch.
+ * @param {{identity?: string|null, role?: string|null, scope?: string|null}} patch normalised patch.
  * @param {unknown} name member name.
- * @returns {{name: string|null, identity: string|null, scope: string|null}|null} profile, or null.
+ * @returns {{name: string|null, identity: string|null, role?: string, scope: string|null}|null} profile, or null.
  */
 function profileFromPatch(patch, name) {
   return profileFromScope({
     ...(typeof patch.identity === 'string' ? { identity: patch.identity } : {}),
+    ...(typeof patch.role === 'string' ? { role: patch.role } : {}),
     ...(typeof patch.scope === 'string' ? { scope: patch.scope } : {}),
   }, name)
 }
@@ -295,6 +299,7 @@ function profileFromPatch(patch, name) {
 function profilePromptPrefix(profile) {
   if (profile === null) return ''
   const parts = []
+  if (typeof profile.role === 'string' && profile.role !== '') parts.push(`你的标准身份：${profile.role}`)
   if (profile.identity !== null) parts.push(`你的身份：${profile.identity}`)
   if (profile.scope !== null) parts.push(`负责范围：${profile.scope}`)
   return parts.length === 0 ? '' : `【成员身份】${parts.join('；')}。`
@@ -378,6 +383,16 @@ function workspaceNameFromTitle(value) {
   if (name === '' || name === '.' || name === '..' || name.length > 120) return ''
   if (/[\\/"<>:|?*]/u.test(name) || /[\u0000-\u001f]/u.test(name)) return ''
   return name
+}
+
+/**
+ * The project directory one delegating conversation runs in.
+ * @param {object|undefined} agent live agent.
+ * @returns {string|null} absolute directory, or null.
+ */
+function callerProjectDir(agent) {
+  const cwd = agent?.session?.header?.cwd ?? agent?.session?.meta?.cwd ?? agent?.session?.cwd
+  return typeof cwd === 'string' && cwd.trim() !== '' ? cwd.trim() : null
 }
 
 /**
@@ -578,6 +593,11 @@ export class MemberTaskService {
         // Old records predate the workspace field. An empty value is not a
         // name, so both fall back to the same placeholder the model sees.
         if (typeof task.workspace !== 'string' || task.workspace.trim() === '') task.workspace = 'unknown'
+        // Older records predate originCwd; recover it from the live origin
+        // conversation when that agent is still around.
+        if (typeof task.originCwd !== 'string' || task.originCwd === '') {
+          task.originCwd = this.#originCwdOf(task.originAgentId, task.originSessionId)
+        }
         // Old records also predate the profile snapshot; make the "not set"
         // state explicit so every reader handles one shape.
         task.profile = memberTaskProfile(task)
@@ -907,13 +927,13 @@ export class MemberTaskService {
     return { text: formatSpilledMessage(text.length, file), spill: file }
   }
 
-  async start({ member, prompt, cwd, workspace, identity, scope, agent, notify = true, signal }) {
+  async start({ member, prompt, cwd, workspace, identity, role, scope, agent, notify = true, signal }) {
     await this.#ensureLoaded()
     if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('prompt is required')
     if (agent === undefined || agent === null) throw new Error('delegation must be called from a DSH conversation')
     // Validate the scope patch before any network work: a bad value must not
     // reach the member or create a conversation that cannot be recorded.
-    const scopePatch = normalizeMemberScopePatch({ identity, scope })
+    const scopePatch = normalizeMemberScopePatch({ identity, role, scope })
     const hasScopePatch = Object.keys(scopePatch).length > 0
     const target = await this.#resolveMember(member)
     // A target that is deploying or upgrading restarts its DSH before the new
@@ -967,7 +987,7 @@ export class MemberTaskService {
     let profile = null
     if (hasScopePatch) {
       if (typeof this.service.setMemberScope !== 'function') throw new Error('member scopes are not available')
-      const saved = await this.service.setMemberScope(conversation.id, { identity, scope })
+      const saved = await this.service.setMemberScope(conversation.id, { identity, role, scope })
       profile = profileFromScope(saved?.scope ?? null, target.name)
     }
     // The member resolved the actual directory/workspace; prefer its answer,
@@ -1011,6 +1031,8 @@ export class MemberTaskService {
       notifyError: null,
       originAgentId: String(agent.id ?? ''),
       originSessionId: String(agent.session?.id ?? ''),
+      /** Project directory the delegating conversation runs in, or null. */
+      originCwd: callerProjectDir(agent),
       /** One-line egress report the target received, or ''. */
       egressLine,
       /** Identity/scope snapshot this conversation was started with. */
@@ -1337,6 +1359,44 @@ export class MemberTaskService {
       await this.#save(task)
     }
     return true
+  }
+
+  /**
+   * Recover the project directory of a task recorded before `originCwd` existed.
+   * @param {string} agentId origin agent id.
+   * @param {string} sessionId origin session id.
+   * @returns {string|null} directory, or null when the origin is gone.
+   */
+  #originCwdOf(agentId, sessionId) {
+    const agents = typeof this.ctx?.get === 'function' ? this.ctx.get('agents') : this.ctx?.agents
+    const agent = agents?.get?.(String(agentId ?? '')) ?? agents?.get?.(String(sessionId ?? ''))
+    return callerProjectDir(agent)
+  }
+
+  /**
+   * Record one accepted reply as the conversation's participation in the
+   * project's active product stage round.
+   *
+   * The service ignores projects without a stage, and a missing service keeps
+   * the reply path working in unit tests. Failures are swallowed: participation
+   * is bookkeeping, never a reason to drop an answer.
+   * @param {object} task the task that answered.
+   * @returns {Promise<void>} resolution after the record is attempted.
+   */
+  async #noteParticipation(task) {
+    if (typeof this.service?.noteMemberParticipation !== 'function') return
+    const cwd = typeof task.originCwd === 'string' ? task.originCwd : ''
+    if (cwd === '') return
+    // The reply's own turn is exact; the task's counter can lag one sync read.
+    const replies = Array.isArray(task.replies) ? task.replies : []
+    const newest = replies.length > 0 && Number.isSafeInteger(replies[replies.length - 1]?.turn)
+      ? replies[replies.length - 1].turn
+      : null
+    await this.service.noteMemberParticipation({
+      cwd,
+      conversationId: String(task.conversationId ?? ''),
+      turn: newest ?? (Number.isSafeInteger(task.turns) ? task.turns : null),
+    }).catch(() => {})
   }
 
   /**
@@ -1773,11 +1833,11 @@ export class MemberTaskService {
    * between the occupancy read and the compaction request: the refusal is
    * treated as "deliver without compressing", not as an error.
    *
-   * Passing `identity` / `scope` merges the conversation's stored scope and
-   * prefixes this delivery with a one-line identity note, so a conversation
-   * created before the setting existed can complete it in place.
+   * Passing `identity` / `role` / `scope` merges the conversation's stored
+   * scope and prefixes this delivery with a one-line identity note, so a
+   * conversation created before the setting existed can complete it in place.
    *
-   * @param {{conversationId: string, member?: string, prompt: string, identity?: unknown, scope?: unknown, agent?: any, signal?: AbortSignal}} request send request.
+   * @param {{conversationId: string, member?: string, prompt: string, identity?: unknown, role?: unknown, scope?: unknown, agent?: any, signal?: AbortSignal}} request send request.
    * @returns {Promise<object>} the tracked task.
    */
   async send(request) {
@@ -1786,7 +1846,7 @@ export class MemberTaskService {
     if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('prompt is required')
     // Validate the scope patch before any network work: a bad value must not
     // reach the member and must not half-create a task.
-    const scopePatch = normalizeMemberScopePatch({ identity: request.identity, scope: request.scope })
+    const scopePatch = normalizeMemberScopePatch({ identity: request.identity, role: request.role, scope: request.scope })
     const hasScopePatch = Object.keys(scopePatch).length > 0
     const signal = request.signal
     const { task, fresh, target } = await this.#sendTarget(request)
@@ -1816,7 +1876,7 @@ export class MemberTaskService {
     }
     if (hasScopePatch) {
       if (typeof this.service.setMemberScope !== 'function') throw new Error('member scopes are not available')
-      const saved = await this.service.setMemberScope(task.conversationId, { identity: request.identity, scope: request.scope })
+      const saved = await this.service.setMemberScope(task.conversationId, { identity: request.identity, role: request.role, scope: request.scope })
       task.profile = profileFromScope(saved?.scope ?? null, target?.name ?? task.member)
     } else if (typeof this.service.memberScope === 'function') {
       // No new setting this time, but an adopted conversation may already have
@@ -2367,6 +2427,10 @@ export class MemberTaskService {
     if (!added) return false
     await this.#save(task)
     await this.#log(task, `reply ${String(task.replySeq)}: ${truncate(task.lastText, 300)}`)
+    // A reply counts as this conversation's participation in the active
+    // product-stage round. Both the `wait_member` path and the fallback
+    // delivery share this reply table, so one hook covers both.
+    await this.#noteParticipation(task)
     if (options.notify !== false) this.#notifyWaiters(task)
     return true
   }

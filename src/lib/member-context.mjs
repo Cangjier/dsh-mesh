@@ -1,27 +1,26 @@
 /**
- * Member status context: pre-step snapshots and the idle active push.
+ * Member status context: the pre-step snapshot.
  *
  * A conversation that delegated to members should not have to remember to ask
- * `status_member`/`wait_member` in every turn. Once it has running member
+ * `status_member`/`wait_member` in every turn. Once it has tracked member
  * conversations, each of its steps may carry a snapshot of every conversation
- * it tracks plus its own identity/work scope:
+ * it tracks, the conversation's own identity/work scope, and the product stage
+ * (version, A/B/C/D stage, goals, participation and the next
+ * `set_product_stage` calls):
  *
  * - the snapshot is request-only context attached to `decision.messages` from
  *   an `agent/pre-step` listener, at most once per
  *   {@link MEMBER_STATUS_INTERVAL_MS};
- * - after a main-conversation turn ends, if `keep` is explicitly on and more
- *   than {@link MEMBER_REVIEW_INTERVAL_MS} has passed since the previous review
- *   ended, a dispatch push is delivered with `followup`: it asks the main
- *   conversation to create a subagent that reviews `.coder/members` plus the
- *   current gaps and decides whether any idle member conversation can be
- *   activated, carrying only the tracked conversation lines as facts. There is
- *   no quiet delay any more: the review turn's own `turn/end` anchors the
- *   window. `keep` defaults to off: a scope without the flag never pushes;
+ * - a running member conversation, a long job kept by `avoidLongJobs`, a roster
+ *   gap in `.coder/members/all.md`, or an active product stage makes the step
+ *   eligible;
  * - when the self scope sets `avoidLongJobs`, the snapshot names the settled
  *   jobs longer than {@link LONG_JOB_WARN_MS} since the previous snapshot and
  *   recommends delegating that work to a member conversation;
- * - member conversations are excluded from the push via
+ * - member conversations are excluded from the snapshot via
  *   {@link isMemberSession};
+ * - the dispatch push is gone: nothing is injected after a turn ends and no
+ *   `keep` flag exists any more;
  * - a failure is logged and swallowed so the agent loop is never affected.
  *
  * @module @local/dsh-mesh/member-context
@@ -32,16 +31,10 @@ import { describeMemberTask, memberTaskProfile } from './member-tasks.mjs'
 import { isMemberSession } from './member-sessions.mjs'
 import { DEFAULT_COMPRESS_PERCENT, effectiveCompressPercent } from './service.mjs'
 import { formatMemberGapLines, memberRosterGaps, readMemberRoster } from './member-roster.mjs'
+import { formatProductStageLines } from './product-stage.mjs'
 
 /** Minimum distance between two status snapshots in one session. */
 export const MEMBER_STATUS_INTERVAL_MS = 60_000
-
-/** Minimum time between the end of one member-status review and the next review. */
-export const MEMBER_REVIEW_INTERVAL_MS = 10 * 60_000
-
-/** How long one pre-push main-conversation compaction may take. */
-const PUSH_COMPACT_TIMEOUT_MS = 180_000
-
 /** A settled job longer than this is worth delegating to a member conversation. */
 export const LONG_JOB_WARN_MS = 60_000
 
@@ -65,41 +58,6 @@ export function formatMemberPercent(value) {
 }
 
 /**
- * Measure the main agent's context occupancy, matching the interop service.
- *
- * `projectedTokens` is what the next request would cost; `pressureTokens` is
- * the last provider-reported prompt size. A projection snapshot is preferred,
- * with the token meter as fallback. No live session or no usable numbers means
- * "unmeasured", never an error.
- * @param {any} ctx host context.
- * @param {any} agent live agent.
- * @returns {number|null} percentage, or null when unmeasured.
- */
-export function measureMemberContextPercent(ctx, agent) {
-  const session = agent?.session
-  if (session === undefined || session === null) return null
-  const nonNegative = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
-  let pressure
-  const projections = typeof ctx?.get === 'function' ? ctx.get('sessionProjections') : undefined
-  if (typeof projections?.snapshot === 'function') {
-    try {
-      pressure = projections.snapshot(session, ['contextPressure']).values.contextPressure
-    } catch { }
-  }
-  if (pressure === undefined) {
-    const meter = typeof ctx?.get === 'function' ? ctx.get('tokenMeter') : undefined
-    if (typeof meter?.contextPressure === 'function') {
-      try { pressure = meter.contextPressure(session) } catch { }
-    }
-  }
-  if (pressure === null || typeof pressure !== 'object') return null
-  const usedTokens = nonNegative(pressure.projectedTokens) ?? nonNegative(pressure.pressureTokens)
-  const maxTokens = nonNegative(pressure.contextWindow)
-  if (usedTokens === null || maxTokens === null || maxTokens <= 0) return null
-  return Math.round((usedTokens / maxTokens) * 1000) / 10
-}
-
-/**
  * The project directory one agent's session runs in.
  * @param {any} agent live agent.
  * @returns {string} absolute directory, or '' when unknown.
@@ -108,32 +66,6 @@ function agentCwd(agent) {
   const session = agent?.session
   const cwd = session?.header?.cwd ?? session?.meta?.cwd ?? session?.cwd
   return typeof cwd === 'string' ? cwd.trim() : ''
-}
-
-/**
- * Run one compaction of the main conversation before pushing its snapshot.
- *
- * The Web profile keeps the compaction engine inside the agent's isolated
- * preset group; a composition without presets keeps it on the host context.
- * @param {any} ctx host context.
- * @param {any} agent idle main agent.
- * @returns {Promise<{ok: boolean, reason?: string}>} outcome; a failure is only
- *   informational because the push still proceeds.
- */
-async function compactMainAgent(ctx, agent) {
-  const presets = typeof ctx?.get === 'function' ? ctx.get('agentPresets') : undefined
-  const scoped = typeof presets?.serviceFor === 'function' ? presets.serviceFor(agent, 'compaction') : undefined
-  const compaction = scoped ?? (typeof ctx?.get === 'function' ? ctx.get('compaction') : undefined)
-  if (compaction === undefined || compaction === null || typeof compaction.compactNow !== 'function') {
-    return { ok: false, reason: 'no compaction service' }
-  }
-  if (agent.status !== 'idle') return { ok: false, reason: 'agent is not idle' }
-  try {
-    const result = await compaction.compactNow(agent, AbortSignal.timeout(PUSH_COMPACT_TIMEOUT_MS))
-    return { ok: true, result }
-  } catch (error) {
-    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
-  }
 }
 
 /**
@@ -233,7 +165,7 @@ function formatMemberConversationLine(task, scopes = {}) {
  */
 function formatSelfLine(selfId, selfScope) {
   // Same head order as a member line: the identity answers "who am I" first.
-  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === true ? '开启' : '关闭'}（只对主对话生效）；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
+  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
 }
 
 /**
@@ -242,7 +174,7 @@ function formatSelfLine(selfId, selfScope) {
  * Statuses are the initiator's task states, matching the documented mapping:
  * running/starting = 进行中, completed = 空闲, failed/interrupted = 异常中止.
  * @param {object[]} tasks every conversation this session tracks.
- * @param {{now?: number, selfId?: string, selfScope?: object|null, scopes?: Record<string, object>, longJobs?: object[]}} [options] snapshot facts (tests pin the time).
+ * @param {{now?: number, selfId?: string, selfScope?: object|null, scopes?: Record<string, object>, longJobs?: object[], gaps?: string[], stage?: object|null}} [options] snapshot facts (tests pin the time).
  * @returns {string} snapshot text.
  */
 export function formatMemberStatusSnapshot(tasks, options = {}) {
@@ -253,8 +185,15 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfScope = options.selfScope ?? null
   const scopes = options.scopes ?? {}
   const gapLines = Array.isArray(options.gaps) ? options.gaps : []
+  const stage = options.stage ?? null
+  // The stage block leads: it answers what version and round the conversation
+  // is working on before it lists who answered.
+  const stageLines = stage === null
+    ? (list.length === 0 ? [] : ['- 还没有设置产品阶段：用 set_product_stage 设置版本、阶段与目标（如 { "stage": "A" }）。'])
+    : formatProductStageLines(stage, list, scopes)
   const lines = [
     `[成员上下文] 本对话跟踪 ${String(list.length)} 个成员会话，其中 ${String(running.length)} 个进行中（快照 ${new Date(at).toISOString()}）。`,
+    ...stageLines,
     formatSelfLine(selfId, selfScope),
     ...list.map(task => formatMemberConversationLine(task, scopes)),
     ...gapLines,
@@ -279,47 +218,15 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
 }
 
 /**
- * Render the idle dispatch push.
- *
- * The push no longer repeats the status snapshot: the main conversation is
- * idle, so the useful action is a fresh review of the roster and the current
- * gaps. The tracked conversation lines stay in the text because the review
- * needs to know which conversations exist and which are already busy.
- * @param {object[]} tasks every conversation this session tracks.
- * @param {{now?: number, selfId?: string, selfScope?: object|null, scopes?: Record<string, object>}} [options] push facts (tests pin the time).
- * @returns {string} push text.
- */
-export function formatMemberDispatchPush(tasks, options = {}) {
-  const list = Array.isArray(tasks) ? tasks : []
-  const running = list.filter(task => task?.status === 'running' || task?.status === 'starting')
-  const at = Number.isFinite(options.now) ? options.now : Date.now()
-  const selfId = String(options.selfId ?? '')
-  const selfScope = options.selfScope ?? null
-  const scopes = options.scopes ?? {}
-  return [
-    '[成员调度] 本对话已空闲。请立即用 subagent 新建一个子代理做只读审查：读本工作区的 `.coder/members/all.md`、`.coder/members/flow.md` 和现有 gap（`.coder/issues/open.md`、`.coder/plan/todo.md`、`.coder/plan/goal.md` 等），判断是否可以激活部分现有空闲成员对话。',
-    '- 子代理只读：不改代码、不跑重活；结论逐条给出可激活的成员会话（conversationId）、建议任务与依据；不建议激活的写原因。',
-    '- 只考虑空闲成员会话；进行中/异常中止的一律跳过，禁止重启、归档或新建同名会话——派活必须带原 conversationId 继续。',
-    '- 名册里列出但还没有成员对话的成员必须建出来（见下面的 [成员缺口]），除非它的宿主主机明确不可用。',
-    '- 审查结论交回本对话，由本对话用 call_member 决定是否派活。',
-    `- 当前成员会话（本对话跟踪 ${String(list.length)} 个，其中 ${String(running.length)} 个进行中；快照 ${new Date(at).toISOString()}）：`,
-    ...list.map(task => formatMemberConversationLine(task, scopes)),
-    formatSelfLine(selfId, selfScope),
-    ...(Array.isArray(options.gaps) ? options.gaps : []),
-  ].join('\n')
-}
-
-/**
- * Install the pre-step status injection and the turn-end review push.
+ * Install the pre-step status injection.
  * @param {{
  *   ctx: any,
  *   memberTasks: any,
- *   service?: {memberScopes?: () => Promise<Record<string, object>>},
+ *   service?: {memberScopes?: () => Promise<Record<string, object>>, productStage?: (cwd: string) => Promise<object|null>},
  *   log?: (line: string) => void,
  *   intervalMs?: number,
- *   reviewIntervalMs?: number,
  *   now?: () => number,
- * }} options host context, task service, scope store, logger and test knobs.
+ * }} options host context, task service, scope/stage stores, logger and test knobs.
  * @returns {object} handle with the listener, maps and disposal.
  */
 export function createMemberContext({
@@ -328,17 +235,10 @@ export function createMemberContext({
   service,
   log = () => {},
   intervalMs = MEMBER_STATUS_INTERVAL_MS,
-  reviewIntervalMs = MEMBER_REVIEW_INTERVAL_MS,
   now = () => Date.now(),
 }) {
-  /** @type {Map<string, number>} session id -> last injection/push time */
+  /** @type {Map<string, number>} session id -> last injection time */
   const lastInjection = new Map()
-  /** @type {Map<string, number>} session id -> when the last review turn ended */
-  const lastReviewEnd = new Map()
-  /** @type {Set<string>} sessions whose dispatch push has not seen its turn end yet */
-  const reviewPending = new Set()
-  /** @type {Map<string, number|null>} session id -> current/ended turn */
-  const turns = new Map()
   /** @type {Map<string, object[]>} session id -> settled jobs over the warn threshold */
   const longJobs = new Map()
   const disposers = []
@@ -351,6 +251,18 @@ export function createMemberContext({
   async function readScopes() {
     if (typeof service?.memberScopes !== 'function') return {}
     return await service.memberScopes().catch(() => ({}))
+  }
+
+  /**
+   * The product stage of the project one agent runs in, or null.
+   * @param {any} agent live agent.
+   * @returns {Promise<object|null>} stage state.
+   */
+  async function stageFor(agent) {
+    if (typeof service?.productStage !== 'function') return null
+    const cwd = agentCwd(agent)
+    if (cwd === '') return null
+    return await service.productStage(cwd).catch(() => null)
   }
 
   /** Recent member-host rows, reused while excusing a roster gap. */
@@ -407,40 +319,29 @@ export function createMemberContext({
     const at = now()
     const last = lastInjection.get(sessionId)
     if (typeof last === 'number' && Number.isFinite(last) && at >= last && at - last < intervalMs) return null
-    const running = await memberTasks.inFlightForOrigin(sessionId)
+    const [running, stage] = await Promise.all([
+      memberTasks.inFlightForOrigin(sessionId),
+      stageFor(agent),
+    ])
     if (!Array.isArray(running)) return null
-    // A long job can be worth reporting even when no member conversation is
-    // running, so the buffer, not the running list, decides that case.
-    const pendingJobs = (longJobs.get(sessionId)?.length ?? 0) > 0
-    if (running.length === 0 && !pendingJobs) {
-      // A roster gap is the third reason to speak: the project names members
-      // that must exist, and one without a conversation is a missed dispatch.
-      const [tasks, scopes] = await Promise.all([
-        memberTasks.listForOrigin(sessionId),
-        readScopes(),
-      ])
-      const gaps = await rosterGaps(agent, tasks, scopes)
-      const gapLines = formatMemberGapLines(gaps)
-      if (gapLines.length === 0) return null
-      return {
-        text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope: scopes[sessionId] ?? null, scopes, gaps: gapLines }),
-        at,
-      }
-    }
     const [tasks, scopes] = await Promise.all([
       memberTasks.listForOrigin(sessionId),
       readScopes(),
     ])
     const selfScope = scopes[sessionId] ?? null
+    // A long job can be worth reporting even when no member conversation is
+    // running, so the buffer, not the running list, decides that case.
     const taken = takeLongJobs(sessionId, at, last)
     // Consuming the buffer at every snapshot keeps the window honest even when
     // the option is off; only an explicit avoidLongJobs turns it into a hint.
     const hintJobs = selfScope?.avoidLongJobs === true ? taken : []
     const gaps = await rosterGaps(agent, tasks, scopes)
     const gapLines = formatMemberGapLines(gaps)
-    if (running.length === 0 && hintJobs.length === 0 && gapLines.length === 0) return null
+    // An active product stage is its own reason to speak: it carries the
+    // version, the goals, and who still owes this round an answer.
+    if (running.length === 0 && hintJobs.length === 0 && gapLines.length === 0 && stage === null) return null
     return {
-      text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes, longJobs: hintJobs, gaps: gapLines }),
+      text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes, longJobs: hintJobs, gaps: gapLines, stage }),
       at,
     }
   }
@@ -517,93 +418,7 @@ export function createMemberContext({
   }
 
   /**
-   * Review the member conversations after one main-conversation turn ends.
-   *
-   * There is no quiet delay: a normal turn end evaluates the window since the
-   * last review ended and, when it is over {@link MEMBER_REVIEW_INTERVAL_MS},
-   * delivers the dispatch instruction. The turn that the dispatch push starts
-   * is the review itself, so its `turn/end` records the anchor. Only an
-   * explicit `keep: true` opts in; `keep` defaults to off.
-   * @param {string} sessionId session id.
-   * @param {number|null} turn turn that just ended.
-   * @returns {Promise<void>} resolution after the attempt.
-   */
-  async function maybeReview(sessionId, turn) {
-    if (closed) return
-    const [tasks, scopes] = await Promise.all([
-      memberTasks.listForOrigin(sessionId).catch(() => []),
-      readScopes(),
-    ])
-    if (closed || turns.get(sessionId) !== turn) return
-    const selfScope = scopes[sessionId] ?? null
-    // A roster with a gap is a reason to review even when this conversation
-    // tracks no member conversation yet.
-    const rosterCwd = agentCwd(typeof ctx?.get === 'function' ? ctx.get('agents')?.get(sessionId) : undefined)
-    const roster = rosterCwd === '' ? null : await readMemberRoster(rosterCwd).catch(() => null)
-    if (tasks.length === 0 && selfScope === null && roster === null) return
-    if (selfScope?.keep !== true) return
-    const last = lastReviewEnd.get(sessionId)
-    if (typeof last === 'number' && now() - last <= reviewIntervalMs) return
-    // `session/event` for `turn/end` fires while the loop still reports the
-    // agent as running; let that turn settle on a macrotask so the agent is
-    // idle for the compaction and the dispatch is not queued behind a turn
-    // that has already ended.
-    await new Promise(resolve => setImmediate(resolve))
-    if (closed || turns.get(sessionId) !== turn) return
-    const agent = typeof ctx?.get === 'function' ? ctx.get('agents')?.get(sessionId) : undefined
-    if (agent === undefined || agent === null || agent.status !== 'idle') return
-    // Measure and, when the main conversation is over its threshold, compact
-    // before the push. A missing/failed compaction never blocks the push, but
-    // a turn that started meanwhile invalidates this review.
-    const threshold = effectiveCompressPercent(selfScope)
-    const beforePercent = measureMemberContextPercent(ctx, agent)
-    let compressionLine
-    if (beforePercent !== null && beforePercent > threshold) {
-      const outcome = await compactMainAgent(ctx, agent)
-      if (closed || turns.get(sessionId) !== turn || agent.status !== 'idle') {
-        log(`member dispatch push abandoned: conversation resumed while compacting (context ${formatMemberPercent(beforePercent)}, threshold ${formatMemberPercent(threshold)})`)
-        return
-      }
-      if (outcome.ok) {
-        if (outcome.result === null) {
-          compressionLine = `no compactable range（上下文 ${formatMemberPercent(beforePercent)}，阈值 ${formatMemberPercent(threshold)}）`
-        } else {
-          const afterPercent = measureMemberContextPercent(ctx, agent)
-          compressionLine = `compressed ${formatMemberPercent(beforePercent)} -> ${afterPercent === null ? '未测' : formatMemberPercent(afterPercent)}（阈值 ${formatMemberPercent(threshold)}）`
-        }
-      } else {
-        compressionLine = `compression skipped: ${outcome.reason}（上下文 ${formatMemberPercent(beforePercent)}，阈值 ${formatMemberPercent(threshold)}）`
-      }
-    } else if (beforePercent === null) {
-      compressionLine = `context not measured（阈值 ${formatMemberPercent(threshold)}）`
-    } else {
-      compressionLine = `no compression（上下文 ${formatMemberPercent(beforePercent)} <= 阈值 ${formatMemberPercent(threshold)}）`
-    }
-    // A slow compaction must not leave the injection clock at the old start
-    // time: the push text (and the timestamp used to suppress the next
-    // pre-step injection) belongs to the moment the push actually happens.
-    const at = now()
-    const gaps = roster === null
-      ? null
-      : memberRosterGaps(roster, tasks, scopes, { hosts: (await memberHosts().catch(() => null)) ?? [] })
-    const text = formatMemberDispatchPush(tasks, { now: at, selfId: sessionId, selfScope, scopes, gaps: formatMemberGapLines(gaps) })
-    try {
-      agent.followup({
-        id: randomUUID(),
-        role: 'user',
-        content: [{ type: 'text', text }],
-        source: { kind: MEMBER_CONTEXT_SOURCE, form: 'push' },
-      })
-      reviewPending.add(sessionId)
-      lastInjection.set(sessionId, at)
-      log(`member dispatch push to ${sessionId}: ${compressionLine}`)
-    } catch (error) {
-      log(`member dispatch push failed: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-
-  /**
-   * Handle one session event for the active push.
+   * Handle one session event for the long-job buffer.
    * @param {any} session session.
    * @param {any} event session event.
    * @returns {void}
@@ -612,37 +427,18 @@ export function createMemberContext({
     if (closed || session === undefined || event === undefined) return
     const sessionId = String(session.id ?? '')
     if (sessionId === '' || isMemberSession(sessionId)) return
-    if (event.type === 'job/settled') {
-      const data = event.data ?? {}
-      const startedAt = Number(data.startedAt)
-      const finishedAt = Number.isFinite(Number(data.finishedAt)) ? Number(data.finishedAt) : Number(event.time)
-      if (Number.isFinite(startedAt) && Number.isFinite(finishedAt)) {
-        recordLongJob(sessionId, {
-          jobId: data.jobId,
-          kind: data.kind,
-          label: data.label,
-          startedAt,
-          finishedAt,
-          durationMs: finishedAt - startedAt,
-        })
-      }
-      return
-    }
-    if (event.type === 'turn/start') {
-      turns.set(sessionId, Number.isSafeInteger(event.data?.turn) ? event.data.turn : null)
-      return
-    }
-    if (event.type !== 'turn/end') return
-    const turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : (turns.get(sessionId) ?? null)
-    turns.set(sessionId, turn)
-    // The turn the dispatch push started is the review itself: its end is the
-    // anchor for the next 10-minute window, and it must not push again.
-    if (reviewPending.delete(sessionId)) {
-      lastReviewEnd.set(sessionId, now())
-      return
-    }
-    void maybeReview(sessionId, turn).catch(error => {
-      log(`member status review failed: ${error instanceof Error ? error.message : String(error)}`)
+    if (event.type !== 'job/settled') return
+    const data = event.data ?? {}
+    const startedAt = Number(data.startedAt)
+    const finishedAt = Number.isFinite(Number(data.finishedAt)) ? Number(data.finishedAt) : Number(event.time)
+    if (!Number.isFinite(startedAt) || !Number.isFinite(finishedAt)) return
+    recordLongJob(sessionId, {
+      jobId: data.jobId,
+      kind: data.kind,
+      label: data.label,
+      startedAt,
+      finishedAt,
+      durationMs: finishedAt - startedAt,
     })
   }
 
@@ -653,9 +449,6 @@ export function createMemberContext({
       const id = String(session?.id ?? '')
       if (id === '') return
       lastInjection.delete(id)
-      lastReviewEnd.delete(id)
-      reviewPending.delete(id)
-      turns.delete(id)
       longJobs.delete(id)
     }))
   }
@@ -664,18 +457,12 @@ export function createMemberContext({
     handler,
     onEvent,
     lastInjection,
-    lastReviewEnd,
-    reviewPending,
-    turns,
     dispose() {
       closed = true
       for (const dispose of disposers.splice(0)) {
         try { dispose?.() } catch { }
       }
       lastInjection.clear()
-      lastReviewEnd.clear()
-      reviewPending.clear()
-      turns.clear()
       longJobs.clear()
     },
   }

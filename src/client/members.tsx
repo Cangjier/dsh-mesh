@@ -39,6 +39,8 @@ export interface MemberConversationRow {
   memberName: string | null
   memberLabel: string
   workspace: string
+  /** Standard identity (产品经理 / 研究员 / 开发 / 测试 / 业务), when set. */
+  role: string | null
   identity: string | null
   scope: string | null
   note: string | null
@@ -463,6 +465,7 @@ function MemberDetail({ row }: { row: MemberConversationRow }) {
         column={1}
         styles={{ label: { width: 84, whiteSpace: 'nowrap' }, content: { minWidth: 0 } }}
         items={[
+          { key: 'role', label: '标准身份', children: row.role ?? '未设置' },
           { key: 'identity', label: '身份', children: row.identity ?? '未设置' },
           { key: 'workspace', label: '工作区', children: <span className="dsh-mesh-mono">{row.workspace}</span> },
           {

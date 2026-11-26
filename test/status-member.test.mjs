@@ -205,12 +205,14 @@ test('status_member shows identity and scope and asks for missing ones once', as
     service.memberTasks.tasks.get('member-test').profile = {
       name: 'build-2',
       identity: '测试',
+      role: '测试',
       scope: '跨平台验收',
     }
     const profiled = await tool.execute({ conversationId: 'conv-1' }, {})
-    assert.match(profiled.text, /身份：测试；工作范围：跨平台验收/u)
+    assert.match(profiled.text, /标准身份：测试；身份：测试；工作范围：跨平台验收/u)
     assert.match(profiled.text, /conv-1（build-2 10\.66\.66\.2，工作区 dsh-mesh，空闲，第 2 轮） 身份：测试；工作范围：跨平台验收/u)
     assert.doesNotMatch(profiled.text, /下次 call_member 带 identity 和 scope 参数/u)
+    assert.equal(profiled.data.conversations[0].role, '测试')
     assert.equal(profiled.data.conversations[0].identity, '测试')
     assert.equal(profiled.data.conversations[0].scope, '跨平台验收')
   } finally {

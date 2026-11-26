@@ -443,6 +443,41 @@ test('a task a graceful stop marked resumable is re-attached on the next start',
   assert.match(messages[0].content[0].text, /RESUMED RESULT/u)
 })
 
+test('an accepted reply is recorded as this round\'s product-stage participation', async () => {
+  const conversationId = 'conv-stage'
+  const { server, port } = await memberWithResult('STAGE RESULT', conversationId)
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-stage-'))
+  const taskRoot = path.join(dataDir, 'member-tasks')
+  await mkdir(taskRoot, { recursive: true })
+  await writeFile(path.join(taskRoot, 'member-stage.json'), `${JSON.stringify({
+    ...persistedTask({ id: 'member-stage', conversationId, originCwd: '/root/ws/project' }),
+    baseUrl: `http://127.0.0.1:${port}`,
+  }, null, 2)}\n`)
+  const notes = []
+  const agent = { id: 'session-A', session: { id: 'session-A', header: { cwd: '/root/ws/project' } }, followup: () => {} }
+  const service = {
+    config: { interopPort: port, interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
+    noteMemberParticipation: async facts => { notes.push(facts) },
+  }
+  const ctx = { get: name => name === 'agents' ? { get: id => id === 'session-A' ? agent : undefined } : undefined }
+  const tasks = new MemberTaskService({ ctx, service, dataDir, log: () => {} })
+  try {
+    await tasks.init()
+    const deadline = Date.now() + 12_000
+    while (notes.length === 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    assert.deepEqual(notes[0], { cwd: '/root/ws/project', conversationId, turn: 1 })
+  } finally {
+    await tasks.dispose()
+    await new Promise(resolve => server.close(resolve))
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
 test('a graceful stop leaves its running task marked resumable', async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-stop-'))
   const service = {
@@ -544,7 +579,7 @@ test('build tool returns the final job and its log path', async () => {
   }
 })
 
-test('registerTools exposes build, deploy, members, call_member, set_member_scope, wait_member, status_member and repack', async () => {
+test('registerTools exposes the build, deploy, member and product-stage tools', async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-tools-'))
   const names = []
   const tools = []
@@ -562,7 +597,7 @@ test('registerTools exposes build, deploy, members, call_member, set_member_scop
   const toolsCtx = { tools: { register: tool => { names.push(tool.name); tools.push(tool) } } }
   try {
     registerTools(ctx, toolsCtx, service)
-    assert.deepEqual(names.sort(), ['build', 'call_member', 'deploy', 'members', 'remove_member', 'repack', 'set_member_scope', 'status_member', 'wait_member'].sort())
+    assert.deepEqual(names.sort(), ['build', 'call_member', 'deploy', 'members', 'remove_member', 'repack', 'set_member_scope', 'set_product_stage', 'status_member', 'wait_member'].sort())
     for (const name of ['build', 'deploy', 'members']) {
       const tool = tools.find(candidate => candidate.name === name)
       assert.equal(tool.parameters.properties.action, undefined)
@@ -574,14 +609,16 @@ test('registerTools exposes build, deploy, members, call_member, set_member_scop
     assert.deepEqual(call.parameters.required, ['prompt'])
     assert.deepEqual(
       Object.keys(call.parameters.properties).sort(),
-      ['conversationId', 'cwd', 'identity', 'member', 'prompt', 'scope', 'workspace'].sort(),
+      ['conversationId', 'cwd', 'identity', 'member', 'prompt', 'role', 'scope', 'workspace'].sort(),
     )
     const setScope = tools.find(candidate => candidate.name === 'set_member_scope')
     assert.equal(setScope.parameters.properties.action, undefined)
     assert.deepEqual(
       Object.keys(setScope.parameters.properties).sort(),
-      ['avoidLongJobs', 'compressPercent', 'conversationId', 'identity', 'keep', 'note', 'scope'].sort(),
+      ['avoidLongJobs', 'compressPercent', 'conversationId', 'identity', 'note', 'role', 'scope'].sort(),
     )
+    const setStage = tools.find(candidate => candidate.name === 'set_product_stage')
+    assert.deepEqual(Object.keys(setStage.parameters.properties).sort(), ['goals', 'round', 'stage'].sort())
     const repack = tools.find(candidate => candidate.name === 'repack')
     assert.deepEqual(repack.parameters.required, ['package'])
   } finally {

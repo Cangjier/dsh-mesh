@@ -173,7 +173,7 @@ test('participation is counted for every member in A and for the stage roles lat
   assert.deepEqual(a.missing.map(entry => entry.conversationId), ['c2', 'c3'])
 })
 
-test('the stage block leads with the version, goals, participation and next calls', () => {
+test('the stage block leads with the version, goals, participation and possible next moves', () => {
   const tasks = [
     { conversationId: 'c1', statusLabel: '空闲', profile: { name: 'B', role: '开发' } },
   ]
@@ -193,8 +193,10 @@ test('the stage block leads with the version, goals, participation and next call
   assert.match(text, /- 本轮参与：0\/1/u)
   assert.match(text, /- 未参与：开发 c1/u)
   assert.match(text, /- 没有成员会话的标准身份：测试、研究员/u)
-  assert.match(text, /- 下一步（set_product_stage）：进入 C 阶段/u)
-  assert.match(text, /同一阶段下一轮 \{ "stage": "B", "round": 3 \}/u)
+  assert.match(text, /后续可能走向：/u)
+  assert.ok(text.includes('1. 如果本轮功能已经没有 BUG（疑难杂症除外），可以交给产品经理使用，则 set_product_stage({ "stage": "C" })'))
+  assert.ok(text.includes('3. 如果本轮还需要继续修复或验证，则 set_product_stage({ "round": 3 })'))
+  assert.ok(text.includes('4. 如果只需要更新开发目标状态，则 set_product_stage({ "goals": { "dev": { "status": "已达成" } } })'))
 })
 
 test('the tool result reports a creation and the previous stage warnings', () => {
@@ -314,7 +316,7 @@ test('a corrupt product stage file reads as no stage', async () => {
   }
 })
 
-test('the set_product_stage tool writes the project state and reports the next calls', async () => {
+test('the set_product_stage tool writes the project state and reports possible next moves', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-stage-tool-'))
   const dataDir = path.join(dir, 'mesh')
   let service
@@ -334,7 +336,8 @@ test('the set_product_stage tool writes the project state and reports the next c
     assert.equal(created.ok, true)
     assert.match(created.text, /^产品阶段已建立：\d{8}\.1 · A 阶段（第 1 轮迭代）/u)
     assert.match(created.text, /- 产品目标：目标（未开始）/u)
-    assert.match(created.text, /- 下一步（set_product_stage）：进入 B 阶段/u)
+    assert.match(created.text, /后续可能走向：/u)
+    assert.ok(created.text.includes('1. 如果所有成员已参与建议、本轮计划与目标已经确定，则 set_product_stage({ "stage": "B" })'))
     const stored = await service.productStage('/root/ws/project')
     assert.equal(stored.stage, 'A')
     assert.equal(stored.updatedBy, 'main-1')

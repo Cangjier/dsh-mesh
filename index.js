@@ -12981,15 +12981,47 @@ function formatProductStageParticipation(state, tasks, scopes = {}) {
   }
   return lines;
 }
-function formatProductStageNextCalls(state) {
-  const calls = [];
-  if (state.stage === "A") calls.push('\u8FDB\u5165 B \u9636\u6BB5 { "stage": "B" }');
-  if (state.stage === "B") calls.push('\u8FDB\u5165 C \u9636\u6BB5 { "stage": "C" }', '\u56DE A \u9636\u6BB5\u91CD\u65B0\u8BA1\u5212 { "stage": "A" }');
-  if (state.stage === "C") calls.push('\u8FDB\u5165 D \u9636\u6BB5 { "stage": "D" }', '\u53D1\u73B0\u95EE\u9898\u56DE B \u9636\u6BB5 { "stage": "B" }');
-  if (state.stage === "D") calls.push('\u4E1A\u52A1\u653E\u884C\u56DE A \u9636\u6BB5 { "stage": "A" }\uFF08\u81EA\u52A8\u5347\u7248\u672C\uFF09', '\u53D1\u73B0\u95EE\u9898\u56DE C \u9636\u6BB5 { "stage": "C" }');
+function productStageMoves(stage, round2) {
+  if (stage === "A") {
+    return [
+      { when: "\u6240\u6709\u6210\u5458\u5DF2\u53C2\u4E0E\u5EFA\u8BAE\u3001\u672C\u8F6E\u8BA1\u5212\u4E0E\u76EE\u6807\u5DF2\u7ECF\u786E\u5B9A", call: '{ "stage": "B" }' },
+      { when: "\u8BA1\u5212\u8FD8\u9700\u8981\u5728\u540C\u4E00\u9636\u6BB5\u7EE7\u7EED\u8BA8\u8BBA\u6216\u8865\u5145", call: `{ "round": ${String(round2)} }` },
+      { when: "\u53EA\u9700\u8981\u66F4\u65B0\u4EA7\u54C1\u76EE\u6807\u6216\u72B6\u6001", call: '{ "goals": { "product": { "status": "\u8FDB\u884C\u4E2D" } } }' }
+    ];
+  }
+  if (stage === "B") {
+    return [
+      { when: "\u672C\u8F6E\u529F\u80FD\u5DF2\u7ECF\u6CA1\u6709 BUG\uFF08\u7591\u96BE\u6742\u75C7\u9664\u5916\uFF09\uFF0C\u53EF\u4EE5\u4EA4\u7ED9\u4EA7\u54C1\u7ECF\u7406\u4F7F\u7528", call: '{ "stage": "C" }' },
+      { when: "\u53D1\u73B0\u95EE\u9898\u9700\u8981\u56DE\u5230\u8BA1\u5212\u91CD\u65B0\u5B9A\u76EE\u6807", call: '{ "stage": "A" }' },
+      { when: "\u672C\u8F6E\u8FD8\u9700\u8981\u7EE7\u7EED\u4FEE\u590D\u6216\u9A8C\u8BC1", call: `{ "round": ${String(round2)} }` },
+      { when: "\u53EA\u9700\u8981\u66F4\u65B0\u5F00\u53D1\u76EE\u6807\u72B6\u6001", call: '{ "goals": { "dev": { "status": "\u5DF2\u8FBE\u6210" } } }' }
+    ];
+  }
+  if (stage === "C") {
+    return [
+      { when: "\u4EA7\u54C1\u7ECF\u7406\u771F\u5B9E\u4F7F\u7528\u540E\u653E\u884C", call: '{ "stage": "D" }' },
+      { when: "\u4EA7\u54C1\u7ECF\u7406\u53D1\u73B0\u95EE\u9898\u9700\u8981\u4FEE\u590D", call: '{ "stage": "B" }' },
+      { when: "\u9A8C\u6536\u8FD8\u9700\u8981\u591A\u8F6E", call: `{ "round": ${String(round2)} }` },
+      { when: "\u53EA\u9700\u8981\u66F4\u65B0\u4EA7\u54C1\u76EE\u6807\u72B6\u6001", call: '{ "goals": { "product": { "status": "\u5DF2\u8FBE\u6210" } } }' }
+    ];
+  }
+  if (stage === "D") {
+    return [
+      { when: "\u4E1A\u52A1\u4EBA\u5458\u653E\u884C\u3001\u5F00\u542F\u4E0B\u4E00\u8F6E\uFF08\u4EA7\u54C1\u7248\u672C\u81EA\u52A8\u5347\u7EA7\uFF09", call: '{ "stage": "A" }' },
+      { when: "\u4E1A\u52A1\u53D1\u73B0\u95EE\u9898\u9700\u8981\u4EA7\u54C1\u7ECF\u7406\u786E\u8BA4", call: '{ "stage": "C" }' },
+      { when: "\u4E1A\u52A1\u9A8C\u8BC1\u8FD8\u9700\u8981\u591A\u8F6E", call: `{ "round": ${String(round2)} }` },
+      { when: "\u53EA\u9700\u8981\u66F4\u65B0\u76EE\u6807\u72B6\u6001", call: '{ "goals": { "product": { "status": "\u5DF2\u8FBE\u6210" } } }' }
+    ];
+  }
+  return [];
+}
+function formatProductStageNextMoves(state) {
+  const current = Number.isSafeInteger(state?.round) ? state.round : 1;
+  const round2 = Math.min(current + 1, PRODUCT_ROUND_MAX);
+  const moves = productStageMoves(state?.stage, round2);
   return [
-    `- \u4E0B\u4E00\u6B65\uFF08set_product_stage\uFF09\uFF1A${calls.join("\uFF1B")}\u3002`,
-    `- \u5B50\u9636\u6BB5\u6216\u76EE\u6807\uFF1A\u540C\u4E00\u9636\u6BB5\u4E0B\u4E00\u8F6E { "stage": "${state.stage}", "round": ${String(state.round + 1)} }\uFF1B\u53EA\u66F4\u65B0\u76EE\u6807\u72B6\u6001 { "goals": { "dev": { "status": "\u5DF2\u8FBE\u6210" } } }\u3002`
+    "\u540E\u7EED\u53EF\u80FD\u8D70\u5411\uFF1A",
+    ...moves.map((move, index) => `${String(index + 1)}. \u5982\u679C${move.when}\uFF0C\u5219 set_product_stage(${move.call})`)
   ];
 }
 function formatProductStageLines(state, tasks, scopes = {}) {
@@ -12998,7 +13030,7 @@ function formatProductStageLines(state, tasks, scopes = {}) {
     `- \u9636\u6BB5\u8981\u6C42\uFF1A${PRODUCT_STAGE_REQUIREMENTS[state.stage] ?? ""}`,
     ...PRODUCT_GOAL_KEYS.map((key) => `- ${PRODUCT_GOAL_LABELS[key]}\uFF1A${goalLine(state.goals?.[key])}`),
     ...formatProductStageParticipation(state, tasks, scopes),
-    ...formatProductStageNextCalls(state)
+    ...formatProductStageNextMoves(state)
   ];
 }
 function formatProductStageResult(state, options = {}) {
@@ -13007,7 +13039,7 @@ function formatProductStageResult(state, options = {}) {
     `- \u9636\u6BB5\u8981\u6C42\uFF1A${PRODUCT_STAGE_REQUIREMENTS[state.stage] ?? ""}`,
     ...PRODUCT_GOAL_KEYS.map((key) => `- ${PRODUCT_GOAL_LABELS[key]}\uFF1A${goalLine(state.goals?.[key])}`),
     ...formatProductStageParticipation(state, options.tasks ?? [], options.scopes ?? {}),
-    ...formatProductStageNextCalls(state),
+    ...formatProductStageNextMoves(state),
     ...Array.isArray(options.warnings) && options.warnings.length > 0 ? ["[\u653E\u884C\u68C0\u67E5]", ...options.warnings.map((line) => `- ${line}`)] : []
   ];
   return lines.join("\n");
@@ -17325,7 +17357,7 @@ function registerTools(ctx, toolsCtx, service) {
       "`goals` \u53EA\u6539\u4F20\u5165\u7684\u76EE\u6807\uFF1Aproduct \u4EA7\u54C1\u76EE\u6807 / dev \u5F00\u53D1\u76EE\u6807 / research \u7814\u7A76\u76EE\u6807\uFF1B\u6BCF\u9879 { text, status }\uFF0Cstatus \u53D6 \u672A\u5F00\u59CB / \u8FDB\u884C\u4E2D / \u5DF2\u8FBE\u6210 / \u672A\u8FBE\u6210\u3002",
       "`round` \u662F\u5B50\u9636\u6BB5\u8F6E\u6B21\uFF08\u7B2C\u51E0\u8F6E\u8FED\u4EE3\uFF09\uFF1A\u7701\u7565\u65F6 D \u8FDB\u5165 A \u81EA\u52A8 +1\uFF0C\u5176\u4ED6\u9636\u6BB5\u6CBF\u7528\u5F53\u524D\u8F6E\u6B21\uFF1B\u4E5F\u53EF\u4EE5\u663E\u5F0F\u6307\u5B9A\u3002",
       "`stage` \u7701\u7565\u65F6\u6CBF\u7528\u5F53\u524D\u9636\u6BB5\uFF08\u9996\u6B21\u8C03\u7528\u9ED8\u8BA4 A\uFF09\uFF0C\u53EA\u66F4\u65B0\u76EE\u6807\u72B6\u6001\u65F6\u53EF\u4EE5\u7701\u7565\u3002",
-      "\u9636\u6BB5\u6309\u9879\u76EE\u76EE\u5F55\u4FDD\u5B58\uFF0C\u540C\u4E00\u5DE5\u4F5C\u533A\u7684\u4E3B\u5BF9\u8BDD\u5171\u4EAB\u3002\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u63D0\u793A\u672C\u8F6E\u54EA\u4E9B\u6210\u5458\u8FD8\u6CA1\u6709\u53C2\u4E0E\u3001\u4EA7\u54C1\u7248\u672C\u7684\u76EE\u6807\u4E0E\u72B6\u6001\uFF0C\u4EE5\u53CA\u4E0B\u4E00\u6B65\u7684\u5404\u79CD\u8C03\u7528\u65B9\u5F0F\u3002",
+      "\u9636\u6BB5\u6309\u9879\u76EE\u76EE\u5F55\u4FDD\u5B58\uFF0C\u540C\u4E00\u5DE5\u4F5C\u533A\u7684\u4E3B\u5BF9\u8BDD\u5171\u4EAB\u3002\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u63D0\u793A\u672C\u8F6E\u54EA\u4E9B\u6210\u5458\u8FD8\u6CA1\u6709\u53C2\u4E0E\u3001\u4EA7\u54C1\u7248\u672C\u7684\u76EE\u6807\u4E0E\u72B6\u6001\uFF0C\u4EE5\u53CA\u540E\u7EED\u53EF\u80FD\u8D70\u5411\uFF08\u5E26\u6761\u4EF6\u7684 set_product_stage \u8C03\u7528\uFF09\u3002",
       "\u6210\u5458\u7684\u6807\u51C6\u8EAB\u4EFD\u7531 set_member_scope \u7684 role \u8BBE\u7F6E\uFF08\u4EA7\u54C1\u7ECF\u7406 / \u7814\u7A76\u5458 / \u5F00\u53D1 / \u6D4B\u8BD5 / \u4E1A\u52A1\uFF09\uFF1B\u6CA1\u6709\u8BBE\u7F6E\u6807\u51C6\u8EAB\u4EFD\u7684\u6210\u5458\u4F1A\u5728\u9636\u6BB5\u6821\u9A8C\u4E2D\u88AB\u63D0\u793A\u3002"
     ].join("\n"),
     parameters: {

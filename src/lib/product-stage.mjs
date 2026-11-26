@@ -424,19 +424,62 @@ export function formatProductStageParticipation(state, tasks, scopes = {}) {
 }
 
 /**
- * The next `set_product_stage` calls for the current stage.
+ * The possible next moves of one stage: a condition and the call it implies.
+ *
+ * The list is intentionally conditional rather than a single "next step": the
+ * flow can advance, go back for rework, start another round of the same stage,
+ * or only update a goal, and the main conversation decides which applies.
+ * @param {string} stage current stage letter.
+ * @param {number} round the next sub-stage round for the same stage.
+ * @returns {{when: string, call: string}[]} moves, in flow order.
+ */
+function productStageMoves(stage, round) {
+  if (stage === 'A') {
+    return [
+      { when: '所有成员已参与建议、本轮计划与目标已经确定', call: '{ "stage": "B" }' },
+      { when: '计划还需要在同一阶段继续讨论或补充', call: `{ "round": ${String(round)} }` },
+      { when: '只需要更新产品目标或状态', call: '{ "goals": { "product": { "status": "进行中" } } }' },
+    ]
+  }
+  if (stage === 'B') {
+    return [
+      { when: '本轮功能已经没有 BUG（疑难杂症除外），可以交给产品经理使用', call: '{ "stage": "C" }' },
+      { when: '发现问题需要回到计划重新定目标', call: '{ "stage": "A" }' },
+      { when: '本轮还需要继续修复或验证', call: `{ "round": ${String(round)} }` },
+      { when: '只需要更新开发目标状态', call: '{ "goals": { "dev": { "status": "已达成" } } }' },
+    ]
+  }
+  if (stage === 'C') {
+    return [
+      { when: '产品经理真实使用后放行', call: '{ "stage": "D" }' },
+      { when: '产品经理发现问题需要修复', call: '{ "stage": "B" }' },
+      { when: '验收还需要多轮', call: `{ "round": ${String(round)} }` },
+      { when: '只需要更新产品目标状态', call: '{ "goals": { "product": { "status": "已达成" } } }' },
+    ]
+  }
+  if (stage === 'D') {
+    return [
+      { when: '业务人员放行、开启下一轮（产品版本自动升级）', call: '{ "stage": "A" }' },
+      { when: '业务发现问题需要产品经理确认', call: '{ "stage": "C" }' },
+      { when: '业务验证还需要多轮', call: `{ "round": ${String(round)} }` },
+      { when: '只需要更新目标状态', call: '{ "goals": { "product": { "status": "已达成" } } }' },
+    ]
+  }
+  return []
+}
+
+/**
+ * The numbered "后续可能走向" block for one stage.
  * @param {object} state stage state.
  * @returns {string[]} lines.
  */
-export function formatProductStageNextCalls(state) {
-  const calls = []
-  if (state.stage === 'A') calls.push('进入 B 阶段 { "stage": "B" }')
-  if (state.stage === 'B') calls.push('进入 C 阶段 { "stage": "C" }', '回 A 阶段重新计划 { "stage": "A" }')
-  if (state.stage === 'C') calls.push('进入 D 阶段 { "stage": "D" }', '发现问题回 B 阶段 { "stage": "B" }')
-  if (state.stage === 'D') calls.push('业务放行回 A 阶段 { "stage": "A" }（自动升版本）', '发现问题回 C 阶段 { "stage": "C" }')
+export function formatProductStageNextMoves(state) {
+  const current = Number.isSafeInteger(state?.round) ? state.round : 1
+  const round = Math.min(current + 1, PRODUCT_ROUND_MAX)
+  const moves = productStageMoves(state?.stage, round)
   return [
-    `- 下一步（set_product_stage）：${calls.join('；')}。`,
-    `- 子阶段或目标：同一阶段下一轮 { "stage": "${state.stage}", "round": ${String(state.round + 1)} }；只更新目标状态 { "goals": { "dev": { "status": "已达成" } } }。`,
+    '后续可能走向：',
+    ...moves.map((move, index) => `${String(index + 1)}. 如果${move.when}，则 set_product_stage(${move.call})`),
   ]
 }
 
@@ -453,7 +496,7 @@ export function formatProductStageLines(state, tasks, scopes = {}) {
     `- 阶段要求：${PRODUCT_STAGE_REQUIREMENTS[state.stage] ?? ''}`,
     ...PRODUCT_GOAL_KEYS.map(key => `- ${PRODUCT_GOAL_LABELS[key]}：${goalLine(state.goals?.[key])}`),
     ...formatProductStageParticipation(state, tasks, scopes),
-    ...formatProductStageNextCalls(state),
+    ...formatProductStageNextMoves(state),
   ]
 }
 
@@ -469,7 +512,7 @@ export function formatProductStageResult(state, options = {}) {
     `- 阶段要求：${PRODUCT_STAGE_REQUIREMENTS[state.stage] ?? ''}`,
     ...PRODUCT_GOAL_KEYS.map(key => `- ${PRODUCT_GOAL_LABELS[key]}：${goalLine(state.goals?.[key])}`),
     ...formatProductStageParticipation(state, options.tasks ?? [], options.scopes ?? {}),
-    ...formatProductStageNextCalls(state),
+    ...formatProductStageNextMoves(state),
     ...(Array.isArray(options.warnings) && options.warnings.length > 0
       ? ['[放行检查]', ...options.warnings.map(line => `- ${line}`)]
       : []),

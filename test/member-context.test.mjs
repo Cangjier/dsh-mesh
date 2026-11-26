@@ -457,7 +457,9 @@ test('an active product stage is injected even when no member conversation is ru
     assert.match(text, /\[产品阶段\] 20261126\.2 · A 阶段（第 1 轮迭代）· 计划与目标/u)
     assert.match(text, /- 产品目标：可用的成员面板（进行中）/u)
     assert.match(text, /- 本轮参与：1\/1（测试 c2）/u)
-    assert.match(text, /- 下一步（set_product_stage）：进入 B 阶段/u)
+    assert.match(text, /后续可能走向：/u)
+    assert.ok(text.includes('1. 如果所有成员已参与建议、本轮计划与目标已经确定，则 set_product_stage({ "stage": "B" })'))
+    assert.ok(text.includes('2. 如果计划还需要在同一阶段继续讨论或补充，则 set_product_stage({ "round": 2 })'))
     assert.doesNotMatch(text, /还没有设置产品阶段/u)
   } finally {
     h.context.dispose()

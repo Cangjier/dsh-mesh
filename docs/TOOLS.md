@@ -615,8 +615,11 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 - 本轮参与：1/3（开发 c1）
 - 未参与：测试 c2、研究员 c3
 - 标准身份未设置：c4（身份 前端开发1）；用 set_member_scope { "conversationId": "c4", "role": "开发" } 设置。
-- 下一步（set_product_stage）：进入 C 阶段 { "stage": "C" }；回 A 阶段重新计划 { "stage": "A" }。
-- 子阶段或目标：同一阶段下一轮 { "stage": "B", "round": 2 }；只更新目标状态 { "goals": { "dev": { "status": "已达成" } } }。
+后续可能走向：
+1. 如果本轮功能已经没有 BUG（疑难杂症除外），可以交给产品经理使用，则 set_product_stage({ "stage": "C" })
+2. 如果发现问题需要回到计划重新定目标，则 set_product_stage({ "stage": "A" })
+3. 如果本轮还需要继续修复或验证，则 set_product_stage({ "round": 2 })
+4. 如果只需要更新开发目标状态，则 set_product_stage({ "goals": { "dev": { "status": "已达成" } } })
 - 身份：网关（自身，会话 <selfId>）；工作范围：成员发现；避免耗时：关闭（只对主对话生效）；压缩阈值：35%
 - 身份：开发；工作区：dsh-mesh；会话：c1（B 10.66.66.2，进行中，第 2 轮）；工作范围：…
 - 身份：未设置；工作区：unknown；会话：c2（B 10.66.66.2，空闲，第 1 轮）；工作范围：未设置；压缩阈值：10%
@@ -627,7 +630,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 - 注入消息的 `source.kind` 是 `member-context`（不是 `user`），带
   `form: "snapshot"` 和 `sections`；
 - 没有进行中的会话、没有产品阶段、没有名册缺口、没有耗时提醒时不注入；距上次注入不足 60 秒不注入；
-- 产品阶段块在自身行之前，包含版本、阶段、轮次、阶段要求、三个目标及状态、本轮参与度、未参与/缺身份提示和下一步调用方式；
+- 产品阶段块在自身行之前，包含版本、阶段、轮次、阶段要求、三个目标及状态、本轮参与度、未参与/缺身份提示和「后续可能走向」的条件式调用；
 - 身份/工作范围优先取 `member-scopes.json`（按 conversationId），回退任务 profile 快照；已归档的会话不进入快照；
 - 成员行在设置了备注时追加 `；备注：…`（备注只在主对话可见，不注入成员）；自身行显示有效配置：避免耗时（`avoidLongJobs`，默认关闭）和压缩阈值
   （`compressPercent`，默认 35%）；成员行只在显式设置过 `compressPercent` 时显示该阈值；

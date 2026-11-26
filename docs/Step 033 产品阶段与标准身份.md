@@ -100,8 +100,11 @@
 - 本轮参与：1/3（开发 c1）
 - 未参与：测试 c2、研究员 c3
 - 标准身份未设置：c4（身份 前端开发1）；用 set_member_scope { "conversationId": "c4", "role": "开发" } 设置。
-- 下一步（set_product_stage）：进入 C 阶段 { "stage": "C" }；回 A 阶段重新计划 { "stage": "A" }。
-- 子阶段或目标：同一阶段下一轮 { "stage": "B", "round": 2 }；只更新目标状态 { "goals": { "dev": { "status": "已达成" } } }。
+后续可能走向：
+1. 如果本轮功能已经没有 BUG（疑难杂症除外），可以交给产品经理使用，则 set_product_stage({ "stage": "C" })
+2. 如果发现问题需要回到计划重新定目标，则 set_product_stage({ "stage": "A" })
+3. 如果本轮还需要继续修复或验证，则 set_product_stage({ "round": 2 })
+4. 如果只需要更新开发目标状态，则 set_product_stage({ "goals": { "dev": { "status": "已达成" } } })
 ```
 
 - 阶段本身就是一个注入理由：即使没有进行中的成员会话，也会按 60 秒间隔注入；
@@ -122,7 +125,7 @@
 ## 验证
 
 - `test/product-stage.test.mjs`：版本同日 +1 / 跨天重置、只有 D→A 升版、轮次自动/显式、
-  目标合并与清除、输入校验、损坏状态丢弃、参与度统计、阶段块和下一步文案、退出警告、
+  目标合并与清除、输入校验、损坏状态丢弃、参与度统计、阶段块和「后续可能走向」文案、退出警告、
   service 持久化与损坏文件、`set_product_stage` 工具写入。
 - `test/member-context.test.mjs`：有阶段时无进行中会话也注入；缺参与/缺角色/缺标准身份
   的文案；没有阶段时的提示。

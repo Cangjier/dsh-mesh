@@ -9,7 +9,7 @@
  *   call_member    start / continue a conversation on another member
  *   wait_member    bounded wait for one or more member tasks, returns on the first
  *   status_member  live state and the last two delivered messages of tracked tasks
- *   remove_member  archive a conversation on its member and stop tracking it
+ *   remove_member  delete a conversation, its workspace, and the workspace directory
  *
  * @module @local/dsh-mesh/tools
  */
@@ -198,9 +198,9 @@ export function registerTools(ctx, toolsCtx, service) {
       '只要知道会话id，配上 member 就能继续；本机已跟踪该对话时 member 可以省略。',
       '继续已有对话时，投递前会按该会话的压缩阈值（`set_member_scope` 的 `compressPercent`，默认 35%）检查上下文占比：',
       '超过阈值就先让成员压缩上下文再投递（要求对话空闲）；不超过就直接投递。压缩阈值只按会话设置，不接受每次调用单独指定。',
-      '`force: true`：只在新建对话时生效。目标工作区目录存在 .git 且已有进行中的对话时，创建会返回',
-      '409 workspace_busy_git（列出工作区、目录和进行中的会话id）；确认要在这个目录并发时加 force: true',
-      '重新调用 call_member。换个工作区通常更安全。继续已有 conversationId 不会触发这个拦截。',
+      '一个工作区只允许一个对话（新建时生效）：目标工作区目录里已经有对话——不管它是进行中、空闲、异常中止还是出错——',
+      '创建会返回 409 workspace_occupied，并给出那条对话的会话id；这时不要新建，直接 call_member 带 conversationId 继续它。',
+      '要继续已有对话不会触发这个拦截；要并行工作就换一个 workspace 名（或新建工作区）。',
       '返回值带当前会话id，以及本对话跟踪的所有成员会话（会话id、进行中/空闲/异常中止、工作区、轮次）。',
       '用 wait_member 等结果（推荐 all: true）：wait_member { "all": true } 等所有进行中的会话，',
       '任意一个先返回就立刻返回；也可以只用 conversationIds 指定会话。成员每结束一轮回答就返回一次，',
@@ -227,7 +227,6 @@ export function registerTools(ctx, toolsCtx, service) {
         conversationId: { type: 'string', description: '要继续的会话id（call_member / wait_member 返回）。省略就新建对话。' },
         cwd: { type: 'string', description: '新建对话：成员 B 上的工作目录（绝对路径，可空）。' },
         workspace: { type: 'string', description: '新建对话：成员 B 上的任务工作区名称；实际目录固定为成员本机的 ~/.dsh/workspaces/<name>。和 cwd 二选一。' },
-        force: { type: 'boolean', description: '只新建对话：目标工作区目录有 .git 且已有进行中的对话时仍然创建（确认文件/git 竞争风险）。继续投递不接受。' },
         identity: { type: 'string', description: '这个会话的身份/角色（例如 开发、测试、网关、客户 A），最长 40 字符；与已有设置合并，空字符串表示清除。' },
         scope: { type: 'string', description: '这个会话负责的工作范围（例如 dsh-mesh 插件开发与构建、跨平台验收），最长 120 字符；与已有设置合并，空字符串表示清除。' },
       },
@@ -259,17 +258,19 @@ export function registerTools(ctx, toolsCtx, service) {
             workspace: args.workspace,
             identity: args.identity,
             scope: args.scope,
-            force: args.force === true,
             agent: exec.agent,
             notify: true,
             signal: exec.signal,
           })
         } catch (error) {
-          // The member refused because the target workspace already has a
-          // running conversation and its directory holds a .git. This is a
-          // decision for the model, not a tool failure: hand the explanation
-          // back with ok:false and create nothing.
-          if (error?.code === 'workspace_busy_git') return workspaceBusyResult(error, args)
+          // The member refused because the workspace already holds a
+          // conversation. This is a decision for the model, not a tool
+          // failure: hand the refusal back with ok:false and create nothing.
+          // `workspace_busy_git` is the older member's code for the same
+          // situation, kept so a mixed-version mesh still reads well.
+          if (error?.code === 'workspace_occupied' || error?.code === 'workspace_busy_git') {
+            return workspaceBusyResult(error, args)
+          }
           throw error
         }
         const data = memberTaskData(task, memberTasks)
@@ -904,12 +905,13 @@ export function registerTools(ctx, toolsCtx, service) {
   const removeMemberDefinition = {
     name: 'remove_member',
     description: [
-      '把目标成员上的一个对话归档，并停止本机对它的跟踪。',
+      '完全删除目标成员上的一个对话：归档 → 删除对话 → 删除工作区记录 → 清空并删除工作区目录，并停止本机对它的跟踪。',
       '',
       '`conversationId` 必填：`call_member` / `wait_member` 返回的会话id，或本机跟踪过的任何成员会话；目标成员由本机任务记录解析，没跟踪过的会话会报错。',
-      '归档在目标成员上执行，等同于成员 Web UI 的「归档」：先停止正在跑的工作，再把会话放进成员的归档集。',
-      '归档后它不会再出现在 `status_member` 和成员状态快照里，也不能再用 `call_member` 继续投递；要恢复请在成员 Web UI 取消归档。',
-      '目标成员需要带归档接口的新版插件；旧版本会返回明确错误，不会假装成功。',
+      '顺序固定：先在成员上归档（停止正在跑的工作、把会话移出 Web 列表），再删除 interop 对话记录，再删除工作区记录，最后递归清空并删除工作区目录。',
+      '删除后这个会话id 不能再投递，它占用的工作区名也会空出来，可以重新用同名 workspace 发起新对话。',
+      '工作区目录只有在成员的工作区根目录（~/.dsh/workspaces）之下才会被删除；默认工作区可能指向 Documents 之类的用户目录，那种情况只删记录、不删目录。',
+      '目标成员需要带删除接口的新版插件；旧版本会返回明确错误，不会假装成功。',
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -930,23 +932,30 @@ export function registerTools(ctx, toolsCtx, service) {
     async execute(args) {
       const conversationId = typeof args.conversationId === 'string' ? args.conversationId.trim() : ''
       if (conversationId === '') throw new Error('conversationId is required')
-      const result = await memberTasks.archive(conversationId)
+      const result = await memberTasks.remove(conversationId)
       const task = result.task
-      const workspace = memberTaskWorkspace(task)
+      const workspace = result.workspace !== '' ? result.workspace : memberTaskWorkspace(task)
+      const directory = result.cwd !== '' ? result.cwd : '（成员未报告目录）'
       return {
         ok: true,
         text: [
-          `已归档成员会话 ${task.conversationId}（${task.member} ${task.memberIp}，工作区 ${workspace}）。`,
-          ...(result.already ? ['该会话此前已归档，本次没有重复操作。'] : ['成员上的对话已归档，正在跑的工作已停止。']),
-          '它不会再出现在 status_member 和成员状态快照里，也不能再继续投递；要恢复请在成员 Web UI 取消归档。',
+          `已删除成员会话 ${task.conversationId}（${task.member} ${task.memberIp}，工作区 ${workspace}）。`,
+          `成员侧已归档、删除对话记录、删除工作区记录（${result.recordRemoved ? '已删除' : '没有对应记录'}）。`,
+          result.directoryRemoved
+            ? `工作区目录已清空并删除：${directory}`
+            : `工作区目录没有删除（可能不在工作区根目录下，或删除失败）：${directory}`,
+          '本机的任务记录和日志也已删除；这个会话id 不能再投递，工作区名可以重新使用。',
         ].join('\n'),
         data: {
           conversationId: task.conversationId,
           member: task.member,
           memberIp: task.memberIp,
           workspace,
+          cwd: result.cwd,
+          removed: true,
           archived: true,
-          already: result.already,
+          workspaceRecordRemoved: result.recordRemoved,
+          workspaceDirectoryRemoved: result.directoryRemoved,
         },
       }
     },
@@ -1236,37 +1245,45 @@ async function originConversationBlock(memberTasks, sessionId, currentConversati
 }
 
 /**
- * Render the refusal a member sends when a git workspace is already busy.
+ * Render the refusal a member sends when its workspace already has a conversation.
  *
- * `call_member` reports this instead of throwing: the model decides between a
- * fresh workspace and an explicit `force: true` retry, and no conversation was
- * created.
+ * `call_member` reports this instead of throwing: the model should continue the
+ * conversation named in the refusal (its id is the answer), and no conversation
+ * was created.
  * @param {Error & {memberMessage?: string, detail?: object}} error member error.
  * @param {object} args tool arguments.
  * @returns {{ok: boolean, text: string, data: object}} tool result.
  */
 function workspaceBusyResult(error, args) {
-  const detail = error?.detail !== null && typeof error?.detail === 'object' ? error.detail : {}
-  const running = Array.isArray(detail.conversationIds) ? detail.conversationIds.map(String) : []
+  const detail = error?.detail !== null && typeof error.detail === 'object' ? error.detail : {}
+  const occupied = Array.isArray(detail.conversationIds) ? detail.conversationIds.map(String) : []
+  const first = typeof detail.conversationId === 'string' && detail.conversationId !== ''
+    ? detail.conversationId
+    : occupied[0] ?? ''
   const member = typeof args?.member === 'string' ? args.member : ''
-  const message = String(error?.memberMessage ?? error?.message ?? '目标工作区已有进行中的对话')
+  const workspace = typeof detail.workspace === 'string' ? detail.workspace : (typeof args?.workspace === 'string' ? args.workspace : '')
+  const message = String(error?.memberMessage ?? error?.message ?? '目标工作区已有对话')
   return {
     ok: false,
     text: [
-      '目标工作区已有进行中的对话，这次没有创建新对话。',
+      '目标工作区已经有对话，这次没有创建新对话（一个工作区只允许一个对话）。',
       message,
-      running.length > 0 ? `进行中的会话：${running.join('、')}` : '',
-      `推荐换一个工作区：call_member { "member": ${JSON.stringify(member)}, "workspace": "<新的工作区名>", "prompt": "..." }。`,
-      '确认要在这个目录里并发（可能造成文件/git 竞争）：在输入中设置 force: true 后重新调用 call_member。',
+      first === ''
+        ? ''
+        : `继续那个对话：call_member { ${member === '' ? '' : `"member": ${JSON.stringify(member)}, `}"conversationId": ${JSON.stringify(first)}, "prompt": "..." }。`,
+      workspace === ''
+        ? '要并行工作就换一个工作区：call_member { "workspace": "<新的工作区名>", "prompt": "..." }。'
+        : `要并行工作就换一个工作区名（现在是「${workspace}」）：call_member { "workspace": "<新的工作区名>", "prompt": "..." }。`,
     ].filter(line => line !== '').join('\n'),
     data: {
       ok: false,
-      code: 'workspace_busy_git',
-      workspaceBusy: true,
+      code: typeof error?.code === 'string' && error.code !== '' ? error.code : 'workspace_occupied',
+      workspaceOccupied: true,
       member,
-      workspace: typeof detail.workspace === 'string' ? detail.workspace : null,
+      workspace: workspace === '' ? null : workspace,
       cwd: typeof detail.cwd === 'string' ? detail.cwd : null,
-      runningConversationIds: running,
+      occupiedConversationIds: occupied,
+      conversationId: first === '' ? null : first,
     },
   }
 }

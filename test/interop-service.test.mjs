@@ -194,8 +194,10 @@ function memoryWorkspaceRegistry(options = {}) {
   const archived = []
   const archiveCalls = []
   /** Register one record without going through `create`, for pre-seeded state. */
+  const deletes = []
   const seed = (dir, title) => {
     const workspace = {
+      id: dir,
       path: dir,
       title,
       sessionIds: [],
@@ -224,6 +226,10 @@ function memoryWorkspaceRegistry(options = {}) {
       if (existing !== undefined) return existing
       return seed(dir, title)
     },
+    async delete(id) {
+      deletes.push(id)
+      records.delete(id)
+    },
     get archivedSessionIds() { return archived },
     async archiveSession(sessionId, archiveOptions) {
       if (options.archiveThrows === true) throw new Error('archive failed')
@@ -231,7 +237,7 @@ function memoryWorkspaceRegistry(options = {}) {
       if (!archived.includes(sessionId)) archived.push(sessionId)
     },
   }
-  return { registry, records, creates, attaches, seed, archived, archiveCalls }
+  return { registry, records, creates, attaches, seed, archived, archiveCalls, deletes }
 }
 
 test('a conversation without workspace or cwd joins the default workspace', async () => {
@@ -1064,30 +1070,31 @@ test('a message to a running conversation is steered, an idle one is a followup'
   }
 })
 
-test('a running conversation in a git workspace blocks a second one unless forced', async () => {
+test('a workspace holds exactly one conversation and the refusal names it', async () => {
   const { service, call, dir } = await serviceOf()
   try {
-    const repo = path.join(dir, 'workspaces', 'repo')
-    mkdirSync(path.join(repo, '.git'), { recursive: true })
     const first = await call('POST', '/v1/conversations', { prompt: '第一个任务', workspace: 'repo' })
     assert.equal(first.status, 201)
     const firstId = first.body.conversation.id
 
     const blocked = await call('POST', '/v1/conversations', { prompt: '第二个任务', workspace: 'repo' })
     assert.equal(blocked.status, 409)
-    assert.equal(blocked.body.error.code, 'workspace_busy_git')
-    assert.match(blocked.body.error.message, /已有进行中的对话/u)
-    assert.match(blocked.body.error.message, /force: true/u)
+    assert.equal(blocked.body.error.code, 'workspace_occupied')
+    assert.match(blocked.body.error.message, /一个工作区只允许一个对话/u)
+    assert.match(blocked.body.error.message, new RegExp(firstId))
+    assert.equal(blocked.body.error.detail.conversationId, firstId)
     assert.deepEqual(blocked.body.error.detail.conversationIds, [firstId])
     assert.equal(blocked.body.error.detail.workspace, 'repo')
     assert.equal(service.conversations.size, 1, 'a refused create must not register a conversation')
 
+    // No override: the supported answer is to continue the existing one.
     const forced = await call('POST', '/v1/conversations', {
       prompt: '确认并发',
       workspace: 'repo',
       forceWorkspace: true,
     })
-    assert.equal(forced.status, 201)
+    assert.equal(forced.status, 409)
+    assert.equal(forced.body.error.code, 'workspace_occupied')
 
     // Continuing an existing conversation never passes through the create guard.
     const sent = await call('POST', `/v1/conversations/${firstId}/messages`, { content: '继续第一个' })
@@ -1098,30 +1105,61 @@ test('a running conversation in a git workspace blocks a second one unless force
   }
 })
 
-test('a .git file (linked worktree) also blocks, while a non-git directory stays concurrent', async () => {
-  const { service, call, dir } = await serviceOf()
+test('an idle conversation also occupies its workspace, and archiving frees the name', async () => {
+  const memory = memoryWorkspaceRegistry()
+  const { service, call, settings, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
   try {
-    const linked = path.join(dir, 'workspaces', 'linked')
-    mkdirSync(linked, { recursive: true })
-    writeFileSync(path.join(linked, '.git'), 'gitdir: /elsewhere/.git/worktrees/linked\n')
-    const first = await call('POST', '/v1/conversations', { prompt: '链接工作树一', workspace: 'linked' })
-    assert.equal(first.status, 201)
-    const blocked = await call('POST', '/v1/conversations', { prompt: '链接工作树二', workspace: 'linked' })
+    const target = path.join(settings.workspaceRoot, 'notes')
+    // A conversation without a prompt is blank/idle, not running: the rule is
+    // about the workspace, not about the turn.
+    const blank = await call('POST', '/v1/conversations', { workspace: 'notes' })
+    assert.equal(blank.status, 201)
+    const id = blank.body.conversation.id
+    const blocked = await call('POST', '/v1/conversations', { prompt: '第二个', workspace: 'notes' })
     assert.equal(blocked.status, 409)
-    assert.equal(blocked.body.error.code, 'workspace_busy_git')
+    assert.equal(blocked.body.error.code, 'workspace_occupied')
 
-    const scratch = path.join(dir, 'workspaces', 'scratch')
-    mkdirSync(scratch, { recursive: true })
-    const one = await call('POST', '/v1/conversations', { prompt: '非 git 一', workspace: 'scratch' })
-    const two = await call('POST', '/v1/conversations', { prompt: '非 git 二', workspace: 'scratch' })
-    assert.equal(one.status, 201)
-    assert.equal(two.status, 201, 'a directory without .git may host concurrent conversations')
+    const archived = await call('POST', `/v1/conversations/${id}/archive`)
+    assert.equal(archived.status, 200)
+    const reused = await call('POST', '/v1/conversations', { prompt: '归档后重开', workspace: 'notes' })
+    assert.equal(reused.status, 201, 'an archived conversation no longer occupies the workspace')
+    assert.notEqual(reused.body.conversation.id, id)
+    assert.equal(existsSync(target), true)
   } finally {
     await service.dispose()
     await rm(dir, { recursive: true, force: true })
   }
 })
 
+test('removing a conversation deletes it, its workspace record and the workspace directory', async () => {
+  const memory = memoryWorkspaceRegistry()
+  const { service, call, settings, dir } = await serviceOf({}, { services: { workspaceRegistry: memory.registry } })
+  try {
+    const workspace = path.join(settings.workspaceRoot, 'trash')
+    const created = await call('POST', '/v1/conversations', { prompt: '准备删掉', workspace: 'trash' })
+    assert.equal(created.status, 201)
+    const id = created.body.conversation.id
+    assert.equal(existsSync(workspace), true)
+
+    const removed = await call('POST', `/v1/conversations/${id}/remove`)
+    assert.equal(removed.status, 200)
+    assert.equal(removed.body.ok, true)
+    assert.equal(removed.body.removed, true)
+    assert.equal(removed.body.workspace, 'trash')
+    assert.equal(removed.body.recordRemoved, true)
+    assert.equal(removed.body.directoryRemoved, true)
+    assert.deepEqual(memory.deletes, [workspace], 'the workspace record is deleted by path')
+    assert.equal(existsSync(workspace), false, 'the workspace directory is removed')
+    assert.equal(service.conversations.has(id), false, 'the conversation record is gone')
+
+    const listing = await call('GET', '/v1/conversations')
+    assert.equal(listing.status, 200)
+    assert.equal(listing.body.conversations.length, 0)
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
 
 test('interop marks created sessions as member sessions and clears them when removed', async () => {
   const { service, fake, call, dir } = await serviceOf()

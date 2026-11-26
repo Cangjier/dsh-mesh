@@ -574,7 +574,7 @@ test('registerTools exposes build, deploy, members, call_member, set_member_scop
     assert.deepEqual(call.parameters.required, ['prompt'])
     assert.deepEqual(
       Object.keys(call.parameters.properties).sort(),
-      ['conversationId', 'cwd', 'force', 'identity', 'member', 'prompt', 'scope', 'workspace'].sort(),
+      ['conversationId', 'cwd', 'identity', 'member', 'prompt', 'scope', 'workspace'].sort(),
     )
     const setScope = tools.find(candidate => candidate.name === 'set_member_scope')
     assert.equal(setScope.parameters.properties.action, undefined)
@@ -763,37 +763,42 @@ test('a delegation waits out a member runtime that is still starting', async () 
   }
 })
 
-test('force only crosses the create boundary as forceWorkspace', async () => {
+test('a new conversation request carries no force escape hatch', async () => {
+  // The one-conversation-per-workspace rule has no override: a caller that
+  // still passes force must not turn it into forceWorkspace on the wire.
   const forced = await delegationPayload({ start: { force: true } })
-  assert.equal(forced.created[0].forceWorkspace, true)
+  assert.equal('forceWorkspace' in forced.created[0], false)
   const plain = await delegationPayload({})
   assert.equal('forceWorkspace' in plain.created[0], false)
 })
 
-test('call_member reports a git-workspace conflict and retries only with force', async () => {
+test('call_member turns a busy workspace into a "continue that conversation" answer', async () => {
   const created = []
   const member = http.createServer(async (request, response) => {
     let body = ''
     for await (const chunk of request) body += String(chunk)
+    if (request.method === 'POST' && request.url === '/v1/conversations/conv-busy/messages') {
+      response.writeHead(202, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({
+        ok: true,
+        conversation: { id: 'conv-busy', status: 'running', turns: 2 },
+        receipt: { accepted: true, delivery: 'followup' },
+      }))
+      return
+    }
     if (request.method !== 'POST' || request.url !== '/v1/conversations') {
       response.writeHead(404, { 'content-type': 'application/json' })
       response.end(JSON.stringify({ ok: false, error: { code: 'not_found', message: 'not found' } }))
       return
     }
-    const parsed = body === '' ? {} : JSON.parse(body)
-    created.push(parsed)
-    if (parsed.forceWorkspace === true) {
-      response.writeHead(201, { 'content-type': 'application/json' })
-      response.end(JSON.stringify({ ok: true, conversation: { id: 'conv-forced', status: 'running', workspace: 'repo' } }))
-      return
-    }
+    created.push(body === '' ? {} : JSON.parse(body))
     response.writeHead(409, { 'content-type': 'application/json' })
     response.end(JSON.stringify({
       ok: false,
       error: {
-        code: 'workspace_busy_git',
-        message: '目标工作区「repo」（/w/repo）已有进行中的对话：conv-busy。该目录存在 .git，多个对话并发可能造成文件/git 竞争。推荐为这次任务新建一个工作区；如果确认要并发，请在输入中设置 force: true 后重新调用 call_member。',
-        detail: { workspace: 'repo', cwd: '/w/repo', conversationIds: ['conv-busy'] },
+        code: 'workspace_occupied',
+        message: '目标工作区「repo」（/w/repo）已有对话：conv-busy（idle）。一个工作区只允许一个对话：请直接 call_member 带 conversationId "conv-busy" 继续这个对话；需要新的工作区就换一个 workspace 名。',
+        detail: { workspace: 'repo', cwd: '/w/repo', conversationId: 'conv-busy', conversationIds: ['conv-busy'] },
       },
     }))
   })
@@ -818,23 +823,24 @@ test('call_member reports a git-workspace conflict and retries only with force',
 
     const blocked = await call.execute({ member: '127.0.0.1', prompt: '并发任务' }, { agent })
     assert.equal(blocked.ok, false)
-    assert.equal(blocked.data.code, 'workspace_busy_git')
-    assert.deepEqual(blocked.data.runningConversationIds, ['conv-busy'])
+    assert.equal(blocked.data.code, 'workspace_occupied')
+    assert.deepEqual(blocked.data.occupiedConversationIds, ['conv-busy'])
+    assert.equal(blocked.data.conversationId, 'conv-busy')
     assert.equal(blocked.data.workspace, 'repo')
-    assert.match(blocked.text, /这次没有创建新对话/u)
-    assert.match(blocked.text, /force: true/u)
+    assert.match(blocked.text, /一个工作区只允许一个对话/u)
+    assert.match(blocked.text, /继续那个对话：call_member \{ "member": "127\.0\.0\.1", "conversationId": "conv-busy"/u)
+    assert.doesNotMatch(blocked.text, /force/u, 'there is no override to suggest')
     assert.equal(service.memberTasks.tasks.size, 0, 'a refused create must not be tracked as a task')
 
     const forced = await call.execute({ member: '127.0.0.1', prompt: '确认并发', force: true }, { agent })
-    assert.equal(forced.ok, true)
-    assert.equal(forced.data.conversationId, 'conv-forced')
+    assert.equal(forced.ok, false)
     assert.equal(created.length, 2)
-    assert.equal(created[1].forceWorkspace, true)
+    assert.equal('forceWorkspace' in created[1], false)
 
-    await assert.rejects(
-      () => call.execute({ conversationId: 'conv-forced', prompt: '继续', force: true }, { agent }),
-      /force only applies when starting a new conversation/u,
-    )
+    assert.match(blocked.text, /"member": "127\.0\.0\.1"/u, 'the suggestion names the member when it is known')
+    const continued = await call.execute({ member: '127.0.0.1', conversationId: 'conv-busy', prompt: '继续那个任务' }, { agent })
+    assert.equal(continued.ok, true)
+    assert.equal(continued.data.currentConversationId, 'conv-busy')
   } finally {
     await service.memberTasks.dispose()
     await new Promise(resolve => member.close(resolve))

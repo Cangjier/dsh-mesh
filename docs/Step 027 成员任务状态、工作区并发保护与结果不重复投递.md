@@ -93,36 +93,49 @@
 - 读任务表失败只记一条日志并返回原 decision，异常不会进入 agent loop；
 - `decision.kind === 'reject'` 或 `signal.aborted` 时不注入。
 
-### 4. 工作区并发保护
+### 4. 工作区独占
 
-成员侧 `createConversation` 在真正 create 之前：
+一个工作区只允许一个对话。成员侧 `createConversation` 在真正 create 之前：
 
 1. 解析目标目录（`workspace` / `cwd` / `default-workspace` 三条原路径不变）；
-2. 目录存在 `.git`（目录，或 linked worktree / submodule 的 `.git` 文件）；
-3. 已有 `status=running` 且解析后是同一目录的会话；
-4. 若请求没有 `forceWorkspace: true`，返回：
+2. 该目录里已有对话——`running`、`idle`、`interrupted`、`error` 都算，已归档的不算；
+3. 直接返回（没有覆盖开关）：
 
 ```text
-409 workspace_busy_git
-目标工作区「repo」（/home/u/.dsh/workspaces/repo）已有进行中的对话：conv-a。
-该目录存在 .git，多个对话并发可能造成文件/git 竞争。推荐为这次任务新建一个工作区；
-如果确认要并发，请在输入中设置 force: true 后重新调用 call_member。
+409 workspace_occupied
+目标工作区「repo」（/home/u/.dsh/workspaces/repo）已有对话：conv-a（idle）。
+一个工作区只允许一个对话：请直接 call_member 带 conversationId "conv-a" 继续这个对话；
+需要新的工作区就换一个 workspace 名。
 ```
 
-`error.detail` 带 `{ workspace, cwd, conversationIds }`。`call_member` 捕获这个 code
-后返回 `ok: false` 和同一段说明，`data.code = "workspace_busy_git"`，不注册任务、
-不创建对话。换一个工作区是默认建议；确认并发时用 `force: true` 重新调用，
-`MemberTaskService.start` 把它透传成 create 请求的 `forceWorkspace: true`。
+`error.detail` 带 `{ workspace, cwd, conversationId, conversationIds }`。`call_member`
+捕获后返回 `ok: false`，`data.code = "workspace_occupied"`，不注册任务、不创建对话，并给出
+两条出路：继续 `conversationId`，或换一个 `workspace`。旧的 `workspace_busy_git` 仍然被
+识别（同一个拒绝，来自旧版成员）。
 
 边界：
 
-- 目录没有 `.git` → 默认允许并发；
-- 继续已有 `conversationId` 走 `/messages`，**永远不经过** create 拦截，也不会因为
-  目标工作区已有别的 running 会话被拒绝；
-- `force` 只在新建时有效；继续投递传 `force` 会报错；
-- 拦截只看本进程 `conversations` 表里 `status=running` 的会话；已空闲/失败的会话
-  不阻塞；
-- `forceWorkspace` 是成员侧 interop 的字段，调用方只能用 `call_member.force` 触发。
+- 继续已有 `conversationId` 走 `/messages`，**永远不经过** create 拦截；
+- 判定与 `.git` 无关：普通目录、git 工作树、linked worktree 一律独占；
+- 拦截看本进程 `conversations` 表里所有未归档会话，状态不再只是 `running`；
+- 没有 `force` / `forceWorkspace`：`call_member.start` 不再发送这个字段，成员侧也忽略它；
+- 归档（成员 Web UI 或 `POST /archive`）会把会话移出占用集，工作区名重新可用；
+  `remove_member` 直接删对话、删工作区记录并删目录。
+
+### 4b. remove_member：归档 → 删除对话 → 删除工作区
+
+`remove_member` 从"归档"改成"彻底删除"，在成员上由一次
+`POST /v1/conversations/<id>/remove` 完成：
+
+1. 归档（`archiveSession(sessionId, { stopActivity: true })`，停掉正在跑的 turn）；
+2. 删除 interop 对话记录（dispose agent、移出 `conversations` / `bySession`、清 member 标记）；
+3. 删除 `workspaceRegistry` 里路径匹配的工作区记录；
+4. 清空并递归删除工作区目录——只在 `~/.dsh/workspaces` 之下才删，避免误删 Documents 这类
+   默认工作区指向的用户目录。
+
+本机随后删掉 `member-tasks/<task>.json` 和日志，停监视/通知/等待。删除后同一个
+conversationId 不能再投递，工作区名空出来可以重新使用；按 id 查 `status_member` 返回
+"本机没有跟踪会话"。
 
 ### 5. 继续投递时 steer
 
@@ -184,13 +197,14 @@ HTTP 请求（conversation GET + 短 `/wait`），成员短暂变慢时可能超
 
 | 位置 | 变化 |
 | --- | --- |
-| `call_member` 参数 | 新增 `force: boolean`（仅新建） |
+| `call_member` 参数 | 没有 `force`：工作区独占不可覆盖 |
 | `call_member` 返回 | 新增 `currentConversationId`、`conversations[]`；send 的 text 带 steer/followup |
 | `wait_member` 参数 | 移除 `conversationId`；保留 `conversationIds`，新增 `all`；二者互斥 |
 | `wait_member` 返回 | 新增 `conversations[]`、`currentConversationId`、`all`；`remaining[]` 带工作区和状态标签 |
 | `status_member` 返回 | 每个被查会话新增 `workspace` 与「工作区」行；新增全量 `conversations[]`（id/状态/工作区），被查详情移到 `requested[]`，`count` 改为全量数量 |
 | 兜底投递 | 有 wait 停在任务上时用 15 秒窗口；wait 后到时不再重复兜底已认领的正文 |
-| `POST /v1/conversations` | 接受 `forceWorkspace: true`；`.git` + running 会话冲突返回 409 `workspace_busy_git`（带 `detail`） |
+| `POST /v1/conversations` | 同一目录已有未归档对话即返回 409 `workspace_occupied`（带 `detail`）；忽略 `forceWorkspace` |
+| `POST /v1/conversations/<id>/remove` | 归档 → 删对话记录 → 删工作区记录 → 删工作区目录，返回是否删除记录/目录 |
 | `POST /v1/conversations/<id>/messages` | 回执新增 `steered` / `delivery`；running 时 `agent.steer` |
 | 任务记录 | 新增 `workspace`、`deliveryReplies`、`deliveryClaimedFrom`、`deliveryFailed`、`lastDelivery`；`terminalDelivered` 语义收紧为「wait 已消费终态」 |
 
@@ -247,7 +261,7 @@ PATH="/root/.dsh/runtime/node/bin:$PATH" ~/.dsh/runtime/node/bin/corepack pnpm b
   `.git` 目录与 `.git` 文件拦截、`forceWorkspace` 绕过、非 git 目录并发、
   拒绝时不注册会话、继续投递不经过拦截。
 - `test/member-task.test.mjs`：`force` 透传、显式 workspace/cwd 的工作区记录、
-  `call_member` 对 409 的 `ok:false` 返回和带 `force` 重试、继续投递拒绝 `force`。
+  `call_member` 对 409 的 `ok:false` 返回、继续 `conversationId` 的提示。
 - `test/member-send.test.mjs`：继续投递从成员 projection 刷新工作区；`call_member`
   的 steer / followup 回执文案。
 - `test/member-delivery.test.mjs`（回归）：progress 已取后终态不再重复正文、终态被
@@ -255,8 +269,8 @@ PATH="/root/.dsh/runtime/node/bin:$PATH" ~/.dsh/runtime/node/bin/corepack pnpm b
 
 部署后手工验证：
 
-1. 在一个有 `.git` 的工作区连续 `call_member` 两次（不带 `force`）：第二次应返回
-   `ok:false` / `workspace_busy_git`，成员上没有新会话；带 `force: true` 再试应创建。
+1. 在同一个工作区连续 `call_member` 两次：第二次应返回 `ok:false` / `workspace_occupied`
+   并给出第一次的会话id；带那个 `conversationId` 继续应成功。归档该对话后重新创建应成功。
 2. 对正在跑的成员会话 `call_member` 继续投递：回执 `delivery: "steer"`，成员的同一轮
    下一步就能看到消息。
 3. 并行发起两个会话，任意一个 `wait_member { "all": true }`：返回先有消息的那个，

@@ -3,7 +3,7 @@
 - 插件：`@local/dsh-mesh`
 - 工具注册：`src/lib/tools.mjs` → `registerTools()`
 - 当前共 9 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`set_member_scope`、`wait_member`、`status_member`、`remove_member`
-- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续（不再有 `compress` 参数），`set_member_scope` 单独设置任意会话或自身的身份/工作范围、派活推送开关和自动压缩阈值，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）；`remove_member` 输入会话id，在目标成员上归档该对话并停止本机跟踪。
+- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续（不再有 `compress` 参数），`set_member_scope` 单独设置任意会话或自身的身份/工作范围、派活推送开关和自动压缩阈值，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）；`remove_member` 输入会话id，在目标成员上归档、删除对话、删除工作区记录并清空工作区目录，同时删掉本机跟踪记录。
 - 所有工具统一返回 `{ ok, text, data }`。`text` 是给人看的摘要，`data` 是结构化结果。
 - 同步执行的工具会在 `text` 和 `data` 里都返回日志文件地址，便于调用结束后继续读取完整日志。
 
@@ -15,11 +15,11 @@
 | `deploy` | SSH 部署/升级，等待结束 | `host` `package` | `false` |
 | `repack` | 用当前仓库刷新已有离线包 | `package` | `false` |
 | `members` | 只读成员发现 | 无 | `true` |
-| `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `cwd` / `workspace` / `force` / `identity` / `scope` | `false` |
+| `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `cwd` / `workspace` / `identity` / `scope` | `false` |
 | `set_member_scope` | 设置成员会话或自身的身份/工作范围、备注、派活推送开关与压缩阈值 | `conversationId` / `identity` / `scope` / `note` / `keep` / `avoidLongJobs` / `compressPercent` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
 | `status_member` | 目标会话状态 + 身份/工作范围 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区/身份/工作范围，已归档的不列出）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
-| `remove_member` | 在目标成员上归档一个对话并停止本机跟踪 | `conversationId` | `false` |
+| `remove_member` | 彻底删除一个对话、它的工作区记录和目录，并停止本机跟踪 | `conversationId` | `false` |
 
 ## 2. 共享基础
 
@@ -333,7 +333,6 @@ deploy { "host": "10.66.66.3", "package": "C:\\packages\\dsh-mesh-0.2.2-rc.1-lin
 
 ```text
 cwd / workspace  仅新建：成员 B 上的工作目录，或 ~/.dsh/workspaces/<name>
-force            仅新建：目标工作区目录有 .git 且已有进行中的对话时仍然创建（确认并发风险）
 identity         身份/角色（例如 开发、测试、网关、客户 A），≤40 字符，按会话合并
 scope            负责的工作范围（例如 dsh-mesh 插件开发与构建、跨平台验收），≤120 字符
 ```
@@ -408,19 +407,19 @@ call_member { "member": "10.66.66.3", "prompt": "检查磁盘" }
 `set_member_scope` 补齐，`data.profile` 是本次有效 profile（缺失为 `null`）。
 仓库不再有“成员机器档案/继承”的概念。
 
-**工作区并发保护**：成员在真正 create 之前检查目标目录。目录存在 `.git`（目录或
-linked worktree 的 `.git` 文件）且该目录已有 `status=running` 的会话时返回：
+**工作区独占**：一个工作区只允许一个对话。成员在真正 create 之前检查目标目录，
+只要目录里已经有对话——`running`、`idle`、`interrupted`、`error` 都算（已归档的不算）——就返回：
 
 ```text
-409 workspace_busy_git
-目标工作区「repo」（/home/u/.dsh/workspaces/repo）已有进行中的对话：conv-a。
-该目录存在 .git，多个对话并发可能造成文件/git 竞争。推荐为这次任务新建一个工作区；
-如果确认要并发，请在输入中设置 force: true 后重新调用 call_member。
+409 workspace_occupied
+目标工作区「repo」（/home/u/.dsh/workspaces/repo）已有对话：conv-a（idle）。
+一个工作区只允许一个对话：请直接 call_member 带 conversationId "conv-a" 继续这个对话；
+需要新的工作区就换一个 workspace 名。
 ```
 
-`call_member` 捕获后以 `ok: false` 直接返回这段说明，不创建对话，`data` 里带
-`code` / `workspace` / `cwd` / `runningConversationIds`。推荐换工作区；确认并发时
-加 `force: true` 重新调用。没有 `.git` 的目录默认允许并发。
+`call_member` 捕获后以 `ok: false` 直接返回，不创建对话，`data` 里带
+`code` / `workspace` / `cwd` / `conversationId` / `occupiedConversationIds`，并给出带
+`conversationId` 的继续调用。没有 `force` 覆盖开关；归档对话后该工作区名会重新可用。
 
 返回里的 `data.logFile`：
 
@@ -765,24 +764,23 @@ set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "
 ```text
 remove_member { "conversationId": "<会话id>" }
   → 按本机任务记录解析目标成员和 baseUrl（没跟踪过会报错，不猜）
-  → POST /v1/conversations/<会话id>/archive
-  → 成员把 session 放进 workspaceRegistry 的归档集（先 stopActivity 停止正在跑的工作）
-  → 本机任务标记 archived，停监视/完成通知/等待，之后所有列表过滤它
-  → 返回：成员、IP、工作区、是否此前已归档
+  → POST /v1/conversations/<会话id>/remove       （一次调用在成员上做完四步）
+       1. archive：stopActivity 停止正在跑的工作，session 进归档集、移出 Web 列表
+       2. 删除 interop 对话记录（dispose agent、移出 conversations/bySession）
+       3. 删除 workspaceRegistry 里路径匹配的工作区记录
+       4. 清空并递归删除工作区目录（仅当目录在 ~/.dsh/workspaces 之下）
+  → 本机删掉任务记录 <task>.json 和日志，停监视/完成通知/等待
+  → 返回：成员、IP、工作区、目录、是否删除了记录/目录
 ```
 
-- 归档等同于成员 Web UI 的「归档」：会话从成员侧默认列表消失，`status_member` 和成员状态
-  快照也不再列出它。
-- 归档后不能继续投递：`call_member` 带这个 conversationId 会收到「已归档」的明确失败。
-  在成员 Web UI 取消归档后，再用同一个 conversationId 投递会先读成员投影，确认未归档就把
-  本机任务重新纳入跟踪并继续；成员仍报告归档则保持拒绝。
-- 重复调用是幂等的：第二次返回“此前已归档”，不会再请求成员。
-- 成员侧由 `src/lib/interop-service.mjs` 的 `POST /v1/conversations/<id>/archive` 实现，
-  使用 `ctx.get('workspaceRegistry').archiveSession(sessionId, { stopActivity: true })`；
-  独立 interop（`code/interop-service/server.mjs`，没有 Web 宿主）返回 501，说明只能归档
-  嵌入式 interop 的会话。
-- 旧版成员没有这个路由（404），工具会明确报“插件版本不支持归档会话”，不会把任务误标为
-  已归档。
+- 删除后这个 conversationId 不能再投递，`status_member` 按 id 查询会返回“本机没有跟踪会话”，
+  工作区名空出来可以重新使用。
+- 目录删除有边界：只有工作区根目录（`DSH_WORKSPACES_DIR`，默认 `~/.dsh/workspaces`）之下的
+  目录才删；默认工作区可能指向 Documents 之类的用户目录，那种情况只删记录、不删目录，返回
+  里 `workspaceDirectoryRemoved: false`。
+- 保留 `POST /v1/conversations/<id>/archive` 作为单独归档（成员 Web UI 的语义）：归档后不能
+  继续投递，取消归档后可以继续；删除是它的加强版。
+- 旧版成员没有 `/remove` 路由（404），工具会明确报“插件版本不支持完全删除会话”。
 - 成员 UI 里自行归档的会话：`status_member` 读取目标投影时看到 `archived: true`，会同步把
   本机任务标记为 archived 并移出列表。
 

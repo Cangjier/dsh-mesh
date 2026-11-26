@@ -15,7 +15,7 @@
 
 import { execFile } from 'node:child_process'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -1131,25 +1131,23 @@ export function createInteropService(options) {
       : explicitCwd !== ''
         ? explicitCwd
         : defaultWorkspaceDirectory(registry, settings)
-    // A git worktree must not be driven by two conversations at once: the
-    // file edits and git commands of one task can silently corrupt the other.
-    // A non-git scratch directory has no such shared history and stays
-    // concurrent by default. `forceWorkspace` is the caller's explicit
-    // acknowledgement and is only read on this create path; continuing an
-    // existing conversation never passes through here.
-    if (request.forceWorkspace !== true && isGitWorktree(cwd)) {
-      const running = [...conversations.values()].filter(conversation =>
-        conversation.status === 'running' && sameDirectory(conversation.cwd, cwd))
-      if (running.length > 0) {
-        const runningIds = running.map(conversation => conversation.id)
-        const busyName = workspace !== '' ? workspace : path.basename(cwd) || cwd
-        throw httpError(
-          409,
-          'workspace_busy_git',
-          `目标工作区「${busyName}」（${cwd}）已有进行中的对话：${runningIds.join('、')}。该目录存在 .git，多个对话并发可能造成文件/git 竞争。推荐为这次任务新建一个工作区；如果确认要并发，请在输入中设置 force: true 后重新调用 call_member。`,
-          { workspace: busyName, cwd, conversationIds: runningIds },
-        )
-      }
+    // One workspace holds exactly one conversation, whatever its state: a
+    // second one would share the same files, the same git history, and the same
+    // workspace record that `remove_member` deletes as a unit. There is no
+    // override — the caller continues the existing conversation instead, which
+    // is also why the refusal names its id.
+    const occupied = [...conversations.values()].filter(conversation =>
+      !sessionArchived(conversation) && sameDirectory(conversation.cwd, cwd))
+    if (occupied.length > 0) {
+      const busyName = workspace !== '' ? workspace : path.basename(cwd) || cwd
+      const first = occupied[0]
+      const label = occupied.map(conversation => `${conversation.id}（${conversation.status}）`).join('、')
+      throw httpError(
+        409,
+        'workspace_occupied',
+        `目标工作区「${busyName}」（${cwd}）已有对话：${label}。一个工作区只允许一个对话：请直接 call_member 带 conversationId "${first.id}" 继续这个对话；需要新的工作区就换一个 workspace 名。`,
+        { workspace: busyName, cwd, conversationIds: occupied.map(conversation => conversation.id), conversationId: first.id },
+      )
     }
     const prompt = request.prompt
     try {
@@ -1393,6 +1391,94 @@ export function createInteropService(options) {
     broadcast(conversation, { type: 'conversation.archived', sessionId: conversation.sessionId })
     log(`archived ${conversation.sessionId} (${conversation.id})`)
     return { already: false }
+  }
+
+  /**
+   * Drop one conversation's interop record.
+   *
+   * The agent is disposed first so nothing keeps writing events into a
+   * conversation that is about to disappear; then the record leaves both maps
+   * and the member-session mark, and the state file is rewritten without it.
+   * @param {Record<string, any>} conversation conversation.
+   * @returns {Promise<void>} when forgotten.
+   */
+  async function forgetConversation(conversation) {
+    const handle = handles.get(conversation.id)
+    if (handle !== undefined) {
+      handles.delete(conversation.id)
+      conversation.agent = null
+      conversation.handle = null
+      await Promise.resolve(handle.dispose()).catch(() => {})
+    }
+    unmarkMemberSession(conversation.sessionId)
+    conversations.delete(conversation.id)
+    bySession.delete(conversation.sessionId)
+    scheduleSave()
+  }
+
+  /**
+   * Delete the workspace record that owns one directory, and the directory.
+   *
+   * The directory is only removed when it lives below the workspace root: the
+   * default workspace can point at a user directory (Documents), and
+   * `remove_member` must never wipe that. The registry record is deleted when
+   * the composition has a registry with `delete`.
+   * @param {string} cwd workspace directory.
+   * @returns {Promise<{recordRemoved: boolean, directoryRemoved: boolean, path: string}>} outcome.
+   */
+  async function removeWorkspaceFor(cwd) {
+    const directory = path.resolve(cwd)
+    const registry = workspaceRegistry()
+    let recordRemoved = false
+    if (registry !== undefined && registry !== null && typeof registry.list === 'function' && typeof registry.delete === 'function') {
+      try {
+        const listed = registry.list()
+        const record = Array.isArray(listed)
+          ? listed.find(workspace => typeof workspace?.path === 'string' && sameDirectory(workspace.path, directory))
+          : undefined
+        if (record !== undefined) {
+          await registry.delete(record.id)
+          recordRemoved = true
+        }
+      } catch (error) {
+        log(`could not delete the workspace record for ${directory}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    let directoryRemoved = false
+    const root = path.resolve(workspaceRootOf(settings))
+    const relative = path.relative(root, directory)
+    const inside = relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
+    if (inside) {
+      try {
+        rmSync(directory, { recursive: true, force: true })
+        directoryRemoved = true
+      } catch (error) {
+        log(`could not remove the workspace directory ${directory}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    } else {
+      log(`kept ${directory}: it is outside the workspace root ${root}`)
+    }
+    return { recordRemoved, directoryRemoved, path: directory }
+  }
+
+  /**
+   * Remove one conversation completely: archive, forget, then the workspace.
+   *
+   * Archiving comes first because it stops a running turn and hides the session
+   * from the member's Web UI before anything is deleted; the interop record and
+   * its local history then go away, and finally the workspace record and its
+   * directory, so a new conversation may reuse the same workspace name.
+   * @param {Record<string, any>} conversation conversation.
+   * @returns {Promise<object>} what was removed.
+   */
+  async function removeConversation(conversation) {
+    const workspace = conversation.workspace ?? ''
+    const cwd = conversation.cwd
+    const archive = await archiveConversation(conversation)
+    await forgetConversation(conversation)
+    const cleaned = await removeWorkspaceFor(cwd)
+    log(`removed ${conversation.id}: workspace ${workspace === '' ? cwd : workspace} record=${String(cleaned.recordRemoved)} directory=${String(cleaned.directoryRemoved)}`)
+    return { archived: true, alreadyArchived: archive.already, workspace, cwd: cleaned.path, ...cleaned }
   }
 
   /**
@@ -1645,7 +1731,7 @@ export function createInteropService(options) {
         json(response, 201, { ok: true, conversation: publicConversation(conversation) })
         return
       }
-      const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact|archive))?$/u.exec(url.pathname)
+      const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact|archive|remove))?$/u.exec(url.pathname)
       if (match === null) { fail(response, 404, 'not_found', 'Unknown endpoint.'); return }
       const conversation = findConversation(decodeURIComponent(match[1]))
       const suffix = match[2] ?? ''
@@ -1703,6 +1789,11 @@ export function createInteropService(options) {
           context: contextOf(conversation),
           receipt,
         })
+        return
+      }
+      if (request.method === 'POST' && suffix === 'remove') {
+        const result = await removeConversation(conversation)
+        json(response, 200, { ok: true, removed: true, ...result })
         return
       }
       if (request.method === 'POST' && suffix === 'archive') {

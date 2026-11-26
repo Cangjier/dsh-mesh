@@ -496,7 +496,7 @@ test('wait_member and call_member expose the conversation id but no compress fla
     assert.equal(call.parameters.properties.compress, undefined)
     assert.doesNotMatch(call.description, /compress: true/u)
     assert.equal(call.parameters.properties.conversationId.type, 'string')
-    assert.equal(call.parameters.properties.force.type, 'boolean')
+    assert.equal(call.parameters.properties.force, undefined, 'the one-conversation rule has no override')
     await assert.rejects(
       () => call.execute({ prompt: 'x' }, {}),
       /member is required/u,

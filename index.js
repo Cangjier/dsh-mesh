@@ -14189,7 +14189,7 @@ var MemberTaskService = class {
       }
     }
   }
-  async start({ member, prompt, cwd, workspace, identity, scope, force = false, agent, notify = true, signal }) {
+  async start({ member, prompt, cwd, workspace, identity, scope, agent, notify = true, signal }) {
     await this.#ensureLoaded();
     if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("prompt is required");
     if (agent === void 0 || agent === null) throw new Error("delegation must be called from a DSH conversation");
@@ -14212,10 +14212,9 @@ var MemberTaskService = class {
       title: truncate(prompt, 80),
       initiator: { ...this.identity ?? { id: "local" }, source: "call_member" },
       ...targetWorkspace !== "" ? { workspace: targetWorkspace } : {},
-      ...explicitCwd ? { cwd } : {},
+      ...explicitCwd ? { cwd } : {}
       // Only a caller that was told about the workspace conflict sends this;
       // it is the member-side escape hatch for intentional concurrency.
-      ...force === true ? { forceWorkspace: true } : {}
     };
     const created = await this.#waitForRuntime(
       () => this.#request(target.baseUrl, "POST", "/v1/conversations", payload, 6e4, signal),
@@ -14643,6 +14642,82 @@ var MemberTaskService = class {
       return { task, live, liveError, archived: true };
     }
     return { task, live, liveError, archived: false };
+  }
+  /**
+   * Remove one member conversation and every trace of it.
+   *
+   * The member performs the destructive half in one call: archive (which stops
+   * a running turn and hides the session), delete the interop record, delete
+   * the workspace record, then clear and delete the workspace directory. This
+   * side then forgets its own task record and log, so nothing can deliver to
+   * the conversation again and the status lists stay clean.
+   * @param {string} conversationId member conversation id.
+   * @returns {Promise<{task: object, workspace: string, cwd: string, recordRemoved: boolean, directoryRemoved: boolean}>} outcome.
+   */
+  async remove(conversationId) {
+    await this.#ensureLoaded();
+    const key = String(conversationId ?? "").trim();
+    if (key === "") throw new Error("conversationId is required");
+    const task = this.#taskOfConversation(key);
+    if (task === void 0) throw new Error(`\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u4F1A\u8BDD ${key}\uFF1B\u5148 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u6216\u786E\u8BA4\u4F1A\u8BDDid \u6B63\u786E\u3002`);
+    let result;
+    try {
+      result = await this.#request(
+        task.baseUrl,
+        "POST",
+        `/v1/conversations/${encodeURIComponent(task.conversationId)}/remove`,
+        void 0,
+        12e4
+      );
+    } catch (error) {
+      if (error?.status === 404) {
+        throw new Error(`\u76EE\u6807\u6210\u5458 ${task.member}\uFF08${task.memberIp}\uFF09\u7684\u63D2\u4EF6\u7248\u672C\u4E0D\u652F\u6301\u5B8C\u5168\u5220\u9664\u4F1A\u8BDD\uFF1B\u5148\u7ED9\u8BE5\u6210\u5458\u5347\u7EA7\u5230\u5E26 remove_member \u7684\u7248\u672C\u3002`);
+      }
+      throw error;
+    }
+    await this.#forget(task);
+    return {
+      task,
+      workspace: typeof result?.workspace === "string" ? result.workspace : "",
+      cwd: typeof result?.cwd === "string" ? result.cwd : "",
+      recordRemoved: result?.recordRemoved === true,
+      directoryRemoved: result?.directoryRemoved === true,
+      alreadyArchived: result?.alreadyArchived === true
+    };
+  }
+  /**
+   * Drop one task record and every local timer, waiter, and file behind it.
+   * @param {object} task tracked task.
+   * @returns {Promise<void>} resolution after the files are gone.
+   */
+  async #forget(task) {
+    task.archived = true;
+    task.archivedAt = task.archivedAt ?? (/* @__PURE__ */ new Date()).toISOString();
+    task.status = "archived";
+    task.notify = false;
+    const controller = this.controllers.get(task.id);
+    if (controller !== void 0) {
+      this.controllers.delete(task.id);
+      try {
+        controller.abort(new Error("the conversation was removed"));
+      } catch {
+      }
+    }
+    for (const timers of [this.deliveryTimers, this.notifyTimers]) {
+      const timer = timers.get(task.id);
+      if (timer !== void 0) {
+        clearTimeout(timer);
+        timers.delete(task.id);
+      }
+    }
+    this.monitors.delete(task.id);
+    this.#notifyWaiters(task);
+    this.tasks.delete(task.id);
+    await Promise.allSettled([
+      rm15(path28.join(this.taskRoot, `${task.id}.json`), { force: true }),
+      rm15(path28.join(this.taskRoot, `${task.id}.log`), { force: true })
+    ]);
+    this.logLine(`member-task ${task.id}: removed ${task.conversationId} and its local record`);
   }
   /**
    * Archive one member conversation and stop tracking it.
@@ -16211,9 +16286,9 @@ function registerTools(ctx, toolsCtx, service) {
       "\u53EA\u8981\u77E5\u9053\u4F1A\u8BDDid\uFF0C\u914D\u4E0A member \u5C31\u80FD\u7EE7\u7EED\uFF1B\u672C\u673A\u5DF2\u8DDF\u8E2A\u8BE5\u5BF9\u8BDD\u65F6 member \u53EF\u4EE5\u7701\u7565\u3002",
       "\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u65F6\uFF0C\u6295\u9012\u524D\u4F1A\u6309\u8BE5\u4F1A\u8BDD\u7684\u538B\u7F29\u9608\u503C\uFF08`set_member_scope` \u7684 `compressPercent`\uFF0C\u9ED8\u8BA4 35%\uFF09\u68C0\u67E5\u4E0A\u4E0B\u6587\u5360\u6BD4\uFF1A",
       "\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u8BA9\u6210\u5458\u538B\u7F29\u4E0A\u4E0B\u6587\u518D\u6295\u9012\uFF08\u8981\u6C42\u5BF9\u8BDD\u7A7A\u95F2\uFF09\uFF1B\u4E0D\u8D85\u8FC7\u5C31\u76F4\u63A5\u6295\u9012\u3002\u538B\u7F29\u9608\u503C\u53EA\u6309\u4F1A\u8BDD\u8BBE\u7F6E\uFF0C\u4E0D\u63A5\u53D7\u6BCF\u6B21\u8C03\u7528\u5355\u72EC\u6307\u5B9A\u3002",
-      "`force: true`\uFF1A\u53EA\u5728\u65B0\u5EFA\u5BF9\u8BDD\u65F6\u751F\u6548\u3002\u76EE\u6807\u5DE5\u4F5C\u533A\u76EE\u5F55\u5B58\u5728 .git \u4E14\u5DF2\u6709\u8FDB\u884C\u4E2D\u7684\u5BF9\u8BDD\u65F6\uFF0C\u521B\u5EFA\u4F1A\u8FD4\u56DE",
-      "409 workspace_busy_git\uFF08\u5217\u51FA\u5DE5\u4F5C\u533A\u3001\u76EE\u5F55\u548C\u8FDB\u884C\u4E2D\u7684\u4F1A\u8BDDid\uFF09\uFF1B\u786E\u8BA4\u8981\u5728\u8FD9\u4E2A\u76EE\u5F55\u5E76\u53D1\u65F6\u52A0 force: true",
-      "\u91CD\u65B0\u8C03\u7528 call_member\u3002\u6362\u4E2A\u5DE5\u4F5C\u533A\u901A\u5E38\u66F4\u5B89\u5168\u3002\u7EE7\u7EED\u5DF2\u6709 conversationId \u4E0D\u4F1A\u89E6\u53D1\u8FD9\u4E2A\u62E6\u622A\u3002",
+      "\u4E00\u4E2A\u5DE5\u4F5C\u533A\u53EA\u5141\u8BB8\u4E00\u4E2A\u5BF9\u8BDD\uFF08\u65B0\u5EFA\u65F6\u751F\u6548\uFF09\uFF1A\u76EE\u6807\u5DE5\u4F5C\u533A\u76EE\u5F55\u91CC\u5DF2\u7ECF\u6709\u5BF9\u8BDD\u2014\u2014\u4E0D\u7BA1\u5B83\u662F\u8FDB\u884C\u4E2D\u3001\u7A7A\u95F2\u3001\u5F02\u5E38\u4E2D\u6B62\u8FD8\u662F\u51FA\u9519\u2014\u2014",
+      "\u521B\u5EFA\u4F1A\u8FD4\u56DE 409 workspace_occupied\uFF0C\u5E76\u7ED9\u51FA\u90A3\u6761\u5BF9\u8BDD\u7684\u4F1A\u8BDDid\uFF1B\u8FD9\u65F6\u4E0D\u8981\u65B0\u5EFA\uFF0C\u76F4\u63A5 call_member \u5E26 conversationId \u7EE7\u7EED\u5B83\u3002",
+      "\u8981\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u4E0D\u4F1A\u89E6\u53D1\u8FD9\u4E2A\u62E6\u622A\uFF1B\u8981\u5E76\u884C\u5DE5\u4F5C\u5C31\u6362\u4E00\u4E2A workspace \u540D\uFF08\u6216\u65B0\u5EFA\u5DE5\u4F5C\u533A\uFF09\u3002",
       "\u8FD4\u56DE\u503C\u5E26\u5F53\u524D\u4F1A\u8BDDid\uFF0C\u4EE5\u53CA\u672C\u5BF9\u8BDD\u8DDF\u8E2A\u7684\u6240\u6709\u6210\u5458\u4F1A\u8BDD\uFF08\u4F1A\u8BDDid\u3001\u8FDB\u884C\u4E2D/\u7A7A\u95F2/\u5F02\u5E38\u4E2D\u6B62\u3001\u5DE5\u4F5C\u533A\u3001\u8F6E\u6B21\uFF09\u3002",
       '\u7528 wait_member \u7B49\u7ED3\u679C\uFF08\u63A8\u8350 all: true\uFF09\uFF1Await_member { "all": true } \u7B49\u6240\u6709\u8FDB\u884C\u4E2D\u7684\u4F1A\u8BDD\uFF0C',
       "\u4EFB\u610F\u4E00\u4E2A\u5148\u8FD4\u56DE\u5C31\u7ACB\u523B\u8FD4\u56DE\uFF1B\u4E5F\u53EF\u4EE5\u53EA\u7528 conversationIds \u6307\u5B9A\u4F1A\u8BDD\u3002\u6210\u5458\u6BCF\u7ED3\u675F\u4E00\u8F6E\u56DE\u7B54\u5C31\u8FD4\u56DE\u4E00\u6B21\uFF0C",
@@ -16240,7 +16315,6 @@ function registerTools(ctx, toolsCtx, service) {
         conversationId: { type: "string", description: "\u8981\u7EE7\u7EED\u7684\u4F1A\u8BDDid\uFF08call_member / wait_member \u8FD4\u56DE\uFF09\u3002\u7701\u7565\u5C31\u65B0\u5EFA\u5BF9\u8BDD\u3002" },
         cwd: { type: "string", description: "\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u6210\u5458 B \u4E0A\u7684\u5DE5\u4F5C\u76EE\u5F55\uFF08\u7EDD\u5BF9\u8DEF\u5F84\uFF0C\u53EF\u7A7A\uFF09\u3002" },
         workspace: { type: "string", description: "\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u6210\u5458 B \u4E0A\u7684\u4EFB\u52A1\u5DE5\u4F5C\u533A\u540D\u79F0\uFF1B\u5B9E\u9645\u76EE\u5F55\u56FA\u5B9A\u4E3A\u6210\u5458\u672C\u673A\u7684 ~/.dsh/workspaces/<name>\u3002\u548C cwd \u4E8C\u9009\u4E00\u3002" },
-        force: { type: "boolean", description: "\u53EA\u65B0\u5EFA\u5BF9\u8BDD\uFF1A\u76EE\u6807\u5DE5\u4F5C\u533A\u76EE\u5F55\u6709 .git \u4E14\u5DF2\u6709\u8FDB\u884C\u4E2D\u7684\u5BF9\u8BDD\u65F6\u4ECD\u7136\u521B\u5EFA\uFF08\u786E\u8BA4\u6587\u4EF6/git \u7ADE\u4E89\u98CE\u9669\uFF09\u3002\u7EE7\u7EED\u6295\u9012\u4E0D\u63A5\u53D7\u3002" },
         identity: { type: "string", description: "\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8EAB\u4EFD/\u89D2\u8272\uFF08\u4F8B\u5982 \u5F00\u53D1\u3001\u6D4B\u8BD5\u3001\u7F51\u5173\u3001\u5BA2\u6237 A\uFF09\uFF0C\u6700\u957F 40 \u5B57\u7B26\uFF1B\u4E0E\u5DF2\u6709\u8BBE\u7F6E\u5408\u5E76\uFF0C\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002" },
         scope: { type: "string", description: "\u8FD9\u4E2A\u4F1A\u8BDD\u8D1F\u8D23\u7684\u5DE5\u4F5C\u8303\u56F4\uFF08\u4F8B\u5982 dsh-mesh \u63D2\u4EF6\u5F00\u53D1\u4E0E\u6784\u5EFA\u3001\u8DE8\u5E73\u53F0\u9A8C\u6536\uFF09\uFF0C\u6700\u957F 120 \u5B57\u7B26\uFF1B\u4E0E\u5DF2\u6709\u8BBE\u7F6E\u5408\u5E76\uFF0C\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002" }
       },
@@ -16272,13 +16346,14 @@ function registerTools(ctx, toolsCtx, service) {
             workspace: args.workspace,
             identity: args.identity,
             scope: args.scope,
-            force: args.force === true,
             agent: exec.agent,
             notify: true,
             signal: exec.signal
           });
         } catch (error) {
-          if (error?.code === "workspace_busy_git") return workspaceBusyResult(error, args);
+          if (error?.code === "workspace_occupied" || error?.code === "workspace_busy_git") {
+            return workspaceBusyResult(error, args);
+          }
           throw error;
         }
         const data2 = memberTaskData(task2, memberTasks);
@@ -16858,12 +16933,13 @@ ${replyText}` : "",
   const removeMemberDefinition = {
     name: "remove_member",
     description: [
-      "\u628A\u76EE\u6807\u6210\u5458\u4E0A\u7684\u4E00\u4E2A\u5BF9\u8BDD\u5F52\u6863\uFF0C\u5E76\u505C\u6B62\u672C\u673A\u5BF9\u5B83\u7684\u8DDF\u8E2A\u3002",
+      "\u5B8C\u5168\u5220\u9664\u76EE\u6807\u6210\u5458\u4E0A\u7684\u4E00\u4E2A\u5BF9\u8BDD\uFF1A\u5F52\u6863 \u2192 \u5220\u9664\u5BF9\u8BDD \u2192 \u5220\u9664\u5DE5\u4F5C\u533A\u8BB0\u5F55 \u2192 \u6E05\u7A7A\u5E76\u5220\u9664\u5DE5\u4F5C\u533A\u76EE\u5F55\uFF0C\u5E76\u505C\u6B62\u672C\u673A\u5BF9\u5B83\u7684\u8DDF\u8E2A\u3002",
       "",
       "`conversationId` \u5FC5\u586B\uFF1A`call_member` / `wait_member` \u8FD4\u56DE\u7684\u4F1A\u8BDDid\uFF0C\u6216\u672C\u673A\u8DDF\u8E2A\u8FC7\u7684\u4EFB\u4F55\u6210\u5458\u4F1A\u8BDD\uFF1B\u76EE\u6807\u6210\u5458\u7531\u672C\u673A\u4EFB\u52A1\u8BB0\u5F55\u89E3\u6790\uFF0C\u6CA1\u8DDF\u8E2A\u8FC7\u7684\u4F1A\u8BDD\u4F1A\u62A5\u9519\u3002",
-      "\u5F52\u6863\u5728\u76EE\u6807\u6210\u5458\u4E0A\u6267\u884C\uFF0C\u7B49\u540C\u4E8E\u6210\u5458 Web UI \u7684\u300C\u5F52\u6863\u300D\uFF1A\u5148\u505C\u6B62\u6B63\u5728\u8DD1\u7684\u5DE5\u4F5C\uFF0C\u518D\u628A\u4F1A\u8BDD\u653E\u8FDB\u6210\u5458\u7684\u5F52\u6863\u96C6\u3002",
-      "\u5F52\u6863\u540E\u5B83\u4E0D\u4F1A\u518D\u51FA\u73B0\u5728 `status_member` \u548C\u6210\u5458\u72B6\u6001\u5FEB\u7167\u91CC\uFF0C\u4E5F\u4E0D\u80FD\u518D\u7528 `call_member` \u7EE7\u7EED\u6295\u9012\uFF1B\u8981\u6062\u590D\u8BF7\u5728\u6210\u5458 Web UI \u53D6\u6D88\u5F52\u6863\u3002",
-      "\u76EE\u6807\u6210\u5458\u9700\u8981\u5E26\u5F52\u6863\u63A5\u53E3\u7684\u65B0\u7248\u63D2\u4EF6\uFF1B\u65E7\u7248\u672C\u4F1A\u8FD4\u56DE\u660E\u786E\u9519\u8BEF\uFF0C\u4E0D\u4F1A\u5047\u88C5\u6210\u529F\u3002"
+      "\u987A\u5E8F\u56FA\u5B9A\uFF1A\u5148\u5728\u6210\u5458\u4E0A\u5F52\u6863\uFF08\u505C\u6B62\u6B63\u5728\u8DD1\u7684\u5DE5\u4F5C\u3001\u628A\u4F1A\u8BDD\u79FB\u51FA Web \u5217\u8868\uFF09\uFF0C\u518D\u5220\u9664 interop \u5BF9\u8BDD\u8BB0\u5F55\uFF0C\u518D\u5220\u9664\u5DE5\u4F5C\u533A\u8BB0\u5F55\uFF0C\u6700\u540E\u9012\u5F52\u6E05\u7A7A\u5E76\u5220\u9664\u5DE5\u4F5C\u533A\u76EE\u5F55\u3002",
+      "\u5220\u9664\u540E\u8FD9\u4E2A\u4F1A\u8BDDid \u4E0D\u80FD\u518D\u6295\u9012\uFF0C\u5B83\u5360\u7528\u7684\u5DE5\u4F5C\u533A\u540D\u4E5F\u4F1A\u7A7A\u51FA\u6765\uFF0C\u53EF\u4EE5\u91CD\u65B0\u7528\u540C\u540D workspace \u53D1\u8D77\u65B0\u5BF9\u8BDD\u3002",
+      "\u5DE5\u4F5C\u533A\u76EE\u5F55\u53EA\u6709\u5728\u6210\u5458\u7684\u5DE5\u4F5C\u533A\u6839\u76EE\u5F55\uFF08~/.dsh/workspaces\uFF09\u4E4B\u4E0B\u624D\u4F1A\u88AB\u5220\u9664\uFF1B\u9ED8\u8BA4\u5DE5\u4F5C\u533A\u53EF\u80FD\u6307\u5411 Documents \u4E4B\u7C7B\u7684\u7528\u6237\u76EE\u5F55\uFF0C\u90A3\u79CD\u60C5\u51B5\u53EA\u5220\u8BB0\u5F55\u3001\u4E0D\u5220\u76EE\u5F55\u3002",
+      "\u76EE\u6807\u6210\u5458\u9700\u8981\u5E26\u5220\u9664\u63A5\u53E3\u7684\u65B0\u7248\u63D2\u4EF6\uFF1B\u65E7\u7248\u672C\u4F1A\u8FD4\u56DE\u660E\u786E\u9519\u8BEF\uFF0C\u4E0D\u4F1A\u5047\u88C5\u6210\u529F\u3002"
     ].join("\n"),
     parameters: {
       type: "object",
@@ -16884,23 +16960,28 @@ ${replyText}` : "",
     async execute(args) {
       const conversationId = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
       if (conversationId === "") throw new Error("conversationId is required");
-      const result = await memberTasks.archive(conversationId);
+      const result = await memberTasks.remove(conversationId);
       const task = result.task;
-      const workspace = memberTaskWorkspace(task);
+      const workspace = result.workspace !== "" ? result.workspace : memberTaskWorkspace(task);
+      const directory = result.cwd !== "" ? result.cwd : "\uFF08\u6210\u5458\u672A\u62A5\u544A\u76EE\u5F55\uFF09";
       return {
         ok: true,
         text: [
-          `\u5DF2\u5F52\u6863\u6210\u5458\u4F1A\u8BDD ${task.conversationId}\uFF08${task.member} ${task.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${workspace}\uFF09\u3002`,
-          ...result.already ? ["\u8BE5\u4F1A\u8BDD\u6B64\u524D\u5DF2\u5F52\u6863\uFF0C\u672C\u6B21\u6CA1\u6709\u91CD\u590D\u64CD\u4F5C\u3002"] : ["\u6210\u5458\u4E0A\u7684\u5BF9\u8BDD\u5DF2\u5F52\u6863\uFF0C\u6B63\u5728\u8DD1\u7684\u5DE5\u4F5C\u5DF2\u505C\u6B62\u3002"],
-          "\u5B83\u4E0D\u4F1A\u518D\u51FA\u73B0\u5728 status_member \u548C\u6210\u5458\u72B6\u6001\u5FEB\u7167\u91CC\uFF0C\u4E5F\u4E0D\u80FD\u518D\u7EE7\u7EED\u6295\u9012\uFF1B\u8981\u6062\u590D\u8BF7\u5728\u6210\u5458 Web UI \u53D6\u6D88\u5F52\u6863\u3002"
+          `\u5DF2\u5220\u9664\u6210\u5458\u4F1A\u8BDD ${task.conversationId}\uFF08${task.member} ${task.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${workspace}\uFF09\u3002`,
+          `\u6210\u5458\u4FA7\u5DF2\u5F52\u6863\u3001\u5220\u9664\u5BF9\u8BDD\u8BB0\u5F55\u3001\u5220\u9664\u5DE5\u4F5C\u533A\u8BB0\u5F55\uFF08${result.recordRemoved ? "\u5DF2\u5220\u9664" : "\u6CA1\u6709\u5BF9\u5E94\u8BB0\u5F55"}\uFF09\u3002`,
+          result.directoryRemoved ? `\u5DE5\u4F5C\u533A\u76EE\u5F55\u5DF2\u6E05\u7A7A\u5E76\u5220\u9664\uFF1A${directory}` : `\u5DE5\u4F5C\u533A\u76EE\u5F55\u6CA1\u6709\u5220\u9664\uFF08\u53EF\u80FD\u4E0D\u5728\u5DE5\u4F5C\u533A\u6839\u76EE\u5F55\u4E0B\uFF0C\u6216\u5220\u9664\u5931\u8D25\uFF09\uFF1A${directory}`,
+          "\u672C\u673A\u7684\u4EFB\u52A1\u8BB0\u5F55\u548C\u65E5\u5FD7\u4E5F\u5DF2\u5220\u9664\uFF1B\u8FD9\u4E2A\u4F1A\u8BDDid \u4E0D\u80FD\u518D\u6295\u9012\uFF0C\u5DE5\u4F5C\u533A\u540D\u53EF\u4EE5\u91CD\u65B0\u4F7F\u7528\u3002"
         ].join("\n"),
         data: {
           conversationId: task.conversationId,
           member: task.member,
           memberIp: task.memberIp,
           workspace,
+          cwd: result.cwd,
+          removed: true,
           archived: true,
-          already: result.already
+          workspaceRecordRemoved: result.recordRemoved,
+          workspaceDirectoryRemoved: result.directoryRemoved
         }
       };
     }
@@ -17075,27 +17156,29 @@ async function originConversationBlock(memberTasks, sessionId, currentConversati
   return conversationListBlock(tasks, currentConversationId, options);
 }
 function workspaceBusyResult(error, args) {
-  const detail = error?.detail !== null && typeof error?.detail === "object" ? error.detail : {};
-  const running = Array.isArray(detail.conversationIds) ? detail.conversationIds.map(String) : [];
+  const detail = error?.detail !== null && typeof error.detail === "object" ? error.detail : {};
+  const occupied = Array.isArray(detail.conversationIds) ? detail.conversationIds.map(String) : [];
+  const first = typeof detail.conversationId === "string" && detail.conversationId !== "" ? detail.conversationId : occupied[0] ?? "";
   const member = typeof args?.member === "string" ? args.member : "";
-  const message = String(error?.memberMessage ?? error?.message ?? "\u76EE\u6807\u5DE5\u4F5C\u533A\u5DF2\u6709\u8FDB\u884C\u4E2D\u7684\u5BF9\u8BDD");
+  const workspace = typeof detail.workspace === "string" ? detail.workspace : typeof args?.workspace === "string" ? args.workspace : "";
+  const message = String(error?.memberMessage ?? error?.message ?? "\u76EE\u6807\u5DE5\u4F5C\u533A\u5DF2\u6709\u5BF9\u8BDD");
   return {
     ok: false,
     text: [
-      "\u76EE\u6807\u5DE5\u4F5C\u533A\u5DF2\u6709\u8FDB\u884C\u4E2D\u7684\u5BF9\u8BDD\uFF0C\u8FD9\u6B21\u6CA1\u6709\u521B\u5EFA\u65B0\u5BF9\u8BDD\u3002",
+      "\u76EE\u6807\u5DE5\u4F5C\u533A\u5DF2\u7ECF\u6709\u5BF9\u8BDD\uFF0C\u8FD9\u6B21\u6CA1\u6709\u521B\u5EFA\u65B0\u5BF9\u8BDD\uFF08\u4E00\u4E2A\u5DE5\u4F5C\u533A\u53EA\u5141\u8BB8\u4E00\u4E2A\u5BF9\u8BDD\uFF09\u3002",
       message,
-      running.length > 0 ? `\u8FDB\u884C\u4E2D\u7684\u4F1A\u8BDD\uFF1A${running.join("\u3001")}` : "",
-      `\u63A8\u8350\u6362\u4E00\u4E2A\u5DE5\u4F5C\u533A\uFF1Acall_member { "member": ${JSON.stringify(member)}, "workspace": "<\u65B0\u7684\u5DE5\u4F5C\u533A\u540D>", "prompt": "..." }\u3002`,
-      "\u786E\u8BA4\u8981\u5728\u8FD9\u4E2A\u76EE\u5F55\u91CC\u5E76\u53D1\uFF08\u53EF\u80FD\u9020\u6210\u6587\u4EF6/git \u7ADE\u4E89\uFF09\uFF1A\u5728\u8F93\u5165\u4E2D\u8BBE\u7F6E force: true \u540E\u91CD\u65B0\u8C03\u7528 call_member\u3002"
+      first === "" ? "" : `\u7EE7\u7EED\u90A3\u4E2A\u5BF9\u8BDD\uFF1Acall_member { ${member === "" ? "" : `"member": ${JSON.stringify(member)}, `}"conversationId": ${JSON.stringify(first)}, "prompt": "..." }\u3002`,
+      workspace === "" ? '\u8981\u5E76\u884C\u5DE5\u4F5C\u5C31\u6362\u4E00\u4E2A\u5DE5\u4F5C\u533A\uFF1Acall_member { "workspace": "<\u65B0\u7684\u5DE5\u4F5C\u533A\u540D>", "prompt": "..." }\u3002' : `\u8981\u5E76\u884C\u5DE5\u4F5C\u5C31\u6362\u4E00\u4E2A\u5DE5\u4F5C\u533A\u540D\uFF08\u73B0\u5728\u662F\u300C${workspace}\u300D\uFF09\uFF1Acall_member { "workspace": "<\u65B0\u7684\u5DE5\u4F5C\u533A\u540D>", "prompt": "..." }\u3002`
     ].filter((line) => line !== "").join("\n"),
     data: {
       ok: false,
-      code: "workspace_busy_git",
-      workspaceBusy: true,
+      code: typeof error?.code === "string" && error.code !== "" ? error.code : "workspace_occupied",
+      workspaceOccupied: true,
       member,
-      workspace: typeof detail.workspace === "string" ? detail.workspace : null,
+      workspace: workspace === "" ? null : workspace,
       cwd: typeof detail.cwd === "string" ? detail.cwd : null,
-      runningConversationIds: running
+      occupiedConversationIds: occupied,
+      conversationId: first === "" ? null : first
     }
   };
 }
@@ -17259,7 +17342,7 @@ function formatBytes3(value) {
 // src/lib/interop-service.mjs
 import { execFile as execFile4 } from "node:child_process";
 import { createHash as createHash9, randomBytes as randomBytes3, randomUUID as randomUUID4, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
-import { existsSync as existsSync15, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync as existsSync15, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http3 from "node:http";
 import { homedir as homedir3 } from "node:os";
 import path29 from "node:path";
@@ -17599,13 +17682,6 @@ function normalizeWorkspaceName(value) {
 }
 function workspacePath(settings, name) {
   return path29.join(workspaceRootOf(settings), name);
-}
-function isGitWorktree(directory) {
-  try {
-    return existsSync15(path29.join(directory, ".git"));
-  } catch {
-    return false;
-  }
 }
 function sameDirectory(left, right) {
   if (typeof left !== "string" || left === "" || typeof right !== "string" || right === "") return false;
@@ -18131,18 +18207,17 @@ data: ${JSON.stringify(payload)}
     const explicitCwd = typeof request.cwd === "string" && request.cwd !== "" ? path29.resolve(request.cwd) : "";
     const workspace = requested !== "" ? requested : explicitCwd === "" ? DEFAULT_WORKSPACE2 : "";
     const cwd = requested !== "" ? requested === DEFAULT_WORKSPACE2 ? defaultWorkspaceDirectory(registry, settings) : workspacePath(settings, requested) : explicitCwd !== "" ? explicitCwd : defaultWorkspaceDirectory(registry, settings);
-    if (request.forceWorkspace !== true && isGitWorktree(cwd)) {
-      const running = [...conversations.values()].filter((conversation2) => conversation2.status === "running" && sameDirectory(conversation2.cwd, cwd));
-      if (running.length > 0) {
-        const runningIds = running.map((conversation2) => conversation2.id);
-        const busyName = workspace !== "" ? workspace : path29.basename(cwd) || cwd;
-        throw httpError(
-          409,
-          "workspace_busy_git",
-          `\u76EE\u6807\u5DE5\u4F5C\u533A\u300C${busyName}\u300D\uFF08${cwd}\uFF09\u5DF2\u6709\u8FDB\u884C\u4E2D\u7684\u5BF9\u8BDD\uFF1A${runningIds.join("\u3001")}\u3002\u8BE5\u76EE\u5F55\u5B58\u5728 .git\uFF0C\u591A\u4E2A\u5BF9\u8BDD\u5E76\u53D1\u53EF\u80FD\u9020\u6210\u6587\u4EF6/git \u7ADE\u4E89\u3002\u63A8\u8350\u4E3A\u8FD9\u6B21\u4EFB\u52A1\u65B0\u5EFA\u4E00\u4E2A\u5DE5\u4F5C\u533A\uFF1B\u5982\u679C\u786E\u8BA4\u8981\u5E76\u53D1\uFF0C\u8BF7\u5728\u8F93\u5165\u4E2D\u8BBE\u7F6E force: true \u540E\u91CD\u65B0\u8C03\u7528 call_member\u3002`,
-          { workspace: busyName, cwd, conversationIds: runningIds }
-        );
-      }
+    const occupied = [...conversations.values()].filter((conversation2) => !sessionArchived(conversation2) && sameDirectory(conversation2.cwd, cwd));
+    if (occupied.length > 0) {
+      const busyName = workspace !== "" ? workspace : path29.basename(cwd) || cwd;
+      const first = occupied[0];
+      const label = occupied.map((conversation2) => `${conversation2.id}\uFF08${conversation2.status}\uFF09`).join("\u3001");
+      throw httpError(
+        409,
+        "workspace_occupied",
+        `\u76EE\u6807\u5DE5\u4F5C\u533A\u300C${busyName}\u300D\uFF08${cwd}\uFF09\u5DF2\u6709\u5BF9\u8BDD\uFF1A${label}\u3002\u4E00\u4E2A\u5DE5\u4F5C\u533A\u53EA\u5141\u8BB8\u4E00\u4E2A\u5BF9\u8BDD\uFF1A\u8BF7\u76F4\u63A5 call_member \u5E26 conversationId "${first.id}" \u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\uFF1B\u9700\u8981\u65B0\u7684\u5DE5\u4F5C\u533A\u5C31\u6362\u4E00\u4E2A workspace \u540D\u3002`,
+        { workspace: busyName, cwd, conversationIds: occupied.map((conversation2) => conversation2.id), conversationId: first.id }
+      );
     }
     const prompt = request.prompt;
     try {
@@ -18334,6 +18409,61 @@ data: ${JSON.stringify(payload)}
     broadcast(conversation, { type: "conversation.archived", sessionId: conversation.sessionId });
     log(`archived ${conversation.sessionId} (${conversation.id})`);
     return { already: false };
+  }
+  async function forgetConversation(conversation) {
+    const handle2 = handles.get(conversation.id);
+    if (handle2 !== void 0) {
+      handles.delete(conversation.id);
+      conversation.agent = null;
+      conversation.handle = null;
+      await Promise.resolve(handle2.dispose()).catch(() => {
+      });
+    }
+    unmarkMemberSession(conversation.sessionId);
+    conversations.delete(conversation.id);
+    bySession.delete(conversation.sessionId);
+    scheduleSave();
+  }
+  async function removeWorkspaceFor(cwd) {
+    const directory = path29.resolve(cwd);
+    const registry = workspaceRegistry();
+    let recordRemoved = false;
+    if (registry !== void 0 && registry !== null && typeof registry.list === "function" && typeof registry.delete === "function") {
+      try {
+        const listed = registry.list();
+        const record = Array.isArray(listed) ? listed.find((workspace) => typeof workspace?.path === "string" && sameDirectory(workspace.path, directory)) : void 0;
+        if (record !== void 0) {
+          await registry.delete(record.id);
+          recordRemoved = true;
+        }
+      } catch (error) {
+        log(`could not delete the workspace record for ${directory}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    let directoryRemoved = false;
+    const root = path29.resolve(workspaceRootOf(settings));
+    const relative = path29.relative(root, directory);
+    const inside = relative !== "" && !relative.startsWith("..") && !path29.isAbsolute(relative);
+    if (inside) {
+      try {
+        rmSync(directory, { recursive: true, force: true });
+        directoryRemoved = true;
+      } catch (error) {
+        log(`could not remove the workspace directory ${directory}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    } else {
+      log(`kept ${directory}: it is outside the workspace root ${root}`);
+    }
+    return { recordRemoved, directoryRemoved, path: directory };
+  }
+  async function removeConversation(conversation) {
+    const workspace = conversation.workspace ?? "";
+    const cwd = conversation.cwd;
+    const archive = await archiveConversation(conversation);
+    await forgetConversation(conversation);
+    const cleaned = await removeWorkspaceFor(cwd);
+    log(`removed ${conversation.id}: workspace ${workspace === "" ? cwd : workspace} record=${String(cleaned.recordRemoved)} directory=${String(cleaned.directoryRemoved)}`);
+    return { archived: true, alreadyArchived: archive.already, workspace, cwd: cleaned.path, ...cleaned };
   }
   function nextSignal(conversation, ms) {
     if (!(conversation.waiters instanceof Set)) conversation.waiters = /* @__PURE__ */ new Set();
@@ -18535,7 +18665,7 @@ data: ${JSON.stringify(payload)}
         json(response, 201, { ok: true, conversation: publicConversation(conversation2) });
         return;
       }
-      const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact|archive))?$/u.exec(url.pathname);
+      const match = /^\/v1\/conversations\/([^/]+)(?:\/(messages|notify|wait|events|result|compact|archive|remove))?$/u.exec(url.pathname);
       if (match === null) {
         fail(response, 404, "not_found", "Unknown endpoint.");
         return;
@@ -18604,6 +18734,11 @@ data: ${JSON.stringify(event)}
           context: contextOf(conversation),
           receipt
         });
+        return;
+      }
+      if (request.method === "POST" && suffix === "remove") {
+        const result = await removeConversation(conversation);
+        json(response, 200, { ok: true, removed: true, ...result });
         return;
       }
       if (request.method === "POST" && suffix === "archive") {

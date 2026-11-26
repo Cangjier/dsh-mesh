@@ -794,7 +794,7 @@ export class MemberTaskService {
     }
   }
 
-  async start({ member, prompt, cwd, workspace, identity, scope, force = false, agent, notify = true, signal }) {
+  async start({ member, prompt, cwd, workspace, identity, scope, agent, notify = true, signal }) {
     await this.#ensureLoaded()
     if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('prompt is required')
     if (agent === undefined || agent === null) throw new Error('delegation must be called from a DSH conversation')
@@ -838,7 +838,6 @@ export class MemberTaskService {
       ...(explicitCwd ? { cwd } : {}),
       // Only a caller that was told about the workspace conflict sends this;
       // it is the member-side escape hatch for intentional concurrency.
-      ...(force === true ? { forceWorkspace: true } : {}),
     }
     const created = await this.#waitForRuntime(
       () => this.#request(target.baseUrl, 'POST', '/v1/conversations', payload, 60_000, signal),
@@ -1309,6 +1308,81 @@ export class MemberTaskService {
       return { task, live, liveError, archived: true }
     }
     return { task, live, liveError, archived: false }
+  }
+
+  /**
+   * Remove one member conversation and every trace of it.
+   *
+   * The member performs the destructive half in one call: archive (which stops
+   * a running turn and hides the session), delete the interop record, delete
+   * the workspace record, then clear and delete the workspace directory. This
+   * side then forgets its own task record and log, so nothing can deliver to
+   * the conversation again and the status lists stay clean.
+   * @param {string} conversationId member conversation id.
+   * @returns {Promise<{task: object, workspace: string, cwd: string, recordRemoved: boolean, directoryRemoved: boolean}>} outcome.
+   */
+  async remove(conversationId) {
+    await this.#ensureLoaded()
+    const key = String(conversationId ?? '').trim()
+    if (key === '') throw new Error('conversationId is required')
+    const task = this.#taskOfConversation(key)
+    if (task === undefined) throw new Error(`本机没有跟踪会话 ${key}；先 call_member 发起或继续一次，或确认会话id 正确。`)
+    let result
+    try {
+      result = await this.#request(
+        task.baseUrl,
+        'POST',
+        `/v1/conversations/${encodeURIComponent(task.conversationId)}/remove`,
+        undefined,
+        120_000,
+      )
+    } catch (error) {
+      if (error?.status === 404) {
+        throw new Error(`目标成员 ${task.member}（${task.memberIp}）的插件版本不支持完全删除会话；先给该成员升级到带 remove_member 的版本。`)
+      }
+      throw error
+    }
+    await this.#forget(task)
+    return {
+      task,
+      workspace: typeof result?.workspace === 'string' ? result.workspace : '',
+      cwd: typeof result?.cwd === 'string' ? result.cwd : '',
+      recordRemoved: result?.recordRemoved === true,
+      directoryRemoved: result?.directoryRemoved === true,
+      alreadyArchived: result?.alreadyArchived === true,
+    }
+  }
+
+  /**
+   * Drop one task record and every local timer, waiter, and file behind it.
+   * @param {object} task tracked task.
+   * @returns {Promise<void>} resolution after the files are gone.
+   */
+  async #forget(task) {
+    task.archived = true
+    task.archivedAt = task.archivedAt ?? new Date().toISOString()
+    task.status = 'archived'
+    task.notify = false
+    const controller = this.controllers.get(task.id)
+    if (controller !== undefined) {
+      this.controllers.delete(task.id)
+      try { controller.abort(new Error('the conversation was removed')) } catch { }
+    }
+    for (const timers of [this.deliveryTimers, this.notifyTimers]) {
+      const timer = timers.get(task.id)
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        timers.delete(task.id)
+      }
+    }
+    this.monitors.delete(task.id)
+    this.#notifyWaiters(task)
+    this.tasks.delete(task.id)
+    await Promise.allSettled([
+      rm(path.join(this.taskRoot, `${task.id}.json`), { force: true }),
+      rm(path.join(this.taskRoot, `${task.id}.log`), { force: true }),
+    ])
+    this.logLine(`member-task ${task.id}: removed ${task.conversationId} and its local record`)
   }
 
   /**

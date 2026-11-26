@@ -9,11 +9,12 @@ import { registerTools } from '../src/lib/tools.mjs'
 
 /**
  * Start a minimal member interop endpoint with an archive route.
- * @param {{archiveStatus?: number, liveArchived?: boolean}} [options] knobs.
+ * @param {{archiveStatus?: number, removeStatus?: number, liveArchived?: boolean}} [options] knobs.
  * @returns {Promise<{server: import('node:http').Server, port: number, archiveCalls: number[]}>} endpoint.
  */
 async function fakeMember(options = {}) {
   const archiveCalls = []
+  const removedCalls = []
   const server = http.createServer(async (request, response) => {
     if (request.headers.authorization !== 'Bearer test-token') {
       response.writeHead(401, { 'content-type': 'application/json' })
@@ -45,6 +46,27 @@ async function fakeMember(options = {}) {
       }))
       return
     }
+    if (request.method === 'POST' && request.url === '/v1/conversations/conv-1/remove') {
+      const status = options.removeStatus ?? 200
+      if (status !== 200) {
+        response.writeHead(status, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ ok: false, error: { code: 'not_found', message: 'Unknown endpoint.' } }))
+        return
+      }
+      removedCalls.push(1)
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({
+        ok: true,
+        removed: true,
+        archived: true,
+        alreadyArchived: false,
+        workspace: 'dsh-mesh',
+        cwd: '/root/.dsh/workspaces/dsh-mesh',
+        recordRemoved: true,
+        directoryRemoved: true,
+      }))
+      return
+    }
     if (request.method === 'POST' && request.url === '/v1/conversations/conv-1/archive') {
       archiveCalls.push(1)
       const status = options.archiveStatus ?? 200
@@ -67,7 +89,7 @@ async function fakeMember(options = {}) {
     response.end(JSON.stringify({ ok: false, error: { code: 'not_found', message: 'not found' } }))
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
-  return { server, port: server.address().port, archiveCalls }
+  return { server, port: server.address().port, archiveCalls, removedCalls }
 }
 
 /**
@@ -128,33 +150,37 @@ async function harness(options = {}) {
   }
 }
 
-test('remove_member archives on the member and drops the conversation from every list', async () => {
+test('remove_member deletes the conversation, its workspace and the workspace directory', async () => {
   const h = await harness()
   try {
     const result = await h.remove.execute({ conversationId: 'conv-1' }, { agent: { session: { id: 'session-1' } } })
     assert.equal(result.ok, true)
-    assert.match(result.text, /已归档成员会话 conv-1/u)
-    assert.equal(h.member.archiveCalls.length, 1)
+    assert.match(result.text, /已删除成员会话 conv-1/u)
+    assert.match(result.text, /工作区目录已清空并删除：\/root\/\.dsh\/workspaces\/dsh-mesh/u)
+    assert.equal(h.member.removedCalls.length, 1, 'one call does everything on the member')
+    assert.equal(result.data.workspaceRecordRemoved, true)
+    assert.equal(result.data.workspaceDirectoryRemoved, true)
 
-    const task = await h.service.memberTasks.find('conv-1')
-    assert.equal(task.archived, true)
-    assert.equal(task.status, 'archived')
+    // The local record and its log are gone: nothing can deliver to it, and no
+    // status list can bring it back.
+    assert.equal(await h.service.memberTasks.find('conv-1'), undefined)
     assert.deepEqual(await h.service.memberTasks.listForOrigin('session-1'), [])
-
-    const status = await h.status.execute({ conversationId: 'conv-1' }, { agent: { session: { id: 'session-1' } } })
-    assert.equal(status.ok, true)
-    assert.match(status.text, /已归档，不再列出：conv-1/u)
-    assert.equal(status.data.count, 0)
-
+    // The id is no longer tracked at all, so even asking for it by id is a
+    // clear "not tracked" error instead of a stale row.
+    await assert.rejects(
+      () => h.status.execute({ conversationId: 'conv-1' }, { agent: { session: { id: 'session-1' } } }),
+      /本机没有跟踪会话/u,
+    )
     const snapshot = formatMemberStatusSnapshot(
       await h.service.memberTasks.listForOrigin('session-1'),
       { selfId: 'session-1' },
     )
     assert.doesNotMatch(snapshot, /conv-1/u)
 
-    const again = await h.remove.execute({ conversationId: 'conv-1' }, { agent: { session: { id: 'session-1' } } })
-    assert.match(again.text, /此前已归档/u)
-    assert.equal(h.member.archiveCalls.length, 1, 'a repeated remove must not ask the member again')
+    await assert.rejects(
+      () => h.remove.execute({ conversationId: 'conv-1' }, { agent: { session: { id: 'session-1' } } }),
+      /本机没有跟踪会话/u,
+    )
   } finally {
     await h.cleanup()
   }
@@ -174,12 +200,12 @@ test('status_member hides a conversation archived in the member Web UI', async (
   }
 })
 
-test('remove_member reports an old member that has no archive route', async () => {
-  const h = await harness({ archiveStatus: 404 })
+test('remove_member reports an old member that has no remove route', async () => {
+  const h = await harness({ removeStatus: 404 })
   try {
     await assert.rejects(
       () => h.remove.execute({ conversationId: 'conv-1' }, { agent: { session: { id: 'session-1' } } }),
-      /不支持归档会话/u,
+      /不支持完全删除会话/u,
     )
     const task = await h.service.memberTasks.find('conv-1')
     assert.notEqual(task.archived, true, 'a refused archive must leave the task tracked')

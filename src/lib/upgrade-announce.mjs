@@ -35,6 +35,17 @@ export const UPGRADE_RESUME_DELAY_MS = 2 * 60_000
 /** A stop message older than this is not reused for a later prepare call. */
 const PLAN_REUSE_MS = UPGRADE_LEAD_MS * 4
 
+/**
+ * A plan older than this is not replayed after a restart.
+ *
+ * A scheduled upgrade announces ten minutes ahead and restarts around the
+ * upgrade tick; a manual one announces right before its job starts. A plan
+ * that is much older belongs to an upgrade that failed before restarting, so
+ * sending "重启成功，请继续。" for it on a later, unrelated restart would be a
+ * lie. The plan is consumed instead.
+ */
+export const UPGRADE_PLAN_MAX_AGE_MS = 30 * 60_000
+
 /** The message a leader conversation gets before an upgrade. */
 export const UPGRADE_LEADER_MESSAGE = '请通过call_member停止所有进行中的成员对话，把需要提交的代码进行提交。并停止派发新的任务。dsh准备升级，将会重启。等我通知。'
 
@@ -315,9 +326,20 @@ export async function resumeUpgradeConversations(ctx, options) {
  * @returns {Promise<boolean>} whether a resume was armed.
  */
 export async function armUpgradeResume(ctx, options) {
+  const log = typeof options.log === 'function' ? options.log : () => {}
+  const now = typeof options.now === 'function' ? options.now : Date.now
   const plan = await readUpgradePlan(options.planFile)
   if (plan === null) return false
   if (typeof plan.resumedAt === 'string' && plan.resumedAt !== '') return false
+  const announcedAt = Date.parse(String(plan.announcedAt ?? ''))
+  if (Number.isFinite(announcedAt) && now() - announcedAt > UPGRADE_PLAN_MAX_AGE_MS) {
+    // The announced restart never happened (the upgrade failed or was
+    // cancelled). Consume the plan so a later restart does not replay it.
+    plan.resumedAt = new Date(now()).toISOString()
+    await writeUpgradePlan(options.planFile, plan)
+    log(`upgrade plan from ${String(plan.announcedAt)} expired; no resume armed`)
+    return false
+  }
   const delay = Number.isSafeInteger(options.delayMs) && options.delayMs >= 0 ? options.delayMs : UPGRADE_RESUME_DELAY_MS
   const setTimer = typeof options.setTimeout === 'function' ? options.setTimeout : setTimeout
   const timer = setTimer(() => {
@@ -327,7 +349,6 @@ export async function armUpgradeResume(ctx, options) {
     })
   }, delay)
   timer?.unref?.()
-  const log = typeof options.log === 'function' ? options.log : () => {}
   log(`upgrade resume armed in ${String(Math.round(delay / 1000))}s for ${String(Array.isArray(plan.sessions) ? plan.sessions.length : 0)} conversation(s)`)
   return true
 }

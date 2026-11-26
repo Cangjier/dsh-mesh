@@ -207,6 +207,20 @@ log "Bringing up interface: $IFACE"
 wg-quick up "$IFACE"
 log "Tunnel is up"
 
+# A full tunnel is routed by wg-quick's policy rules, not by the main table.
+# If those rules are missing (a re-created interface or a partial wg-quick
+# down), every packet to the hub's VPN address leaves through the physical
+# default route: the handshake still succeeds because it targets the
+# hub's public address, so the tunnel looks connected while nothing gets
+# through. Re-add them when the interface carries 0.0.0.0/0.
+if [ "$ALLOWED_IPS" = "0.0.0.0/0" ]; then
+  ip rule show | grep -q 'lookup 51820' || ip rule add not fwmark 51820 table 51820
+  ip rule show | grep -q 'suppress_prefixlength 0' || ip rule add table main suppress_prefixlength 0
+  if ! ip rule show | grep -q 'lookup 51820'; then
+    log "WARNING: could not install the table-51820 policy rule; the hub may be unreachable"
+  fi
+fi
+
 if command -v systemctl >/dev/null 2>&1; then
   if systemctl enable "wg-quick@$IFACE" >/dev/null 2>&1; then
     log "Enabled wg-quick@$IFACE at boot"

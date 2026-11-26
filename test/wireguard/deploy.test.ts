@@ -93,6 +93,9 @@ test('static client script is portable, parameterized, and contains no secrets',
   }
   assert.match(LINUX_CLIENT_SCRIPT, /Unknown package manager/);
   assert.match(LINUX_CLIENT_SCRIPT, /wg-quick up "\$IFACE"/);
+  // A full tunnel may lose its policy rules; the bootstrap restores them.
+  assert.match(LINUX_CLIENT_SCRIPT, /ip rule add not fwmark 51820 table 51820/);
+  assert.match(LINUX_CLIENT_SCRIPT, /ip rule add table main suppress_prefixlength 0/);
   assert.match(LINUX_CLIENT_SCRIPT, /AllowedIPs = \$ALLOWED_IPS/);
   assert.match(LINUX_CLIENT_SCRIPT, /EGRESS=0/);
   assert.match(LINUX_CLIENT_SCRIPT, /dsh-mesh-egress\.service/);

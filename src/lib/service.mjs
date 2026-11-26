@@ -49,13 +49,14 @@ import {
 import { EgressProxy } from './egress.mjs'
 import { memberInteropRequest } from './interop-client.mjs'
 import { UPGRADE_LEAD_MS } from './upgrade-announce.mjs'
+import { readScheduleFile } from './scheduler.mjs'
 import { RemoteBuilder } from './remote-build.mjs'
 import { CLUSTER_HEADER, deriveClusterSecret, signClusterRequest } from '../../code/shared/cluster.mjs'
 import { repackArchive } from '../../code/build/repack.mjs'
 import { quickSystemInfo } from '../../code/shared/system-info.mjs'
 import { GeoLookup } from '../../code/shared/geo.mjs'
 import { detectReleaseOwner, fetchLatestManifest, latestManifestSources, latestManifestUrls, loadReleaseConfig, sanitizeReleaseConfig, saveReleaseConfig } from '../../code/shared/release.mjs'
-import { buildUpdateReasons, memberDeployment, packageInfo, planMemberUpgrade } from './schedule.mjs'
+import { buildUpdateReasons, memberDeployment, packageInfo, planMemberUpgrade, scheduleFile } from './schedule.mjs'
 import { autoUpgradeEnabled, pickBuildMember, pickProxyMember, pullBackEnabled } from './build-defaults.mjs'
 import { memberBuildTarget, pickArtifactForMember } from './build-artifacts.mjs'
 import { linkFor, resolveBuildEgress, resolveDeployLinkProxy } from './egress-plan.mjs'
@@ -91,6 +92,8 @@ export const MEMBER_IDENTITY_MAX = 40
 export const MEMBER_SCOPE_MAX = 120
 /** How long a pre-upgrade announcement stays valid for the upgrade that follows. */
 const UPGRADE_ANNOUNCE_WINDOW_MS = UPGRADE_LEAD_MS * 3
+/** How long after a scheduled announcement the member still counts as upgrading. */
+const UPGRADE_PREPARE_GRACE_MS = 5 * 60_000
 
 /** Default context occupancy percentage that triggers a pre-delivery compaction. */
 export const DEFAULT_COMPRESS_PERCENT = 35
@@ -746,6 +749,52 @@ export class MeshService {
     await mkdir(this.dataDir, { recursive: true })
     await writeFile(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}\n`, 'utf8')
     return { ok: true, tags }
+  }
+
+  /**
+   * Whether one target is busy with a deploy, an upgrade, or the announcement
+   * window in front of a scheduled upgrade.
+   *
+   * `call_member` refuses while this is active. A deploy or upgrade restarts
+   * the member's DSH (a local upgrade restarts this one), so a conversation
+   * created or messaged now would lose its first turn to that restart. The
+   * window starts with the announcement — a scheduled upgrade stops the
+   * conversations ten minutes before it starts — and ends when the job that
+   * replaced the announcement has settled.
+   * @param {{id?: string, name?: string, ip?: string}} member target member row.
+   * @returns {Promise<{active: boolean, kind?: string, phase?: string, since?: string, job?: string}>} state.
+   */
+  async memberMaintenance(member) {
+    const ids = new Set([member?.id, member?.name, member?.ip]
+      .filter(value => typeof value === 'string' && value !== ''))
+    const jobs = await this.deploy.list(50).catch(() => [])
+    const active = jobs.find((job) => {
+      if (job?.status !== 'running' && job?.status !== 'queued') return false
+      if (ids.has(String(job.member ?? ''))) return true
+      return ids.has(String(job.target?.host ?? ''))
+    })
+    if (active !== undefined && active !== null) {
+      return {
+        active: true,
+        kind: active.mode === 'install' ? '部署' : '升级',
+        job: String(active.id ?? ''),
+        phase: String(active.phase ?? ''),
+        ...(typeof active.createdAt === 'string' && active.createdAt !== '' ? { since: active.createdAt } : {}),
+      }
+    }
+    const id = typeof member?.id === 'string' ? member.id : ''
+    if (id === '') return { active: false }
+    const schedule = await readScheduleFile(scheduleFile(this.dataDir))
+    const prepare = schedule.last?.prepares?.[id]
+    if (prepare === null || typeof prepare !== 'object') return { active: false }
+    const status = String(prepare.status ?? '')
+    if (status === 'skipped' || status === 'failed' || status === 'unsupported') return { active: false }
+    const announcedAt = Date.parse(String(prepare.at ?? ''))
+    if (!Number.isFinite(announcedAt)) return { active: false }
+    if (Date.now() - announcedAt > UPGRADE_LEAD_MS + UPGRADE_PREPARE_GRACE_MS) return { active: false }
+    const upgradedAt = Date.parse(String(schedule.last?.upgrades?.[id]?.at ?? ''))
+    if (Number.isFinite(upgradedAt) && upgradedAt >= announcedAt) return { active: false }
+    return { active: true, kind: '自动升级', phase: 'prepare', since: new Date(announcedAt).toISOString() }
   }
 
   /**
@@ -2307,6 +2356,13 @@ export class MeshService {
         { status: 409 },
       )
     }
+
+    // A manual upgrade restarts the target's DSH just like a scheduled one.
+    // Tell its running conversations to wind down first (the same prepare
+    // endpoint the scheduler calls ten minutes early); their plan also makes
+    // the restarted plugin send the resume message. An install has no
+    // conversations yet, and a failure here only logs.
+    if (mode === 'upgrade' && member !== undefined) await this.#ensureUpgradeAnnounced(member)
 
     let packagePath = ''
     let os = 'linux'

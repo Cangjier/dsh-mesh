@@ -16,6 +16,7 @@ import {
   UPGRADE_RESUME_MESSAGE,
   announceUpgrade,
   armUpgradeResume,
+  UPGRADE_PLAN_MAX_AGE_MS,
   classifyUpgradeConversation,
   readUpgradePlan,
   resumeUpgradeConversations,
@@ -251,6 +252,35 @@ test('the interop endpoint announces and serves the plan', async () => {
   } finally {
     await service.dispose()
     clearMemberSessions()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a plan whose upgrade never restarted is consumed instead of resumed', async () => {
+  const { planFile, dir } = await planFileOf()
+  try {
+    const plain = fakeAgent('s-plain')
+    await announceUpgrade(fakeCtx([plain]), { planFile })
+    let fired = false
+    const armed = await armUpgradeResume(fakeCtx([plain]), {
+      planFile,
+      delayMs: 0,
+      // The restart it announced never happened: the plan is older than any
+      // upgrade could take, so nothing may be sent.
+      now: () => Date.now() + UPGRADE_PLAN_MAX_AGE_MS + 60_000,
+      setTimeout: () => {
+        fired = true
+        return { unref() {} }
+      },
+    })
+    assert.equal(armed, false)
+    assert.equal(fired, false)
+    assert.equal(plain.followed.length, 0)
+    const plan = await readUpgradePlan(planFile)
+    assert.equal(typeof plan.resumedAt, 'string', 'the stale plan is consumed once')
+    // A second start must not arm either.
+    assert.equal(await armUpgradeResume(fakeCtx([plain]), { planFile, delayMs: 0 }), false)
+  } finally {
     await rm(dir, { recursive: true, force: true })
   }
 })

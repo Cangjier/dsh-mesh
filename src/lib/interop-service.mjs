@@ -17,7 +17,7 @@ import { execFile } from 'node:child_process'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import {
@@ -86,6 +86,8 @@ const DEFAULT_WORKSPACE = 'default-workspace'
 export const EMBEDDED_INTEROP_MARKER = 'dsh-mesh-embedded-interop-v1'
 /** Largest accepted JSON body. */
 const MAX_BODY = 1024 * 1024
+/** Largest text one oversized-message spill may carry. */
+const SCRATCH_MAX_CHARS = 8 * 1024 * 1024
 /** How long "the whole task ended" may take to show up before a reply is called progress. */
 const SETTLE_MS = 300
 
@@ -385,6 +387,32 @@ function fail(response, status, code, message, detail) {
     ok: false,
     error: { code, message, ...(detail === undefined ? {} : { detail }) },
   })
+}
+
+/**
+ * Write one oversized message body to a file the member's DSH can read.
+ *
+ * The initiator sends a body that no longer fits comfortably in one message
+ * (a whole review, a long discussion) to this endpoint, then delivers a short
+ * message naming the returned path. The file lives in the member's temporary
+ * directory, which every permission preset allows reading; the name is only a
+ * hint, and a timestamp/random suffix keeps two spills apart.
+ * @param {Record<string, any>} body request body (`text`, optional `name`).
+ * @returns {{path: string, bytes: number}} written file.
+ */
+function writeScratch(body) {
+  const text = typeof body.text === 'string' ? body.text : ''
+  if (text.trim() === '') throw httpError(400, 'empty_text', 'text is empty')
+  if (text.length > SCRATCH_MAX_CHARS) {
+    throw httpError(413, 'text_too_large', `text is longer than ${String(SCRATCH_MAX_CHARS)} characters`)
+  }
+  const hint = typeof body.name === 'string' && body.name.trim() !== '' ? body.name.trim() : 'message'
+  const safe = hint.replace(/[^A-Za-z0-9._-]/gu, '-').slice(0, 60) || 'message'
+  const dir = path.join(tmpdir(), 'dsh-mesh-messages')
+  mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, `${safe}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}.md`)
+  writeFileSync(file, text, 'utf8')
+  return { path: file, bytes: Buffer.byteLength(text, 'utf8') }
 }
 
 /**
@@ -1713,6 +1741,13 @@ export function createInteropService(options) {
       }
       if (request.method === 'GET' && url.pathname === '/v1/upgrade/plan') {
         json(response, 200, { ok: true, plan: await readUpgradePlan(upgradePlanFile) })
+        return
+      }
+      if (request.method === 'POST' && url.pathname === '/v1/scratch') {
+        // A message body too long for one delivery is handed over as a file;
+        // the initiator then sends the path instead of the text.
+        const body = await readJson(request)
+        json(response, 200, { ok: true, ...writeScratch(body) })
         return
       }
       if (request.method === 'GET' && url.pathname === '/v1/conversations') {

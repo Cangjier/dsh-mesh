@@ -197,7 +197,10 @@ export function registerTools(ctx, toolsCtx, service) {
       '会话id（conversationId）是跨进程的继续投递凭据：重新启动后、或不是本机发起的对话，',
       '只要知道会话id，配上 member 就能继续；本机已跟踪该对话时 member 可以省略。',
       '继续已有对话时，投递前会按该会话的压缩阈值（`set_member_scope` 的 `compressPercent`，默认 35%）检查上下文占比：',
-      '超过阈值就先让成员压缩上下文再投递（要求对话空闲）；不超过就直接投递。压缩阈值只按会话设置，不接受每次调用单独指定。',
+      '超过阈值且目标空闲就先让成员压缩上下文再投递；目标还在运行就跳过压缩、直接把消息 steer 进去。压缩阈值只按会话设置，不接受每次调用单独指定。',
+      '目标成员正在部署/升级（包括自动升级前十分钟的准备期）时，call_member 直接返回 ok:false，不创建也不投递：升级会重启目标成员的 DSH，现在派发的消息会丢。',
+      '等升级结束后再用同一个 conversationId 继续。',
+      '要投递的消息超过 4.8 万字符时，正文会写到成员本机的临时文件，投递内容改成「读取该文件」的说明；返回值 data.messageSpill 是文件路径。',
       '一个工作区只允许一个对话（新建时生效）：目标工作区目录里已经有对话——不管它是进行中、空闲、异常中止还是出错——',
       '创建会返回 409 workspace_occupied，并给出那条对话的会话id；这时不要新建，直接 call_member 带 conversationId 继续它。',
       '要继续已有对话不会触发这个拦截；要并行工作就换一个 workspace 名（或新建工作区）。',
@@ -271,6 +274,7 @@ export function registerTools(ctx, toolsCtx, service) {
           if (error?.code === 'workspace_occupied' || error?.code === 'workspace_busy_git') {
             return workspaceBusyResult(error, args)
           }
+          if (error?.code === 'member_maintenance') return maintenanceResult(error, args)
           throw error
         }
         const data = memberTaskData(task, memberTasks)
@@ -283,6 +287,9 @@ export function registerTools(ctx, toolsCtx, service) {
             formatTaskProfileMissingHint(task),
             typeof task.egressLine === 'string' && task.egressLine !== '' ? `出网实测：${task.egressLine}` : '',
             `会话id：${task.conversationId}`,
+            typeof task.messageSpill === 'string' && task.messageSpill !== ''
+              ? `消息过长，正文已写入成员本机文件：${task.messageSpill}（投递的是读取该文件的说明）。`
+              : '',
             '结果会自动投递到本对话；不取走也不会丢，已经取走的不重复。',
             `要继续这个对话：call_member { "member": ${JSON.stringify(String(task.member))}, "conversationId": ${JSON.stringify(String(task.conversationId))}, "prompt": "..." }。`,
             ...conversationBlock.lines,
@@ -300,15 +307,21 @@ export function registerTools(ctx, toolsCtx, service) {
       const hasWorkspace = typeof args.workspace === 'string' && args.workspace.trim() !== ''
       if (hasCwd || hasWorkspace) throw new Error('cwd/workspace only apply to a new conversation')
       if (args.force === true) throw new Error('force only applies when starting a new conversation')
-      const task = await memberTasks.send({
-        conversationId,
-        member: args.member,
-        prompt: args.prompt,
-        identity: args.identity,
-        scope: args.scope,
-        agent: exec.agent,
-        signal: exec.signal,
-      })
+      let task
+      try {
+        task = await memberTasks.send({
+          conversationId,
+          member: args.member,
+          prompt: args.prompt,
+          identity: args.identity,
+          scope: args.scope,
+          agent: exec.agent,
+          signal: exec.signal,
+        })
+      } catch (error) {
+        if (error?.code === 'member_maintenance') return maintenanceResult(error, args)
+        throw error
+      }
       const data = memberTaskData(task, memberTasks)
       const compaction = task.lastCompaction
       const observedPercent = Number.isFinite(compaction?.observedPercent)
@@ -334,6 +347,9 @@ export function registerTools(ctx, toolsCtx, service) {
           `会话id：${task.conversationId}`,
           deliveryLine,
           forcedLine,
+          typeof task.messageSpill === 'string' && task.messageSpill !== ''
+            ? `消息过长，正文已写入成员本机文件：${task.messageSpill}（投递的是读取该文件的说明）。`
+            : '',
           formatContextLine(task.context),
           '结果会自动投递到本对话；不取走也不会丢，已经取走的不重复。',
           ...conversationBlock.lines,
@@ -1284,6 +1300,38 @@ function workspaceBusyResult(error, args) {
       cwd: typeof detail.cwd === 'string' ? detail.cwd : null,
       occupiedConversationIds: occupied,
       conversationId: first === '' ? null : first,
+    },
+  }
+}
+
+/**
+ * The answer a delivery returns while its target is deploying or upgrading.
+ *
+ * This is a decision, not a failure: the member restarts its DSH during the
+ * job, so the work must wait instead of being lost to that restart.
+ * @param {any} error refusal carrying `member_maintenance`.
+ * @param {object} args tool arguments.
+ * @returns {object} tool result.
+ */
+function maintenanceResult(error, args) {
+  const state = error?.maintenance !== null && typeof error.maintenance === 'object' ? error.maintenance : {}
+  const message = String(error?.message ?? '目标成员正在升级')
+  return {
+    ok: false,
+    text: [
+      message,
+      '升级/部署会重启目标成员的 DSH；等它结束后再派发或继续成员对话。',
+      '现在没有创建或投递任何对话；升级结束后用同一个 conversationId 继续即可（新建的等升级完再发起）。',
+    ].join('\n'),
+    data: {
+      ok: false,
+      code: 'member_maintenance',
+      member: typeof args?.member === 'string' ? args.member : null,
+      conversationId: typeof args?.conversationId === 'string' ? args.conversationId : null,
+      kind: typeof state.kind === 'string' ? state.kind : null,
+      phase: typeof state.phase === 'string' ? state.phase : null,
+      job: typeof state.job === 'string' ? state.job : null,
+      since: typeof state.since === 'string' ? state.since : null,
     },
   }
 }

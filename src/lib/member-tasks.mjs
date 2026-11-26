@@ -24,15 +24,31 @@ export { DEFAULT_COMPRESS_PERCENT }
  */
 const CONVERSATION_ID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
 /** Transport failures named in the surfaced error. */
-const CONNECTION_ERROR_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE'])
+const CONNECTION_ERROR_CODES = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', 'ETIMEDOUT',
+  // Node's fetch wraps a connect timeout in `TypeError: fetch failed`; the
+  // cause carries one of these undici codes.
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_CLOSED', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+])
 /**
  * Failures retried before the member is reported unreachable. A reset can mean
  * the request was already accepted, so a non-idempotent POST is not replayed
- * on it; only a refused/host-unreachable connection proves nothing was sent.
+ * on it; only a refused/unreachable connection (or a connect timeout, where no
+ * request was sent) proves nothing was sent.
  */
-const CONNECT_RETRY_CODES = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH'])
-/** How long a member's interop may be down before a call reports the failure. */
+const CONNECT_RETRY_CODES = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT'])
+/** How long a member's interop may be down before a delivery reports the failure. */
 const CONNECTION_RETRY_MS = 30_000
+/**
+ * How long a running task keeps polling a member that stopped answering.
+ *
+ * A member upgrade restarts its DSH and can take well over five minutes, and
+ * the monitor used to give up after 30 attempts (about seven minutes) and
+ * report a failed task even though the member was only restarting. Connection
+ * failures now keep retrying for this window; a member that is still gone
+ * after it is reported as interrupted, with the conversation id intact.
+ */
+export const UNREACHABLE_RETRY_MS = 20 * 60_000
 /**
  * The transport code behind a failed `fetch`, walking the `cause` chain.
  * @param {unknown} error thrown value.
@@ -46,6 +62,15 @@ function connectionFailureCode(error) {
     current = current.cause
   }
   return ''
+}
+
+/**
+ * Whether a failure is one of the transport problems a restart causes.
+ * @param {unknown} error thrown value.
+ * @returns {boolean} true when the member was unreachable, not wrong.
+ */
+export function isConnectionFailure(error) {
+  return connectionFailureCode(error) !== ''
 }
 const WAIT_TIMEOUT_MS = 60_000
 const MAX_ATTEMPTS = 30
@@ -113,6 +138,50 @@ const DEFAULT_WORKSPACE = 'default-workspace'
 function truncate(text, limit) {
   const value = String(text ?? '')
   return value.length > limit ? `${value.slice(0, limit)}…` : value
+}
+
+/**
+ * Message length at which the body is handed over as a file.
+ *
+ * A message that carries a whole review or a long discussion reply pushes the
+ * member's context and its JSON body limit; below this the text stays inline,
+ * above it the member reads a file instead.
+ */
+export const MESSAGE_SPILL_CHARS = 48_000
+
+/**
+ * The short message that replaces a spilled body.
+ * @param {number} chars original length.
+ * @param {string} file absolute path on the member.
+ * @returns {string} message text.
+ */
+export function formatSpilledMessage(chars, file) {
+  return `【消息过长】这条对话回复内容共 ${String(chars)} 字符，已写入成员本机文件：${file}。请先用 read 工具读取该文件，再按文件里的要求执行；不要跳过读取。`
+}
+
+/**
+ * The error a delivery raises while its target is deploying or upgrading.
+ *
+ * The upgrade restarts the member's DSH (or this host), so a conversation
+ * created or messaged now loses its first turn to the restart. The check
+ * carries `code: 'member_maintenance'` so the tool can answer with ok:false
+ * instead of looking like a broken call.
+ * @param {{name?: string, ip?: string, id?: string}} target member row.
+ * @param {{kind?: string, phase?: string, since?: string, job?: string}} state maintenance state.
+ * @returns {Error} refusal.
+ */
+export function memberMaintenanceError(target, state) {
+  const ip = typeof target?.ip === 'string' ? target.ip.trim() : ''
+  const name = typeof target?.name === 'string' ? target.name.trim() : ''
+  const label = name !== '' && name !== ip ? `${name}（${ip === '' ? String(target?.id ?? '') : ip}）` : (ip !== '' ? ip : String(target?.id ?? '成员'))
+  const kind = typeof state?.kind === 'string' && state.kind !== '' ? state.kind : '升级'
+  const since = typeof state?.since === 'string' && state.since !== '' ? `，自 ${state.since}` : ''
+  const phase = typeof state?.phase === 'string' && state.phase !== '' ? `，阶段 ${state.phase}` : ''
+  const job = typeof state?.job === 'string' && state.job !== '' ? `，任务 ${state.job}` : ''
+  return Object.assign(
+    new Error(`目标成员 ${label} 正在${kind}（进行中${since}${phase}${job}）。升级/部署期间不能派发或继续成员对话：等它升级完成后再调用 call_member。`),
+    { code: 'member_maintenance', maintenance: state },
+  )
 }
 
 /**
@@ -501,6 +570,7 @@ export class MemberTaskService {
         // `remove_member` is idempotent, but every list filters them out.
         task.archived = task.archived === true
         task.archivedAt = typeof task.archivedAt === 'string' ? task.archivedAt : null
+        task.unreachableSince = Number.isFinite(task.unreachableSince) ? task.unreachableSince : null
         task.repliesTakenByWait = task.repliesTakenByWait === true
         // Old records predate the workspace field. An empty value is not a
         // name, so both fall back to the same placeholder the model sees.
@@ -794,6 +864,46 @@ export class MemberTaskService {
     }
   }
 
+  /**
+   * Whether this delivery target is deploying or upgrading right now.
+   * @param {{id?: string, name?: string, ip?: string}|undefined} target member row.
+   * @returns {Promise<object|null>} maintenance state, or null when idle.
+   */
+  async #maintenanceFor(target) {
+    const probe = typeof this.service?.memberMaintenance === 'function' ? this.service.memberMaintenance : null
+    if (probe === null) return null
+    const member = {
+      ...(typeof target?.id === 'string' && target.id !== '' ? { id: target.id } : {}),
+      ...(typeof target?.name === 'string' && target.name !== '' ? { name: target.name } : {}),
+      ...(typeof target?.ip === 'string' && target.ip !== '' ? { ip: target.ip } : {}),
+    }
+    if (Object.keys(member).length === 0) return null
+    const state = await probe.call(this.service, member).catch(() => null)
+    return state?.active === true ? state : null
+  }
+
+  /**
+   * The body to deliver: inline, or a pointer to a file on the member.
+   *
+   * A body over {@link MESSAGE_SPILL_CHARS} is written to the member's own
+   * scratch directory first, and the delivered message tells its agent to read
+   * that file. The upload is one JSON request; a member without the endpoint
+   * (an older release) keeps the inline text, which only fails for a body over
+   * its request-body limit.
+   * @param {string} baseUrl member interop base.
+   * @param {string} text message body.
+   * @param {string} name scratch file hint.
+   * @param {AbortSignal} [signal] cancellation.
+   * @returns {Promise<{text: string, spill: string|null}>} body to deliver.
+   */
+  async #deliverableBody(baseUrl, text, name, signal) {
+    if (typeof text !== 'string' || text.length <= MESSAGE_SPILL_CHARS) return { text, spill: null }
+    const result = await this.#request(baseUrl, 'POST', '/v1/scratch', { text, name }, 120_000, signal).catch(() => null)
+    const file = typeof result?.path === 'string' && result.path !== '' ? result.path : ''
+    if (file === '') return { text, spill: null }
+    return { text: formatSpilledMessage(text.length, file), spill: file }
+  }
+
   async start({ member, prompt, cwd, workspace, identity, scope, agent, notify = true, signal }) {
     await this.#ensureLoaded()
     if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('prompt is required')
@@ -803,6 +913,10 @@ export class MemberTaskService {
     const scopePatch = normalizeMemberScopePatch({ identity, scope })
     const hasScopePatch = Object.keys(scopePatch).length > 0
     const target = await this.#resolveMember(member)
+    // A target that is deploying or upgrading restarts its DSH before the new
+    // conversation could answer; refuse instead of losing the first turn.
+    const maintenance = await this.#maintenanceFor(target)
+    if (maintenance !== null) throw memberMaintenanceError(target, maintenance)
     // A new conversation has no stored scope yet, so its first scope is
     // exactly what this call passed. It rides in the create request, before
     // the conversation id exists; the durable record is written after create.
@@ -814,7 +928,8 @@ export class MemberTaskService {
     const egressLine = mesh.link === true ? formatEgressLine(mesh) : ''
     const profilePrefix = initialProfile === null ? '' : profilePromptPrefix(initialProfile)
     const environment = environmentPrompt(egressLine, mesh.tokens)
-    const deliveredPrompt = [profilePrefix, environment, prompt].filter(part => part !== '').join('\n')
+    const body = await this.#deliverableBody(target.baseUrl, prompt, 'member-message', signal)
+    const deliveredPrompt = [profilePrefix, environment, body.text].filter(part => part !== '').join('\n')
     const explicitWorkspace = typeof workspace === 'string' && workspace.trim() !== ''
     const explicitCwd = typeof cwd === 'string' && cwd !== ''
     // Precedence: an explicitly named workspace, then an explicit cwd (which
@@ -867,6 +982,8 @@ export class MemberTaskService {
       /** Workspace name the member resolved, or a best-known fallback. */
       workspace: reportedWorkspace,
       prompt: truncate(prompt, 2000),
+      /** Member-local file holding the body when it was too long to inline. */
+      messageSpill: body.spill,
       status: 'running',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -1668,6 +1785,11 @@ export class MemberTaskService {
     const hasScopePatch = Object.keys(scopePatch).length > 0
     const signal = request.signal
     const { task, fresh, target } = await this.#sendTarget(request)
+    // Same rule as a new conversation: a restarting target would drop this
+    // delivery, so say so instead of queueing it.
+    const maintenanceTarget = target ?? { name: task.member, ip: task.memberIp }
+    const maintenance = await this.#maintenanceFor(maintenanceTarget)
+    if (maintenance !== null) throw memberMaintenanceError(maintenanceTarget, maintenance)
     if (task.archived === true) {
       // The member is the source of truth: if the session was unarchived in
       // its Web UI, admit the conversation again instead of refusing forever.
@@ -1701,7 +1823,9 @@ export class MemberTaskService {
     // call passes identity/scope; the environment block is always present.
     const prefix = hasScopePatch ? profilePromptPrefix(task.profile) : ''
     const environment = environmentPrompt(task.egressLine, await this.#tokenPair())
-    const deliveredPrompt = [prefix, environment, prompt].filter(part => part !== '').join('\n')
+    const body = await this.#deliverableBody(task.baseUrl, prompt, `member-${task.conversationId}`, signal)
+    task.messageSpill = body.spill
+    const deliveredPrompt = [prefix, environment, body.text].filter(part => part !== '').join('\n')
     // A compaction record belongs to one delivery; the next one starts clean.
     task.lastCompaction = null
     // A status read failure keeps the previous value, so the gate below is
@@ -2063,6 +2187,7 @@ export class MemberTaskService {
         // A completed round trip proves the member is healthy: start the retry
         // budget over, so a long multi-turn task is not failed by one late blip.
         task.attempts = 0
+        task.unreachableSince = null
         this.#rememberContext(task, result.context ?? result.conversation?.context)
         const conversation = result.conversation ?? {}
         this.#rememberWorkspace(task, conversation)
@@ -2147,13 +2272,26 @@ export class MemberTaskService {
       } catch (error) {
         if (signal?.aborted || task.status === 'interrupted') break
         task.error = error instanceof Error ? error.message : String(error)
-        await this.#log(task, `wait failed: ${task.error}`)
+        const connection = connectionFailureCode(error)
+        if (connection !== '' && !Number.isFinite(task.unreachableSince)) task.unreachableSince = Date.now()
+        await this.#log(task, `wait failed: ${task.error}${connection === '' ? '' : '（连接失败，继续重试）'}`)
         if (LOST_CONVERSATION.test(task.error)) {
           task.status = 'failed'
           task.interrupted = true
           break
         }
-        if (task.attempts >= MAX_ATTEMPTS) {
+        if (connection !== '') {
+          // The member's DSH is probably restarting (an upgrade does that):
+          // keep the task alive for the connection window instead of calling a
+          // restarting member failed.
+          const unreachableFor = Date.now() - (Number.isFinite(task.unreachableSince) ? task.unreachableSince : Date.now())
+          if (unreachableFor >= UNREACHABLE_RETRY_MS) {
+            task.error = `${task.error}（目标成员连续 ${String(Math.round(UNREACHABLE_RETRY_MS / 60_000))} 分钟不可达：任务已中断，成员恢复后用同一个 conversationId 继续，或先 status_member 查看）`
+            task.status = 'failed'
+            task.interrupted = true
+            break
+          }
+        } else if (task.attempts >= MAX_ATTEMPTS) {
           task.status = 'failed'
           break
         }

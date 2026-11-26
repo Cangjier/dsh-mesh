@@ -253,6 +253,8 @@ export function MemberConversationsChip({ sessionId, ctx }: { sessionId: string,
   const mode = useThemeMode(ctx)
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [details, setDetails] = useState(false)
+  // Which conversation the dialog shows; null means all of them.
+  const [selected, setSelected] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const alive = useRef(true)
 
@@ -292,7 +294,9 @@ export function MemberConversationsChip({ sessionId, ctx }: { sessionId: string,
 
   const { total, running, rows } = snapshot
   const label = `${String(total)}个成员对话`
-  const openDetails = (): void => {
+  const shown = selected === null ? rows : rows.filter(row => row.conversationId === selected)
+  const openDetails = (conversationId: string | null = null): void => {
+    setSelected(conversationId)
     setDetails(true)
     void manualRefresh()
   }
@@ -309,7 +313,7 @@ export function MemberConversationsChip({ sessionId, ctx }: { sessionId: string,
           key={row.conversationId}
           type="button"
           className="dsh-mesh-pop-row"
-          onClick={openDetails}
+          onClick={() => openDetails(row.conversationId)}
         >
           <span className="dsh-mesh-pop-identity">{row.identity ?? '未设置身份'}</span>
           <StatusTag status={row.status} label={row.statusLabel} />
@@ -320,7 +324,7 @@ export function MemberConversationsChip({ sessionId, ctx }: { sessionId: string,
         </button>
       ))}
       <div style={{ marginTop: 6, textAlign: 'right' }}>
-        <Typography.Link onClick={openDetails} style={{ fontSize: 12 }}>查看详情</Typography.Link>
+        <Typography.Link onClick={() => openDetails()} style={{ fontSize: 12 }}>查看全部</Typography.Link>
       </div>
     </div>
   )
@@ -339,7 +343,7 @@ export function MemberConversationsChip({ sessionId, ctx }: { sessionId: string,
           className="dsh-mesh-chip"
           aria-haspopup="dialog"
           title={label}
-          onClick={openDetails}
+          onClick={() => openDetails()}
         >
           <ApartmentOutlined />
           <span>{label}</span>
@@ -348,7 +352,7 @@ export function MemberConversationsChip({ sessionId, ctx }: { sessionId: string,
       </Popover>
       <Modal
         open={details}
-        title={`成员对话 · ${label}`}
+        title={shown.length === 1 ? `成员对话 · ${shown[0]?.identity ?? shown[0]?.conversationId ?? ''}` : `成员对话 · ${label}`}
         width={720}
         onCancel={() => setDetails(false)}
         footer={(
@@ -365,9 +369,9 @@ export function MemberConversationsChip({ sessionId, ctx }: { sessionId: string,
         )}
         destroyOnHidden
       >
-        {rows.length === 0
+        {shown.length === 0
           ? <Empty description="没有成员对话" />
-          : rows.map(row => <MemberDetail key={row.conversationId} row={row} />)}
+          : shown.map(row => <MemberDetail key={row.conversationId} row={row} />)}
       </Modal>
     </ConfigProvider>
   )

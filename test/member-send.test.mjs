@@ -4,7 +4,7 @@ import http from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { MemberTaskService } from '../src/lib/member-tasks.mjs'
+import { MESSAGE_SPILL_CHARS, MemberTaskService } from '../src/lib/member-tasks.mjs'
 import { registerTools } from '../src/lib/tools.mjs'
 
 /**
@@ -30,6 +30,8 @@ async function fakeMember(options = {}) {
     workspace: options.workspace ?? '',
     // How the member took the message; the tool surfaces it in the receipt line.
     delivery: options.delivery ?? 'followup',
+    // Whether this member release has the oversized-message file endpoint.
+    scratch: options.scratch !== false,
     // Live conversation position. `reset` simulates a member restart, where
     // the reply counter begins a new epoch at zero.
     turns: 5,
@@ -38,6 +40,7 @@ async function fakeMember(options = {}) {
   }
   const messages = []
   const created = []
+  const scratches = []
   const order = []
   const waits = []
   const server = http.createServer(async (request, response) => {
@@ -54,6 +57,15 @@ async function fakeMember(options = {}) {
       return
     }
     const use = `conv-9`
+    if (request.method === 'POST' && request.url === '/v1/scratch') {
+      if (members.scratch !== true) {
+        reply(404, { ok: false, error: { code: 'not_found', message: 'Unknown endpoint.' } })
+        return
+      }
+      scratches.push(body)
+      reply(200, { ok: true, path: '/tmp/member/messages/m1.md', bytes: String(body.text ?? '').length })
+      return
+    }
     if (request.method === 'POST' && request.url === '/v1/conversations') {
       order.push('create')
       created.push(body)
@@ -155,6 +167,7 @@ async function fakeMember(options = {}) {
     port: server.address().port,
     messages,
     created,
+    scratches,
     order,
     waits,
     resetEpoch: () => {
@@ -642,5 +655,80 @@ test('call_member reports whether the message was steered or queued', async () =
       await member.close()
       await rm(dataDir, { recursive: true, force: true })
     }
+  }
+})
+
+test('a delivery is refused while the target member is being upgraded', async () => {
+  const member = await fakeMember()
+  const { tasks, service, dataDir } = await buildService(member.port)
+  service.memberMaintenance = async () => ({
+    active: true,
+    kind: '升级',
+    phase: 'activate',
+    since: '2026-11-26T08:00:00.000Z',
+    job: 'deploy-1',
+  })
+  try {
+    await assert.rejects(
+      () => tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' }),
+      error => error.code === 'member_maintenance'
+        && /正在升级/u.test(error.message)
+        && /deploy-1/u.test(error.message),
+    )
+    assert.deepEqual(member.messages, [], 'nothing is delivered into a restarting member')
+    assert.deepEqual(member.order, [], 'the refusal happens before the first request')
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a long message is delivered as a file pointer', async () => {
+  const member = await fakeMember()
+  const { tasks, dataDir } = await buildService(member.port)
+  try {
+    const body = `长消息${'内容'.repeat(MESSAGE_SPILL_CHARS)}`
+    const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: body })
+    assert.equal(member.scratches.length, 1, 'the body goes to the member once')
+    assert.equal(member.scratches[0].text, body)
+    assert.equal(member.messages.length, 1)
+    assert.match(member.messages[0], /【消息过长】/u)
+    assert.match(member.messages[0], /\/tmp\/member\/messages\/m1\.md/u)
+    assert.equal(task.messageSpill, '/tmp/member/messages/m1.md')
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a short message stays inline', async () => {
+  const member = await fakeMember()
+  const { tasks, dataDir } = await buildService(member.port)
+  try {
+    const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' })
+    assert.equal(member.scratches.length, 0)
+    assert.deepEqual(member.messages, ['继续'])
+    assert.equal(task.messageSpill, null)
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a member without the file endpoint keeps the inline body', async () => {
+  const member = await fakeMember({ scratch: false })
+  const { tasks, dataDir } = await buildService(member.port)
+  try {
+    const body = 'x'.repeat(MESSAGE_SPILL_CHARS + 10)
+    const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: body })
+    assert.deepEqual(member.messages, [body], 'an older member still receives the text')
+    assert.equal(task.messageSpill, null)
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
   }
 })

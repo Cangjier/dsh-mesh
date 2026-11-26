@@ -1184,3 +1184,28 @@ test('interop marks created sessions as member sessions and clears them when rem
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('an oversized message body is stored for the member to read', async () => {
+  const { service, call, dir } = await serviceOf()
+  try {
+    const text = `长消息${'内容'.repeat(500)}`
+    const stored = await call('POST', '/v1/scratch', { text, name: 'member-conv-1' })
+    assert.equal(stored.status, 200)
+    assert.equal(stored.body.ok, true)
+    assert.match(stored.body.path, /dsh-mesh-messages/u)
+    assert.equal(await readFile(stored.body.path, 'utf8'), text)
+    assert.equal(stored.body.bytes, Buffer.byteLength(text, 'utf8'))
+
+    const empty = await call('POST', '/v1/scratch', { text: '   ' })
+    assert.equal(empty.status, 400)
+    assert.equal(empty.body.error.code, 'empty_text')
+
+    const missing = await call('POST', '/v1/scratch', {})
+    assert.equal(missing.status, 400)
+
+    await rm(path.dirname(stored.body.path), { recursive: true, force: true })
+  } finally {
+    await service.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

@@ -3,12 +3,12 @@ import { homedir as homedir4 } from "node:os";
 import path30 from "node:path";
 
 // src/lib/service.mjs
-import { mkdir as mkdir14, readFile as readFile17, readdir as readdir9, rm as rm15, stat as stat13, writeFile as writeFile14 } from "node:fs/promises";
+import { mkdir as mkdir15, readFile as readFile18, readdir as readdir9, rm as rm15, stat as stat13, writeFile as writeFile15 } from "node:fs/promises";
 import { existsSync as existsSync14, readFileSync as readFileSync5, realpathSync } from "node:fs";
 import { execFile as execFile3, spawn as spawn7 } from "node:child_process";
 import { createHash as createHash8 } from "node:crypto";
 import os10 from "node:os";
-import path25 from "node:path";
+import path26 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { promisify as promisify3 } from "node:util";
 
@@ -8291,6 +8291,7 @@ function clearMemberSessions() {
 var UPGRADE_LEAD_MS = 10 * 6e4;
 var UPGRADE_RESUME_DELAY_MS = 2 * 6e4;
 var PLAN_REUSE_MS = UPGRADE_LEAD_MS * 4;
+var UPGRADE_PLAN_MAX_AGE_MS = 30 * 6e4;
 var UPGRADE_LEADER_MESSAGE = "\u8BF7\u901A\u8FC7call_member\u505C\u6B62\u6240\u6709\u8FDB\u884C\u4E2D\u7684\u6210\u5458\u5BF9\u8BDD\uFF0C\u628A\u9700\u8981\u63D0\u4EA4\u7684\u4EE3\u7801\u8FDB\u884C\u63D0\u4EA4\u3002\u5E76\u505C\u6B62\u6D3E\u53D1\u65B0\u7684\u4EFB\u52A1\u3002dsh\u51C6\u5907\u5347\u7EA7\uFF0C\u5C06\u4F1A\u91CD\u542F\u3002\u7B49\u6211\u901A\u77E5\u3002";
 var UPGRADE_MEMBER_MESSAGE = "dsh\u51C6\u5907\u5347\u7EA7\uFF0C\u8BF7\u505C\u6B62\uFF0C\u628A\u9700\u8981\u63D0\u4EA4\u7684\u4EE3\u7801\u8FDB\u884C\u63D0\u4EA4\u3002";
 var UPGRADE_PLAIN_MESSAGE = "dsh\u51C6\u5907\u5347\u7EA7\uFF0C\u8BF7\u505C\u6B62\u3002";
@@ -8463,9 +8464,19 @@ async function resumeUpgradeConversations(ctx, options) {
   return { ok: true, skipped: false, resumed, failed, announcedAt: plan.announcedAt };
 }
 async function armUpgradeResume(ctx, options) {
+  const log = typeof options.log === "function" ? options.log : () => {
+  };
+  const now = typeof options.now === "function" ? options.now : Date.now;
   const plan = await readUpgradePlan(options.planFile);
   if (plan === null) return false;
   if (typeof plan.resumedAt === "string" && plan.resumedAt !== "") return false;
+  const announcedAt = Date.parse(String(plan.announcedAt ?? ""));
+  if (Number.isFinite(announcedAt) && now() - announcedAt > UPGRADE_PLAN_MAX_AGE_MS) {
+    plan.resumedAt = new Date(now()).toISOString();
+    await writeUpgradePlan(options.planFile, plan);
+    log(`upgrade plan from ${String(plan.announcedAt)} expired; no resume armed`);
+    return false;
+  }
   const delay2 = Number.isSafeInteger(options.delayMs) && options.delayMs >= 0 ? options.delayMs : UPGRADE_RESUME_DELAY_MS;
   const setTimer = typeof options.setTimeout === "function" ? options.setTimeout : setTimeout;
   const timer = setTimer(() => {
@@ -8476,17 +8487,723 @@ async function armUpgradeResume(ctx, options) {
     });
   }, delay2);
   timer?.unref?.();
-  const log = typeof options.log === "function" ? options.log : () => {
-  };
   log(`upgrade resume armed in ${String(Math.round(delay2 / 1e3))}s for ${String(Array.isArray(plan.sessions) ? plan.sessions.length : 0)} conversation(s)`);
   return true;
 }
 
+// src/lib/scheduler.mjs
+import { mkdir as mkdir12, readFile as readFile15, writeFile as writeFile11 } from "node:fs/promises";
+import path22 from "node:path";
+
+// src/lib/schedule.mjs
+import path21 from "node:path";
+
+// src/lib/build-artifacts.mjs
+function memberBuildTarget(member) {
+  const platform = String(member?.system?.platform ?? "").trim().toLowerCase();
+  const arch = String(member?.system?.arch ?? "").trim().toLowerCase();
+  if (arch !== "x64" && arch !== "arm64") return null;
+  if (platform.startsWith("linux")) return `linux-${arch}`;
+  if (platform.startsWith("win")) return `win-${arch}`;
+  return null;
+}
+function pickArtifactForMember(artifacts, member) {
+  const target = memberBuildTarget(member);
+  if (target === null) return null;
+  const list = Array.isArray(artifacts) ? artifacts : [];
+  return list.find((artifact) => artifact !== null && typeof artifact === "object" && artifact.target === target) ?? null;
+}
+
+// src/lib/package-sources.mjs
+import path20 from "node:path";
+var PACKAGE_ARCHIVE_RE = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u;
+var DEPLOYABLE_ARCHIVE_RE = /^dsh-mesh-(?!plugin[-.])(.+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u;
+var RELEASE_TARGET_RE = /^(linux|win)-(x64|arm64)$/u;
+function packagePlatformFromName(name) {
+  const match = DEPLOYABLE_ARCHIVE_RE.exec(String(name ?? ""));
+  if (match === null) return null;
+  const os11 = match[2].startsWith("win") ? "windows" : "linux";
+  const arch = match[3];
+  return {
+    version: match[1],
+    os: os11,
+    arch,
+    target: `${os11 === "windows" ? "win" : "linux"}-${arch}`
+  };
+}
+function packageTargetFromName(name) {
+  const match = PACKAGE_ARCHIVE_RE.exec(String(name ?? ""));
+  if (match === null) return null;
+  const os11 = match[3].startsWith("win") ? "windows" : "linux";
+  const arch = match[4];
+  return {
+    version: match[1],
+    buildStamp: match[2],
+    os: os11,
+    arch,
+    target: `${os11 === "windows" ? "win" : "linux"}-${arch}`
+  };
+}
+function normalizeLatestManifest(manifest, options = {}) {
+  const assets = [];
+  const entries = manifest?.assets !== null && typeof manifest?.assets === "object" ? manifest.assets : {};
+  for (const [target, entry] of Object.entries(entries)) {
+    if (!RELEASE_TARGET_RE.test(target)) continue;
+    if (entry === null || typeof entry !== "object") continue;
+    const name = typeof entry.archive === "string" ? entry.archive.trim() : "";
+    const parsed = packageTargetFromName(name);
+    if (parsed === null || parsed.target !== target) continue;
+    const bytes = Number(entry.bytes);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) continue;
+    const sha256 = typeof entry.sha256 === "string" ? entry.sha256.trim().toLowerCase() : "";
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) continue;
+    const providers = [];
+    if (typeof entry.github?.url === "string" && entry.github.url !== "") providers.push("github");
+    if (Array.isArray(entry.gitee?.parts) && entry.gitee.parts.length > 0 && Array.isArray(entry.gitee?.urls) && entry.gitee.urls.length > 0) providers.push("gitee");
+    assets.push({ target, os: parsed.os, arch: parsed.arch, name, bytes, sha256, providers });
+  }
+  assets.sort((left, right) => left.target.localeCompare(right.target));
+  return {
+    ok: assets.length > 0,
+    configured: true,
+    provider: typeof options.provider === "string" && options.provider !== "" ? options.provider : null,
+    version: typeof manifest?.version === "string" ? manifest.version : null,
+    buildStamp: typeof manifest?.buildStamp === "string" ? manifest.buildStamp : null,
+    publishedAt: typeof manifest?.publishedAt === "string" ? manifest.publishedAt : null,
+    assets,
+    manifestUrls: Array.isArray(options.manifestUrls) ? options.manifestUrls.filter((url) => typeof url === "string") : [],
+    ...assets.length === 0 ? { error: "\u53D1\u5E03\u6E05\u5355\u91CC\u6CA1\u6709\u53EF\u7528\u7684\u90E8\u7F72\u5305" } : {}
+  };
+}
+function selectLatestAsset(release, target) {
+  const wanted = normalizeTarget(target);
+  if (wanted === "") return null;
+  const assets = Array.isArray(release?.assets) ? release.assets : [];
+  return assets.find((asset) => asset.target === wanted) ?? null;
+}
+function normalizeTarget(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  const match = /^(linux|win(?:dows)?|win32)-(x64|arm64)$/u.exec(text);
+  if (match === null) return "";
+  return `${match[1].startsWith("linux") ? "linux" : "win"}-${match[2]}`;
+}
+function packageRoots(home, os11) {
+  const base = String(home ?? "").replace(/[\\/]+$/u, "");
+  if (base === "") return [];
+  const join = os11 === "windows" ? path20.win32.join : path20.posix.join;
+  return [join(base, ".dsh", "packages"), join(base, ".dsh", "mesh", "upgrade")];
+}
+function isAllowedPackagePath(candidate, home, os11) {
+  const text = String(candidate ?? "").trim();
+  if (text === "") return false;
+  const p = os11 === "windows" ? path20.win32 : path20.posix;
+  const normalized = p.normalize(text);
+  if (packageTargetFromName(p.basename(normalized)) === null) return false;
+  const roots = packageRoots(home, os11).map((root) => p.normalize(root));
+  const comparand = os11 === "windows" ? normalized.toLowerCase() : normalized;
+  return roots.some((root) => {
+    const prefix = os11 === "windows" ? root.toLowerCase() : root;
+    return comparand === prefix || comparand.startsWith(`${prefix}${p.sep}`);
+  });
+}
+function parseTargetPackageList(stdout) {
+  const packages = [];
+  for (const line of String(stdout ?? "").split(/\r?\n/u)) {
+    const text = line.trim();
+    if (text === "") continue;
+    const [file, rawBytes, rawMtime, rawSha] = text.split("	");
+    if (file === void 0 || rawBytes === void 0) continue;
+    const parsed = packageTargetFromName(file.split(/[\\/]/u).pop() ?? "");
+    if (parsed === null) continue;
+    const bytes = Number(rawBytes);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) continue;
+    const sha256 = typeof rawSha === "string" && /^[a-f0-9]{64}$/u.test(rawSha.trim()) ? rawSha.trim().toLowerCase() : null;
+    const mtime = normalizeMtime(rawMtime);
+    packages.push({ name: file.split(/[\\/]/u).pop() ?? file, path: file, bytes, mtime, sha256, ...parsed });
+  }
+  packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
+  return packages;
+}
+function normalizeMtime(value) {
+  const text = String(value ?? "").trim();
+  if (text === "") return "";
+  if (/^\d+$/u.test(text)) {
+    const seconds = Number.parseInt(text, 10);
+    return Number.isSafeInteger(seconds) && seconds > 0 ? new Date(seconds * 1e3).toISOString() : "";
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : "";
+}
+function listPackagesScript(os11, home = "") {
+  const homeDir = String(home ?? "").trim();
+  if (os11 === "windows") {
+    const base2 = homeDir === "" ? "$env:USERPROFILE" : powershellQuote(homeDir);
+    return `$ErrorActionPreference = 'SilentlyContinue'
+$base = ${base2}
+$roots = @(
+  (Join-Path $base '.dsh\\packages'),
+  (Join-Path $base '.dsh\\mesh\\upgrade')
+)
+$rows = @()
+foreach ($root in $roots) {
+  if (-not (Test-Path -LiteralPath $root)) { continue }
+  Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.Name -match '^dsh-mesh-.*\\.(7z|zip|tar\\.gz|tgz)$' } | ForEach-Object {
+    $sha = ''
+    $side = "$($_.FullName).sha256"
+    if (Test-Path -LiteralPath $side) {
+      $first = Get-Content -LiteralPath $side -TotalCount 1
+      if ($first) { $sha = ($first -split '\\s+')[0] }
+    }
+    $rows += ($_.FullName + [char]9 + $_.Length + [char]9 + $_.LastWriteTimeUtc.ToString('o') + [char]9 + $sha)
+  }
+}
+$rows | ForEach-Object { Write-Output $_ }
+`;
+  }
+  const base = homeDir === "" ? '"$HOME"' : shellQuote(homeDir);
+  return `BASE=${base}
+for root in "$BASE/.dsh/packages" "$BASE/.dsh/mesh/upgrade"; do
+  [ -d "$root" ] || continue
+  find "$root" -maxdepth 3 -type f \\( -name 'dsh-mesh-*.7z' -o -name 'dsh-mesh-*.tar.gz' -o -name 'dsh-mesh-*.tgz' -o -name 'dsh-mesh-*.zip' \\) -print0 2>/dev/null |
+  while IFS= read -r -d '' file; do
+    bytes=$(stat -c %s -- "$file" 2>/dev/null || echo 0)
+    mtime=$(stat -c %Y -- "$file" 2>/dev/null || echo 0)
+    sha=''
+    side="$file.sha256"
+    if [ -f "$side" ]; then sha=$(sed -n '1s/[[:space:]].*//p' "$side" 2>/dev/null || true); fi
+    printf '%s\\t%s\\t%s\\t%s\\n' "$file" "$bytes" "$mtime" "$sha"
+  done
+done
+`;
+}
+function shellQuote(value) {
+  return `'${String(value).replace(/'/gu, `'\\''`)}'`;
+}
+function powershellQuote(value) {
+  return `'${String(value).replace(/'/gu, "''")}'`;
+}
+
+// src/lib/schedule.mjs
+var SCHEDULE_FORMAT = 3;
+var DEFAULT_BUILD_SCHEDULE = Object.freeze({ enabled: false, time: "04:00" });
+var DEFAULT_UPGRADE_SCHEDULE = Object.freeze({ enabled: false, time: "06:00" });
+var LEGACY_BUILD_SCHEDULE = Object.freeze({ enabled: true, time: "04:00" });
+var LEGACY_UPGRADE_SCHEDULE = Object.freeze({ enabled: true, time: "06:00" });
+function parseClock(value) {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{1,2}):(\d{2})$/u.exec(value.trim());
+  if (match === null) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+  return { hour, minute };
+}
+function formatClock(clock) {
+  const hour = clock?.hour;
+  const minute = clock?.minute;
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return "";
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+function normalizeEntry(value, fallback) {
+  const source = value !== null && typeof value === "object" ? value : {};
+  const parsed = parseClock(source.time);
+  const time = parsed === null ? fallback.time : formatClock(parsed);
+  return { enabled: typeof source.enabled === "boolean" ? source.enabled : fallback.enabled, time };
+}
+function normalizeBuildSchedule(value) {
+  return normalizeEntry(value, DEFAULT_BUILD_SCHEDULE);
+}
+function normalizeUpgradeSchedule(value) {
+  return normalizeEntry(value, DEFAULT_UPGRADE_SCHEDULE);
+}
+function normalizeSchedules(value) {
+  const source = value !== null && typeof value === "object" ? value : {};
+  const upgrades = {};
+  const raw = source.upgrades !== null && typeof source.upgrades === "object" ? source.upgrades : {};
+  for (const [memberId, entry] of Object.entries(raw)) {
+    if (typeof memberId === "string" && memberId !== "" && entry !== null && typeof entry === "object") {
+      upgrades[memberId] = normalizeUpgradeSchedule(entry);
+    }
+  }
+  return {
+    build: normalizeBuildSchedule(source.build),
+    upgrade: normalizeUpgradeSchedule(source.upgrade),
+    upgrades
+  };
+}
+function migrateSchedules(value) {
+  const schedule = normalizeSchedules(value);
+  const format = value !== null && typeof value === "object" ? value.format : void 0;
+  if (format === SCHEDULE_FORMAT) return schedule;
+  if (schedule.build.enabled && schedule.build.time === LEGACY_BUILD_SCHEDULE.time) {
+    schedule.build = { ...schedule.build, enabled: false };
+  }
+  if (schedule.upgrade.enabled && schedule.upgrade.time === LEGACY_UPGRADE_SCHEDULE.time) {
+    schedule.upgrade = { ...schedule.upgrade, enabled: false };
+  }
+  return schedule;
+}
+function upgradeEntryFor(schedules, memberId) {
+  const entry = schedules?.upgrades?.[memberId];
+  return entry !== null && typeof entry === "object" ? entry : schedules?.upgrade ?? DEFAULT_UPGRADE_SCHEDULE;
+}
+function nextRunAt(at, time) {
+  const clock = parseClock(time) ?? parseClock(DEFAULT_BUILD_SCHEDULE.time);
+  const next = new Date(at.getTime());
+  next.setHours(clock.hour, clock.minute, 0, 0);
+  if (next.getTime() <= at.getTime()) next.setDate(next.getDate() + 1);
+  return next;
+}
+function packageInfo(name) {
+  if (typeof name !== "string") return null;
+  const match = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(?:x64|arm64)\.(?:7z|tar\.gz|tgz|zip)$/u.exec(name);
+  if (match === null) return null;
+  return {
+    version: match[1],
+    buildStamp: match[2],
+    os: match[3].startsWith("win") ? "windows" : "linux"
+  };
+}
+function stampRank(stamp) {
+  const match = /^(\d{8})([A-Z]+)$/u.exec(String(stamp ?? ""));
+  if (match === null) return null;
+  let letter = 0;
+  for (const char of match[2]) letter = letter * 26 + (char.charCodeAt(0) - 64);
+  return { date: Number(match[1]), letter };
+}
+function compareBuildStamps(left, right) {
+  const a = stampRank(left);
+  const b = stampRank(right);
+  if (a === null || b === null) return String(left ?? "").localeCompare(String(right ?? ""));
+  if (a.date !== b.date) return a.date - b.date;
+  return a.letter - b.letter;
+}
+function latestPackagesByOs(packages) {
+  const latest = {};
+  for (const item of Array.isArray(packages) ? packages : []) {
+    const parsed = packageInfo(item.name);
+    if (parsed === null) continue;
+    const current = latest[parsed.os];
+    if (current === void 0) {
+      latest[parsed.os] = item;
+      continue;
+    }
+    const currentInfo = packageInfo(current.name);
+    if (currentInfo !== null && compareBuildStamps(parsed.buildStamp, currentInfo.buildStamp) > 0) {
+      latest[parsed.os] = item;
+    }
+  }
+  return latest;
+}
+function memberDeployment(member) {
+  const direct = member?.deployment;
+  if (direct !== null && typeof direct === "object") return direct;
+  const nested = member?.gate?.deployment;
+  return nested !== null && typeof nested === "object" ? nested : null;
+}
+function shouldUpgrade(deployment, candidate) {
+  const parsed = packageInfo(candidate?.name);
+  if (parsed === null) return { needed: false, reason: "\u4E0D\u662F\u53EF\u8BC6\u522B\u7684\u90E8\u7F72\u5305\uFF0C\u8DF3\u8FC7" };
+  const currentStamp = typeof deployment?.buildStamp === "string" ? deployment.buildStamp : "";
+  if (currentStamp !== "") {
+    const order = compareBuildStamps(parsed.buildStamp, currentStamp);
+    if (order === 0) return { needed: false, reason: "\u5DF2\u7ECF\u662F\u8FD9\u4E2A\u90E8\u7F72\u5305" };
+    if (order < 0) return { needed: false, reason: "\u6700\u65B0\u5305\u7684\u6784\u5EFA\u53F7\u6BD4\u5F53\u524D\u90E8\u7F72\u65E7" };
+    return { needed: true, reason: `${currentStamp} \u2192 ${parsed.buildStamp}` };
+  }
+  const currentVersion = typeof deployment?.version === "string" ? deployment.version : "";
+  if (currentVersion !== "" && currentVersion === parsed.version) {
+    return { needed: false, reason: `\u5DF2\u7ECF\u662F ${parsed.version}` };
+  }
+  return { needed: true, reason: `\u5347\u7EA7\u5230 ${parsed.buildStamp}` };
+}
+function memberOs(member) {
+  const platform = String(member?.system?.platform ?? member?.gate?.system?.platform ?? "").toLowerCase();
+  if (platform.startsWith("win")) return "windows";
+  if (platform.startsWith("linux")) return "linux";
+  const target = String(memberDeployment(member)?.target?.os ?? "").toLowerCase();
+  return target.startsWith("win") ? "windows" : "linux";
+}
+function planMemberUpgrade(member, packages, release) {
+  const deployment = memberDeployment(member);
+  if (deployment === null) return { reason: "\u8BFB\u4E0D\u5230\u5F53\u524D\u90E8\u7F72" };
+  if (member?.online === false) return { reason: "\u79BB\u7EBF" };
+  const os11 = memberOs(member);
+  const local = latestPackagesByOs(packages)[os11] ?? null;
+  const target = memberBuildTarget(member);
+  const asset = release !== null && release?.ok === true && target !== null ? selectLatestAsset(release, target) : null;
+  let chosen = local === null ? null : { source: "local", package: local, target: null };
+  if (asset !== null) {
+    const candidate = { source: "release", package: asset, target: asset.target };
+    if (chosen === null || newerPackage(candidate.package, chosen.package)) chosen = candidate;
+  }
+  if (chosen === null) return { reason: `\u6CA1\u6709 ${os11 === "windows" ? "Windows" : "Linux"} \u90E8\u7F72\u5305` };
+  const decision = shouldUpgrade(deployment, chosen.package);
+  if (!decision.needed) return { reason: decision.reason };
+  return { ...chosen, reason: decision.reason };
+}
+function newerPackage(candidate, current) {
+  const next = packageInfo(candidate?.name);
+  const previous = packageInfo(current?.name);
+  if (next === null || previous === null) return false;
+  return compareBuildStamps(next.buildStamp, previous.buildStamp) > 0;
+}
+function buildUpdateReasons(input) {
+  const latest = input.latestManifest;
+  const current = input.current;
+  if (latest === null || typeof latest !== "object") return ["\u8FD8\u6CA1\u6709\u5E26\u7248\u672C\u4FE1\u606F\u7684\u7F16\u8BD1\u4EFB\u52A1"];
+  const reasons = [];
+  if (latest.source !== current.source || latest.ref !== current.ref) {
+    reasons.push("\u6E90\u7801\u6216\u5F15\u7528\u53D8\u4E86");
+  }
+  if (latest.sourceEtag === void 0 || latest.sourceEtag === null || current.sourceEtag === null) {
+    reasons.push("\u65E0\u6CD5\u786E\u8BA4 DSH \u6E90\u7801\u7248\u672C");
+  } else if (latest.sourceEtag !== current.sourceEtag) {
+    reasons.push("DSH \u6E90\u7801\u6709\u66F4\u65B0");
+  }
+  const plugin = latest.plugin;
+  if (plugin === null || typeof plugin !== "object" || typeof plugin.fingerprint !== "string" || current.pluginFingerprint === null) {
+    reasons.push("\u65E0\u6CD5\u786E\u8BA4 dsh-mesh \u7248\u672C");
+  } else if (plugin.fingerprint !== current.pluginFingerprint) {
+    reasons.push("dsh-mesh \u6709\u66F4\u65B0");
+  }
+  const latestPlugins = Array.isArray(latest.extraPlugins) ? latest.extraPlugins : [];
+  for (const entry of current.extraPlugins) {
+    const previous = latestPlugins.find((item) => item?.name === entry.name);
+    const previousEtag = typeof previous?.archiveEtag === "string" ? previous.archiveEtag : "";
+    if (previousEtag === "" || entry.etag === null) reasons.push(`${entry.name} \u6709\u66F4\u65B0`);
+    else if (previousEtag !== entry.etag) reasons.push(`${entry.name} \u6709\u66F4\u65B0`);
+  }
+  return reasons;
+}
+function scheduleFile(dataDir) {
+  return path21.join(dataDir, "schedule.json");
+}
+
+// src/lib/scheduler.mjs
+var TICK_TOLERANCE_MS = 9e4;
+var DUPLICATE_WINDOW_MS = 10 * 6e4;
+var Scheduler = class {
+  /**
+   * @param {object} options scheduler input.
+   * @param {{ scheduledBuild: () => Promise<object>, scheduledUpgradeMember: (memberId: string) => Promise<object> }} options.service mesh service.
+   * @param {string} options.file `schedule.json` path.
+   * @param {() => Promise<string[]>} [options.members] current member id provider.
+   * @param {(line: string) => void} [options.log] logger.
+   * @param {() => number} [options.now] clock (tests).
+   * @param {typeof setTimeout} [options.setTimeout] timer factory (tests).
+   * @param {typeof clearTimeout} [options.clearTimeout] timer canceller (tests).
+   * @param {boolean} [options.autoStart] arm on construction; default true.
+   */
+  constructor(options) {
+    this.service = options.service;
+    this.file = options.file;
+    this.memberIdProvider = typeof options.members === "function" ? options.members : null;
+    this.log = typeof options.log === "function" ? options.log : () => {
+    };
+    this.now = typeof options.now === "function" ? options.now : Date.now;
+    this.setTimer = options.setTimeout ?? setTimeout;
+    this.clearTimer = options.clearTimeout ?? clearTimeout;
+    this.schedule = normalizeSchedules({});
+    this.upgrades = /* @__PURE__ */ new Map();
+    this.last = { build: null, upgrades: {}, prepares: {} };
+    this.runningUpgrades = /* @__PURE__ */ new Set();
+    this.runningBuild = false;
+    this.memberIds = [];
+    this.timer = null;
+    this.disposed = false;
+    this.loading = null;
+    if (options.autoStart !== false) void this.start();
+  }
+  /**
+   * Read the persisted schedule, discover members, and arm the timer.
+   * @returns {Promise<void>} when armed.
+   */
+  async start() {
+    await this.#load();
+    await this.#refreshMembers();
+    this.#arm();
+  }
+  /**
+   * Merge one client update and re-arm immediately.
+   *
+   * Either the build clock (`{build}`) or one member's auto-upgrade
+   * (`{member, upgrade}`) is updated per call.
+   * @param {{build?: {enabled?: boolean, time?: string}, member?: string, upgrade?: {enabled?: boolean, time?: string}}} patch schedule patch.
+   * @returns {Promise<object>} new status (build or the member's entry).
+   */
+  async update(patch) {
+    const memberId = typeof patch?.member === "string" ? patch.member.trim() : "";
+    if (memberId !== "") {
+      const entry = normalizeUpgradeSchedule({
+        ...upgradeEntryFor(this.schedule, memberId),
+        ...patch?.upgrade ?? {}
+      });
+      this.upgrades.set(memberId, entry);
+      if (!this.memberIds.includes(memberId)) this.memberIds.push(memberId);
+    } else if (patch?.build !== void 0) {
+      this.schedule.build = normalizeBuildSchedule({ ...this.schedule.build, ...patch.build ?? {} });
+    }
+    this.schedule = {
+      ...this.schedule,
+      upgrades: Object.fromEntries(this.upgrades)
+    };
+    await this.#save();
+    this.#arm();
+    this.log(`schedule saved: build ${this.schedule.build.time} ${this.schedule.build.enabled ? "on" : "off"}${memberId === "" ? "" : `, upgrade ${memberId} ${this.upgrades.get(memberId)?.time} ${this.upgrades.get(memberId)?.enabled ? "on" : "off"}`}`);
+    return this.status(memberId === "" ? void 0 : memberId);
+  }
+  /**
+   * The panel's read model.
+   * @param {string} [memberId] when set, include that member's auto-upgrade.
+   * @returns {object} status.
+   */
+  status(memberId) {
+    const at = new Date(this.now());
+    const result = {
+      ok: true,
+      build: this.#statusEntry(this.schedule.build, "build", void 0, at)
+    };
+    if (typeof memberId === "string" && memberId !== "") {
+      result.upgrade = this.#statusEntry(upgradeEntryFor(this.schedule, memberId), "upgrade", memberId, at);
+    }
+    return result;
+  }
+  /** Stop the timer. */
+  dispose() {
+    this.disposed = true;
+    if (this.timer !== null) this.clearTimer(this.timer);
+    this.timer = null;
+  }
+  /** Build one status row with next occurrence and last outcome. */
+  #statusEntry(entry, kind, memberId, at) {
+    const last = kind === "build" ? this.last.build : this.last.upgrades[memberId] ?? null;
+    return {
+      enabled: entry.enabled,
+      time: entry.time,
+      next: entry.enabled ? nextRunAt(at, entry.time).toISOString() : null,
+      last,
+      // The announcement runs one lead time before the upgrade itself, so the
+      // panel can show that the member's conversations were told to stop.
+      ...kind === "build" ? {} : { prepare: this.last.prepares?.[memberId] ?? null },
+      running: kind === "build" ? this.runningBuild : this.runningUpgrades.has(memberId),
+      ...memberId === void 0 ? {} : { member: memberId }
+    };
+  }
+  /** Read the schedule file once. */
+  async #load() {
+    if (this.loading !== null) return this.loading;
+    this.loading = (async () => {
+      try {
+        const parsed = JSON.parse(await readFile15(this.file, "utf8"));
+        const normalized = migrateSchedules(parsed);
+        this.schedule = normalized;
+        this.upgrades = new Map(Object.entries(normalized.upgrades));
+        if (parsed?.last !== null && typeof parsed?.last === "object") {
+          this.last = {
+            build: typeof parsed.last.build === "object" ? parsed.last.build : null,
+            upgrades: parsed.last.upgrades !== null && typeof parsed.last.upgrades === "object" ? parsed.last.upgrades : {},
+            prepares: parsed.last.prepares !== null && typeof parsed.last.prepares === "object" ? parsed.last.prepares : {}
+          };
+        }
+        if (parsed?.format !== SCHEDULE_FORMAT) await this.#save();
+      } catch {
+      }
+    })();
+    return this.loading;
+  }
+  /** Persist the current settings and last outcomes. */
+  async #save() {
+    try {
+      await mkdir12(path22.dirname(this.file), { recursive: true });
+      await writeFile11(this.file, `${JSON.stringify({
+        format: SCHEDULE_FORMAT,
+        build: this.schedule.build,
+        upgrade: this.schedule.upgrade,
+        upgrades: Object.fromEntries(this.upgrades),
+        last: this.last
+      }, null, 2)}
+`, "utf8");
+    } catch (error) {
+      this.log(`cannot save schedule: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  /** Ask the service who exists now; a failure keeps the previous list. */
+  async #refreshMembers() {
+    if (this.memberIdProvider === null) return;
+    try {
+      const ids = await this.memberIdProvider();
+      const unique = [...new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === "string" && id !== ""))];
+      if (unique.length > 0) this.memberIds = unique;
+    } catch {
+    }
+  }
+  /** One timer for the nearest enabled occurrence. */
+  #arm() {
+    if (this.disposed) return;
+    if (this.timer !== null) this.clearTimer(this.timer);
+    this.timer = null;
+    const at = new Date(this.now());
+    const candidates = [];
+    if (this.schedule.build.enabled) {
+      candidates.push({ kind: "build", memberId: void 0, at: nextRunAt(at, this.schedule.build.time) });
+    }
+    const ids = [.../* @__PURE__ */ new Set([...this.memberIds, ...this.upgrades.keys()])];
+    for (const memberId of ids) {
+      const entry = upgradeEntryFor(this.schedule, memberId);
+      if (!entry.enabled) continue;
+      const upgradeAt = nextRunAt(at, entry.time);
+      candidates.push({ kind: "upgrade", memberId, at: upgradeAt });
+      const prepareAt = new Date(upgradeAt.getTime() - UPGRADE_LEAD_MS);
+      if (prepareAt.getTime() > at.getTime() + 1e3) {
+        candidates.push({ kind: "prepare", memberId, at: prepareAt });
+      }
+    }
+    if (candidates.length === 0) return;
+    candidates.sort((left, right) => left.at.getTime() - right.at.getTime());
+    const next = candidates[0];
+    const delay2 = Math.max(0, next.at.getTime() - at.getTime());
+    this.timer = this.setTimer(() => {
+      this.timer = null;
+      void this.#tick();
+    }, delay2);
+    if (typeof this.timer?.unref === "function") this.timer.unref();
+    this.log(`next ${next.kind}${next.memberId === void 0 ? "" : ` ${next.memberId}`} at ${next.at.toISOString()}`);
+  }
+  /** Run every occurrence due in this tick, then re-arm. */
+  async #tick() {
+    if (this.disposed) return;
+    await this.#refreshMembers();
+    const at = new Date(this.now());
+    try {
+      if (this.schedule.build.enabled && this.#isDue(this.schedule.build.time, at)) {
+        if (!this.#recentlyRan(this.last.build)) await this.#runBuild();
+      }
+      for (const memberId of [.../* @__PURE__ */ new Set([...this.memberIds, ...this.upgrades.keys()])]) {
+        const entry = upgradeEntryFor(this.schedule, memberId);
+        if (!entry.enabled) continue;
+        const prepareDue = [new Date(at.getTime() - 24 * 60 * 6e4), at].some((reference) => {
+          const upgradeAt = nextRunAt(reference, entry.time);
+          return this.#isDueTime(new Date(upgradeAt.getTime() - UPGRADE_LEAD_MS), at);
+        });
+        if (prepareDue && !this.#recentlyRan(this.last.prepares?.[memberId])) {
+          await this.#runPrepare(memberId);
+        }
+        if (!this.#isDue(entry.time, at)) continue;
+        if (this.runningUpgrades.has(memberId)) continue;
+        if (this.#recentlyRan(this.last.upgrades[memberId])) continue;
+        await this.#runUpgrade(memberId);
+      }
+    } finally {
+      this.#arm();
+    }
+  }
+  /** Whether a daily clock occurrence is within the tick window. */
+  #isDue(time, at) {
+    const base = new Date(at.getTime() - 24 * 60 * 6e4);
+    const due = nextRunAt(base, time);
+    return Math.abs(due.getTime() - at.getTime()) <= TICK_TOLERANCE_MS;
+  }
+  /** Whether one exact instant is within the tick window. */
+  #isDueTime(due, at) {
+    return Math.abs(due.getTime() - at.getTime()) <= TICK_TOLERANCE_MS;
+  }
+  /** Whether this kind already ran within the duplicate window. */
+  #recentlyRan(last) {
+    const at = last?.at;
+    return typeof at === "string" && Math.abs(this.now() - Date.parse(at)) < DUPLICATE_WINDOW_MS;
+  }
+  /**
+   * Run the pre-upgrade announcement and record the outcome.
+   *
+   * Independent of the upgrade tick on purpose: a failure only means the
+   * conversations were not stopped in time, and the upgrade still runs.
+   * @param {string} memberId member id.
+   * @returns {Promise<void>} when recorded.
+   */
+  async #runPrepare(memberId) {
+    const at = new Date(this.now()).toISOString();
+    try {
+      this.log(`prepare ${memberId} tick at ${at}`);
+      const result = await this.service.scheduledPrepareUpgrade(memberId);
+      this.last.prepares ??= {};
+      this.last.prepares[memberId] = { at, ...result !== null && typeof result === "object" ? result : { status: "unknown" } };
+      await this.#save();
+      this.log(`prepare ${memberId}: ${String(this.last.prepares[memberId].status ?? "unknown")}${this.last.prepares[memberId].reason ? ` (${String(this.last.prepares[memberId].reason)})` : ""}`);
+    } catch (error) {
+      this.last.prepares ??= {};
+      this.last.prepares[memberId] = { at, status: "failed", reason: error instanceof Error ? error.message : String(error) };
+      await this.#save();
+      this.log(`prepare ${memberId} failed: ${String(this.last.prepares[memberId].reason)}`);
+    }
+  }
+  /** Run the build hook and record the outcome. */
+  async #runBuild() {
+    if (this.runningBuild) return;
+    this.runningBuild = true;
+    const at = new Date(this.now()).toISOString();
+    try {
+      this.log(`build tick at ${at}`);
+      const result = await this.service.scheduledBuild();
+      this.last.build = { at, ...result !== null && typeof result === "object" ? result : { status: "unknown" } };
+      await this.#save();
+      this.log(`build: ${String(this.last.build.status ?? "unknown")}${this.last.build.reason ? ` (${String(this.last.build.reason)})` : ""}`);
+    } catch (error) {
+      this.last.build = { at, status: "failed", reason: error instanceof Error ? error.message : String(error) };
+      await this.#save();
+      this.log(`build failed: ${String(this.last.build.reason)}`);
+    } finally {
+      this.runningBuild = false;
+    }
+  }
+  /** Run one member's upgrade hook and record the outcome. */
+  async #runUpgrade(memberId) {
+    if (this.runningUpgrades.has(memberId)) return;
+    this.runningUpgrades.add(memberId);
+    const at = new Date(this.now()).toISOString();
+    try {
+      this.log(`upgrade ${memberId} tick at ${at}`);
+      const result = await this.service.scheduledUpgradeMember(memberId);
+      this.last.upgrades[memberId] = { at, ...result !== null && typeof result === "object" ? result : { status: "unknown" } };
+      await this.#save();
+      this.log(`upgrade ${memberId}: ${String(this.last.upgrades[memberId].status ?? "unknown")}${this.last.upgrades[memberId].reason ? ` (${String(this.last.upgrades[memberId].reason)})` : ""}`);
+    } catch (error) {
+      this.last.upgrades[memberId] = { at, status: "failed", reason: error instanceof Error ? error.message : String(error) };
+      await this.#save();
+      this.log(`upgrade ${memberId} failed: ${String(this.last.upgrades[memberId].reason)}`);
+    } finally {
+      this.runningUpgrades.delete(memberId);
+    }
+  }
+};
+async function readScheduleFile(file) {
+  try {
+    const parsed = JSON.parse(await readFile15(file, "utf8"));
+    const schedule = migrateSchedules(parsed);
+    return {
+      schedule,
+      upgrades: schedule.upgrades,
+      last: {
+        build: typeof parsed?.last?.build === "object" ? parsed.last.build : null,
+        upgrades: parsed?.last?.upgrades !== null && typeof parsed?.last?.upgrades === "object" ? parsed.last.upgrades : {},
+        prepares: parsed?.last?.prepares !== null && typeof parsed?.last?.prepares === "object" ? parsed.last.prepares : {}
+      }
+    };
+  } catch {
+    return {
+      schedule: normalizeSchedules({}),
+      upgrades: {},
+      last: { build: null, upgrades: {}, prepares: {} }
+    };
+  }
+}
+
 // src/lib/remote-build.mjs
 import { createHash as createHash5 } from "node:crypto";
-import { mkdtemp as mkdtemp6, open as open4, rename as rename9, rm as rm12, stat as stat11, writeFile as writeFile11 } from "node:fs/promises";
+import { mkdtemp as mkdtemp6, open as open4, rename as rename9, rm as rm12, stat as stat11, writeFile as writeFile12 } from "node:fs/promises";
 import { tmpdir as tmpdir4 } from "node:os";
-import path20 from "node:path";
+import path23 from "node:path";
 var DEFAULT_MESH_REPO = "https://github.com/Cangjier/dsh-mesh.git";
 var REMOTE_SRC = "$HOME/.dsh/mesh/build-src";
 var REMOTE_JOBS = "$HOME/.dsh/mesh/build";
@@ -8845,7 +9562,7 @@ var RemoteBuilder = class {
       const info = await stat11(local);
       const digest = await sha256File3(local);
       await writeSidecar(local, digest);
-      await appendLog(jobDir, `pulled ${path20.basename(local)} (${String(info.size)} bytes)`);
+      await appendLog(jobDir, `pulled ${path23.basename(local)} (${String(info.size)} bytes)`);
       pulled += 1;
       await this.#update(jobDir, { phase: "fetch", percent: 96 + Math.round(3 * pulled / directories.length) });
       return { local, digest, bytes: info.size };
@@ -8873,7 +9590,7 @@ var RemoteBuilder = class {
         if (staged !== null) {
           if (digest === null) digest = staged.sha256;
           if (bytes === null) bytes = staged.bytes;
-          await appendLog(jobDir, `staged ${path20.basename(staged.path)} for the automatic upgrade (${String(staged.bytes)} bytes)`);
+          await appendLog(jobDir, `staged ${path23.basename(staged.path)} for the automatic upgrade (${String(staged.bytes)} bytes)`);
         } else if (local === null) {
           await appendLog(jobDir, "staging failed; pulling the archive back so the build result is preserved");
           try {
@@ -8937,13 +9654,13 @@ var RemoteBuilder = class {
    * @returns {Promise<void>} completion.
    */
   async #uploadReleaseConfig(runner, config, remote, windows) {
-    const dir = await mkdtemp6(path20.join(tmpdir4(), "dsh-mesh-release-config-"));
-    const local = path20.join(dir, "release.json");
-    await writeFile11(local, `${JSON.stringify(config, null, 2)}
+    const dir = await mkdtemp6(path23.join(tmpdir4(), "dsh-mesh-release-config-"));
+    const local = path23.join(dir, "release.json");
+    await writeFile12(local, `${JSON.stringify(config, null, 2)}
 `, { encoding: "utf8", mode: 384 });
     try {
       if (windows) {
-        const dir2 = path20.win32.dirname(remote);
+        const dir2 = path23.win32.dirname(remote);
         await runner.runProcess("ssh", [...runner.sshOptions(), runner.target(), `cmd /c if not exist "${dir2}" mkdir "${dir2}"`]);
       } else {
         await runner.runProcess("ssh", [...runner.sshOptions(), runner.target(), `umask 077; : > '${remote.replace(/'/gu, `'\\''`)}'`]);
@@ -9012,8 +9729,8 @@ var RemoteBuilder = class {
    * @returns {Promise<string>} local path.
    */
   async #pull(runner, remote, windows = false) {
-    const name = remote.split(/[\\/]/u).pop() ?? path20.basename(remote);
-    const local = path20.join(this.packagesDir, name);
+    const name = remote.split(/[\\/]/u).pop() ?? path23.basename(remote);
+    const local = path23.join(this.packagesDir, name);
     const temporary = `${local}.part`;
     const args = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-P", String(runner.plan.port ?? 22)];
     if (runner.plan.identityFile) args.push("-i", runner.plan.identityFile);
@@ -9040,7 +9757,7 @@ var RemoteBuilder = class {
    * @returns {Promise<{path: string, bytes: number, sha256: string}|null>} staged archive, or null.
    */
   async #stageArtifact(runner, jobDir, jobId, remoteArchive, windows) {
-    const name = remoteArchive.split(/[\\/]/u).pop() ?? path20.basename(remoteArchive);
+    const name = remoteArchive.split(/[\\/]/u).pop() ?? path23.basename(remoteArchive);
     const command = windows ? powershellCommand([
       "$ProgressPreference = 'SilentlyContinue'",
       `$stage = Join-Path $env:USERPROFILE '.dsh\\mesh\\upgrade\\${jobId}'`,
@@ -9114,7 +9831,7 @@ var RemoteBuilder = class {
   }
 };
 async function writeSidecar(file, digest) {
-  await writeFile11(`${file}.sha256`, `${digest}  ${path20.basename(file)}
+  await writeFile12(`${file}.sha256`, `${digest}  ${path23.basename(file)}
 `, "utf8");
 }
 
@@ -9143,9 +9860,9 @@ function payloadOf(method, path31, timestamp, nonce) {
 // code/build/repack.mjs
 import { execFile } from "node:child_process";
 import { createHash as createHash7 } from "node:crypto";
-import { cp as cp3, mkdir as mkdir12, mkdtemp as mkdtemp7, readFile as readFile15, readdir as readdir7, rm as rm13, stat as stat12, writeFile as writeFile12 } from "node:fs/promises";
+import { cp as cp3, mkdir as mkdir13, mkdtemp as mkdtemp7, readFile as readFile16, readdir as readdir7, rm as rm13, stat as stat12, writeFile as writeFile13 } from "node:fs/promises";
 import { createReadStream as createReadStream6, existsSync as existsSync12 } from "node:fs";
-import path21 from "node:path";
+import path24 from "node:path";
 import { promisify } from "node:util";
 var run2 = promisify(execFile);
 var CODE_SCRIPTS = ["install.sh", "install.ps1"];
@@ -9169,45 +9886,45 @@ async function replaceFile(from, to) {
 async function countFiles(dir) {
   let total = 0;
   for (const entry of await readdir7(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) total += await countFiles(path21.join(dir, entry.name));
+    if (entry.isDirectory()) total += await countFiles(path24.join(dir, entry.name));
     else if (entry.isFile()) total += 1;
   }
   return total;
 }
 async function repackDirectory(packageDir, repositoryRoot) {
-  const manifestFile = path21.join(packageDir, "manifest.json");
+  const manifestFile = path24.join(packageDir, "manifest.json");
   if (!existsSync12(manifestFile)) throw new Error(`${packageDir} is not an extracted package (no manifest.json)`);
-  await replaceDirectory(path21.join(repositoryRoot, "code", "gate"), path21.join(packageDir, "gate"));
-  await replaceDirectory(path21.join(repositoryRoot, "code", "shared"), path21.join(packageDir, "shared"));
-  await replaceDirectory(path21.join(repositoryRoot, "code", "config"), path21.join(packageDir, "config"));
+  await replaceDirectory(path24.join(repositoryRoot, "code", "gate"), path24.join(packageDir, "gate"));
+  await replaceDirectory(path24.join(repositoryRoot, "code", "shared"), path24.join(packageDir, "shared"));
+  await replaceDirectory(path24.join(repositoryRoot, "code", "config"), path24.join(packageDir, "config"));
   for (const name of CODE_DIRS) {
-    await replaceDirectory(path21.join(repositoryRoot, "code", name), path21.join(packageDir, "code", name));
+    await replaceDirectory(path24.join(repositoryRoot, "code", name), path24.join(packageDir, "code", name));
   }
-  await replaceDirectory(path21.join(repositoryRoot, "docs"), path21.join(packageDir, "docs"));
+  await replaceDirectory(path24.join(repositoryRoot, "docs"), path24.join(packageDir, "docs"));
   for (const name of CODE_SCRIPTS) {
-    await replaceFile(path21.join(repositoryRoot, "code", name), path21.join(packageDir, name));
+    await replaceFile(path24.join(repositoryRoot, "code", name), path24.join(packageDir, name));
   }
   for (const name of ROOT_SCRIPTS) {
-    await replaceFile(path21.join(repositoryRoot, name), path21.join(packageDir, name));
+    await replaceFile(path24.join(repositoryRoot, name), path24.join(packageDir, name));
   }
   for (const name of PLUGIN_FILES) {
-    await replaceFile(path21.join(repositoryRoot, name), path21.join(packageDir, "plugins", "dsh-mesh", name));
+    await replaceFile(path24.join(repositoryRoot, name), path24.join(packageDir, "plugins", "dsh-mesh", name));
   }
   for (const name of PLUGIN_DIRS) {
-    await replaceDirectory(path21.join(repositoryRoot, name), path21.join(packageDir, "plugins", "dsh-mesh", name));
+    await replaceDirectory(path24.join(repositoryRoot, name), path24.join(packageDir, "plugins", "dsh-mesh", name));
   }
-  const manifest = JSON.parse(await readFile15(manifestFile, "utf8"));
+  const manifest = JSON.parse(await readFile16(manifestFile, "utf8"));
   const features = new Set(Array.isArray(manifest.features) ? manifest.features : []);
   features.add("embedded-interop");
   manifest.features = [...features];
-  const staticAssets = await collectStaticAssets(path21.join(packageDir, "gate"));
+  const staticAssets = await collectStaticAssets(path24.join(packageDir, "gate"));
   manifest.staticAssets = staticAssets;
   manifest.builtAt = (/* @__PURE__ */ new Date()).toISOString();
   manifest.repackedFrom = "code/build/repack.mjs";
   manifest.files = await countFiles(packageDir);
-  await writeFile12(manifestFile, `${JSON.stringify(manifest, null, 2)}
+  await writeFile13(manifestFile, `${JSON.stringify(manifest, null, 2)}
 `, "utf8");
-  const clientBytes = (await stat12(path21.join(packageDir, "plugins", "dsh-mesh", "client.js"))).size;
+  const clientBytes = (await stat12(path24.join(packageDir, "plugins", "dsh-mesh", "client.js"))).size;
   return { packageDir, version: manifest.version, target: manifest.target, files: manifest.files, clientBytes };
 }
 async function sha256File4(file) {
@@ -9221,10 +9938,10 @@ async function sha256File4(file) {
   return hash.digest("hex");
 }
 function archiveRootName(file) {
-  return path21.basename(file).replace(/\.(7z|tar\.gz|tgz|zip)$/u, "");
+  return path24.basename(file).replace(/\.(7z|tar\.gz|tgz|zip)$/u, "");
 }
 async function extractArchive(file, directory, repositoryRoot) {
-  await mkdir12(directory, { recursive: true });
+  await mkdir13(directory, { recursive: true });
   if (isSevenZipArchive(file)) {
     const binary = await ensureSevenZipBinary(hostSevenZipPath(repositoryRoot));
     await run2(binary, ["x", "-y", "-bd", `-o${directory}`, file]);
@@ -9237,9 +9954,9 @@ async function extractArchive(file, directory, repositoryRoot) {
   } else {
     await run2("tar", ["-xzf", file, "-C", directory]);
   }
-  const root = path21.join(directory, archiveRootName(file));
-  if (!existsSync12(path21.join(root, "manifest.json"))) {
-    throw new Error(`archive ${path21.basename(file)} has no ${archiveRootName(file)}/manifest.json`);
+  const root = path24.join(directory, archiveRootName(file));
+  if (!existsSync12(path24.join(root, "manifest.json"))) {
+    throw new Error(`archive ${path24.basename(file)} has no ${archiveRootName(file)}/manifest.json`);
   }
   return root;
 }
@@ -9260,21 +9977,21 @@ async function compressDirectory(parent, name, file, repositoryRoot) {
 }
 async function repackArchive(file, { repositoryRoot, log = () => {
 } }) {
-  const work = await mkdtemp7(path21.join(path21.dirname(file), ".repack-"));
+  const work = await mkdtemp7(path24.join(path24.dirname(file), ".repack-"));
   try {
-    log(`extracting ${path21.basename(file)}`);
+    log(`extracting ${path24.basename(file)}`);
     const packageDir = await extractArchive(file, work, repositoryRoot);
     const summary = await repackDirectory(packageDir, repositoryRoot);
     log(`replaced gateway, scripts and plugin files (${String(summary.files)} files in the package)`);
-    const parent = path21.dirname(packageDir);
-    const name = path21.basename(packageDir);
+    const parent = path24.dirname(packageDir);
+    const name = path24.basename(packageDir);
     await compressDirectory(parent, name, file, repositoryRoot);
     const bytes = (await stat12(file)).size;
     const sha256 = await sha256File4(file);
-    await writeFile12(`${file}.sha256`, `${sha256}  ${path21.basename(file)}
+    await writeFile13(`${file}.sha256`, `${sha256}  ${path24.basename(file)}
 
 `, "utf8");
-    log(`wrote ${path21.basename(file)} (${String(bytes)} bytes)`);
+    log(`wrote ${path24.basename(file)} (${String(bytes)} bytes)`);
     return { package: file, version: summary.version, target: summary.target, bytes, sha256, files: summary.files };
   } finally {
     await rm13(work, { recursive: true, force: true });
@@ -9544,392 +10261,6 @@ async function collectSystemInfo(options = {}) {
   };
 }
 
-// src/lib/schedule.mjs
-import path23 from "node:path";
-
-// src/lib/build-artifacts.mjs
-function memberBuildTarget(member) {
-  const platform = String(member?.system?.platform ?? "").trim().toLowerCase();
-  const arch = String(member?.system?.arch ?? "").trim().toLowerCase();
-  if (arch !== "x64" && arch !== "arm64") return null;
-  if (platform.startsWith("linux")) return `linux-${arch}`;
-  if (platform.startsWith("win")) return `win-${arch}`;
-  return null;
-}
-function pickArtifactForMember(artifacts, member) {
-  const target = memberBuildTarget(member);
-  if (target === null) return null;
-  const list = Array.isArray(artifacts) ? artifacts : [];
-  return list.find((artifact) => artifact !== null && typeof artifact === "object" && artifact.target === target) ?? null;
-}
-
-// src/lib/package-sources.mjs
-import path22 from "node:path";
-var PACKAGE_ARCHIVE_RE = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u;
-var DEPLOYABLE_ARCHIVE_RE = /^dsh-mesh-(?!plugin[-.])(.+)-(linux|win(?:dows)?)-(x64|arm64)\.(7z|tar\.gz|tgz|zip)$/u;
-var RELEASE_TARGET_RE = /^(linux|win)-(x64|arm64)$/u;
-function packagePlatformFromName(name) {
-  const match = DEPLOYABLE_ARCHIVE_RE.exec(String(name ?? ""));
-  if (match === null) return null;
-  const os11 = match[2].startsWith("win") ? "windows" : "linux";
-  const arch = match[3];
-  return {
-    version: match[1],
-    os: os11,
-    arch,
-    target: `${os11 === "windows" ? "win" : "linux"}-${arch}`
-  };
-}
-function packageTargetFromName(name) {
-  const match = PACKAGE_ARCHIVE_RE.exec(String(name ?? ""));
-  if (match === null) return null;
-  const os11 = match[3].startsWith("win") ? "windows" : "linux";
-  const arch = match[4];
-  return {
-    version: match[1],
-    buildStamp: match[2],
-    os: os11,
-    arch,
-    target: `${os11 === "windows" ? "win" : "linux"}-${arch}`
-  };
-}
-function normalizeLatestManifest(manifest, options = {}) {
-  const assets = [];
-  const entries = manifest?.assets !== null && typeof manifest?.assets === "object" ? manifest.assets : {};
-  for (const [target, entry] of Object.entries(entries)) {
-    if (!RELEASE_TARGET_RE.test(target)) continue;
-    if (entry === null || typeof entry !== "object") continue;
-    const name = typeof entry.archive === "string" ? entry.archive.trim() : "";
-    const parsed = packageTargetFromName(name);
-    if (parsed === null || parsed.target !== target) continue;
-    const bytes = Number(entry.bytes);
-    if (!Number.isSafeInteger(bytes) || bytes <= 0) continue;
-    const sha256 = typeof entry.sha256 === "string" ? entry.sha256.trim().toLowerCase() : "";
-    if (!/^[a-f0-9]{64}$/u.test(sha256)) continue;
-    const providers = [];
-    if (typeof entry.github?.url === "string" && entry.github.url !== "") providers.push("github");
-    if (Array.isArray(entry.gitee?.parts) && entry.gitee.parts.length > 0 && Array.isArray(entry.gitee?.urls) && entry.gitee.urls.length > 0) providers.push("gitee");
-    assets.push({ target, os: parsed.os, arch: parsed.arch, name, bytes, sha256, providers });
-  }
-  assets.sort((left, right) => left.target.localeCompare(right.target));
-  return {
-    ok: assets.length > 0,
-    configured: true,
-    provider: typeof options.provider === "string" && options.provider !== "" ? options.provider : null,
-    version: typeof manifest?.version === "string" ? manifest.version : null,
-    buildStamp: typeof manifest?.buildStamp === "string" ? manifest.buildStamp : null,
-    publishedAt: typeof manifest?.publishedAt === "string" ? manifest.publishedAt : null,
-    assets,
-    manifestUrls: Array.isArray(options.manifestUrls) ? options.manifestUrls.filter((url) => typeof url === "string") : [],
-    ...assets.length === 0 ? { error: "\u53D1\u5E03\u6E05\u5355\u91CC\u6CA1\u6709\u53EF\u7528\u7684\u90E8\u7F72\u5305" } : {}
-  };
-}
-function selectLatestAsset(release, target) {
-  const wanted = normalizeTarget(target);
-  if (wanted === "") return null;
-  const assets = Array.isArray(release?.assets) ? release.assets : [];
-  return assets.find((asset) => asset.target === wanted) ?? null;
-}
-function normalizeTarget(value) {
-  const text = String(value ?? "").trim().toLowerCase();
-  const match = /^(linux|win(?:dows)?|win32)-(x64|arm64)$/u.exec(text);
-  if (match === null) return "";
-  return `${match[1].startsWith("linux") ? "linux" : "win"}-${match[2]}`;
-}
-function packageRoots(home, os11) {
-  const base = String(home ?? "").replace(/[\\/]+$/u, "");
-  if (base === "") return [];
-  const join = os11 === "windows" ? path22.win32.join : path22.posix.join;
-  return [join(base, ".dsh", "packages"), join(base, ".dsh", "mesh", "upgrade")];
-}
-function isAllowedPackagePath(candidate, home, os11) {
-  const text = String(candidate ?? "").trim();
-  if (text === "") return false;
-  const p = os11 === "windows" ? path22.win32 : path22.posix;
-  const normalized = p.normalize(text);
-  if (packageTargetFromName(p.basename(normalized)) === null) return false;
-  const roots = packageRoots(home, os11).map((root) => p.normalize(root));
-  const comparand = os11 === "windows" ? normalized.toLowerCase() : normalized;
-  return roots.some((root) => {
-    const prefix = os11 === "windows" ? root.toLowerCase() : root;
-    return comparand === prefix || comparand.startsWith(`${prefix}${p.sep}`);
-  });
-}
-function parseTargetPackageList(stdout) {
-  const packages = [];
-  for (const line of String(stdout ?? "").split(/\r?\n/u)) {
-    const text = line.trim();
-    if (text === "") continue;
-    const [file, rawBytes, rawMtime, rawSha] = text.split("	");
-    if (file === void 0 || rawBytes === void 0) continue;
-    const parsed = packageTargetFromName(file.split(/[\\/]/u).pop() ?? "");
-    if (parsed === null) continue;
-    const bytes = Number(rawBytes);
-    if (!Number.isSafeInteger(bytes) || bytes <= 0) continue;
-    const sha256 = typeof rawSha === "string" && /^[a-f0-9]{64}$/u.test(rawSha.trim()) ? rawSha.trim().toLowerCase() : null;
-    const mtime = normalizeMtime(rawMtime);
-    packages.push({ name: file.split(/[\\/]/u).pop() ?? file, path: file, bytes, mtime, sha256, ...parsed });
-  }
-  packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
-  return packages;
-}
-function normalizeMtime(value) {
-  const text = String(value ?? "").trim();
-  if (text === "") return "";
-  if (/^\d+$/u.test(text)) {
-    const seconds = Number.parseInt(text, 10);
-    return Number.isSafeInteger(seconds) && seconds > 0 ? new Date(seconds * 1e3).toISOString() : "";
-  }
-  const parsed = Date.parse(text);
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : "";
-}
-function listPackagesScript(os11, home = "") {
-  const homeDir = String(home ?? "").trim();
-  if (os11 === "windows") {
-    const base2 = homeDir === "" ? "$env:USERPROFILE" : powershellQuote(homeDir);
-    return `$ErrorActionPreference = 'SilentlyContinue'
-$base = ${base2}
-$roots = @(
-  (Join-Path $base '.dsh\\packages'),
-  (Join-Path $base '.dsh\\mesh\\upgrade')
-)
-$rows = @()
-foreach ($root in $roots) {
-  if (-not (Test-Path -LiteralPath $root)) { continue }
-  Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.Name -match '^dsh-mesh-.*\\.(7z|zip|tar\\.gz|tgz)$' } | ForEach-Object {
-    $sha = ''
-    $side = "$($_.FullName).sha256"
-    if (Test-Path -LiteralPath $side) {
-      $first = Get-Content -LiteralPath $side -TotalCount 1
-      if ($first) { $sha = ($first -split '\\s+')[0] }
-    }
-    $rows += ($_.FullName + [char]9 + $_.Length + [char]9 + $_.LastWriteTimeUtc.ToString('o') + [char]9 + $sha)
-  }
-}
-$rows | ForEach-Object { Write-Output $_ }
-`;
-  }
-  const base = homeDir === "" ? '"$HOME"' : shellQuote(homeDir);
-  return `BASE=${base}
-for root in "$BASE/.dsh/packages" "$BASE/.dsh/mesh/upgrade"; do
-  [ -d "$root" ] || continue
-  find "$root" -maxdepth 3 -type f \\( -name 'dsh-mesh-*.7z' -o -name 'dsh-mesh-*.tar.gz' -o -name 'dsh-mesh-*.tgz' -o -name 'dsh-mesh-*.zip' \\) -print0 2>/dev/null |
-  while IFS= read -r -d '' file; do
-    bytes=$(stat -c %s -- "$file" 2>/dev/null || echo 0)
-    mtime=$(stat -c %Y -- "$file" 2>/dev/null || echo 0)
-    sha=''
-    side="$file.sha256"
-    if [ -f "$side" ]; then sha=$(sed -n '1s/[[:space:]].*//p' "$side" 2>/dev/null || true); fi
-    printf '%s\\t%s\\t%s\\t%s\\n' "$file" "$bytes" "$mtime" "$sha"
-  done
-done
-`;
-}
-function shellQuote(value) {
-  return `'${String(value).replace(/'/gu, `'\\''`)}'`;
-}
-function powershellQuote(value) {
-  return `'${String(value).replace(/'/gu, "''")}'`;
-}
-
-// src/lib/schedule.mjs
-var SCHEDULE_FORMAT = 3;
-var DEFAULT_BUILD_SCHEDULE = Object.freeze({ enabled: false, time: "04:00" });
-var DEFAULT_UPGRADE_SCHEDULE = Object.freeze({ enabled: false, time: "06:00" });
-var LEGACY_BUILD_SCHEDULE = Object.freeze({ enabled: true, time: "04:00" });
-var LEGACY_UPGRADE_SCHEDULE = Object.freeze({ enabled: true, time: "06:00" });
-function parseClock(value) {
-  if (typeof value !== "string") return null;
-  const match = /^(\d{1,2}):(\d{2})$/u.exec(value.trim());
-  if (match === null) return null;
-  const hour = Number(match[1]);
-  const minute = Number(match[2]);
-  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
-  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
-  return { hour, minute };
-}
-function formatClock(clock) {
-  const hour = clock?.hour;
-  const minute = clock?.minute;
-  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return "";
-  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-}
-function normalizeEntry(value, fallback) {
-  const source = value !== null && typeof value === "object" ? value : {};
-  const parsed = parseClock(source.time);
-  const time = parsed === null ? fallback.time : formatClock(parsed);
-  return { enabled: typeof source.enabled === "boolean" ? source.enabled : fallback.enabled, time };
-}
-function normalizeBuildSchedule(value) {
-  return normalizeEntry(value, DEFAULT_BUILD_SCHEDULE);
-}
-function normalizeUpgradeSchedule(value) {
-  return normalizeEntry(value, DEFAULT_UPGRADE_SCHEDULE);
-}
-function normalizeSchedules(value) {
-  const source = value !== null && typeof value === "object" ? value : {};
-  const upgrades = {};
-  const raw = source.upgrades !== null && typeof source.upgrades === "object" ? source.upgrades : {};
-  for (const [memberId, entry] of Object.entries(raw)) {
-    if (typeof memberId === "string" && memberId !== "" && entry !== null && typeof entry === "object") {
-      upgrades[memberId] = normalizeUpgradeSchedule(entry);
-    }
-  }
-  return {
-    build: normalizeBuildSchedule(source.build),
-    upgrade: normalizeUpgradeSchedule(source.upgrade),
-    upgrades
-  };
-}
-function migrateSchedules(value) {
-  const schedule = normalizeSchedules(value);
-  const format = value !== null && typeof value === "object" ? value.format : void 0;
-  if (format === SCHEDULE_FORMAT) return schedule;
-  if (schedule.build.enabled && schedule.build.time === LEGACY_BUILD_SCHEDULE.time) {
-    schedule.build = { ...schedule.build, enabled: false };
-  }
-  if (schedule.upgrade.enabled && schedule.upgrade.time === LEGACY_UPGRADE_SCHEDULE.time) {
-    schedule.upgrade = { ...schedule.upgrade, enabled: false };
-  }
-  return schedule;
-}
-function upgradeEntryFor(schedules, memberId) {
-  const entry = schedules?.upgrades?.[memberId];
-  return entry !== null && typeof entry === "object" ? entry : schedules?.upgrade ?? DEFAULT_UPGRADE_SCHEDULE;
-}
-function nextRunAt(at, time) {
-  const clock = parseClock(time) ?? parseClock(DEFAULT_BUILD_SCHEDULE.time);
-  const next = new Date(at.getTime());
-  next.setHours(clock.hour, clock.minute, 0, 0);
-  if (next.getTime() <= at.getTime()) next.setDate(next.getDate() + 1);
-  return next;
-}
-function packageInfo(name) {
-  if (typeof name !== "string") return null;
-  const match = /^dsh-mesh-(.+)-(\d{8}[A-Z]+)-(linux|win(?:dows)?)-(?:x64|arm64)\.(?:7z|tar\.gz|tgz|zip)$/u.exec(name);
-  if (match === null) return null;
-  return {
-    version: match[1],
-    buildStamp: match[2],
-    os: match[3].startsWith("win") ? "windows" : "linux"
-  };
-}
-function stampRank(stamp) {
-  const match = /^(\d{8})([A-Z]+)$/u.exec(String(stamp ?? ""));
-  if (match === null) return null;
-  let letter = 0;
-  for (const char of match[2]) letter = letter * 26 + (char.charCodeAt(0) - 64);
-  return { date: Number(match[1]), letter };
-}
-function compareBuildStamps(left, right) {
-  const a = stampRank(left);
-  const b = stampRank(right);
-  if (a === null || b === null) return String(left ?? "").localeCompare(String(right ?? ""));
-  if (a.date !== b.date) return a.date - b.date;
-  return a.letter - b.letter;
-}
-function latestPackagesByOs(packages) {
-  const latest = {};
-  for (const item of Array.isArray(packages) ? packages : []) {
-    const parsed = packageInfo(item.name);
-    if (parsed === null) continue;
-    const current = latest[parsed.os];
-    if (current === void 0) {
-      latest[parsed.os] = item;
-      continue;
-    }
-    const currentInfo = packageInfo(current.name);
-    if (currentInfo !== null && compareBuildStamps(parsed.buildStamp, currentInfo.buildStamp) > 0) {
-      latest[parsed.os] = item;
-    }
-  }
-  return latest;
-}
-function memberDeployment(member) {
-  const direct = member?.deployment;
-  if (direct !== null && typeof direct === "object") return direct;
-  const nested = member?.gate?.deployment;
-  return nested !== null && typeof nested === "object" ? nested : null;
-}
-function shouldUpgrade(deployment, candidate) {
-  const parsed = packageInfo(candidate?.name);
-  if (parsed === null) return { needed: false, reason: "\u4E0D\u662F\u53EF\u8BC6\u522B\u7684\u90E8\u7F72\u5305\uFF0C\u8DF3\u8FC7" };
-  const currentStamp = typeof deployment?.buildStamp === "string" ? deployment.buildStamp : "";
-  if (currentStamp !== "") {
-    const order = compareBuildStamps(parsed.buildStamp, currentStamp);
-    if (order === 0) return { needed: false, reason: "\u5DF2\u7ECF\u662F\u8FD9\u4E2A\u90E8\u7F72\u5305" };
-    if (order < 0) return { needed: false, reason: "\u6700\u65B0\u5305\u7684\u6784\u5EFA\u53F7\u6BD4\u5F53\u524D\u90E8\u7F72\u65E7" };
-    return { needed: true, reason: `${currentStamp} \u2192 ${parsed.buildStamp}` };
-  }
-  const currentVersion = typeof deployment?.version === "string" ? deployment.version : "";
-  if (currentVersion !== "" && currentVersion === parsed.version) {
-    return { needed: false, reason: `\u5DF2\u7ECF\u662F ${parsed.version}` };
-  }
-  return { needed: true, reason: `\u5347\u7EA7\u5230 ${parsed.buildStamp}` };
-}
-function memberOs(member) {
-  const platform = String(member?.system?.platform ?? member?.gate?.system?.platform ?? "").toLowerCase();
-  if (platform.startsWith("win")) return "windows";
-  if (platform.startsWith("linux")) return "linux";
-  const target = String(memberDeployment(member)?.target?.os ?? "").toLowerCase();
-  return target.startsWith("win") ? "windows" : "linux";
-}
-function planMemberUpgrade(member, packages, release) {
-  const deployment = memberDeployment(member);
-  if (deployment === null) return { reason: "\u8BFB\u4E0D\u5230\u5F53\u524D\u90E8\u7F72" };
-  if (member?.online === false) return { reason: "\u79BB\u7EBF" };
-  const os11 = memberOs(member);
-  const local = latestPackagesByOs(packages)[os11] ?? null;
-  const target = memberBuildTarget(member);
-  const asset = release !== null && release?.ok === true && target !== null ? selectLatestAsset(release, target) : null;
-  let chosen = local === null ? null : { source: "local", package: local, target: null };
-  if (asset !== null) {
-    const candidate = { source: "release", package: asset, target: asset.target };
-    if (chosen === null || newerPackage(candidate.package, chosen.package)) chosen = candidate;
-  }
-  if (chosen === null) return { reason: `\u6CA1\u6709 ${os11 === "windows" ? "Windows" : "Linux"} \u90E8\u7F72\u5305` };
-  const decision = shouldUpgrade(deployment, chosen.package);
-  if (!decision.needed) return { reason: decision.reason };
-  return { ...chosen, reason: decision.reason };
-}
-function newerPackage(candidate, current) {
-  const next = packageInfo(candidate?.name);
-  const previous = packageInfo(current?.name);
-  if (next === null || previous === null) return false;
-  return compareBuildStamps(next.buildStamp, previous.buildStamp) > 0;
-}
-function buildUpdateReasons(input) {
-  const latest = input.latestManifest;
-  const current = input.current;
-  if (latest === null || typeof latest !== "object") return ["\u8FD8\u6CA1\u6709\u5E26\u7248\u672C\u4FE1\u606F\u7684\u7F16\u8BD1\u4EFB\u52A1"];
-  const reasons = [];
-  if (latest.source !== current.source || latest.ref !== current.ref) {
-    reasons.push("\u6E90\u7801\u6216\u5F15\u7528\u53D8\u4E86");
-  }
-  if (latest.sourceEtag === void 0 || latest.sourceEtag === null || current.sourceEtag === null) {
-    reasons.push("\u65E0\u6CD5\u786E\u8BA4 DSH \u6E90\u7801\u7248\u672C");
-  } else if (latest.sourceEtag !== current.sourceEtag) {
-    reasons.push("DSH \u6E90\u7801\u6709\u66F4\u65B0");
-  }
-  const plugin = latest.plugin;
-  if (plugin === null || typeof plugin !== "object" || typeof plugin.fingerprint !== "string" || current.pluginFingerprint === null) {
-    reasons.push("\u65E0\u6CD5\u786E\u8BA4 dsh-mesh \u7248\u672C");
-  } else if (plugin.fingerprint !== current.pluginFingerprint) {
-    reasons.push("dsh-mesh \u6709\u66F4\u65B0");
-  }
-  const latestPlugins = Array.isArray(latest.extraPlugins) ? latest.extraPlugins : [];
-  for (const entry of current.extraPlugins) {
-    const previous = latestPlugins.find((item) => item?.name === entry.name);
-    const previousEtag = typeof previous?.archiveEtag === "string" ? previous.archiveEtag : "";
-    if (previousEtag === "" || entry.etag === null) reasons.push(`${entry.name} \u6709\u66F4\u65B0`);
-    else if (previousEtag !== entry.etag) reasons.push(`${entry.name} \u6709\u66F4\u65B0`);
-  }
-  return reasons;
-}
-function scheduleFile(dataDir) {
-  return path23.join(dataDir, "schedule.json");
-}
-
 // src/lib/build-defaults.mjs
 var DEFAULT_BUILD_TARGETS = Object.freeze(["linux-x64", "win-x64"]);
 function memberPlatform(member) {
@@ -10145,12 +10476,27 @@ function formatEgressLine(mesh) {
 
 // src/lib/member-tasks.mjs
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { mkdir as mkdir13, readFile as readFile16, readdir as readdir8, rename as rename10, rm as rm14, writeFile as writeFile13 } from "node:fs/promises";
-import path24 from "node:path";
+import { mkdir as mkdir14, readFile as readFile17, readdir as readdir8, rename as rename10, rm as rm14, writeFile as writeFile14 } from "node:fs/promises";
+import path25 from "node:path";
 var CONVERSATION_ID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
-var CONNECTION_ERROR_CODES = /* @__PURE__ */ new Set(["ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "EPIPE"]);
-var CONNECT_RETRY_CODES = /* @__PURE__ */ new Set(["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"]);
+var CONNECTION_ERROR_CODES = /* @__PURE__ */ new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EPIPE",
+  "ETIMEDOUT",
+  // Node's fetch wraps a connect timeout in `TypeError: fetch failed`; the
+  // cause carries one of these undici codes.
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CLOSED",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT"
+]);
+var CONNECT_RETRY_CODES = /* @__PURE__ */ new Set(["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
 var CONNECTION_RETRY_MS = 3e4;
+var UNREACHABLE_RETRY_MS = 20 * 6e4;
 function connectionFailureCode(error) {
   let current = error;
   for (let depth = 0; current !== null && current !== void 0 && depth < 4; depth++) {
@@ -10175,6 +10521,23 @@ var DEFAULT_WORKSPACE = "default-workspace";
 function truncate(text, limit) {
   const value = String(text ?? "");
   return value.length > limit ? `${value.slice(0, limit)}\u2026` : value;
+}
+var MESSAGE_SPILL_CHARS = 48e3;
+function formatSpilledMessage(chars, file) {
+  return `\u3010\u6D88\u606F\u8FC7\u957F\u3011\u8FD9\u6761\u5BF9\u8BDD\u56DE\u590D\u5185\u5BB9\u5171 ${String(chars)} \u5B57\u7B26\uFF0C\u5DF2\u5199\u5165\u6210\u5458\u672C\u673A\u6587\u4EF6\uFF1A${file}\u3002\u8BF7\u5148\u7528 read \u5DE5\u5177\u8BFB\u53D6\u8BE5\u6587\u4EF6\uFF0C\u518D\u6309\u6587\u4EF6\u91CC\u7684\u8981\u6C42\u6267\u884C\uFF1B\u4E0D\u8981\u8DF3\u8FC7\u8BFB\u53D6\u3002`;
+}
+function memberMaintenanceError(target, state) {
+  const ip = typeof target?.ip === "string" ? target.ip.trim() : "";
+  const name = typeof target?.name === "string" ? target.name.trim() : "";
+  const label = name !== "" && name !== ip ? `${name}\uFF08${ip === "" ? String(target?.id ?? "") : ip}\uFF09` : ip !== "" ? ip : String(target?.id ?? "\u6210\u5458");
+  const kind = typeof state?.kind === "string" && state.kind !== "" ? state.kind : "\u5347\u7EA7";
+  const since = typeof state?.since === "string" && state.since !== "" ? `\uFF0C\u81EA ${state.since}` : "";
+  const phase = typeof state?.phase === "string" && state.phase !== "" ? `\uFF0C\u9636\u6BB5 ${state.phase}` : "";
+  const job = typeof state?.job === "string" && state.job !== "" ? `\uFF0C\u4EFB\u52A1 ${state.job}` : "";
+  return Object.assign(
+    new Error(`\u76EE\u6807\u6210\u5458 ${label} \u6B63\u5728${kind}\uFF08\u8FDB\u884C\u4E2D${since}${phase}${job}\uFF09\u3002\u5347\u7EA7/\u90E8\u7F72\u671F\u95F4\u4E0D\u80FD\u6D3E\u53D1\u6216\u7EE7\u7EED\u6210\u5458\u5BF9\u8BDD\uFF1A\u7B49\u5B83\u5347\u7EA7\u5B8C\u6210\u540E\u518D\u8C03\u7528 call_member\u3002`),
+    { code: "member_maintenance", maintenance: state }
+  );
 }
 function isTerminalStatus(status) {
   return status === "completed" || status === "failed" || status === "interrupted";
@@ -10301,7 +10664,7 @@ var MemberTaskService = class {
     this.dataDir = options.dataDir;
     this.logLine = options.log ?? (() => {
     });
-    this.taskRoot = path24.join(this.dataDir, "member-tasks");
+    this.taskRoot = path25.join(this.dataDir, "member-tasks");
     this.tasks = /* @__PURE__ */ new Map();
     this.monitors = /* @__PURE__ */ new Map();
     this.deliveryGraceMs = Number.isSafeInteger(options.deliveryGraceMs) && options.deliveryGraceMs >= 0 ? options.deliveryGraceMs : DELIVERY_GRACE_MS;
@@ -10348,7 +10711,7 @@ var MemberTaskService = class {
   async #ensureLoaded() {
     if (this.loaded) return;
     this.loaded = true;
-    await mkdir13(this.taskRoot, { recursive: true });
+    await mkdir14(this.taskRoot, { recursive: true });
     let files = [];
     try {
       files = await readdir8(this.taskRoot);
@@ -10358,7 +10721,7 @@ var MemberTaskService = class {
     for (const file of files) {
       if (!file.endsWith(".json")) continue;
       try {
-        const task = JSON.parse(await readFile16(path24.join(this.taskRoot, file), "utf8"));
+        const task = JSON.parse(await readFile17(path25.join(this.taskRoot, file), "utf8"));
         if (task?.id === void 0) continue;
         const stoppedAt = Date.parse(task.updatedAt);
         const recent = Number.isFinite(stoppedAt) && Date.now() - stoppedAt <= RESUME_WINDOW_MS;
@@ -10377,6 +10740,7 @@ var MemberTaskService = class {
         task.terminalDelivered = task.terminalDelivered === true;
         task.archived = task.archived === true;
         task.archivedAt = typeof task.archivedAt === "string" ? task.archivedAt : null;
+        task.unreachableSince = Number.isFinite(task.unreachableSince) ? task.unreachableSince : null;
         task.repliesTakenByWait = task.repliesTakenByWait === true;
         if (typeof task.workspace !== "string" || task.workspace.trim() === "") task.workspace = "unknown";
         task.profile = memberTaskProfile(task);
@@ -10440,11 +10804,11 @@ var MemberTaskService = class {
    * @returns {Promise<void>} resolution after the rename.
    */
   async #writeTaskSnapshot(id, body) {
-    const file = path24.join(this.taskRoot, `${id}.json`);
+    const file = path25.join(this.taskRoot, `${id}.json`);
     const temporary = `${file}.${process.pid}.${randomUUID2()}.tmp`;
     try {
-      await mkdir13(this.taskRoot, { recursive: true });
-      await writeFile13(temporary, body, "utf8");
+      await mkdir14(this.taskRoot, { recursive: true });
+      await writeFile14(temporary, body, "utf8");
       await rename10(temporary, file);
     } catch (error) {
       await rm14(temporary, { force: true }).catch(() => {
@@ -10456,7 +10820,7 @@ var MemberTaskService = class {
     const text = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
 `;
     try {
-      await writeFile13(path24.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
+      await writeFile14(path25.join(this.taskRoot, `${task.id}.log`), text, { encoding: "utf8", flag: "a" });
     } catch {
     }
     try {
@@ -10643,6 +11007,44 @@ var MemberTaskService = class {
       }
     }
   }
+  /**
+   * Whether this delivery target is deploying or upgrading right now.
+   * @param {{id?: string, name?: string, ip?: string}|undefined} target member row.
+   * @returns {Promise<object|null>} maintenance state, or null when idle.
+   */
+  async #maintenanceFor(target) {
+    const probe = typeof this.service?.memberMaintenance === "function" ? this.service.memberMaintenance : null;
+    if (probe === null) return null;
+    const member = {
+      ...typeof target?.id === "string" && target.id !== "" ? { id: target.id } : {},
+      ...typeof target?.name === "string" && target.name !== "" ? { name: target.name } : {},
+      ...typeof target?.ip === "string" && target.ip !== "" ? { ip: target.ip } : {}
+    };
+    if (Object.keys(member).length === 0) return null;
+    const state = await probe.call(this.service, member).catch(() => null);
+    return state?.active === true ? state : null;
+  }
+  /**
+   * The body to deliver: inline, or a pointer to a file on the member.
+   *
+   * A body over {@link MESSAGE_SPILL_CHARS} is written to the member's own
+   * scratch directory first, and the delivered message tells its agent to read
+   * that file. The upload is one JSON request; a member without the endpoint
+   * (an older release) keeps the inline text, which only fails for a body over
+   * its request-body limit.
+   * @param {string} baseUrl member interop base.
+   * @param {string} text message body.
+   * @param {string} name scratch file hint.
+   * @param {AbortSignal} [signal] cancellation.
+   * @returns {Promise<{text: string, spill: string|null}>} body to deliver.
+   */
+  async #deliverableBody(baseUrl, text, name, signal) {
+    if (typeof text !== "string" || text.length <= MESSAGE_SPILL_CHARS) return { text, spill: null };
+    const result = await this.#request(baseUrl, "POST", "/v1/scratch", { text, name }, 12e4, signal).catch(() => null);
+    const file = typeof result?.path === "string" && result.path !== "" ? result.path : "";
+    if (file === "") return { text, spill: null };
+    return { text: formatSpilledMessage(text.length, file), spill: file };
+  }
   async start({ member, prompt, cwd, workspace, identity, scope, agent, notify = true, signal }) {
     await this.#ensureLoaded();
     if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("prompt is required");
@@ -10650,16 +11052,19 @@ var MemberTaskService = class {
     const scopePatch = normalizeMemberScopePatch({ identity, scope });
     const hasScopePatch = Object.keys(scopePatch).length > 0;
     const target = await this.#resolveMember(member);
+    const maintenance = await this.#maintenanceFor(target);
+    if (maintenance !== null) throw memberMaintenanceError(target, maintenance);
     const initialProfile = profileFromPatch(scopePatch, target.name);
     const mesh = await this.#meshFor(target);
     const egressLine = mesh.link === true ? formatEgressLine(mesh) : "";
     const profilePrefix = initialProfile === null ? "" : profilePromptPrefix(initialProfile);
     const environment = environmentPrompt(egressLine, mesh.tokens);
-    const deliveredPrompt = [profilePrefix, environment, prompt].filter((part) => part !== "").join("\n");
+    const body = await this.#deliverableBody(target.baseUrl, prompt, "member-message", signal);
+    const deliveredPrompt = [profilePrefix, environment, body.text].filter((part) => part !== "").join("\n");
     const explicitWorkspace = typeof workspace === "string" && workspace.trim() !== "";
     const explicitCwd = typeof cwd === "string" && cwd !== "";
     const targetWorkspace = explicitWorkspace ? workspace.trim() : explicitCwd ? "" : await callerWorkspaceName(this.ctx, agent);
-    const taskWorkspace = explicitWorkspace ? workspace.trim() : explicitCwd ? path24.basename(path24.resolve(cwd)) || "unknown" : targetWorkspace || "unknown";
+    const taskWorkspace = explicitWorkspace ? workspace.trim() : explicitCwd ? path25.basename(path25.resolve(cwd)) || "unknown" : targetWorkspace || "unknown";
     const payload = {
       prompt: deliveredPrompt,
       // The member's panel lists these; without a title it would show a UUID.
@@ -10693,6 +11098,8 @@ var MemberTaskService = class {
       /** Workspace name the member resolved, or a best-known fallback. */
       workspace: reportedWorkspace,
       prompt: truncate(prompt, 2e3),
+      /** Member-local file holding the body when it was too long to inline. */
+      messageSpill: body.spill,
       status: "running",
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
       updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -11168,8 +11575,8 @@ var MemberTaskService = class {
     this.#notifyWaiters(task);
     this.tasks.delete(task.id);
     await Promise.allSettled([
-      rm14(path24.join(this.taskRoot, `${task.id}.json`), { force: true }),
-      rm14(path24.join(this.taskRoot, `${task.id}.log`), { force: true })
+      rm14(path25.join(this.taskRoot, `${task.id}.json`), { force: true }),
+      rm14(path25.join(this.taskRoot, `${task.id}.log`), { force: true })
     ]);
     this.logLine(`member-task ${task.id}: removed ${task.conversationId} and its local record`);
   }
@@ -11452,6 +11859,9 @@ var MemberTaskService = class {
     const hasScopePatch = Object.keys(scopePatch).length > 0;
     const signal = request.signal;
     const { task, fresh, target } = await this.#sendTarget(request);
+    const maintenanceTarget = target ?? { name: task.member, ip: task.memberIp };
+    const maintenance = await this.#maintenanceFor(maintenanceTarget);
+    if (maintenance !== null) throw memberMaintenanceError(maintenanceTarget, maintenance);
     if (task.archived === true) {
       let live = null;
       try {
@@ -11479,7 +11889,9 @@ var MemberTaskService = class {
     }
     const prefix = hasScopePatch ? profilePromptPrefix(task.profile) : "";
     const environment = environmentPrompt(task.egressLine, await this.#tokenPair());
-    const deliveredPrompt = [prefix, environment, prompt].filter((part) => part !== "").join("\n");
+    const body = await this.#deliverableBody(task.baseUrl, prompt, `member-${task.conversationId}`, signal);
+    task.messageSpill = body.spill;
+    const deliveredPrompt = [prefix, environment, body.text].filter((part) => part !== "").join("\n");
     task.lastCompaction = null;
     task.liveStatus = "";
     await this.#refreshContext(task, signal);
@@ -11807,6 +12219,7 @@ var MemberTaskService = class {
           signal
         );
         task.attempts = 0;
+        task.unreachableSince = null;
         this.#rememberContext(task, result.context ?? result.conversation?.context);
         const conversation = result.conversation ?? {};
         this.#rememberWorkspace(task, conversation);
@@ -11873,13 +12286,23 @@ var MemberTaskService = class {
       } catch (error) {
         if (signal?.aborted || task.status === "interrupted") break;
         task.error = error instanceof Error ? error.message : String(error);
-        await this.#log(task, `wait failed: ${task.error}`);
+        const connection = connectionFailureCode(error);
+        if (connection !== "" && !Number.isFinite(task.unreachableSince)) task.unreachableSince = Date.now();
+        await this.#log(task, `wait failed: ${task.error}${connection === "" ? "" : "\uFF08\u8FDE\u63A5\u5931\u8D25\uFF0C\u7EE7\u7EED\u91CD\u8BD5\uFF09"}`);
         if (LOST_CONVERSATION.test(task.error)) {
           task.status = "failed";
           task.interrupted = true;
           break;
         }
-        if (task.attempts >= MAX_ATTEMPTS) {
+        if (connection !== "") {
+          const unreachableFor = Date.now() - (Number.isFinite(task.unreachableSince) ? task.unreachableSince : Date.now());
+          if (unreachableFor >= UNREACHABLE_RETRY_MS) {
+            task.error = `${task.error}\uFF08\u76EE\u6807\u6210\u5458\u8FDE\u7EED ${String(Math.round(UNREACHABLE_RETRY_MS / 6e4))} \u5206\u949F\u4E0D\u53EF\u8FBE\uFF1A\u4EFB\u52A1\u5DF2\u4E2D\u65AD\uFF0C\u6210\u5458\u6062\u590D\u540E\u7528\u540C\u4E00\u4E2A conversationId \u7EE7\u7EED\uFF0C\u6216\u5148 status_member \u67E5\u770B\uFF09`;
+            task.status = "failed";
+            task.interrupted = true;
+            break;
+          }
+        } else if (task.attempts >= MAX_ATTEMPTS) {
           task.status = "failed";
           break;
         }
@@ -12201,7 +12624,7 @@ var MemberTaskService = class {
     const task = this.tasks.get(String(taskId));
     if (task === void 0) return "";
     try {
-      const text = await readFile16(path24.join(this.taskRoot, `${task.id}.log`), "utf8");
+      const text = await readFile17(path25.join(this.taskRoot, `${task.id}.log`), "utf8");
       return text.split("\n").slice(-Math.max(1, Math.min(lines, 500))).join("\n");
     } catch {
       return "";
@@ -12213,7 +12636,7 @@ var MemberTaskService = class {
    * @returns {string} log path.
    */
   logPath(taskId) {
-    return path24.join(this.taskRoot, `${String(taskId)}.log`);
+    return path25.join(this.taskRoot, `${String(taskId)}.log`);
   }
 };
 
@@ -12265,7 +12688,7 @@ function memberConversationSummary(entries) {
 }
 
 // src/lib/service.mjs
-var HERE2 = path25.dirname(fileURLToPath2(import.meta.url));
+var HERE2 = path26.dirname(fileURLToPath2(import.meta.url));
 var execFileAsync2 = promisify3(execFile3);
 var PROBE_GRACE_MS = 10 * 6e4;
 var PROBE_TIMEOUT_MS = 4500;
@@ -12274,6 +12697,7 @@ var PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 6e4;
 var MEMBER_IDENTITY_MAX = 40;
 var MEMBER_SCOPE_MAX = 120;
 var UPGRADE_ANNOUNCE_WINDOW_MS = UPGRADE_LEAD_MS * 3;
+var UPGRADE_PREPARE_GRACE_MS = 5 * 6e4;
 var DEFAULT_COMPRESS_PERCENT = 35;
 var MEMBER_NOTE_MAX = 500;
 function normalizeMemberScopePatch(patch = {}) {
@@ -12340,14 +12764,14 @@ function savedScopeNumber(value, valid) {
 function findRepositoryRoot(start) {
   let current = start;
   for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync14(path25.join(current, "build", "recipes.json")) && existsSync14(path25.join(current, "code", "build"))) {
+    if (existsSync14(path26.join(current, "build", "recipes.json")) && existsSync14(path26.join(current, "code", "build"))) {
       return current;
     }
-    const parent = path25.dirname(current);
+    const parent = path26.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return path25.resolve(start, "..", "..");
+  return path26.resolve(start, "..", "..");
 }
 var REPOSITORY_ROOT = findRepositoryRoot(HERE2);
 function runSshProbe(args, source, timeoutMs = 3e4) {
@@ -12391,7 +12815,7 @@ function runSshProbe(args, source, timeoutMs = 3e4) {
 }
 function packageVersion() {
   try {
-    const parsed = JSON.parse(readFileSync5(path25.join(REPOSITORY_ROOT, "package.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync5(path26.join(REPOSITORY_ROOT, "package.json"), "utf8"));
     return typeof parsed.version === "string" ? parsed.version : "0.0.0";
   } catch {
     return "0.0.0";
@@ -12422,24 +12846,24 @@ var MeshService = class {
     this.config = options.config ?? {};
     this.logLine = options.log ?? (() => {
     });
-    this.jobRoot = path25.join(this.dataDir, "build");
-    this.cacheDir = path25.join(this.dataDir, "cache");
+    this.jobRoot = path26.join(this.dataDir, "build");
+    this.cacheDir = path26.join(this.dataDir, "cache");
     this.version = packageVersion();
     this.repositoryRoot = REPOSITORY_ROOT;
-    this.recipesPath = path25.join(REPOSITORY_ROOT, "build", "recipes.json");
-    this.overlayRoot = path25.join(REPOSITORY_ROOT, "build", "overlays");
-    this.home = path25.dirname(this.dataDir);
-    this.deployRoot = path25.join(this.dataDir, "deploy");
-    this.memberTagsFile = path25.join(this.dataDir, "member-tags.json");
-    this.memberScopesFile = path25.join(this.dataDir, "member-scopes.json");
+    this.recipesPath = path26.join(REPOSITORY_ROOT, "build", "recipes.json");
+    this.overlayRoot = path26.join(REPOSITORY_ROOT, "build", "overlays");
+    this.home = path26.dirname(this.dataDir);
+    this.deployRoot = path26.join(this.dataDir, "deploy");
+    this.memberTagsFile = path26.join(this.dataDir, "member-tags.json");
+    this.memberScopesFile = path26.join(this.dataDir, "member-scopes.json");
     this.announcedUpgrades = /* @__PURE__ */ new Map();
-    this.packagesDir = path25.join(os10.homedir(), ".dsh", "packages");
-    this.releaseConfigFile = path25.join(this.dataDir, "release.json");
+    this.packagesDir = path26.join(os10.homedir(), ".dsh", "packages");
+    this.releaseConfigFile = path26.join(this.dataDir, "release.json");
     this.latestReleaseCache = null;
     const geoConfig = this.config.geo === false ? { enabled: false } : this.config.geo !== null && typeof this.config.geo === "object" ? this.config.geo : {};
     this.geo = options.geoLookup ?? new GeoLookup({
       enabled: geoConfig.enabled !== false,
-      cacheFile: path25.join(this.dataDir, "geo-cache.json"),
+      cacheFile: path26.join(this.dataDir, "geo-cache.json"),
       provider: typeof geoConfig.provider === "string" && geoConfig.provider !== "" ? geoConfig.provider : void 0,
       timeoutMs: typeof geoConfig.timeoutMs === "number" ? geoConfig.timeoutMs : void 0,
       fetchImpl: typeof geoConfig.fetchImpl === "function" ? geoConfig.fetchImpl : void 0,
@@ -12456,7 +12880,7 @@ var MeshService = class {
     this.remoteBuilder = new RemoteBuilder({ packagesDir: this.packagesDir, log: (line) => this.logLine(line) });
     this.systemCache = null;
     this.probes = /* @__PURE__ */ new Map();
-    this.probeCacheFile = path25.join(this.dataDir, "probe-cache.json");
+    this.probeCacheFile = path26.join(this.dataDir, "probe-cache.json");
     this.probeCacheLoaded = false;
     this.fetchImpl = options.fetchImpl;
   }
@@ -12472,7 +12896,7 @@ var MeshService = class {
     if (this.probeCacheLoaded) return;
     this.probeCacheLoaded = true;
     try {
-      const parsed = JSON.parse(await readFile17(this.probeCacheFile, "utf8"));
+      const parsed = JSON.parse(await readFile18(this.probeCacheFile, "utf8"));
       if (parsed === null || typeof parsed !== "object") return;
       const now = Date.now();
       for (const [ip, entry] of Object.entries(parsed)) {
@@ -12496,8 +12920,8 @@ var MeshService = class {
   /** Persist the probe map; a failed write is not worth reporting. */
   async #saveProbes() {
     try {
-      await mkdir14(path25.dirname(this.probeCacheFile), { recursive: true });
-      await writeFile14(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.probes)), "utf8");
+      await mkdir15(path26.dirname(this.probeCacheFile), { recursive: true });
+      await writeFile15(this.probeCacheFile, JSON.stringify(Object.fromEntries(this.probes)), "utf8");
     } catch {
     }
   }
@@ -12518,7 +12942,7 @@ var MeshService = class {
    * @returns {Promise<object>} status.
    */
   async status() {
-    const stateFile = path25.join(this.home, "wireguard", "state.json");
+    const stateFile = path26.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     return {
@@ -12599,7 +13023,7 @@ var MeshService = class {
   }
   async members() {
     await this.#loadProbes();
-    const stateFile = path25.join(this.home, "wireguard", "state.json");
+    const stateFile = path26.join(this.home, "wireguard", "state.json");
     const { state, error } = await readWireGuardState({ file: stateFile });
     const identity = state === null ? null : wireGuardIdentity(state);
     const self = {
@@ -12735,11 +13159,11 @@ var MeshService = class {
     const address = String(ip ?? "").trim();
     if (address === "") return { ok: false, error: "member address is empty" };
     if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, error: "proxy port is invalid" };
-    const { state } = await readWireGuardState({ file: path25.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path26.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === address);
     if (peer === void 0 || peer === null) return { ok: false, error: "member is not in the WireGuard state" };
     const digest = createHash8("sha256").update(String(peer.publicKey ?? "")).digest("hex");
-    const key = path25.join(this.home, "wireguard", "ssh", `${digest}.key`);
+    const key = path26.join(this.home, "wireguard", "ssh", `${digest}.key`);
     if (!existsSync14(key)) return { ok: false, error: "no SSH key for this member" };
     const windows = String(peer.platform ?? "").toLowerCase().startsWith("win");
     const remote = windows ? `"%USERPROFILE%\\.dsh\\runtime\\node\\node.exe" --input-type=module - ${String(port)}` : `~/.dsh/runtime/node/bin/node --input-type=module - ${String(port)}`;
@@ -12773,7 +13197,7 @@ var MeshService = class {
    */
   async memberTags() {
     try {
-      const parsed = JSON.parse(await readFile17(this.memberTagsFile, "utf8"));
+      const parsed = JSON.parse(await readFile18(this.memberTagsFile, "utf8"));
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
       const tags = {};
       for (const [id, tag] of Object.entries(parsed)) {
@@ -12797,10 +13221,54 @@ var MeshService = class {
     const tags = await this.memberTags();
     if (label === "") delete tags[memberId];
     else tags[memberId] = label;
-    await mkdir14(this.dataDir, { recursive: true });
-    await writeFile14(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
+    await mkdir15(this.dataDir, { recursive: true });
+    await writeFile15(this.memberTagsFile, `${JSON.stringify(tags, null, 2)}
 `, "utf8");
     return { ok: true, tags };
+  }
+  /**
+   * Whether one target is busy with a deploy, an upgrade, or the announcement
+   * window in front of a scheduled upgrade.
+   *
+   * `call_member` refuses while this is active. A deploy or upgrade restarts
+   * the member's DSH (a local upgrade restarts this one), so a conversation
+   * created or messaged now would lose its first turn to that restart. The
+   * window starts with the announcement — a scheduled upgrade stops the
+   * conversations ten minutes before it starts — and ends when the job that
+   * replaced the announcement has settled.
+   * @param {{id?: string, name?: string, ip?: string}} member target member row.
+   * @returns {Promise<{active: boolean, kind?: string, phase?: string, since?: string, job?: string}>} state.
+   */
+  async memberMaintenance(member) {
+    const ids = new Set([member?.id, member?.name, member?.ip].filter((value) => typeof value === "string" && value !== ""));
+    const jobs = await this.deploy.list(50).catch(() => []);
+    const active = jobs.find((job) => {
+      if (job?.status !== "running" && job?.status !== "queued") return false;
+      if (ids.has(String(job.member ?? ""))) return true;
+      return ids.has(String(job.target?.host ?? ""));
+    });
+    if (active !== void 0 && active !== null) {
+      return {
+        active: true,
+        kind: active.mode === "install" ? "\u90E8\u7F72" : "\u5347\u7EA7",
+        job: String(active.id ?? ""),
+        phase: String(active.phase ?? ""),
+        ...typeof active.createdAt === "string" && active.createdAt !== "" ? { since: active.createdAt } : {}
+      };
+    }
+    const id = typeof member?.id === "string" ? member.id : "";
+    if (id === "") return { active: false };
+    const schedule = await readScheduleFile(scheduleFile(this.dataDir));
+    const prepare = schedule.last?.prepares?.[id];
+    if (prepare === null || typeof prepare !== "object") return { active: false };
+    const status = String(prepare.status ?? "");
+    if (status === "skipped" || status === "failed" || status === "unsupported") return { active: false };
+    const announcedAt = Date.parse(String(prepare.at ?? ""));
+    if (!Number.isFinite(announcedAt)) return { active: false };
+    if (Date.now() - announcedAt > UPGRADE_LEAD_MS + UPGRADE_PREPARE_GRACE_MS) return { active: false };
+    const upgradedAt = Date.parse(String(schedule.last?.upgrades?.[id]?.at ?? ""));
+    if (Number.isFinite(upgradedAt) && upgradedAt >= announcedAt) return { active: false };
+    return { active: true, kind: "\u81EA\u52A8\u5347\u7EA7", phase: "prepare", since: new Date(announcedAt).toISOString() };
   }
   /**
    * The member conversations one main conversation tracks, for the Web
@@ -12832,7 +13300,7 @@ var MeshService = class {
    */
   async memberScopes() {
     try {
-      const parsed = JSON.parse(await readFile17(this.memberScopesFile, "utf8"));
+      const parsed = JSON.parse(await readFile18(this.memberScopesFile, "utf8"));
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
       const scopes = {};
       for (const [rawId, value] of Object.entries(parsed)) {
@@ -12906,8 +13374,8 @@ var MeshService = class {
     if (normalized.compressPercent !== void 0) next.compressPercent = normalized.compressPercent;
     if (Object.keys(next).length === 0) delete scopes[id];
     else scopes[id] = next;
-    await mkdir14(this.dataDir, { recursive: true });
-    await writeFile14(this.memberScopesFile, `${JSON.stringify(scopes, null, 2)}
+    await mkdir15(this.dataDir, { recursive: true });
+    await writeFile15(this.memberScopesFile, `${JSON.stringify(scopes, null, 2)}
 `, "utf8");
     return { ok: true, scopes, scope: scopes[id] ?? null };
   }
@@ -12936,7 +13404,7 @@ var MeshService = class {
     const removed = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path25.join(this.jobRoot, entry.name);
+      const dir = path26.join(this.jobRoot, entry.name);
       let state;
       try {
         state = await readState(dir);
@@ -12945,12 +13413,12 @@ var MeshService = class {
       }
       if (this.running.has(state.id) && state.id !== options.keep) continue;
       if (state.status === "created" || state.status === "needs-fix" || state.status === "learned") continue;
-      await rm15(path25.join(dir, "src"), { recursive: true, force: true });
-      if (state.id !== options.keep) await rm15(path25.join(dir, "smoke"), { recursive: true, force: true });
-      await rm15(path25.join(dir, "work-order"), { recursive: true, force: true });
+      await rm15(path26.join(dir, "src"), { recursive: true, force: true });
+      if (state.id !== options.keep) await rm15(path26.join(dir, "smoke"), { recursive: true, force: true });
+      await rm15(path26.join(dir, "work-order"), { recursive: true, force: true });
       if (options.keepDist !== true) {
-        if (state.status === "done") await this.#pruneDist(path25.join(dir, "dist"));
-        else await rm15(path25.join(dir, "dist"), { recursive: true, force: true });
+        if (state.status === "done") await this.#pruneDist(path26.join(dir, "dist"));
+        else await rm15(path26.join(dir, "dist"), { recursive: true, force: true });
       }
       removed.push(state.id);
     }
@@ -12969,7 +13437,7 @@ var MeshService = class {
     const entries = await readdir9(distDir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      await rm15(path25.join(distDir, entry.name), { recursive: true, force: true });
+      await rm15(path26.join(distDir, entry.name), { recursive: true, force: true });
     }
   }
   /**
@@ -12983,7 +13451,7 @@ var MeshService = class {
    */
   async #directLinks() {
     try {
-      const raw = JSON.parse(await readFile17(path25.join(this.home, "hysteria", "links.json"), "utf8"));
+      const raw = JSON.parse(await readFile18(path26.join(this.home, "hysteria", "links.json"), "utf8"));
       return Array.isArray(raw.links) ? raw.links : [];
     } catch {
       return [];
@@ -13080,7 +13548,7 @@ var MeshService = class {
       direct: request.direct === true
     });
     const buildStamp = await nextBuildStamp({
-      stateFile: path25.join(this.dataDir, "build-stamp.json"),
+      stateFile: path26.join(this.dataDir, "build-stamp.json"),
       packagesDir: this.packagesDir
     });
     const job = await createJob({
@@ -13312,14 +13780,14 @@ var MeshService = class {
     let user = "root";
     let identityFile;
     let port = 22;
-    const { state } = await readWireGuardState({ file: path25.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path26.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (Number.isSafeInteger(peer.sshPort)) port = peer.sshPort;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
         const digest = createHash8("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path25.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        const candidate = path26.join(this.home, "wireguard", "ssh", `${digest}.key`);
         if (existsSync14(candidate)) identityFile = candidate;
       }
     }
@@ -13407,8 +13875,8 @@ var MeshService = class {
     const state = await readState(dir);
     return {
       ...state,
-      logFile: path25.join(dir, "build.log"),
-      stateFile: path25.join(dir, "state.json"),
+      logFile: path26.join(dir, "build.log"),
+      stateFile: path26.join(dir, "state.json"),
       logTail: await readLogTail(dir, 60),
       running: this.running.has(id),
       workOrderMarkdown: state.workOrder?.markdown ?? null,
@@ -13426,7 +13894,7 @@ var MeshService = class {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       try {
-        const state = await readState(path25.join(this.jobRoot, entry.name));
+        const state = await readState(path26.join(this.jobRoot, entry.name));
         jobs.push(this.#summary(state));
       } catch {
       }
@@ -13508,7 +13976,7 @@ var MeshService = class {
    * @returns {Promise<object>} recipes.
    */
   async recipes() {
-    const parsed = JSON.parse(await readFile17(this.recipesPath, "utf8"));
+    const parsed = JSON.parse(await readFile18(this.recipesPath, "utf8"));
     return {
       source: parsed.source,
       ref: parsed.ref,
@@ -13596,7 +14064,7 @@ var MeshService = class {
       if (depth < 0) return;
       const entries = await readdir9(dir, { withFileTypes: true }).catch(() => []);
       for (const entry of entries) {
-        const file = path25.join(dir, entry.name);
+        const file = path26.join(dir, entry.name);
         if (entry.isDirectory()) {
           if (depth > 0) await walk(file, depth - 1);
           continue;
@@ -13607,13 +14075,13 @@ var MeshService = class {
         const info = await stat13(file).catch(() => null);
         if (info === null) continue;
         seen.add(file);
-        const sidecar = await readFile17(`${file}.sha256`, "utf8").catch(() => "");
+        const sidecar = await readFile18(`${file}.sha256`, "utf8").catch(() => "");
         const sha256 = /^([a-f0-9]{64})\b/iu.exec(sidecar)?.[1]?.toLowerCase() ?? null;
         packages.push({ name: entry.name, path: file, bytes: info.size, mtime: info.mtime.toISOString(), sha256, ...parsed });
       }
     };
     await walk(this.packagesDir, 0);
-    await walk(path25.join(this.dataDir, "upgrade"), 2);
+    await walk(path26.join(this.dataDir, "upgrade"), 2);
     packages.sort((left, right) => right.mtime.localeCompare(left.mtime));
     return packages;
   }
@@ -13741,7 +14209,7 @@ var MeshService = class {
       if (!entry.isFile()) continue;
       const parsed = packagePlatformFromName(entry.name);
       if (parsed === null) continue;
-      const file = path25.join(this.packagesDir, entry.name);
+      const file = path26.join(this.packagesDir, entry.name);
       const info = await stat13(file).catch(() => null);
       if (info === null) continue;
       packages.push({
@@ -13856,7 +14324,7 @@ var MeshService = class {
   #applyInferredDeployment(member, deployJobs) {
     if (memberDeployment(member) !== null) return;
     const job = deployJobs.find((candidate) => candidate.status === "succeeded" && candidate.package !== void 0 && (candidate.member === member.id || candidate.target?.host === member.ip));
-    const parsed = packageInfo(path25.basename(job?.package ?? ""));
+    const parsed = packageInfo(path26.basename(job?.package ?? ""));
     if (parsed === null) return;
     member.deployment = { version: parsed.version, buildStamp: parsed.buildStamp, inferred: true };
   }
@@ -14183,11 +14651,11 @@ var MeshService = class {
    */
   async removePackage(request) {
     const name = typeof request?.name === "string" ? request.name.trim() : "";
-    if (name === "" || name !== path25.basename(name) || name.startsWith(".")) {
+    if (name === "" || name !== path26.basename(name) || name.startsWith(".")) {
       throw new Error("package name is invalid");
     }
     if (!/\.(?:7z|zip|tar\.gz|tgz)$/iu.test(name)) throw new Error(`not a package name: ${name}`);
-    const file = path25.join(this.packagesDir, name);
+    const file = path26.join(this.packagesDir, name);
     const info = await stat13(file).catch(() => null);
     if (info === null || !info.isFile()) throw new Error(`package not found: ${name}`);
     const removed = [];
@@ -14210,7 +14678,7 @@ var MeshService = class {
   async resolvePackage(input) {
     const raw = typeof input === "string" ? input.trim() : "";
     if (raw === "") throw new Error("package is required");
-    const candidates = path25.isAbsolute(raw) ? [raw] : [path25.join(this.packagesDir, raw), path25.join(this.repositoryRoot, "dist", raw)];
+    const candidates = path26.isAbsolute(raw) ? [raw] : [path26.join(this.packagesDir, raw), path26.join(this.repositoryRoot, "dist", raw)];
     for (const file of candidates) {
       const info = await stat13(file).catch(() => null);
       if (info?.isFile()) return file;
@@ -14250,6 +14718,7 @@ var MeshService = class {
         { status: 409 }
       );
     }
+    if (mode === "upgrade" && member !== void 0) await this.#ensureUpgradeAnnounced(member);
     let packagePath = "";
     let os11 = "linux";
     let packageDescriptor = null;
@@ -14291,7 +14760,7 @@ var MeshService = class {
           prefer: "gitee",
           ...link3 === null || typeof link3.url !== "string" || link3.url === "" ? {} : { proxy: link3.url }
         };
-        packagePath = path25.join(this.packagesDir, asset.name);
+        packagePath = path26.join(this.packagesDir, asset.name);
         os11 = asset.os;
       } else {
         packagePath = asset.name;
@@ -14305,11 +14774,11 @@ var MeshService = class {
     } else if (packageOnTarget !== null) {
       packagePath = String(packageOnTarget.path ?? "").trim();
       if (packagePath === "") throw new Error("packageOnTarget.path is required");
-      os11 = /win(?:dows)?/iu.test(path25.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
+      os11 = /win(?:dows)?/iu.test(path26.basename(packagePath)) ? "windows" : member?.system?.platform?.toLowerCase().startsWith("win") ? "windows" : "linux";
     } else {
       packagePath = await this.resolvePackage(request.package);
-      const parsed = packagePlatformFromName(path25.basename(packagePath));
-      if (parsed === null) throw new Error(`\u4E0D\u662F dsh-mesh \u90E8\u7F72\u5305\uFF1A${path25.basename(packagePath)}`);
+      const parsed = packagePlatformFromName(path26.basename(packagePath));
+      if (parsed === null) throw new Error(`\u4E0D\u662F dsh-mesh \u90E8\u7F72\u5305\uFF1A${path26.basename(packagePath)}`);
       os11 = parsed.os;
     }
     if (member !== void 0) {
@@ -14438,7 +14907,7 @@ var MeshService = class {
     return {
       job,
       member: started.member,
-      logFile: path25.join(this.deployRoot, started.job.id, "deploy.log"),
+      logFile: path26.join(this.deployRoot, started.job.id, "deploy.log"),
       log: await this.deployLogs(started.job.id, 80)
     };
   }
@@ -14525,7 +14994,7 @@ var MeshService = class {
       target: { host: "127.0.0.1", user: os10.userInfo().username, port: null, os: "linux", appRoot: install.appRoot },
       services: ["dsh-web-app.service", "dsh-web-gate.service", "dsh-wireguard-control.service"],
       packagePath: input.packagePath,
-      release: typeof input.acquire?.name === "string" ? input.acquire.name : path25.basename(input.packagePath)
+      release: typeof input.acquire?.name === "string" ? input.acquire.name : path26.basename(input.packagePath)
     });
     return { ok: true, job, member: input.identity, packagePath: input.packagePath, layout: "pointer" };
   }
@@ -14536,8 +15005,8 @@ var MeshService = class {
    */
   async #queueJob(job) {
     const id = newJobId();
-    const dir = path25.join(this.deployRoot, id);
-    await mkdir14(dir, { recursive: true });
+    const dir = path26.join(this.deployRoot, id);
+    await mkdir15(dir, { recursive: true });
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const bytes = job.plan?.package?.bytes ?? (await stat13(job.packagePath).catch(() => null))?.size ?? 0;
     const state = {
@@ -14559,7 +15028,7 @@ var MeshService = class {
     };
     await writeDeployState(dir, state);
     const requestFile = jobPaths(dir).request;
-    await writeFile14(requestFile, `${JSON.stringify({ ...job.request, id, member: job.member }, null, 2)}
+    await writeFile15(requestFile, `${JSON.stringify({ ...job.request, id, member: job.member }, null, 2)}
 `, { encoding: "utf8", mode: 384 });
     const spawned = await this.spawnRunner(dir, id);
     await appendDeployLog(dir, `job queued; runner ${spawned.mode}${spawned.unit === null ? "" : ` (${spawned.unit})`}`);
@@ -14578,7 +15047,7 @@ var MeshService = class {
    * @returns {Promise<{mode: string, unit: string|null}>} how it was started.
    */
   async #spawnRunner(dir, id) {
-    const script = path25.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
+    const script = path26.join(this.repositoryRoot, "code", "deploy", "runner.mjs");
     if (!existsSync14(script)) throw new Error(`deploy runner is missing: ${script}`);
     const node = process.execPath;
     const unit = `dsh-mesh-job-${id.replace(/^deploy-/u, "")}`;
@@ -14625,26 +15094,26 @@ var MeshService = class {
   #localAppRoot() {
     const inspect = (candidate2) => {
       try {
-        if (existsSync14(path25.join(candidate2, "dsh-mesh.json")) && existsSync14(path25.join(candidate2, "releases"))) {
+        if (existsSync14(path26.join(candidate2, "dsh-mesh.json")) && existsSync14(path26.join(candidate2, "releases"))) {
           return { appRoot: candidate2, layout: "pointer" };
         }
       } catch {
       }
       return null;
     };
-    let candidate = path25.resolve(this.repositoryRoot, "..");
+    let candidate = path26.resolve(this.repositoryRoot, "..");
     for (let depth = 0; depth < 5; depth += 1) {
       const found = inspect(candidate);
       if (found !== null) return found;
-      const parent = path25.dirname(candidate);
+      const parent = path26.dirname(candidate);
       if (parent === candidate) break;
       candidate = parent;
     }
-    candidate = path25.resolve(this.home);
+    candidate = path26.resolve(this.home);
     for (let depth = 0; depth < 5; depth += 1) {
       const found = inspect(candidate);
       if (found !== null) return found;
-      const parent = path25.dirname(candidate);
+      const parent = path26.dirname(candidate);
       if (parent === candidate) break;
       candidate = parent;
     }
@@ -14662,7 +15131,7 @@ var MeshService = class {
     if (this.running.has(state.id) || state.status === "running") {
       throw new Error("\u7F16\u8BD1\u8FD8\u5728\u8FD0\u884C\uFF0C\u7ED3\u675F\u540E\u518D\u6E05\u7A7A\u65E5\u5FD7");
     }
-    await writeFile14(path25.join(dir, "build.log"), "", "utf8");
+    await writeFile15(path26.join(dir, "build.log"), "", "utf8");
     return { ok: true, id: state.id };
   }
   /**
@@ -14680,7 +15149,7 @@ var MeshService = class {
     const entries = await readdir9(this.jobRoot, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path25.join(this.jobRoot, entry.name);
+      const dir = path26.join(this.jobRoot, entry.name);
       const state = await readState(dir).catch(() => null);
       if (state === null) continue;
       if (this.running.has(state.id) || state.status === "running" || state.status === "queued") continue;
@@ -14768,13 +15237,13 @@ var MeshService = class {
     if (member.ip === "") throw new Error(`member ${member.id} has no VPN address`);
     let user = "root";
     let identityFile;
-    const { state } = await readWireGuardState({ file: path25.join(this.home, "wireguard", "state.json") });
+    const { state } = await readWireGuardState({ file: path26.join(this.home, "wireguard", "state.json") });
     const peer = state?.server?.peers?.find((candidate) => candidate?.ip === member.ip);
     if (peer !== void 0 && peer !== null) {
       if (typeof peer.sshUser === "string" && peer.sshUser !== "") user = peer.sshUser;
       if (typeof peer.publicKey === "string" && peer.publicKey !== "") {
         const digest = createHash8("sha256").update(peer.publicKey).digest("hex");
-        const candidate = path25.join(this.home, "wireguard", "ssh", `${digest}.key`);
+        const candidate = path26.join(this.home, "wireguard", "ssh", `${digest}.key`);
         if (existsSync14(candidate)) identityFile = candidate;
       }
     }
@@ -14922,15 +15391,15 @@ var MeshService = class {
    */
   _jobDir(id) {
     if (typeof id !== "string" || !/^[A-Za-z0-9._-]+$/u.test(id)) throw new Error("invalid job id");
-    const dir = path25.resolve(this.jobRoot, id);
-    if (!dir.startsWith(`${path25.resolve(this.jobRoot)}${path25.sep}`)) throw new Error("invalid job id");
+    const dir = path26.resolve(this.jobRoot, id);
+    if (!dir.startsWith(`${path26.resolve(this.jobRoot)}${path26.sep}`)) throw new Error("invalid job id");
     return dir;
   }
 };
 
 // code/shared/event-stream.mjs
 import { mkdirSync, readdirSync, watch } from "node:fs";
-import path26 from "node:path";
+import path27 from "node:path";
 var HEARTBEAT_MS = 15e3;
 var DEBOUNCE_MS = 120;
 var EventHub = class {
@@ -15085,7 +15554,7 @@ var JobDirectoryWatcher = class {
     for (const entry of entries) {
       if (!entry.isDirectory() || this.watchers.has(entry.name)) continue;
       try {
-        const watcher = watch(path26.join(this.root, entry.name), { persistent: false }, (_event, file) => {
+        const watcher = watch(path27.join(this.root, entry.name), { persistent: false }, (_event, file) => {
           this.#queue(entry.name, String(file ?? ""));
         });
         watcher.on("error", () => {
@@ -15123,7 +15592,7 @@ var JobDirectoryWatcher = class {
 };
 
 // src/lib/job-events.mjs
-import path27 from "node:path";
+import path28 from "node:path";
 var LOG_THROTTLE_MS = 400;
 var LOG_LINES = 300;
 var JOB_ID = /^[A-Za-z0-9._-]+$/u;
@@ -15140,12 +15609,12 @@ function startJobEvents(options) {
   }
   const watchers = [
     new JobDirectoryWatcher({
-      root: path27.join(service.dataDir, "build"),
+      root: path28.join(service.dataDir, "build"),
       log,
       onChange: (dir, file) => handle("build", dir, file)
     }),
     new JobDirectoryWatcher({
-      root: path27.join(service.dataDir, "deploy"),
+      root: path28.join(service.dataDir, "deploy"),
       log,
       onChange: (dir, file) => handle("deploy", dir, file)
     })
@@ -15486,305 +15955,6 @@ function registerApi(ctx, service, scheduler = null) {
     }
   }), "mesh local api");
 }
-
-// src/lib/scheduler.mjs
-import { mkdir as mkdir15, readFile as readFile18, writeFile as writeFile15 } from "node:fs/promises";
-import path28 from "node:path";
-var TICK_TOLERANCE_MS = 9e4;
-var DUPLICATE_WINDOW_MS = 10 * 6e4;
-var Scheduler = class {
-  /**
-   * @param {object} options scheduler input.
-   * @param {{ scheduledBuild: () => Promise<object>, scheduledUpgradeMember: (memberId: string) => Promise<object> }} options.service mesh service.
-   * @param {string} options.file `schedule.json` path.
-   * @param {() => Promise<string[]>} [options.members] current member id provider.
-   * @param {(line: string) => void} [options.log] logger.
-   * @param {() => number} [options.now] clock (tests).
-   * @param {typeof setTimeout} [options.setTimeout] timer factory (tests).
-   * @param {typeof clearTimeout} [options.clearTimeout] timer canceller (tests).
-   * @param {boolean} [options.autoStart] arm on construction; default true.
-   */
-  constructor(options) {
-    this.service = options.service;
-    this.file = options.file;
-    this.memberIdProvider = typeof options.members === "function" ? options.members : null;
-    this.log = typeof options.log === "function" ? options.log : () => {
-    };
-    this.now = typeof options.now === "function" ? options.now : Date.now;
-    this.setTimer = options.setTimeout ?? setTimeout;
-    this.clearTimer = options.clearTimeout ?? clearTimeout;
-    this.schedule = normalizeSchedules({});
-    this.upgrades = /* @__PURE__ */ new Map();
-    this.last = { build: null, upgrades: {}, prepares: {} };
-    this.runningUpgrades = /* @__PURE__ */ new Set();
-    this.runningBuild = false;
-    this.memberIds = [];
-    this.timer = null;
-    this.disposed = false;
-    this.loading = null;
-    if (options.autoStart !== false) void this.start();
-  }
-  /**
-   * Read the persisted schedule, discover members, and arm the timer.
-   * @returns {Promise<void>} when armed.
-   */
-  async start() {
-    await this.#load();
-    await this.#refreshMembers();
-    this.#arm();
-  }
-  /**
-   * Merge one client update and re-arm immediately.
-   *
-   * Either the build clock (`{build}`) or one member's auto-upgrade
-   * (`{member, upgrade}`) is updated per call.
-   * @param {{build?: {enabled?: boolean, time?: string}, member?: string, upgrade?: {enabled?: boolean, time?: string}}} patch schedule patch.
-   * @returns {Promise<object>} new status (build or the member's entry).
-   */
-  async update(patch) {
-    const memberId = typeof patch?.member === "string" ? patch.member.trim() : "";
-    if (memberId !== "") {
-      const entry = normalizeUpgradeSchedule({
-        ...upgradeEntryFor(this.schedule, memberId),
-        ...patch?.upgrade ?? {}
-      });
-      this.upgrades.set(memberId, entry);
-      if (!this.memberIds.includes(memberId)) this.memberIds.push(memberId);
-    } else if (patch?.build !== void 0) {
-      this.schedule.build = normalizeBuildSchedule({ ...this.schedule.build, ...patch.build ?? {} });
-    }
-    this.schedule = {
-      ...this.schedule,
-      upgrades: Object.fromEntries(this.upgrades)
-    };
-    await this.#save();
-    this.#arm();
-    this.log(`schedule saved: build ${this.schedule.build.time} ${this.schedule.build.enabled ? "on" : "off"}${memberId === "" ? "" : `, upgrade ${memberId} ${this.upgrades.get(memberId)?.time} ${this.upgrades.get(memberId)?.enabled ? "on" : "off"}`}`);
-    return this.status(memberId === "" ? void 0 : memberId);
-  }
-  /**
-   * The panel's read model.
-   * @param {string} [memberId] when set, include that member's auto-upgrade.
-   * @returns {object} status.
-   */
-  status(memberId) {
-    const at = new Date(this.now());
-    const result = {
-      ok: true,
-      build: this.#statusEntry(this.schedule.build, "build", void 0, at)
-    };
-    if (typeof memberId === "string" && memberId !== "") {
-      result.upgrade = this.#statusEntry(upgradeEntryFor(this.schedule, memberId), "upgrade", memberId, at);
-    }
-    return result;
-  }
-  /** Stop the timer. */
-  dispose() {
-    this.disposed = true;
-    if (this.timer !== null) this.clearTimer(this.timer);
-    this.timer = null;
-  }
-  /** Build one status row with next occurrence and last outcome. */
-  #statusEntry(entry, kind, memberId, at) {
-    const last = kind === "build" ? this.last.build : this.last.upgrades[memberId] ?? null;
-    return {
-      enabled: entry.enabled,
-      time: entry.time,
-      next: entry.enabled ? nextRunAt(at, entry.time).toISOString() : null,
-      last,
-      // The announcement runs one lead time before the upgrade itself, so the
-      // panel can show that the member's conversations were told to stop.
-      ...kind === "build" ? {} : { prepare: this.last.prepares?.[memberId] ?? null },
-      running: kind === "build" ? this.runningBuild : this.runningUpgrades.has(memberId),
-      ...memberId === void 0 ? {} : { member: memberId }
-    };
-  }
-  /** Read the schedule file once. */
-  async #load() {
-    if (this.loading !== null) return this.loading;
-    this.loading = (async () => {
-      try {
-        const parsed = JSON.parse(await readFile18(this.file, "utf8"));
-        const normalized = migrateSchedules(parsed);
-        this.schedule = normalized;
-        this.upgrades = new Map(Object.entries(normalized.upgrades));
-        if (parsed?.last !== null && typeof parsed?.last === "object") {
-          this.last = {
-            build: typeof parsed.last.build === "object" ? parsed.last.build : null,
-            upgrades: parsed.last.upgrades !== null && typeof parsed.last.upgrades === "object" ? parsed.last.upgrades : {},
-            prepares: parsed.last.prepares !== null && typeof parsed.last.prepares === "object" ? parsed.last.prepares : {}
-          };
-        }
-        if (parsed?.format !== SCHEDULE_FORMAT) await this.#save();
-      } catch {
-      }
-    })();
-    return this.loading;
-  }
-  /** Persist the current settings and last outcomes. */
-  async #save() {
-    try {
-      await mkdir15(path28.dirname(this.file), { recursive: true });
-      await writeFile15(this.file, `${JSON.stringify({
-        format: SCHEDULE_FORMAT,
-        build: this.schedule.build,
-        upgrade: this.schedule.upgrade,
-        upgrades: Object.fromEntries(this.upgrades),
-        last: this.last
-      }, null, 2)}
-`, "utf8");
-    } catch (error) {
-      this.log(`cannot save schedule: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  /** Ask the service who exists now; a failure keeps the previous list. */
-  async #refreshMembers() {
-    if (this.memberIdProvider === null) return;
-    try {
-      const ids = await this.memberIdProvider();
-      const unique = [...new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === "string" && id !== ""))];
-      if (unique.length > 0) this.memberIds = unique;
-    } catch {
-    }
-  }
-  /** One timer for the nearest enabled occurrence. */
-  #arm() {
-    if (this.disposed) return;
-    if (this.timer !== null) this.clearTimer(this.timer);
-    this.timer = null;
-    const at = new Date(this.now());
-    const candidates = [];
-    if (this.schedule.build.enabled) {
-      candidates.push({ kind: "build", memberId: void 0, at: nextRunAt(at, this.schedule.build.time) });
-    }
-    const ids = [.../* @__PURE__ */ new Set([...this.memberIds, ...this.upgrades.keys()])];
-    for (const memberId of ids) {
-      const entry = upgradeEntryFor(this.schedule, memberId);
-      if (!entry.enabled) continue;
-      const upgradeAt = nextRunAt(at, entry.time);
-      candidates.push({ kind: "upgrade", memberId, at: upgradeAt });
-      const prepareAt = new Date(upgradeAt.getTime() - UPGRADE_LEAD_MS);
-      if (prepareAt.getTime() > at.getTime() + 1e3) {
-        candidates.push({ kind: "prepare", memberId, at: prepareAt });
-      }
-    }
-    if (candidates.length === 0) return;
-    candidates.sort((left, right) => left.at.getTime() - right.at.getTime());
-    const next = candidates[0];
-    const delay2 = Math.max(0, next.at.getTime() - at.getTime());
-    this.timer = this.setTimer(() => {
-      this.timer = null;
-      void this.#tick();
-    }, delay2);
-    if (typeof this.timer?.unref === "function") this.timer.unref();
-    this.log(`next ${next.kind}${next.memberId === void 0 ? "" : ` ${next.memberId}`} at ${next.at.toISOString()}`);
-  }
-  /** Run every occurrence due in this tick, then re-arm. */
-  async #tick() {
-    if (this.disposed) return;
-    await this.#refreshMembers();
-    const at = new Date(this.now());
-    try {
-      if (this.schedule.build.enabled && this.#isDue(this.schedule.build.time, at)) {
-        if (!this.#recentlyRan(this.last.build)) await this.#runBuild();
-      }
-      for (const memberId of [.../* @__PURE__ */ new Set([...this.memberIds, ...this.upgrades.keys()])]) {
-        const entry = upgradeEntryFor(this.schedule, memberId);
-        if (!entry.enabled) continue;
-        const prepareDue = [new Date(at.getTime() - 24 * 60 * 6e4), at].some((reference) => {
-          const upgradeAt = nextRunAt(reference, entry.time);
-          return this.#isDueTime(new Date(upgradeAt.getTime() - UPGRADE_LEAD_MS), at);
-        });
-        if (prepareDue && !this.#recentlyRan(this.last.prepares?.[memberId])) {
-          await this.#runPrepare(memberId);
-        }
-        if (!this.#isDue(entry.time, at)) continue;
-        if (this.runningUpgrades.has(memberId)) continue;
-        if (this.#recentlyRan(this.last.upgrades[memberId])) continue;
-        await this.#runUpgrade(memberId);
-      }
-    } finally {
-      this.#arm();
-    }
-  }
-  /** Whether a daily clock occurrence is within the tick window. */
-  #isDue(time, at) {
-    const base = new Date(at.getTime() - 24 * 60 * 6e4);
-    const due = nextRunAt(base, time);
-    return Math.abs(due.getTime() - at.getTime()) <= TICK_TOLERANCE_MS;
-  }
-  /** Whether one exact instant is within the tick window. */
-  #isDueTime(due, at) {
-    return Math.abs(due.getTime() - at.getTime()) <= TICK_TOLERANCE_MS;
-  }
-  /** Whether this kind already ran within the duplicate window. */
-  #recentlyRan(last) {
-    const at = last?.at;
-    return typeof at === "string" && Math.abs(this.now() - Date.parse(at)) < DUPLICATE_WINDOW_MS;
-  }
-  /**
-   * Run the pre-upgrade announcement and record the outcome.
-   *
-   * Independent of the upgrade tick on purpose: a failure only means the
-   * conversations were not stopped in time, and the upgrade still runs.
-   * @param {string} memberId member id.
-   * @returns {Promise<void>} when recorded.
-   */
-  async #runPrepare(memberId) {
-    const at = new Date(this.now()).toISOString();
-    try {
-      this.log(`prepare ${memberId} tick at ${at}`);
-      const result = await this.service.scheduledPrepareUpgrade(memberId);
-      this.last.prepares ??= {};
-      this.last.prepares[memberId] = { at, ...result !== null && typeof result === "object" ? result : { status: "unknown" } };
-      await this.#save();
-      this.log(`prepare ${memberId}: ${String(this.last.prepares[memberId].status ?? "unknown")}${this.last.prepares[memberId].reason ? ` (${String(this.last.prepares[memberId].reason)})` : ""}`);
-    } catch (error) {
-      this.last.prepares ??= {};
-      this.last.prepares[memberId] = { at, status: "failed", reason: error instanceof Error ? error.message : String(error) };
-      await this.#save();
-      this.log(`prepare ${memberId} failed: ${String(this.last.prepares[memberId].reason)}`);
-    }
-  }
-  /** Run the build hook and record the outcome. */
-  async #runBuild() {
-    if (this.runningBuild) return;
-    this.runningBuild = true;
-    const at = new Date(this.now()).toISOString();
-    try {
-      this.log(`build tick at ${at}`);
-      const result = await this.service.scheduledBuild();
-      this.last.build = { at, ...result !== null && typeof result === "object" ? result : { status: "unknown" } };
-      await this.#save();
-      this.log(`build: ${String(this.last.build.status ?? "unknown")}${this.last.build.reason ? ` (${String(this.last.build.reason)})` : ""}`);
-    } catch (error) {
-      this.last.build = { at, status: "failed", reason: error instanceof Error ? error.message : String(error) };
-      await this.#save();
-      this.log(`build failed: ${String(this.last.build.reason)}`);
-    } finally {
-      this.runningBuild = false;
-    }
-  }
-  /** Run one member's upgrade hook and record the outcome. */
-  async #runUpgrade(memberId) {
-    if (this.runningUpgrades.has(memberId)) return;
-    this.runningUpgrades.add(memberId);
-    const at = new Date(this.now()).toISOString();
-    try {
-      this.log(`upgrade ${memberId} tick at ${at}`);
-      const result = await this.service.scheduledUpgradeMember(memberId);
-      this.last.upgrades[memberId] = { at, ...result !== null && typeof result === "object" ? result : { status: "unknown" } };
-      await this.#save();
-      this.log(`upgrade ${memberId}: ${String(this.last.upgrades[memberId].status ?? "unknown")}${this.last.upgrades[memberId].reason ? ` (${String(this.last.upgrades[memberId].reason)})` : ""}`);
-    } catch (error) {
-      this.last.upgrades[memberId] = { at, status: "failed", reason: error instanceof Error ? error.message : String(error) };
-      await this.#save();
-      this.log(`upgrade ${memberId} failed: ${String(this.last.upgrades[memberId].reason)}`);
-    } finally {
-      this.runningUpgrades.delete(memberId);
-    }
-  }
-};
 
 // src/lib/wireguard-api.mjs
 import { request as httpRequest } from "node:http";
@@ -16354,7 +16524,10 @@ function registerTools(ctx, toolsCtx, service) {
       "\u4F1A\u8BDDid\uFF08conversationId\uFF09\u662F\u8DE8\u8FDB\u7A0B\u7684\u7EE7\u7EED\u6295\u9012\u51ED\u636E\uFF1A\u91CD\u65B0\u542F\u52A8\u540E\u3001\u6216\u4E0D\u662F\u672C\u673A\u53D1\u8D77\u7684\u5BF9\u8BDD\uFF0C",
       "\u53EA\u8981\u77E5\u9053\u4F1A\u8BDDid\uFF0C\u914D\u4E0A member \u5C31\u80FD\u7EE7\u7EED\uFF1B\u672C\u673A\u5DF2\u8DDF\u8E2A\u8BE5\u5BF9\u8BDD\u65F6 member \u53EF\u4EE5\u7701\u7565\u3002",
       "\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u65F6\uFF0C\u6295\u9012\u524D\u4F1A\u6309\u8BE5\u4F1A\u8BDD\u7684\u538B\u7F29\u9608\u503C\uFF08`set_member_scope` \u7684 `compressPercent`\uFF0C\u9ED8\u8BA4 35%\uFF09\u68C0\u67E5\u4E0A\u4E0B\u6587\u5360\u6BD4\uFF1A",
-      "\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u8BA9\u6210\u5458\u538B\u7F29\u4E0A\u4E0B\u6587\u518D\u6295\u9012\uFF08\u8981\u6C42\u5BF9\u8BDD\u7A7A\u95F2\uFF09\uFF1B\u4E0D\u8D85\u8FC7\u5C31\u76F4\u63A5\u6295\u9012\u3002\u538B\u7F29\u9608\u503C\u53EA\u6309\u4F1A\u8BDD\u8BBE\u7F6E\uFF0C\u4E0D\u63A5\u53D7\u6BCF\u6B21\u8C03\u7528\u5355\u72EC\u6307\u5B9A\u3002",
+      "\u8D85\u8FC7\u9608\u503C\u4E14\u76EE\u6807\u7A7A\u95F2\u5C31\u5148\u8BA9\u6210\u5458\u538B\u7F29\u4E0A\u4E0B\u6587\u518D\u6295\u9012\uFF1B\u76EE\u6807\u8FD8\u5728\u8FD0\u884C\u5C31\u8DF3\u8FC7\u538B\u7F29\u3001\u76F4\u63A5\u628A\u6D88\u606F steer \u8FDB\u53BB\u3002\u538B\u7F29\u9608\u503C\u53EA\u6309\u4F1A\u8BDD\u8BBE\u7F6E\uFF0C\u4E0D\u63A5\u53D7\u6BCF\u6B21\u8C03\u7528\u5355\u72EC\u6307\u5B9A\u3002",
+      "\u76EE\u6807\u6210\u5458\u6B63\u5728\u90E8\u7F72/\u5347\u7EA7\uFF08\u5305\u62EC\u81EA\u52A8\u5347\u7EA7\u524D\u5341\u5206\u949F\u7684\u51C6\u5907\u671F\uFF09\u65F6\uFF0Ccall_member \u76F4\u63A5\u8FD4\u56DE ok:false\uFF0C\u4E0D\u521B\u5EFA\u4E5F\u4E0D\u6295\u9012\uFF1A\u5347\u7EA7\u4F1A\u91CD\u542F\u76EE\u6807\u6210\u5458\u7684 DSH\uFF0C\u73B0\u5728\u6D3E\u53D1\u7684\u6D88\u606F\u4F1A\u4E22\u3002",
+      "\u7B49\u5347\u7EA7\u7ED3\u675F\u540E\u518D\u7528\u540C\u4E00\u4E2A conversationId \u7EE7\u7EED\u3002",
+      "\u8981\u6295\u9012\u7684\u6D88\u606F\u8D85\u8FC7 4.8 \u4E07\u5B57\u7B26\u65F6\uFF0C\u6B63\u6587\u4F1A\u5199\u5230\u6210\u5458\u672C\u673A\u7684\u4E34\u65F6\u6587\u4EF6\uFF0C\u6295\u9012\u5185\u5BB9\u6539\u6210\u300C\u8BFB\u53D6\u8BE5\u6587\u4EF6\u300D\u7684\u8BF4\u660E\uFF1B\u8FD4\u56DE\u503C data.messageSpill \u662F\u6587\u4EF6\u8DEF\u5F84\u3002",
       "\u4E00\u4E2A\u5DE5\u4F5C\u533A\u53EA\u5141\u8BB8\u4E00\u4E2A\u5BF9\u8BDD\uFF08\u65B0\u5EFA\u65F6\u751F\u6548\uFF09\uFF1A\u76EE\u6807\u5DE5\u4F5C\u533A\u76EE\u5F55\u91CC\u5DF2\u7ECF\u6709\u5BF9\u8BDD\u2014\u2014\u4E0D\u7BA1\u5B83\u662F\u8FDB\u884C\u4E2D\u3001\u7A7A\u95F2\u3001\u5F02\u5E38\u4E2D\u6B62\u8FD8\u662F\u51FA\u9519\u2014\u2014",
       "\u521B\u5EFA\u4F1A\u8FD4\u56DE 409 workspace_occupied\uFF0C\u5E76\u7ED9\u51FA\u90A3\u6761\u5BF9\u8BDD\u7684\u4F1A\u8BDDid\uFF1B\u8FD9\u65F6\u4E0D\u8981\u65B0\u5EFA\uFF0C\u76F4\u63A5 call_member \u5E26 conversationId \u7EE7\u7EED\u5B83\u3002",
       "\u8981\u7EE7\u7EED\u5DF2\u6709\u5BF9\u8BDD\u4E0D\u4F1A\u89E6\u53D1\u8FD9\u4E2A\u62E6\u622A\uFF1B\u8981\u5E76\u884C\u5DE5\u4F5C\u5C31\u6362\u4E00\u4E2A workspace \u540D\uFF08\u6216\u65B0\u5EFA\u5DE5\u4F5C\u533A\uFF09\u3002",
@@ -16423,6 +16596,7 @@ function registerTools(ctx, toolsCtx, service) {
           if (error?.code === "workspace_occupied" || error?.code === "workspace_busy_git") {
             return workspaceBusyResult(error, args);
           }
+          if (error?.code === "member_maintenance") return maintenanceResult(error, args);
           throw error;
         }
         const data2 = memberTaskData(task2, memberTasks);
@@ -16435,6 +16609,7 @@ function registerTools(ctx, toolsCtx, service) {
             formatTaskProfileMissingHint(task2),
             typeof task2.egressLine === "string" && task2.egressLine !== "" ? `\u51FA\u7F51\u5B9E\u6D4B\uFF1A${task2.egressLine}` : "",
             `\u4F1A\u8BDDid\uFF1A${task2.conversationId}`,
+            typeof task2.messageSpill === "string" && task2.messageSpill !== "" ? `\u6D88\u606F\u8FC7\u957F\uFF0C\u6B63\u6587\u5DF2\u5199\u5165\u6210\u5458\u672C\u673A\u6587\u4EF6\uFF1A${task2.messageSpill}\uFF08\u6295\u9012\u7684\u662F\u8BFB\u53D6\u8BE5\u6587\u4EF6\u7684\u8BF4\u660E\uFF09\u3002` : "",
             "\u7ED3\u679C\u4F1A\u81EA\u52A8\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF1B\u4E0D\u53D6\u8D70\u4E5F\u4E0D\u4F1A\u4E22\uFF0C\u5DF2\u7ECF\u53D6\u8D70\u7684\u4E0D\u91CD\u590D\u3002",
             `\u8981\u7EE7\u7EED\u8FD9\u4E2A\u5BF9\u8BDD\uFF1Acall_member { "member": ${JSON.stringify(String(task2.member))}, "conversationId": ${JSON.stringify(String(task2.conversationId))}, "prompt": "..." }\u3002`,
             ...conversationBlock2.lines,
@@ -16452,15 +16627,21 @@ function registerTools(ctx, toolsCtx, service) {
       const hasWorkspace = typeof args.workspace === "string" && args.workspace.trim() !== "";
       if (hasCwd || hasWorkspace) throw new Error("cwd/workspace only apply to a new conversation");
       if (args.force === true) throw new Error("force only applies when starting a new conversation");
-      const task = await memberTasks.send({
-        conversationId,
-        member: args.member,
-        prompt: args.prompt,
-        identity: args.identity,
-        scope: args.scope,
-        agent: exec.agent,
-        signal: exec.signal
-      });
+      let task;
+      try {
+        task = await memberTasks.send({
+          conversationId,
+          member: args.member,
+          prompt: args.prompt,
+          identity: args.identity,
+          scope: args.scope,
+          agent: exec.agent,
+          signal: exec.signal
+        });
+      } catch (error) {
+        if (error?.code === "member_maintenance") return maintenanceResult(error, args);
+        throw error;
+      }
       const data = memberTaskData(task, memberTasks);
       const compaction = task.lastCompaction;
       const observedPercent = Number.isFinite(compaction?.observedPercent) ? formatOneDecimal(compaction.observedPercent) : Number.isFinite(compaction?.forcedPercent) ? formatOneDecimal(compaction.forcedPercent) : "?";
@@ -16476,6 +16657,7 @@ function registerTools(ctx, toolsCtx, service) {
           `\u4F1A\u8BDDid\uFF1A${task.conversationId}`,
           deliveryLine,
           forcedLine,
+          typeof task.messageSpill === "string" && task.messageSpill !== "" ? `\u6D88\u606F\u8FC7\u957F\uFF0C\u6B63\u6587\u5DF2\u5199\u5165\u6210\u5458\u672C\u673A\u6587\u4EF6\uFF1A${task.messageSpill}\uFF08\u6295\u9012\u7684\u662F\u8BFB\u53D6\u8BE5\u6587\u4EF6\u7684\u8BF4\u660E\uFF09\u3002` : "",
           formatContextLine(task.context),
           "\u7ED3\u679C\u4F1A\u81EA\u52A8\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF1B\u4E0D\u53D6\u8D70\u4E5F\u4E0D\u4F1A\u4E22\uFF0C\u5DF2\u7ECF\u53D6\u8D70\u7684\u4E0D\u91CD\u590D\u3002",
           ...conversationBlock.lines,
@@ -17251,6 +17433,28 @@ function workspaceBusyResult(error, args) {
     }
   };
 }
+function maintenanceResult(error, args) {
+  const state = error?.maintenance !== null && typeof error.maintenance === "object" ? error.maintenance : {};
+  const message = String(error?.message ?? "\u76EE\u6807\u6210\u5458\u6B63\u5728\u5347\u7EA7");
+  return {
+    ok: false,
+    text: [
+      message,
+      "\u5347\u7EA7/\u90E8\u7F72\u4F1A\u91CD\u542F\u76EE\u6807\u6210\u5458\u7684 DSH\uFF1B\u7B49\u5B83\u7ED3\u675F\u540E\u518D\u6D3E\u53D1\u6216\u7EE7\u7EED\u6210\u5458\u5BF9\u8BDD\u3002",
+      "\u73B0\u5728\u6CA1\u6709\u521B\u5EFA\u6216\u6295\u9012\u4EFB\u4F55\u5BF9\u8BDD\uFF1B\u5347\u7EA7\u7ED3\u675F\u540E\u7528\u540C\u4E00\u4E2A conversationId \u7EE7\u7EED\u5373\u53EF\uFF08\u65B0\u5EFA\u7684\u7B49\u5347\u7EA7\u5B8C\u518D\u53D1\u8D77\uFF09\u3002"
+    ].join("\n"),
+    data: {
+      ok: false,
+      code: "member_maintenance",
+      member: typeof args?.member === "string" ? args.member : null,
+      conversationId: typeof args?.conversationId === "string" ? args.conversationId : null,
+      kind: typeof state.kind === "string" ? state.kind : null,
+      phase: typeof state.phase === "string" ? state.phase : null,
+      job: typeof state.job === "string" ? state.job : null,
+      since: typeof state.since === "string" ? state.since : null
+    }
+  };
+}
 function formatRemainingWait(remaining) {
   if (!Array.isArray(remaining) || remaining.length === 0) return [];
   return [
@@ -17413,7 +17617,7 @@ import { execFile as execFile4 } from "node:child_process";
 import { createHash as createHash9, randomBytes as randomBytes3, randomUUID as randomUUID4, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 import { existsSync as existsSync15, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http3 from "node:http";
-import { homedir as homedir3 } from "node:os";
+import { homedir as homedir3, tmpdir as tmpdir5 } from "node:os";
 import path29 from "node:path";
 import { promisify as promisify4 } from "node:util";
 
@@ -17612,6 +17816,7 @@ var MAX_EVENTS = 5e3;
 var DEFAULT_WORKSPACE2 = "default-workspace";
 var EMBEDDED_INTEROP_MARKER = "dsh-mesh-embedded-interop-v1";
 var MAX_BODY = 1024 * 1024;
+var SCRATCH_MAX_CHARS = 8 * 1024 * 1024;
 var SETTLE_MS = 300;
 function readEnvFile2(file) {
   const values = {};
@@ -17798,6 +18003,20 @@ function fail(response, status, code, message, detail) {
     ok: false,
     error: { code, message, ...detail === void 0 ? {} : { detail } }
   });
+}
+function writeScratch(body) {
+  const text = typeof body.text === "string" ? body.text : "";
+  if (text.trim() === "") throw httpError(400, "empty_text", "text is empty");
+  if (text.length > SCRATCH_MAX_CHARS) {
+    throw httpError(413, "text_too_large", `text is longer than ${String(SCRATCH_MAX_CHARS)} characters`);
+  }
+  const hint = typeof body.name === "string" && body.name.trim() !== "" ? body.name.trim() : "message";
+  const safe = hint.replace(/[^A-Za-z0-9._-]/gu, "-").slice(0, 60) || "message";
+  const dir = path29.join(tmpdir5(), "dsh-mesh-messages");
+  mkdirSync2(dir, { recursive: true });
+  const file = path29.join(dir, `${safe}-${Date.now().toString(36)}-${randomUUID4().slice(0, 8)}.md`);
+  writeFileSync(file, text, "utf8");
+  return { path: file, bytes: Buffer.byteLength(text, "utf8") };
 }
 function readJson3(request) {
   return new Promise((resolve, reject) => {
@@ -18716,6 +18935,11 @@ data: ${JSON.stringify(payload)}
       }
       if (request.method === "GET" && url.pathname === "/v1/upgrade/plan") {
         json(response, 200, { ok: true, plan: await readUpgradePlan(upgradePlanFile) });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/scratch") {
+        const body = await readJson3(request);
+        json(response, 200, { ok: true, ...writeScratch(body) });
         return;
       }
       if (request.method === "GET" && url.pathname === "/v1/conversations") {

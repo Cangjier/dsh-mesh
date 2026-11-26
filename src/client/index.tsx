@@ -63,7 +63,7 @@ import {
 import { WireGuardPanel } from './wireguard'
 import { PackagesPanel } from './packages'
 import { AutoUpgradeModal } from './schedule'
-import { MemberConversationsChip } from './members'
+import { MemberConversationsProgress, MemberConversationsSection } from './members'
 import { useThemeMode } from './theme'
 import { EN as WIREGUARD_EN, dictionary as wireguardDictionary } from './wireguard/i18n'
 
@@ -1730,14 +1730,20 @@ export function apply(ctx: any) {
     order: 21,
     label: () => t('panel.label'),
   }, SidebarIcon))
-  // The conversation header carries this Session's member conversations: a
-  // hover list for a quick look and a detail dialog on click. The entry hides
-  // itself while the Session tracks none, so an ordinary conversation keeps
-  // the header it had.
-  ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
-    name: 'conversation.session.header.utilities',
+  // The member conversations sit in the Session panel, next to the subagent
+  // catalog: a list of identity/state/member per conversation, the count
+  // beside the title, and a detail dialog on click. An empty section renders
+  // nothing, and the panel hides a section whose body is empty.
+  ctx.slots.inject('conversation.session.panel.section', () => ctx.slots.register({
+    name: 'conversation.session.panel.section',
     id: 'mesh-members',
-    order: 20,
-    label: () => '成员对话',
-  }, (props: any) => <MemberConversationsChip {...props} ctx={ctx} />))
+    // Between the environment block and the subagent catalog (200), which is
+    // where the roster and the delegated work read naturally together.
+    order: 190,
+    label: () => '成员列表',
+  }, (props: any) => <MemberConversationsSection {...props} ctx={ctx} />))
+  ctx.slots.inject('conversation.session.panel.section.actions', () => ctx.slots.register({
+    name: 'conversation.session.panel.section.actions',
+    key: 'mesh-members',
+  }, (props: any) => <MemberConversationsProgress {...props} />))
 }

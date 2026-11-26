@@ -1,37 +1,38 @@
 /**
- * The conversation-header entry for the member conversations of one Session.
+ * The Session-panel section for the member conversations of one Session.
  *
  * A main conversation that delegated through `call_member` tracks several
- * member conversations on other machines. This entry is the one place that
- * shows them without leaving the conversation: a compact "[icon] N个成员对话"
- * chip, a hover list (identity, status, member), and a click-open detail view.
+ * member conversations on other machines. The section lists them beside the
+ * environment block and the subagent catalog: identity, state, member and
+ * workspace per row, a click-open detail view, and the count beside the title.
  *
  * The facts come from the host's `/api/dsh-mesh/member-conversations`, which
  * reads the same task table and scope store the tools use; the browser never
  * touches the task records directly.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   ConfigProvider,
   Descriptions,
-  Empty,
   Modal,
-  Popover,
   Space,
   Tag,
   Tooltip,
   Typography,
   theme as antdTheme,
 } from 'antd'
-import { ApartmentOutlined, ReloadOutlined } from '@ant-design/icons'
+import { ReloadOutlined } from '@ant-design/icons'
 import { useThemeMode } from './theme'
 
 /** Same-origin read of one Session's member conversations. */
 export const MEMBER_CONVERSATIONS_PATH = '/api/dsh-mesh/member-conversations'
 
-/** How often the chip refreshes while the page is visible. */
+/** How often the section refreshes while the page is visible. */
 const POLL_MS = 10_000
+
+/** Rows shown before the fold control, matching the subagent section's budget. */
+const FOLD_LIMIT = 5
 
 /** One member conversation, as the host renders it. */
 export interface MemberConversationRow {
@@ -58,64 +59,107 @@ interface Snapshot {
   total: number
   running: number
   rows: MemberConversationRow[]
-  error: string
 }
 
-/** The chip's own styles: the header seat has no panel stylesheet. */
-const CHIP_CSS = `
-.dsh-mesh-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 24px;
-  padding: 0 8px;
-  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 12px;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
+interface Store {
+  snapshot: Snapshot | null
+  listeners: Set<() => void>
+  timer: ReturnType<typeof setInterval> | null
 }
-.dsh-mesh-chip:hover,
-.dsh-mesh-chip[aria-expanded="true"] {
-  background: color-mix(in srgb, currentColor 10%, transparent);
+
+/** One poller per Session, shared by the section and its title-side count. */
+const stores = new Map<string, Store>()
+
+/**
+ * The store for one Session, created on first use.
+ * @param sessionId main conversation id.
+ * @returns the store.
+ */
+function storeOf(sessionId: string): Store {
+  let entry = stores.get(sessionId)
+  if (entry === undefined) {
+    entry = { snapshot: null, listeners: new Set(), timer: null }
+    stores.set(sessionId, entry)
+  }
+  return entry
 }
-.dsh-mesh-chip-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #1677ff;
-  animation: dsh-mesh-chip-pulse 1.4s ease-in-out infinite;
+
+/**
+ * Read one Session's member conversations and publish the result.
+ *
+ * A failed read keeps the last successful snapshot: a transient host error
+ * must not make the section disappear or report stale states as empty.
+ * @param sessionId main conversation id.
+ * @returns when every listener ran.
+ */
+async function load(sessionId: string): Promise<void> {
+  const entry = storeOf(sessionId)
+  try {
+    const response = await fetch(`${MEMBER_CONVERSATIONS_PATH}?session=${encodeURIComponent(sessionId)}`, {
+      credentials: 'same-origin',
+    })
+    if (response.ok) {
+      const body = await response.json() as { total?: number, running?: number, conversations?: MemberConversationRow[] }
+      const rows = Array.isArray(body.conversations) ? body.conversations : []
+      entry.snapshot = {
+        total: typeof body.total === 'number' ? body.total : rows.length,
+        running: typeof body.running === 'number' ? body.running : 0,
+        rows,
+      }
+    }
+  } catch {
+    // Keep the previous snapshot; the next poll retries.
+  }
+  for (const listener of [...entry.listeners]) listener()
 }
-@keyframes dsh-mesh-chip-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
+
+/**
+ * Follow one Session's member conversations.
+ *
+ * The first mount starts the poller; the last unmount stops it, so an unread
+ * section costs nothing.
+ * @param sessionId main conversation id.
+ * @returns the latest snapshot, or null before the first successful read.
+ */
+function useMemberConversations(sessionId: string): Snapshot | null {
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(() => stores.get(sessionId)?.snapshot ?? null)
+  useEffect(() => {
+    const entry = storeOf(sessionId)
+    const listener = (): void => setSnapshot(entry.snapshot)
+    listener()
+    entry.listeners.add(listener)
+    if (entry.timer === null) {
+      entry.timer = setInterval(() => {
+        if (document.visibilityState !== 'hidden') void load(sessionId)
+      }, POLL_MS)
+      void load(sessionId)
+    }
+    return () => {
+      entry.listeners.delete(listener)
+      if (entry.listeners.size === 0 && entry.timer !== null) {
+        clearInterval(entry.timer)
+        entry.timer = null
+        stores.delete(sessionId)
+      }
+    }
+  }, [sessionId])
+  return snapshot
 }
-.dsh-mesh-pop {
-  max-width: 360px;
-}
-.dsh-mesh-mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-.dsh-mesh-pop-head {
+
+/** The section's own styles: the panel has no stylesheet of ours. */
+const SECTION_CSS = `
+.dsh-mesh-members {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
-  font-size: 12px;
+  flex-direction: column;
+  gap: 1px;
 }
-.dsh-mesh-pop-row {
+.dsh-mesh-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 8px;
-  row-gap: 1px;
   width: 100%;
-  padding: 5px 6px;
+  padding: 4px 6px;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -124,48 +168,54 @@ const CHIP_CSS = `
   cursor: pointer;
   font: inherit;
 }
-.dsh-mesh-pop-row:hover {
+.dsh-mesh-row:hover {
   background: color-mix(in srgb, currentColor 10%, transparent);
 }
-.dsh-mesh-pop-identity {
+.dsh-mesh-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.dsh-mesh-row-identity {
   font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dsh-mesh-pop-meta {
+.dsh-mesh-row-meta {
   font-size: 11px;
   opacity: 0.65;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.dsh-mesh-more {
+  align-self: flex-start;
+  padding: 4px 6px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  opacity: 0.7;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.dsh-mesh-more:hover {
+  opacity: 1;
+}
+.dsh-mesh-progress {
+  font-size: 12px;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+.dsh-mesh-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 .dsh-mesh-detail-member + .dsh-mesh-detail-member {
   margin-top: 12px;
 }
 `
-
-/**
- * Read one Session's member conversations.
- * @param sessionId the main conversation id.
- * @param signal abort signal for an unmounted component.
- * @returns the snapshot.
- */
-async function readMemberConversations(sessionId: string, signal?: AbortSignal): Promise<Snapshot> {
-  const response = await fetch(`${MEMBER_CONVERSATIONS_PATH}?session=${encodeURIComponent(sessionId)}`, {
-    credentials: 'same-origin',
-    signal,
-  })
-  if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
-  const body = await response.json() as Partial<Snapshot> & { conversations?: MemberConversationRow[] }
-  const rows = Array.isArray(body.conversations) ? body.conversations : []
-  return {
-    total: typeof body.total === 'number' ? body.total : rows.length,
-    running: typeof body.running === 'number' ? body.running : 0,
-    rows,
-    error: '',
-  }
-}
 
 /**
  * The status tag for one conversation.
@@ -242,137 +292,94 @@ function MemberDetail({ row }: { row: MemberConversationRow }) {
 }
 
 /**
- * The chip plus its hover list and detail dialog.
+ * The section body: one row per tracked member conversation.
  *
- * The chip is invisible until the host confirms at least one conversation, so
- * a Session that never delegated keeps a clean header.
+ * Five rows show at first, matching the subagent section; the rest sit behind
+ * a fold. Clicking a row opens that conversation's detail. Nothing renders
+ * while the Session tracks no conversation, which also hides the section.
  * @param props slot props (`sessionId`) and the client context.
- * @returns the entry, or nothing.
+ * @returns the section body, or null with nothing to show.
  */
-export function MemberConversationsChip({ sessionId, ctx }: { sessionId: string, ctx: any }) {
+export function MemberConversationsSection({ sessionId, ctx }: { sessionId: string, ctx: any }) {
   const mode = useThemeMode(ctx)
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
-  const [details, setDetails] = useState(false)
-  // Which conversation the dialog shows; null means all of them.
+  const snapshot = useMemberConversations(sessionId)
   const [selected, setSelected] = useState<string | null>(null)
+  const [unfolded, setUnfolded] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
-  const alive = useRef(true)
 
   const refresh = useCallback(async () => {
+    setRefreshing(true)
     try {
-      const next = await readMemberConversations(sessionId)
-      if (alive.current) setSnapshot(next)
-    } catch {
-      // Keep the last known list: a transient host error must not make the
-      // entry disappear or lie about the conversations.
-      if (alive.current) setSnapshot(current => (current === null ? { total: 0, running: 0, rows: [], error: 'unavailable' } : current))
+      await load(sessionId)
+    } finally {
+      setRefreshing(false)
     }
   }, [sessionId])
 
-  useEffect(() => {
-    alive.current = true
-    void refresh()
-    const timer = window.setInterval(() => {
-      if (document.visibilityState !== 'hidden') void refresh()
-    }, POLL_MS)
-    return () => {
-      alive.current = false
-      window.clearInterval(timer)
-    }
-  }, [refresh])
-
-  const manualRefresh = useCallback(async () => {
-    setRefreshing(true)
-    try {
-      await refresh()
-    } finally {
-      if (alive.current) setRefreshing(false)
-    }
-  }, [refresh])
-
   if (snapshot === null || snapshot.rows.length === 0) return null
-
-  const { total, running, rows } = snapshot
-  const label = `${String(total)}个成员对话`
-  const shown = selected === null ? rows : rows.filter(row => row.conversationId === selected)
-  const openDetails = (conversationId: string | null = null): void => {
-    setSelected(conversationId)
-    setDetails(true)
-    void manualRefresh()
-  }
-  const content = (
-    <div className="dsh-mesh-pop">
-      <div className="dsh-mesh-pop-head">
-        <Typography.Text strong>{label}</Typography.Text>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {running > 0 ? `${String(running)} 个进行中` : '全部空闲'}
-        </Typography.Text>
-      </div>
-      {rows.map(row => (
-        <button
-          key={row.conversationId}
-          type="button"
-          className="dsh-mesh-pop-row"
-          onClick={() => openDetails(row.conversationId)}
-        >
-          <span className="dsh-mesh-pop-identity">{row.identity ?? '未设置身份'}</span>
-          <StatusTag status={row.status} label={row.statusLabel} />
-          <span className="dsh-mesh-pop-meta">
-            {`成员 ${row.memberLabel} · ${row.workspace}`}
-          </span>
-          <span />
-        </button>
-      ))}
-      <div style={{ marginTop: 6, textAlign: 'right' }}>
-        <Typography.Link onClick={() => openDetails()} style={{ fontSize: 12 }}>查看全部</Typography.Link>
-      </div>
-    </div>
-  )
+  const { rows } = snapshot
+  const shown = unfolded ? rows : rows.slice(0, FOLD_LIMIT)
+  const selectedRow = rows.find(row => row.conversationId === selected) ?? null
   return (
     <ConfigProvider theme={{ algorithm: mode === 'dark' ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm }}>
-      <style>{CHIP_CSS}</style>
-      <Popover
-        content={content}
-        trigger="hover"
-        placement="bottomRight"
-        mouseEnterDelay={0.15}
-        mouseLeaveDelay={0.2}
-      >
-        <button
-          type="button"
-          className="dsh-mesh-chip"
-          aria-haspopup="dialog"
-          title={label}
-          onClick={() => openDetails()}
-        >
-          <ApartmentOutlined />
-          <span>{label}</span>
-          {running > 0 ? <span className="dsh-mesh-chip-dot" aria-hidden="true" /> : null}
-        </button>
-      </Popover>
+      <style>{SECTION_CSS}</style>
+      <div className="dsh-mesh-members">
+        {shown.map(row => (
+          <button
+            key={row.conversationId}
+            type="button"
+            className="dsh-mesh-row"
+            title={`${row.identity ?? '未设置身份'} · ${row.workspace}`}
+            onClick={() => setSelected(row.conversationId)}
+          >
+            <span className="dsh-mesh-row-main">
+              <span className="dsh-mesh-row-identity">{row.identity ?? '未设置身份'}</span>
+              <span className="dsh-mesh-row-meta">{`成员 ${row.memberLabel} · ${row.workspace}`}</span>
+            </span>
+            <StatusTag status={row.status} label={row.statusLabel} />
+          </button>
+        ))}
+        {rows.length > FOLD_LIMIT
+          ? (
+            <button type="button" className="dsh-mesh-more" onClick={() => setUnfolded(value => !value)}>
+              {unfolded ? '收起' : `显示其余 ${String(rows.length - FOLD_LIMIT)} 个`}
+            </button>
+          )
+          : null}
+      </div>
       <Modal
-        open={details}
-        title={shown.length === 1 ? `成员对话 · ${shown[0]?.identity ?? shown[0]?.conversationId ?? ''}` : `成员对话 · ${label}`}
+        open={selectedRow !== null}
+        title={`成员对话 · ${selectedRow?.identity ?? selectedRow?.conversationId ?? ''}`}
         width={720}
-        onCancel={() => setDetails(false)}
+        onCancel={() => setSelected(null)}
         footer={(
           <Space>
             <Tooltip title="从这台 DSH 重新读取成员会话状态">
               <span>
-                <Typography.Link onClick={() => { void manualRefresh() }}>
+                <Typography.Link onClick={() => { void refresh() }}>
                   <ReloadOutlined spin={refreshing} /> 刷新
                 </Typography.Link>
               </span>
             </Tooltip>
-            <Typography.Link onClick={() => setDetails(false)}>关闭</Typography.Link>
+            <Typography.Link onClick={() => setSelected(null)}>关闭</Typography.Link>
           </Space>
         )}
         destroyOnHidden
       >
-        {shown.length === 0
-          ? <Empty description="没有成员对话" />
-          : shown.map(row => <MemberDetail key={row.conversationId} row={row} />)}
+        {selectedRow === null ? null : <MemberDetail row={selectedRow} />}
       </Modal>
     </ConfigProvider>
   )
+}
+
+/**
+ * The count beside the section title: every conversation and the running ones.
+ * @param props slot props (`sessionId`).
+ * @returns the phrase, or null when the Session tracks none.
+ */
+export function MemberConversationsProgress({ sessionId }: { sessionId: string }) {
+  const snapshot = useMemberConversations(sessionId)
+  if (snapshot === null || snapshot.rows.length === 0) return null
+  const { total, running } = snapshot
+  return <span className="dsh-mesh-progress">{`${String(total)} 个${running > 0 ? ` · ${String(running)} 进行中` : ' · 全部空闲'}`}</span>
 }

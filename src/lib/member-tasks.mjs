@@ -10,14 +10,13 @@
 
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
-import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { formatEgressLine } from './egress-probe.mjs'
+import { interopBaseUrl, interopPortOf, resolveInteropToken } from './interop-client.mjs'
 import { DEFAULT_COMPRESS_PERCENT, effectiveCompressPercent, normalizeMemberScopePatch } from './service.mjs'
 
 export { DEFAULT_COMPRESS_PERCENT }
 
-const DEFAULT_INTEROP_PORT = 8765
 /**
  * A conversation id is a UUID. Callers sometimes put one into `member` when
  * they mean to continue an existing conversation; treating that as a hostname
@@ -110,19 +109,6 @@ const EMPTY_WAIT_RETRIES = 3
  * the Web client localizes exactly this title, so it must not be translated.
  */
 const DEFAULT_WORKSPACE = 'default-workspace'
-
-function envFile(file) {
-  const values = {}
-  if (!existsSync(file)) return values
-  for (const raw of readFileSync(file, 'utf8').split(/\r?\n/)) {
-    const line = raw.trim()
-    if (line === '' || line.startsWith('#')) continue
-    const index = line.indexOf('=')
-    if (index <= 0) continue
-    values[line.slice(0, index).trim()] = line.slice(index + 1).trim()
-  }
-  return values
-}
 
 function truncate(text, limit) {
   const value = String(text ?? '')
@@ -601,28 +587,11 @@ export class MemberTaskService {
   }
 
   #port() {
-    const configured = this.service.config?.interopPort
-    if (Number.isSafeInteger(configured) && configured > 0 && configured < 65_536) return configured
-    return DEFAULT_INTEROP_PORT
+    return interopPortOf(this.service)
   }
 
   #token() {
-    const configured = this.service.config?.interopToken
-    if (typeof configured === 'string' && configured.trim() !== '') return configured.trim()
-    if (process.env.DSH_INTEROP_TOKEN) return process.env.DSH_INTEROP_TOKEN
-    if (this.service.config?.interopUseGatePassword !== false) {
-      if (process.env.DSH_GATE_PASSWORD) return process.env.DSH_GATE_PASSWORD
-      const candidates = [
-        path.join(this.service.repositoryRoot, '..', 'config', 'gate.env'),
-        path.join(this.service.repositoryRoot, 'config', 'gate.env'),
-        path.join(this.service.dataDir, '..', '..', 'config', 'gate.env'),
-      ]
-      for (const file of candidates) {
-        const password = envFile(file).DSH_GATE_PASSWORD
-        if (typeof password === 'string' && password !== '') return password
-      }
-    }
-    throw new Error('no interop token: set interopToken, DSH_INTEROP_TOKEN, or DSH_GATE_PASSWORD')
+    return resolveInteropToken(this.service)
   }
 
   /**
@@ -631,10 +600,7 @@ export class MemberTaskService {
    * @returns {string} base URL without trailing slash.
    */
   #baseUrl(address) {
-    const raw = String(address ?? '')
-    if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, '')
-    const host = raw.includes(':') && !raw.startsWith('[') ? `[${raw}]` : raw
-    return `http://${host}:${String(this.#port())}`
+    return interopBaseUrl(address, this.#port())
   }
 
   async #resolveMember(input) {
@@ -1602,8 +1568,14 @@ export class MemberTaskService {
    * already above its own `compressPercent` (default
    * {@link DEFAULT_COMPRESS_PERCENT}) is compacted first, so the next turn
    * starts from a shortened context. The threshold is read from the
-   * conversation's stored scope; the compaction requires that conversation to
-   * be idle.
+   * conversation's stored scope.
+   *
+   * Compaction is impossible while the conversation is running: the member
+   * only compacts an idle agent. A running conversation is therefore delivered
+   * directly (the message is steered into the turn in progress) instead of
+   * failing the call. The same holds when the conversation starts running
+   * between the occupancy read and the compaction request: the refusal is
+   * treated as "deliver without compressing", not as an error.
    *
    * Passing `identity` / `scope` merges the conversation's stored scope and
    * prefixes this delivery with a one-line identity note, so a conversation
@@ -1658,6 +1630,9 @@ export class MemberTaskService {
     const deliveredPrompt = [prefix, environment, prompt].filter(part => part !== '').join('\n')
     // A compaction record belongs to one delivery; the next one starts clean.
     task.lastCompaction = null
+    // A status read failure keeps the previous value, so the gate below is
+    // cleared here: an unknown status must not look like "running" forever.
+    task.liveStatus = ''
     // The read also detects a member whose reply counter restarted; the cursor
     // must move to the new epoch before the monitor polls it again.
     await this.#refreshContext(task, signal)
@@ -1862,6 +1837,11 @@ export class MemberTaskService {
    * an older member still decides on what the last wait reported. The threshold
    * comes from the conversation's scope (`compressPercent`, default 35%).
    * "超过" is strict: exactly the threshold delivers directly.
+   *
+   * A conversation that is running right now is not compacted: the member
+   * refuses to compact a live agent, and the delivery is meant to steer that
+   * turn anyway. The message is queued directly and the next call decides
+   * again from the new occupancy.
    * @param {object} task member task.
    * @param {AbortSignal} [signal] cancellation of the sending tool call.
    * @param {number} threshold percentage threshold for this conversation.
@@ -1870,6 +1850,13 @@ export class MemberTaskService {
   async #compactIfCrowded(task, signal, threshold) {
     const percent = task.context?.percent
     if (typeof percent !== 'number' || percent <= threshold) return false
+    if (task.liveStatus === 'running') {
+      await this.#log(
+        task,
+        `conversation is running; delivering without compaction (over ${String(threshold)}%, observed ${String(percent)}%)`,
+      )
+      return false
+    }
     await this.#compact(task, signal, { threshold, percent })
     return true
   }
@@ -1879,7 +1866,9 @@ export class MemberTaskService {
    *
    * `GET /v1/conversations/<id>` is cheap and reports the same projection the
    * wait responses do. A member from an older release returns no context; the
-   * cached value then stays in place.
+   * cached value then stays in place. The same read also reports whether the
+   * conversation is running, which decides whether a pre-delivery compaction
+   * is even possible.
    * @param {object} task member task.
    * @param {AbortSignal} [signal] cancellation of the sending tool call.
    * @returns {Promise<void>} resolution after the best-effort read.
@@ -1896,6 +1885,7 @@ export class MemberTaskService {
       )
       this.#rememberContext(task, result?.context)
       this.#rememberWorkspace(task, result?.conversation)
+      if (typeof result?.conversation?.status === 'string') task.liveStatus = result.conversation.status
       if (this.#replyCursorReset(task, result?.conversation)) {
         await this.#resetReplyCursor(task, result.conversation.replySeq)
       }
@@ -1950,7 +1940,15 @@ export class MemberTaskService {
         throw new Error(`对话 ${task.conversationId} 的上下文占比 ${String(percent)}% 已超过压缩阈值 ${String(threshold)}%，但成员 ${task.member} 的 interop 服务不支持上下文压缩（版本过旧）：${message}。先升级该成员再投递。`)
       }
       if (/busy|already has active work|conversation_busy|409/iu.test(message)) {
-        throw new Error(`对话 ${task.conversationId} 的上下文占比 ${String(percent)}% 已超过压缩阈值 ${String(threshold)}%，需要先压缩，但它还在运行：${message}。等 wait_member 返回 state=done 后再投递。`)
+        // The conversation started running between the occupancy read and the
+        // compaction request. Compaction needs an idle agent, but the delivery
+        // does not: steer it into the turn in progress and let the next call
+        // decide on the new occupancy again.
+        await this.#log(
+          task,
+          `conversation started running during compaction; delivering without it (over ${String(threshold)}%, observed ${String(percent)}%): ${message}`,
+        )
+        return null
       }
       throw error
     }

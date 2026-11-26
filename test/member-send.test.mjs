@@ -13,12 +13,15 @@ import { registerTools } from '../src/lib/tools.mjs'
  * A send queues a message; the next wait reports the new sixth reply only when
  * the caller's cursor is past the five old ones, which is exactly what proves
  * that an adopted conversation does not replay its history.
- * @param {{compact?: 'ok'|'unsupported'|'busy', usedTokens?: number, liveContext?: object|null}} [options] knobs.
+ * @param {{compact?: 'ok'|'unsupported'|'busy', usedTokens?: number, liveContext?: object|null, status?: string}} [options] knobs.
  * @returns {Promise<object>} server handle.
  */
 async function fakeMember(options = {}) {
   const members = {
     compact: options.compact ?? 'ok',
+    // What the conversation read says about the live agent; 'running' means a
+    // pre-delivery compaction is impossible.
+    status: options.status ?? 'idle',
     usedTokens: options.usedTokens ?? 12_000,
     // What a conversation read reports before a delivery; null keeps an older
     // member's response (no context on the read).
@@ -75,7 +78,7 @@ async function fakeMember(options = {}) {
     if (request.method === 'GET' && (request.url === `/v1/conversations/${use}` || request.url === `/v1/conversations/${use}?resume=1`)) {
       reply(200, {
         ok: true,
-        conversation: { id: use, status: 'idle', turns: members.turns, replySeq: members.replySeq, workspace: members.workspace },
+        conversation: { id: use, status: members.status, turns: members.turns, replySeq: members.replySeq, workspace: members.workspace },
         ...(members.liveContext === null ? {} : { context: members.liveContext }),
       })
       return
@@ -210,25 +213,45 @@ test('send by conversationId adopts the conversation without replaying its histo
 })
 
 test('send uses the conversation scope threshold before delivering', async () => {
-  for (const mode of ['unsupported', 'busy']) {
-    const member = await fakeMember({
-      compact: mode,
-      liveContext: { usedTokens: 20_000, maxTokens: 128_000, percent: 15.6 },
-    })
-    const { tasks, service, dataDir } = await buildService(member.port)
-    // A low explicit threshold (10%) makes the 15.6% context over the limit.
-    service.memberScope = async () => ({ compressPercent: 10 })
-    try {
-      await assert.rejects(
-        () => tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' }),
-        mode === 'busy' ? /还在运行/u : /不支持上下文压缩/u,
-      )
-      assert.deepEqual(member.messages, [], 'a failed compaction must not deliver the message')
-    } finally {
-      await tasks.dispose()
-      await member.close()
-      await rm(dataDir, { recursive: true, force: true })
-    }
+  const member = await fakeMember({
+    compact: 'unsupported',
+    liveContext: { usedTokens: 20_000, maxTokens: 128_000, percent: 15.6 },
+  })
+  const { tasks, service, dataDir } = await buildService(member.port)
+  // A low explicit threshold (10%) makes the 15.6% context over the limit.
+  service.memberScope = async () => ({ compressPercent: 10 })
+  try {
+    // A member too old to compact still refuses, with the upgrade hint: the
+    // conversation would grow without bound and the caller must act.
+    await assert.rejects(
+      () => tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' }),
+      /不支持上下文压缩/u,
+    )
+    assert.deepEqual(member.messages, [], 'a failed compaction must not deliver the message')
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a conversation that is running is delivered without a compaction', async () => {
+  const member = await fakeMember({
+    status: 'running',
+    liveContext: { usedTokens: 60_000, maxTokens: 128_000, percent: 46.9 },
+  })
+  const { tasks, dataDir } = await buildService(member.port)
+  try {
+    const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' })
+    // The member cannot compact a live agent, and the delivery steers the turn
+    // in progress: no compaction request, no error, the message still lands.
+    assert.deepEqual(member.order, ['message'])
+    assert.deepEqual(member.messages, ['继续'])
+    assert.equal(task.lastCompaction, null)
+  } finally {
+    await tasks.dispose()
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
   }
 })
 
@@ -371,19 +394,19 @@ test('a higher conversation threshold leaves a 15% context alone', async () => {
   }
 })
 
-test('a compaction that cannot reach an idle conversation refuses the delivery', async () => {
+test('a conversation that starts running during the compaction still gets the message', async () => {
   const member = await fakeMember({
     compact: 'busy',
     liveContext: { usedTokens: 60_000, maxTokens: 128_000, percent: 46.9 },
   })
   const { tasks, dataDir } = await buildService(member.port)
   try {
-    await assert.rejects(
-      () => tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' }),
-      /超过压缩阈值 35%|还在运行/u,
-    )
-    assert.deepEqual(member.order, ['compact'], 'the message must not be delivered without the compaction')
-    assert.deepEqual(member.messages, [])
+    // The occupancy read says idle, the compact request then finds it running.
+    // Compaction is skipped and the delivery proceeds instead of failing.
+    const task = await tasks.send({ member: '127.0.0.1', conversationId: 'conv-9', prompt: '继续' })
+    assert.deepEqual(member.order, ['compact', 'message'])
+    assert.deepEqual(member.messages, ['继续'])
+    assert.equal(task.lastCompaction, null, 'no compaction was recorded')
   } finally {
     await tasks.dispose()
     await member.close()

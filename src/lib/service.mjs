@@ -47,6 +47,8 @@ import {
   SshRunner,
 } from '../../code/deploy/engine.mjs'
 import { EgressProxy } from './egress.mjs'
+import { memberInteropRequest } from './interop-client.mjs'
+import { UPGRADE_LEAD_MS } from './upgrade-announce.mjs'
 import { RemoteBuilder } from './remote-build.mjs'
 import { CLUSTER_HEADER, deriveClusterSecret, signClusterRequest } from '../../code/shared/cluster.mjs'
 import { repackArchive } from '../../code/build/repack.mjs'
@@ -86,6 +88,9 @@ const PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 60_000
 export const MEMBER_IDENTITY_MAX = 40
 /** Longest accepted scope text in one session scope. */
 export const MEMBER_SCOPE_MAX = 120
+/** How long a pre-upgrade announcement stays valid for the upgrade that follows. */
+const UPGRADE_ANNOUNCE_WINDOW_MS = UPGRADE_LEAD_MS * 3
+
 /** Default context occupancy percentage that triggers a pre-delivery compaction. */
 export const DEFAULT_COMPRESS_PERCENT = 35
 
@@ -326,6 +331,8 @@ export class MeshService {
     this.deployRoot = path.join(this.dataDir, 'deploy')
     this.memberTagsFile = path.join(this.dataDir, 'member-tags.json')
     this.memberScopesFile = path.join(this.dataDir, 'member-scopes.json')
+    /** @type {Map<string, {at: string, counts: object}>} members already asked to stop their conversations */
+    this.announcedUpgrades = new Map()
     this.packagesDir = path.join(os.homedir(), '.dsh', 'packages')
     this.releaseConfigFile = path.join(this.dataDir, 'release.json')
     /**
@@ -1849,6 +1856,109 @@ export class MeshService {
   }
 
   /**
+   * Announce one member's imminent auto-upgrade to its running conversations.
+   *
+   * The member owns those conversations, so the gateway only asks: it POSTs
+   * `/v1/upgrade/prepare`, the member classifies its running agents (leader /
+   * member / plain) and injects the matching stop message. A member older than
+   * this release has no such endpoint; that is reported, not retried, and the
+   * upgrade still runs.
+   *
+   * Nothing is announced when the member is already on the newest build: the
+   * upgrade tick would only skip it, and stopping conversations for nothing
+   * would be worse than the missed notice.
+   * @param {string} memberId member id.
+   * @returns {Promise<{status: string, member?: string, reason?: string, announced?: number, counts?: object}>} outcome.
+   */
+  async scheduledPrepareUpgrade(memberId) {
+    const snapshot = await this.members()
+    const everyone = [snapshot.local, ...snapshot.members].filter(Boolean)
+    const member = everyone.find(candidate => candidate.id === memberId)
+    if (member === undefined) return { status: 'skipped', reason: '成员不在当前列表', member: memberId }
+    if (member.online === false) return { status: 'skipped', reason: '离线', member: member.name }
+    if (member.id === 'local' || member.kind === 'self') return { status: 'skipped', reason: '本机没有自动升级', member: member.name }
+    const deployJobs = await this.deployJobs(50)
+    this.#applyInferredDeployment(member, deployJobs)
+    const packages = (await this.packages()).packages
+    const release = await this.#scheduledRelease()
+    const candidate = planMemberUpgrade(member, packages, release)
+    if (candidate.package === undefined) {
+      return { status: 'skipped', member: member.name, reason: candidate.reason }
+    }
+    return this.#announceUpgrade(member)
+  }
+
+  /**
+   * Ask one member to stop the conversations an upgrade will interrupt.
+   * @param {object} member member row.
+   * @returns {Promise<{status: string, member: string, reason?: string, announced?: number, counts?: object}>} outcome.
+   */
+  async #announceUpgrade(member) {
+    if (member.dsh !== true || typeof member.ip !== 'string' || member.ip === '') {
+      return { status: 'skipped', member: member.name, reason: '成员没有在运行的 DSH' }
+    }
+    let response
+    try {
+      response = await memberInteropRequest(this, {
+        address: member.ip,
+        path: '/v1/upgrade/prepare',
+        body: {},
+        timeoutMs: 20_000,
+      })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      this.logLine(`scheduled upgrade ${member.name}: could not announce the restart: ${reason}`)
+      return { status: 'failed', member: member.name, reason }
+    }
+    if (response.unsupported) {
+      this.logLine(`scheduled upgrade ${member.name}: the member's release has no /v1/upgrade/prepare; its conversations are not stopped`)
+      return { status: 'unsupported', member: member.name, reason: '成员版本过旧，不支持升级前停止通知' }
+    }
+    if (!response.ok) {
+      const reason = response.data?.error?.message ?? `HTTP ${String(response.status)}`
+      this.logLine(`scheduled upgrade ${member.name}: the announcement was refused: ${reason}`)
+      return { status: 'failed', member: member.name, reason }
+    }
+    const announced = Number.isSafeInteger(response.data?.announced) ? response.data.announced : 0
+    const counts = response.data?.counts ?? {}
+    this.announcedUpgrades.set(member.id, { at: new Date().toISOString(), counts })
+    this.logLine(`scheduled upgrade ${member.name}: announced to ${String(announced)} running conversation(s) (leader ${String(counts.leader ?? 0)}, member ${String(counts.member ?? 0)}, plain ${String(counts.plain ?? 0)})`)
+    return {
+      status: response.data?.already === true ? 'already' : 'announced',
+      member: member.name,
+      announced,
+      counts,
+    }
+  }
+
+  /**
+   * Make sure the stop messages went out before an upgrade starts.
+   *
+   * The scheduler normally announced ten minutes earlier. When this process
+   * was not alive for that tick (a restart inside the window), the
+   * announcement happens now and the upgrade still proceeds: the alternative —
+   * skipping the upgrade — would silently drop a scheduled deployment.
+   * @param {object} member member row.
+   * @returns {Promise<void>} completion.
+   */
+  async #ensureUpgradeAnnounced(member) {
+    if (member.dsh !== true || typeof member.ip !== 'string' || member.ip === '') return
+    const previous = this.announcedUpgrades.get(member.id)
+    if (previous !== undefined) {
+      const at = Date.parse(previous.at)
+      if (Number.isFinite(at) && Date.now() - at <= UPGRADE_ANNOUNCE_WINDOW_MS) return
+    }
+    const result = await this.#announceUpgrade(member).catch(error => ({
+      status: 'failed',
+      member: member.name,
+      reason: error instanceof Error ? error.message : String(error),
+    }))
+    if (result.status === 'announced' || result.status === 'already') {
+      this.logLine(`scheduled upgrade ${member.name}: the stop messages went out at the upgrade tick (the ten-minute lead was missed)`)
+    }
+  }
+
+  /**
    * One member's scheduled auto-upgrade.
    *
    * The archive comes from the gateway cache when that copy is the newest one;
@@ -1875,6 +1985,7 @@ export class MeshService {
       return { status: 'skipped', member: member.name, reason: candidate.reason }
     }
     try {
+      await this.#ensureUpgradeAnnounced(member)
       return { status: 'started', ...(await this.#startScheduledUpgrade(member, candidate)) }
     } catch (error) {
       return { status: 'failed', member: member.name, reason: error instanceof Error ? error.message : String(error) }

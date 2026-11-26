@@ -8,7 +8,9 @@
  * required for either job to run.
  *
  * Per-member upgrades share one timer: the earliest enabled occurrence wins,
- * and every member whose own time is due is started in that tick.
+ * and every member whose own time is due is started in that tick. The same
+ * upgrade also has a prepare occurrence {@link UPGRADE_LEAD_MS} earlier: that
+ * tick asks the member to stop its running conversations before the restart.
  *
  * @module @local/dsh-mesh/scheduler
  */
@@ -27,6 +29,7 @@ import {
   parseClock,
   upgradeEntryFor,
 } from './schedule.mjs'
+import { UPGRADE_LEAD_MS } from './upgrade-announce.mjs'
 
 /** How late a tick may still count as the scheduled occurrence. */
 const TICK_TOLERANCE_MS = 90_000
@@ -59,8 +62,8 @@ export class Scheduler {
     this.schedule = normalizeSchedules({})
     /** @type {Map<string, object>} */
     this.upgrades = new Map()
-    /** @type {{build: object|null, upgrades: Record<string, object>}} */
-    this.last = { build: null, upgrades: {} }
+    /** @type {{build: object|null, upgrades: Record<string, object>, prepares: Record<string, object>}} */
+    this.last = { build: null, upgrades: {}, prepares: {} }
     /** @type {Set<string>} */
     this.runningUpgrades = new Set()
     this.runningBuild = false
@@ -147,6 +150,9 @@ export class Scheduler {
       time: entry.time,
       next: entry.enabled ? nextRunAt(at, entry.time).toISOString() : null,
       last,
+      // The announcement runs one lead time before the upgrade itself, so the
+      // panel can show that the member's conversations were told to stop.
+      ...(kind === 'build' ? {} : { prepare: this.last.prepares?.[memberId] ?? null }),
       running: kind === 'build' ? this.runningBuild : this.runningUpgrades.has(memberId),
       ...(memberId === undefined ? {} : { member: memberId }),
     }
@@ -165,6 +171,7 @@ export class Scheduler {
           this.last = {
             build: typeof parsed.last.build === 'object' ? parsed.last.build : null,
             upgrades: parsed.last.upgrades !== null && typeof parsed.last.upgrades === 'object' ? parsed.last.upgrades : {},
+            prepares: parsed.last.prepares !== null && typeof parsed.last.prepares === 'object' ? parsed.last.prepares : {},
           }
         }
         // Rewrite a legacy file once so the next read sees the new format even
@@ -219,7 +226,16 @@ export class Scheduler {
     for (const memberId of ids) {
       const entry = upgradeEntryFor(this.schedule, memberId)
       if (!entry.enabled) continue
-      candidates.push({ kind: 'upgrade', memberId, at: nextRunAt(at, entry.time) })
+      const upgradeAt = nextRunAt(at, entry.time)
+      candidates.push({ kind: 'upgrade', memberId, at: upgradeAt })
+      // The stop messages go out before the restart, not with it: a tick of
+      // its own runs while the upgrade is still UPGRADE_LEAD_MS away. A
+      // prepare occurrence already in the past is not replayed; the upgrade
+      // tick then announces late and logs that the lead was missed.
+      const prepareAt = new Date(upgradeAt.getTime() - UPGRADE_LEAD_MS)
+      if (prepareAt.getTime() > at.getTime() + 1000) {
+        candidates.push({ kind: 'prepare', memberId, at: prepareAt })
+      }
     }
     if (candidates.length === 0) return
     candidates.sort((left, right) => left.at.getTime() - right.at.getTime())
@@ -244,7 +260,18 @@ export class Scheduler {
       }
       for (const memberId of [...new Set([...this.memberIds, ...this.upgrades.keys()])]) {
         const entry = upgradeEntryFor(this.schedule, memberId)
-        if (!entry.enabled || !this.#isDue(entry.time, at)) continue
+        if (!entry.enabled) continue
+        // The prepare occurrence belongs to the upgrade that follows it, and
+        // either of the two daily occurrences can be the one that is due: the
+        // one reached from yesterday's clock, or the one still ahead today.
+        const prepareDue = [new Date(at.getTime() - 24 * 60 * 60_000), at].some(reference => {
+          const upgradeAt = nextRunAt(reference, entry.time)
+          return this.#isDueTime(new Date(upgradeAt.getTime() - UPGRADE_LEAD_MS), at)
+        })
+        if (prepareDue && !this.#recentlyRan(this.last.prepares?.[memberId])) {
+          await this.#runPrepare(memberId)
+        }
+        if (!this.#isDue(entry.time, at)) continue
         if (this.runningUpgrades.has(memberId)) continue
         if (this.#recentlyRan(this.last.upgrades[memberId])) continue
         await this.#runUpgrade(memberId)
@@ -261,10 +288,40 @@ export class Scheduler {
     return Math.abs(due.getTime() - at.getTime()) <= TICK_TOLERANCE_MS
   }
 
+  /** Whether one exact instant is within the tick window. */
+  #isDueTime(due, at) {
+    return Math.abs(due.getTime() - at.getTime()) <= TICK_TOLERANCE_MS
+  }
+
   /** Whether this kind already ran within the duplicate window. */
   #recentlyRan(last) {
     const at = last?.at
     return typeof at === 'string' && Math.abs(this.now() - Date.parse(at)) < DUPLICATE_WINDOW_MS
+  }
+
+  /**
+   * Run the pre-upgrade announcement and record the outcome.
+   *
+   * Independent of the upgrade tick on purpose: a failure only means the
+   * conversations were not stopped in time, and the upgrade still runs.
+   * @param {string} memberId member id.
+   * @returns {Promise<void>} when recorded.
+   */
+  async #runPrepare(memberId) {
+    const at = new Date(this.now()).toISOString()
+    try {
+      this.log(`prepare ${memberId} tick at ${at}`)
+      const result = await this.service.scheduledPrepareUpgrade(memberId)
+      this.last.prepares ??= {}
+      this.last.prepares[memberId] = { at, ...(result !== null && typeof result === 'object' ? result : { status: 'unknown' }) }
+      await this.#save()
+      this.log(`prepare ${memberId}: ${String(this.last.prepares[memberId].status ?? 'unknown')}${this.last.prepares[memberId].reason ? ` (${String(this.last.prepares[memberId].reason)})` : ''}`)
+    } catch (error) {
+      this.last.prepares ??= {}
+      this.last.prepares[memberId] = { at, status: 'failed', reason: error instanceof Error ? error.message : String(error) }
+      await this.#save()
+      this.log(`prepare ${memberId} failed: ${String(this.last.prepares[memberId].reason)}`)
+    }
   }
 
   /** Run the build hook and record the outcome. */
@@ -323,13 +380,14 @@ export async function readScheduleFile(file) {
       last: {
         build: typeof parsed?.last?.build === 'object' ? parsed.last.build : null,
         upgrades: parsed?.last?.upgrades !== null && typeof parsed?.last?.upgrades === 'object' ? parsed.last.upgrades : {},
+        prepares: parsed?.last?.prepares !== null && typeof parsed?.last?.prepares === 'object' ? parsed.last.prepares : {},
       },
     }
   } catch {
     return {
       schedule: normalizeSchedules({}),
       upgrades: {},
-      last: { build: null, upgrades: {} },
+      last: { build: null, upgrades: {}, prepares: {} },
     }
   }
 }

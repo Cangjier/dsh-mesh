@@ -496,11 +496,13 @@ call_member { "conversationId": "<会话id>", "prompt": "继续" }
 阈值取该 conversationId 在 `member-scopes.json` 里的 `compressPercent`，默认 35%；新会话
 还没设置时也用默认值，设置后下一次 `call_member` 投递生效。投递前会先读一次目标对话的
 上下文占用（`GET /v1/conversations/<id>`，响应里的 `context`），**严格大于阈值** 就先压缩、
-压缩完成才投递；正好等于阈值不压缩。压缩同样要求对话空闲：目标还在跑时会返回错误并拒绝
-这次投递（不会跳过压缩直接发），等 `wait_member` 到 `state=done` 后重试即可。成员版本过旧
-（没有 `/compact` 或 `ctx.compaction`）会明确提示先升级；不要为了压缩而重开对话（那样上下文
-会丢）。成员侧读取返回 `context` 的能力随插件一起升级；旧成员不返回 `context` 时退回到最近
-一次 `wait` 报告的占用。
+压缩完成才投递；正好等于阈值不压缩。目标**正在运行**时不压缩：压缩要求成员侧对话空闲，
+而 running 的投递本来就走 steer，所以直接投递（超过阈值只记一行日志，下一次投递再按新
+占用判断）；读了占用是空闲、压缩请求却撞上 409 `conversation_busy`（它刚好开始跑）也按
+「跳过压缩、照常投递」处理，不再拒绝这次投递。成员版本过旧（没有 `/compact` 或
+`ctx.compaction`）仍会明确提示先升级；不要为了压缩而重开对话（那样上下文会丢）。成员侧
+读取返回 `context` 的能力随插件一起升级；旧成员不返回 `context` 时退回到最近一次 `wait`
+报告的占用。
 
 ### 6.5 wait_member：按轮返回、`all` 优先
 

@@ -367,6 +367,7 @@ test('each member gets its own 06:00 upgrade tick once enabled', async () => {
     file,
     service: {
       scheduledBuild: async () => { calls.push('build'); return { status: 'skipped' } },
+      scheduledPrepareUpgrade: async memberId => { calls.push(`prepare:${memberId}`); return { status: 'announced', member: memberId } },
       scheduledUpgradeMember: async memberId => { calls.push(`upgrade:${memberId}`); return { status: 'started', member: memberId, jobId: `job-${memberId}` } },
     },
     members: async () => ['local', 'peer'],
@@ -380,15 +381,24 @@ test('each member gets its own 06:00 upgrade tick once enabled', async () => {
     assert.equal(timer, null)
     await scheduler.update({ member: 'local', upgrade: { enabled: true } })
     await scheduler.update({ member: 'peer', upgrade: { enabled: true } })
-    assert.equal(delay, 60 * 60 * 1000)
+    // The first occurrence is the pre-upgrade announcement, ten minutes before
+    // the 06:00 clock; the upgrade itself is armed after that tick.
+    assert.equal(delay, 50 * 60 * 1000)
+    now = new Date('2026-11-16T05:50:00+08:00').getTime()
+    timer()
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.deepEqual(calls.sort(), ['prepare:local', 'prepare:peer'])
+    assert.equal(delay, 10 * 60 * 1000)
+    assert.equal(scheduler.status('peer').upgrade.prepare.status, 'announced')
     now = new Date('2026-11-16T06:00:00+08:00').getTime()
     timer()
     await new Promise(resolve => setTimeout(resolve, 50))
-    assert.deepEqual(calls.sort(), ['upgrade:local', 'upgrade:peer'])
+    assert.deepEqual(calls.sort(), ['prepare:local', 'prepare:peer', 'upgrade:local', 'upgrade:peer'])
     assert.equal(scheduler.status('peer').upgrade.last.status, 'started')
     const saved = await readScheduleFile(file)
     assert.equal(saved.schedule.upgrade.time, '06:00')
     assert.equal(saved.last.upgrades.peer.status, 'started')
+    assert.equal(saved.last.prepares.peer.status, 'announced')
   } finally {
     scheduler.dispose()
     await rm(dir, { recursive: true, force: true })

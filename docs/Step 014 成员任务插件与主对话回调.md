@@ -62,6 +62,8 @@ call_member { "member": "10.66.66.3", "conversationId": "<会话id>", "prompt": 
 成员侧用 DSH 的 `ctx.compaction.compactNow()`（等同 `/compact`，要求对话空闲）把旧历史
 替换成摘要；返回 `compacted` / `shadowedCount` / `shadowedTokenCount` / `context`。
 老成员没有这个接口时返回 404/501，A 侧直接报「先升级该成员」，不会为了压缩重开对话。
+对话正在运行时不压缩：压缩只对 idle 的 agent 可用，而 running 的投递本来就走 steer，
+所以直接投递；压缩请求撞上 `409 conversation_busy` 也按「跳过压缩、照常投递」处理。
 
 ### 上下文占用
 

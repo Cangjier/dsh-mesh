@@ -31,6 +31,7 @@ import {
 } from '../../code/shared/conversation-meta.mjs'
 import { applySessionEvent, repliesSince, summarizeReplies } from '../../code/shared/conversation-replies.mjs'
 import { clearMemberSessions, markMemberSession, unmarkMemberSession } from './member-sessions.mjs'
+import { announceUpgrade, readUpgradePlan } from './upgrade-announce.mjs'
 import { collectSystemInfo } from '../../code/shared/system-info.mjs'
 
 const execFileAsync = promisify(execFile)
@@ -495,6 +496,12 @@ export function createInteropService(options) {
   const settings = options.settings ?? resolveInteropSettings(config)
   const logLine = options.log ?? (() => {})
   const retry = options.retry !== false
+  // The pre-upgrade announcement is persisted here so the restarted process
+  // can find the conversations it stopped. It belongs to the mesh plugin's
+  // data directory; the caller passes the same path it arms the resume with.
+  const upgradePlanFile = typeof options.upgradePlanFile === 'string' && options.upgradePlanFile !== ''
+    ? options.upgradePlanFile
+    : path.join(settings.dataDir, 'upgrade-plan.json')
 
   /** @type {Map<string, string>} */
   const conversations = new Map()
@@ -1609,6 +1616,17 @@ export function createInteropService(options) {
       }
       if (request.method === 'GET' && (url.pathname === '/v1/system' || url.pathname.startsWith('/v1/system/'))) {
         await serveSystem(response, url)
+        return
+      }
+      if (request.method === 'POST' && url.pathname === '/v1/upgrade/prepare') {
+        // The gateway asks this host to wind its running conversations down
+        // before the scheduled restart. Idempotent: a retry reuses the plan.
+        const result = await announceUpgrade(ctx, { planFile: upgradePlanFile, log })
+        json(response, 200, result)
+        return
+      }
+      if (request.method === 'GET' && url.pathname === '/v1/upgrade/plan') {
+        json(response, 200, { ok: true, plan: await readUpgradePlan(upgradePlanFile) })
         return
       }
       if (request.method === 'GET' && url.pathname === '/v1/conversations') {

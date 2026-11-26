@@ -9,6 +9,7 @@ import { scheduleFile } from './lib/schedule.mjs'
 import { registerWireGuardApi } from './lib/wireguard-api.mjs'
 import { registerTools } from './lib/tools.mjs'
 import { createInteropService, resolveInteropSettings } from './lib/interop-service.mjs'
+import { armUpgradeResume } from './lib/upgrade-announce.mjs'
 
 export const inject = ['webServer']
 
@@ -65,6 +66,19 @@ export async function apply(ctx: any, config: any = {}) {
   // A profile without the agent registry (a non-Web launch) simply never runs
   // this block. `interopEmbedded: false` is the emergency fallback to the
   // standalone `code/interop-service/server.mjs`.
+  // The pre-upgrade announcement persists which conversations it stopped. A
+  // restart consumes it: two minutes after the plugin is up, the leader and
+  // plain conversations get "重启成功，请继续。". Member conversations are left
+  // to their initiator. Arming needs no agents yet; the resume looks them up
+  // when the timer fires.
+  const upgradePlanFile = path.join(dataDirectory(), 'upgrade-plan.json')
+  void armUpgradeResume(ctx, {
+    planFile: upgradePlanFile,
+    log: (line: string) => console.log(`mesh upgrade: ${line}`),
+  }).catch((error: unknown) => {
+    console.error(`mesh upgrade: could not arm the resume: ${error instanceof Error ? error.message : String(error)}`)
+  })
+
   if (config.interopEmbedded !== false) {
     try {
       ctx.inject(['agents'], (agentsCtx: any) => {
@@ -79,11 +93,15 @@ export async function apply(ctx: any, config: any = {}) {
           ctx: any
           settings: Record<string, any>
           config: Record<string, any>
+          upgradePlanFile?: string
           log: (line: string) => void
         }) => { start(): Promise<{ port: number }>; dispose(): Promise<void> })({
           ctx: agentsCtx,
           settings,
           config,
+          // Both ends of the announcement use the same file: the endpoint
+          // writes it, the resume timer above consumes it after the restart.
+          upgradePlanFile,
           log: line => console.log(line),
         })
         agentsCtx.effect(() => () => {

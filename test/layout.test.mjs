@@ -110,6 +110,46 @@ test('prepare creates shared state, launcher and stable runtime without links', 
     assert.equal(profile.dependencies['@local/dsh-mesh'], 'link:./node_modules/@local/dsh-mesh')
     assert.ok(existsSync(path.join(root, 'shared', 'home', 'profiles', 'web', 'node_modules', '@local', 'dsh-mesh', 'index.js')))
     assert.ok(existsSync(path.join(root, 'shared', 'home', 'profiles', 'web', 'node_modules', 'xl', 'index.js')))
+    // New Sessions must not start confined: a dispatched member conversation
+    // has nobody who could approve a workspace-write write.
+    const patch = readFileSync(path.join(root, 'shared', 'home', 'profiles', 'web', 'cordis.patch.yml'), 'utf8')
+    assert.match(patch, /^- id: permission$/mu)
+    assert.match(patch, /^    defaultPreset: danger-full-access$/mu)
+    assert.match(patch, /^        sandbox: danger-full-access$/mu)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('prepare adds the permission default without overriding the operator choice', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dsh-layout-'))
+  const patchFile = path.join(root, 'shared', 'home', 'profiles', 'web', 'cordis.patch.yml')
+  try {
+    makeRelease(root, '20261118D-aaaaaaaa')
+    mkdirSync(path.dirname(patchFile), { recursive: true })
+    // What the Web UI Settings page writes when the operator picks read-only.
+    const chosen = '- id: permission\n  name: "@deepseek-ai/dsh-permission-presets"\n  config:\n    defaultPreset: read-only\n'
+    writeFileSync(patchFile, chosen)
+    layout(['prepare', '--root', root, '--release', '20261118D-aaaaaaaa', '--no-units'])
+    assert.equal(readFileSync(patchFile, 'utf8'), chosen, 'an explicit default is left alone')
+
+    // A row without a default gains the full-access one, once.
+    writeFileSync(patchFile, '- id: permission\n  name: "@deepseek-ai/dsh-permission-presets"\n  config:\n    presets:\n      read-only:\n        sandbox: read-only\n        approval: ask\n')
+    layout(['prepare', '--root', root, '--release', '20261118D-aaaaaaaa', '--no-units'])
+    const added = readFileSync(patchFile, 'utf8')
+    assert.match(added, /^    defaultPreset: danger-full-access$/mu)
+    assert.equal(added.match(/- id: permission/gu)?.length, 1)
+    // ...and a second prepare is idempotent.
+    layout(['prepare', '--root', root, '--release', '20261118D-aaaaaaaa', '--no-units'])
+    assert.equal(readFileSync(patchFile, 'utf8'), added)
+
+    // A profile initialised empty carries `[]`; the row replaces it instead of
+    // trailing an invalid second document.
+    writeFileSync(patchFile, '# dsh profile root\n[]\n')
+    layout(['prepare', '--root', root, '--release', '20261118D-aaaaaaaa', '--no-units'])
+    const replaced = readFileSync(patchFile, 'utf8')
+    assert.doesNotMatch(replaced, /^\[\]$/mu)
+    assert.match(replaced, /^- id: permission$/mu)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

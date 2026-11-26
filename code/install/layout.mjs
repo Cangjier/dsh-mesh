@@ -42,6 +42,9 @@ const POINTER = 'dsh-mesh.json'
 const LAUNCHER = 'dsh-mesh.mjs'
 const BACKUP = 'dsh-mesh.mjs.bak'
 
+/** New Session permission every dsh-mesh profile defaults to. */
+const PERMISSION_DEFAULT_PRESET = 'danger-full-access'
+
 /** Roles understood by the launcher, in restart order. */
 const ROLE_ORDER = ['control', 'dsh', 'gate', 'interop']
 
@@ -198,6 +201,85 @@ function stableNode(root) {
 }
 
 /**
+ * The permission row a profile without one receives.
+ *
+ * `presets` repeats the catalogue the reference install carries so the choice
+ * between read-only, workspace-write and full access stays available in the
+ * Web UI; only `defaultPreset` decides what a new Session starts with.
+ * @param {string} preset preset key.
+ * @returns {string[]} YAML lines.
+ */
+function permissionPatchLines(preset) {
+  return [
+    '- id: permission',
+    '  name: "@deepseek-ai/dsh-permission-presets"',
+    '  config:',
+    '    presets:',
+    '      read-only:',
+    '        sandbox: read-only',
+    '        approval: ask',
+    '      workspace-write:',
+    '        sandbox: workspace-write',
+    '        approval: ask',
+    '      danger-full-access:',
+    '        sandbox: danger-full-access',
+    '        approval: never',
+    `    defaultPreset: ${preset}`,
+  ]
+}
+
+/**
+ * Make full access the default for new Sessions without overriding a choice.
+ *
+ * A profile without a `permission` row derives its default from the composed
+ * sandbox and approval defaults, which is `workspace-write` + `ask`. Every
+ * Session that `call_member` starts on this host would then wait for an
+ * approval nobody can give, and dispatched work stalls. The row is added only
+ * when the profile has none; an explicit `defaultPreset` written by the
+ * operator (the Web UI Settings page writes one) is left untouched.
+ * @param {string} profileDir DSH profile directory.
+ * @param {string} [preset] preset to add when the row is missing.
+ * @returns {boolean} whether the patch was written.
+ */
+function ensurePermissionDefault(profileDir, preset = PERMISSION_DEFAULT_PRESET) {
+  const file = path.join(profileDir, 'cordis.patch.yml')
+  const text = existsSync(file) ? readFileSync(file, 'utf8') : ''
+  const lines = text.split('\n')
+  const start = lines.findIndex(line => /^- id:\s*permission\s*$/u.test(line))
+  if (start !== -1) {
+    let end = lines.length
+    for (let index = start + 1; index < lines.length; index += 1) {
+      if (/^- /u.test(lines[index])) {
+        end = index
+        break
+      }
+    }
+    const block = lines.slice(start, end)
+    if (block.some(line => /^\s+defaultPreset:/u.test(line))) return false
+    const configAt = block.findIndex(line => /^\s*config:\s*$/u.test(line))
+    if (configAt === -1) block.push('  config:', `    defaultPreset: ${preset}`)
+    else block.splice(configAt + 1, 0, `    defaultPreset: ${preset}`)
+    lines.splice(start, end - start, ...block)
+    writeFileSync(file, lines.join('\n'))
+    return true
+  }
+  const rows = permissionPatchLines(preset)
+  const emptyAt = lines.findIndex(line => /^\s*\[\s*\]\s*$/u.test(line))
+  const meaningful = lines.filter(line => line.trim() !== '' && !line.trim().startsWith('#'))
+  mkdirSync(profileDir, { recursive: true })
+  if (emptyAt !== -1 && meaningful.length === 1) {
+    // A freshly initialised profile holds `[]`; appending a list item after an
+    // empty document is invalid YAML, so replace the placeholder.
+    lines.splice(emptyAt, 1, ...rows)
+    writeFileSync(file, `${lines.join('\n').replace(/\n+$/u, '')}\n`)
+    return true
+  }
+  const body = text.replace(/\n+$/u, '')
+  writeFileSync(file, `${body === '' ? '' : `${body}\n`}${rows.join('\n')}\n`)
+  return true
+}
+
+/**
  * Point the profile at the plugin copies from this release.
  *
  * Copies, not symlinks: a rollback must not leave the profile pointing into a
@@ -222,6 +304,7 @@ function wireProfile(releaseDir, profileDir) {
   const bundles = Array.isArray(manifest.dsh.profile.bundles) ? manifest.dsh.profile.bundles : []
   if (!existsSync(pluginsRoot)) {
     writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`)
+    ensurePermissionDefault(profileDir)
     return []
   }
   const wired = []
@@ -244,6 +327,7 @@ function wireProfile(releaseDir, profileDir) {
   }
   manifest.dsh.profile.bundles = bundles
   writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`)
+  ensurePermissionDefault(profileDir)
   return wired
 }
 

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 import {
   MEMBER_REVIEW_INTERVAL_MS,
@@ -38,9 +41,11 @@ function harness(options = {}) {
   const logs = []
   const followups = []
   const sessionId = options.sessionId ?? 'session-a'
+  /** One session object, carrying a project directory when the test sets one. */
+  const sessionOf = (id) => ({ id, ...(options.cwd === undefined ? {} : { header: { cwd: options.cwd } }) })
   const agent = options.agent ?? {
     id: sessionId,
-    session: { id: sessionId },
+    session: sessionOf(sessionId),
     status: 'idle',
     followup: message => { followups.push(message) },
   }
@@ -75,7 +80,7 @@ function harness(options = {}) {
     handlers.get('session/event')?.(session, { type, data })
   }
   const payload = {
-    agent: { id: sessionId, session: { id: sessionId }, status: 'running' },
+    agent: { id: sessionId, session: sessionOf(sessionId), status: 'running' },
     messages: [],
     turn: 1,
     step: 1,
@@ -773,4 +778,83 @@ test('a slow pre-push compaction stamps the injection clock at push time', async
   } finally {
     h.context.dispose()
   }
+})
+
+test('a roster member without a conversation is reported by the snapshot', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'mesh-roster-context-'))
+  try {
+    await mkdir(path.join(dir, '.coder', 'members'), { recursive: true })
+    await writeFile(path.join(dir, '.coder', 'members', 'all.md'), [
+      '# 主对话',
+      '身份：leader',
+      '工作范围：.coder',
+      '',
+      '# 成员1',
+      '工作区名称：mesh-kernel1',
+      '身份：内核开发1',
+      '工作范围：kernel/**',
+      '',
+      '# 成员2',
+      '工作区名称：mesh-web1',
+      '身份：前端开发1',
+      '工作范围：web/**',
+      '',
+    ].join('\n'), 'utf8')
+    const h = harness({
+      // No member conversation at all: the roster alone must make the step carry
+      // a gap, otherwise a forgotten dispatch stays invisible.
+      tasks: [],
+      cwd: dir,
+      services: { agents: undefined },
+    })
+    try {
+      const decision = await h.preStep(h.payload, h.next)
+      assert.equal(decision.messages.length, 1)
+      const text = decision.messages[0].content[0].text
+      assert.match(text, /\[成员缺口\] \.coder\/members\/all\.md 记录了 2 个成员，其中 2 个还没有成员对话/u)
+      assert.match(text, /成员1（工作区 mesh-kernel1，身份 内核开发1）还没有成员对话/u)
+      assert.match(text, /call_member \{ "workspace": "mesh-kernel1", "identity": "内核开发1" \}/u)
+    } finally {
+      h.context.dispose()
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a member conversation that covers the roster workspace clears the gap', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'mesh-roster-context-'))
+  try {
+    await mkdir(path.join(dir, '.coder', 'members'), { recursive: true })
+    await writeFile(path.join(dir, '.coder', 'members', 'all.md'), [
+      '# 主对话',
+      '身份：leader',
+      '',
+      '# 成员1',
+      '工作区名称：mesh-kernel1',
+      '身份：内核开发1',
+      '',
+    ].join('\n'), 'utf8')
+    const task = { ...running, conversationId: 'c1', workspace: 'mesh-kernel1' }
+    const h = harness({ tasks: [task], cwd: dir, memberTasks: taskService([{ ...task, status: 'completed' }]) })
+    try {
+      const decision = await h.preStep(h.payload, h.next)
+      assert.equal(decision.messages.length, 0, 'no running conversation and no gap means no injection')
+    } finally {
+      h.context.dispose()
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the dispatch push carries the roster gap even with no tracked conversations', () => {
+  const text = formatMemberDispatchPush([], {
+    now: 1_000_000,
+    selfId: 'session-a',
+    selfScope: { identity: 'leader', keep: true },
+    gaps: ['[成员缺口] .coder/members/all.md 记录了 1 个成员，其中 1 个还没有成员对话（每个成员都必须有一个）：', '- 成员1（工作区 mesh-kernel1）还没有成员对话'],
+  })
+  assert.match(text, /名册里列出但还没有成员对话的成员必须建出来/u)
+  assert.match(text, /\[成员缺口\] \.coder\/members\/all\.md 记录了 1 个成员/u)
 })

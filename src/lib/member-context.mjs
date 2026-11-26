@@ -31,6 +31,7 @@ import { randomUUID } from 'node:crypto'
 import { describeMemberTask, memberTaskProfile } from './member-tasks.mjs'
 import { isMemberSession } from './member-sessions.mjs'
 import { DEFAULT_COMPRESS_PERCENT, effectiveCompressPercent } from './service.mjs'
+import { formatMemberGapLines, memberRosterGaps, readMemberRoster } from './member-roster.mjs'
 
 /** Minimum distance between two status snapshots in one session. */
 export const MEMBER_STATUS_INTERVAL_MS = 60_000
@@ -43,6 +44,9 @@ const PUSH_COMPACT_TIMEOUT_MS = 180_000
 
 /** A settled job longer than this is worth delegating to a member conversation. */
 export const LONG_JOB_WARN_MS = 60_000
+
+/** How long a member-host snapshot is reused when excusing a roster gap. */
+const HOST_CACHE_MS = 5 * 60_000
 
 /** How many long-job records one session keeps between snapshots. */
 const LONG_JOBS_MAX = 20
@@ -93,6 +97,17 @@ export function measureMemberContextPercent(ctx, agent) {
   const maxTokens = nonNegative(pressure.contextWindow)
   if (usedTokens === null || maxTokens === null || maxTokens <= 0) return null
   return Math.round((usedTokens / maxTokens) * 1000) / 10
+}
+
+/**
+ * The project directory one agent's session runs in.
+ * @param {any} agent live agent.
+ * @returns {string} absolute directory, or '' when unknown.
+ */
+function agentCwd(agent) {
+  const session = agent?.session
+  const cwd = session?.header?.cwd ?? session?.meta?.cwd ?? session?.cwd
+  return typeof cwd === 'string' ? cwd.trim() : ''
 }
 
 /**
@@ -237,10 +252,12 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfId = String(options.selfId ?? '')
   const selfScope = options.selfScope ?? null
   const scopes = options.scopes ?? {}
+  const gapLines = Array.isArray(options.gaps) ? options.gaps : []
   const lines = [
     `[成员上下文] 本对话跟踪 ${String(list.length)} 个成员会话，其中 ${String(running.length)} 个进行中（快照 ${new Date(at).toISOString()}）。`,
     formatSelfLine(selfId, selfScope),
     ...list.map(task => formatMemberConversationLine(task, scopes)),
+    ...gapLines,
   ]
   const longJobs = Array.isArray(options.longJobs) ? options.longJobs : []
   if (longJobs.length > 0) {
@@ -283,10 +300,12 @@ export function formatMemberDispatchPush(tasks, options = {}) {
     '[成员调度] 本对话已空闲。请立即用 subagent 新建一个子代理做只读审查：读本工作区的 `.coder/members/all.md`、`.coder/members/flow.md` 和现有 gap（`.coder/issues/open.md`、`.coder/plan/todo.md`、`.coder/plan/goal.md` 等），判断是否可以激活部分现有空闲成员对话。',
     '- 子代理只读：不改代码、不跑重活；结论逐条给出可激活的成员会话（conversationId）、建议任务与依据；不建议激活的写原因。',
     '- 只考虑空闲成员会话；进行中/异常中止的一律跳过，禁止重启、归档或新建同名会话——派活必须带原 conversationId 继续。',
+    '- 名册里列出但还没有成员对话的成员必须建出来（见下面的 [成员缺口]），除非它的宿主主机明确不可用。',
     '- 审查结论交回本对话，由本对话用 call_member 决定是否派活。',
     `- 当前成员会话（本对话跟踪 ${String(list.length)} 个，其中 ${String(running.length)} 个进行中；快照 ${new Date(at).toISOString()}）：`,
     ...list.map(task => formatMemberConversationLine(task, scopes)),
     formatSelfLine(selfId, selfScope),
+    ...(Array.isArray(options.gaps) ? options.gaps : []),
   ].join('\n')
 }
 
@@ -334,6 +353,48 @@ export function createMemberContext({
     return await service.memberScopes().catch(() => ({}))
   }
 
+  /** Recent member-host rows, reused while excusing a roster gap. */
+  let hostsCache = { at: 0, rows: null }
+
+  /**
+   * The member rows, for deciding whether a roster gap is creatable.
+   * @returns {Promise<object[]|null>} rows, or null when the service cannot tell.
+   */
+  async function memberHosts() {
+    if (hostsCache.rows !== null && now() - hostsCache.at < HOST_CACHE_MS) return hostsCache.rows
+    const read = typeof service?.members === 'function' ? service.members : null
+    if (read === null) return null
+    const snapshot = await read.call(service).catch(() => null)
+    if (snapshot === null || typeof snapshot !== 'object') return null
+    const rows = [snapshot.local, ...(Array.isArray(snapshot.members) ? snapshot.members : [])]
+      .filter(row => row !== null && row !== undefined && typeof row === 'object')
+    hostsCache = { at: now(), rows }
+    return rows
+  }
+
+  /**
+   * The `.coder/members/all.md` gaps for one conversation.
+   * @param {any} agent live agent (its session names the project directory).
+   * @param {object[]} tasks tracked conversations.
+   * @param {Record<string, object>} scopes conversation id -> stored scope.
+   * @returns {Promise<{total: number, missing: object[], excused: object[]}|null>} gaps.
+   */
+  async function rosterGaps(agent, tasks, scopes) {
+    const cwd = agentCwd(agent)
+    if (cwd === '') return null
+    const roster = await readMemberRoster(cwd).catch(() => null)
+    if (roster === null) return null
+    // Only ask the service about hosts when the roster actually has a gap.
+    const covered = new Set()
+    for (const task of tasks) {
+      const workspace = typeof task?.workspace === 'string' ? task.workspace.trim() : ''
+      if (workspace !== '' && workspace !== 'unknown') covered.add(workspace)
+    }
+    const uncovered = roster.members.some(member => !covered.has(member.workspace))
+    const hosts = uncovered ? await memberHosts() : []
+    return memberRosterGaps(roster, tasks, scopes, { hosts: Array.isArray(hosts) ? hosts : [] })
+  }
+
   /**
    * The status snapshot to append to one step, or null when this step is not
    * eligible.
@@ -351,7 +412,21 @@ export function createMemberContext({
     // A long job can be worth reporting even when no member conversation is
     // running, so the buffer, not the running list, decides that case.
     const pendingJobs = (longJobs.get(sessionId)?.length ?? 0) > 0
-    if (running.length === 0 && !pendingJobs) return null
+    if (running.length === 0 && !pendingJobs) {
+      // A roster gap is the third reason to speak: the project names members
+      // that must exist, and one without a conversation is a missed dispatch.
+      const [tasks, scopes] = await Promise.all([
+        memberTasks.listForOrigin(sessionId),
+        readScopes(),
+      ])
+      const gaps = await rosterGaps(agent, tasks, scopes)
+      const gapLines = formatMemberGapLines(gaps)
+      if (gapLines.length === 0) return null
+      return {
+        text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope: scopes[sessionId] ?? null, scopes, gaps: gapLines }),
+        at,
+      }
+    }
     const [tasks, scopes] = await Promise.all([
       memberTasks.listForOrigin(sessionId),
       readScopes(),
@@ -361,9 +436,11 @@ export function createMemberContext({
     // Consuming the buffer at every snapshot keeps the window honest even when
     // the option is off; only an explicit avoidLongJobs turns it into a hint.
     const hintJobs = selfScope?.avoidLongJobs === true ? taken : []
-    if (running.length === 0 && hintJobs.length === 0) return null
+    const gaps = await rosterGaps(agent, tasks, scopes)
+    const gapLines = formatMemberGapLines(gaps)
+    if (running.length === 0 && hintJobs.length === 0 && gapLines.length === 0) return null
     return {
-      text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes, longJobs: hintJobs }),
+      text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes, longJobs: hintJobs, gaps: gapLines }),
       at,
     }
   }
@@ -459,7 +536,11 @@ export function createMemberContext({
     ])
     if (closed || turns.get(sessionId) !== turn) return
     const selfScope = scopes[sessionId] ?? null
-    if (tasks.length === 0 && selfScope === null) return
+    // A roster with a gap is a reason to review even when this conversation
+    // tracks no member conversation yet.
+    const rosterCwd = agentCwd(typeof ctx?.get === 'function' ? ctx.get('agents')?.get(sessionId) : undefined)
+    const roster = rosterCwd === '' ? null : await readMemberRoster(rosterCwd).catch(() => null)
+    if (tasks.length === 0 && selfScope === null && roster === null) return
     if (selfScope?.keep !== true) return
     const last = lastReviewEnd.get(sessionId)
     if (typeof last === 'number' && now() - last <= reviewIntervalMs) return
@@ -502,7 +583,10 @@ export function createMemberContext({
     // time: the push text (and the timestamp used to suppress the next
     // pre-step injection) belongs to the moment the push actually happens.
     const at = now()
-    const text = formatMemberDispatchPush(tasks, { now: at, selfId: sessionId, selfScope, scopes })
+    const gaps = roster === null
+      ? null
+      : memberRosterGaps(roster, tasks, scopes, { hosts: (await memberHosts().catch(() => null)) ?? [] })
+    const text = formatMemberDispatchPush(tasks, { now: at, selfId: sessionId, selfScope, scopes, gaps: formatMemberGapLines(gaps) })
     try {
       agent.followup({
         id: randomUUID(),

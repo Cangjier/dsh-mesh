@@ -1,6 +1,6 @@
 // src/index.ts
 import { homedir as homedir4 } from "node:os";
-import path30 from "node:path";
+import path31 from "node:path";
 
 // src/lib/service.mjs
 import { mkdir as mkdir15, readFile as readFile18, readdir as readdir9, rm as rm15, stat as stat13, writeFile as writeFile15 } from "node:fs/promises";
@@ -9853,8 +9853,8 @@ function signClusterRequest(secret, request) {
   const signature = createHmac("sha256", secret).update(payload).digest("base64url");
   return `${VERSION}.${String(timestamp)}.${nonce}.${signature}`;
 }
-function payloadOf(method, path31, timestamp, nonce) {
-  return [VERSION, String(method).toUpperCase(), path31, String(timestamp), nonce].join("\n");
+function payloadOf(method, path32, timestamp, nonce) {
+  return [VERSION, String(method).toUpperCase(), path32, String(timestamp), nonce].join("\n");
 }
 
 // code/build/repack.mjs
@@ -13007,10 +13007,10 @@ var MeshService = class {
     let host = String(member.ip ?? "");
     if (host === "") throw new Error(`member ${member.id} has no VPN address`);
     if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
-    const path31 = "/__gate/cluster/__gate/session/promote";
-    const response = await fetch(`http://${host}${path31}`, {
+    const path32 = "/__gate/cluster/__gate/session/promote";
+    const response = await fetch(`http://${host}${path32}`, {
       method: "POST",
-      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path31 }) }
+      headers: { [CLUSTER_HEADER]: signClusterRequest(deriveClusterSecret(password), { method: "POST", path: path32 }) }
     });
     const text = await response.text();
     if (!response.ok) throw new Error(`member ${member.name} refused the request: HTTP ${String(response.status)} ${text.slice(0, 120)}`);
@@ -15718,24 +15718,24 @@ function registerApi(ctx, service, scheduler = null) {
       try {
         const method = request.method ?? "GET";
         const url = new URL(request.url ?? "/", "http://local.invalid");
-        const path31 = url.pathname.slice(API_PREFIX.length) || "/";
-        if (method === "GET" && path31 === "/status") {
+        const path32 = url.pathname.slice(API_PREFIX.length) || "/";
+        if (method === "GET" && path32 === "/status") {
           writeJson(response, 200, await service.status());
           return;
         }
-        if (method === "GET" && path31 === "/members") {
+        if (method === "GET" && path32 === "/members") {
           writeJson(response, 200, await service.members());
           return;
         }
-        if (method === "GET" && path31 === "/member-tags") {
+        if (method === "GET" && path32 === "/member-tags") {
           writeJson(response, 200, { ok: true, tags: await service.memberTags() });
           return;
         }
-        if (method === "GET" && path31 === "/member-conversations") {
+        if (method === "GET" && path32 === "/member-conversations") {
           writeJson(response, 200, await service.memberConversations(url.searchParams.get("session") ?? ""));
           return;
         }
-        if (method === "GET" && path31 === "/schedule") {
+        if (method === "GET" && path32 === "/schedule") {
           if (scheduler === null) {
             writeJson(response, 503, { ok: false, error: { code: "unavailable", message: "\u5B9A\u65F6\u4EFB\u52A1\u8FD8\u6CA1\u6709\u542F\u52A8\u3002" } });
             return;
@@ -15744,43 +15744,43 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, { ok: true, schedule: scheduler.status(member === "" ? void 0 : member) });
           return;
         }
-        if (method === "POST" && path31 === "/packages/delete") {
+        if (method === "POST" && path32 === "/packages/delete") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.removePackage({ name: typeof body.name === "string" ? body.name : "" }));
           return;
         }
-        if (method === "GET" && path31 === "/events") {
+        if (method === "GET" && path32 === "/events") {
           hub.subscribe(request, response);
           return;
         }
-        if (method === "GET" && path31 === "/jobs") {
+        if (method === "GET" && path32 === "/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.jobs() });
           return;
         }
-        if (method === "GET" && path31 === "/packages") {
+        if (method === "GET" && path32 === "/packages") {
           writeJson(response, 200, await service.packages());
           return;
         }
-        if (method === "GET" && path31 === "/release/latest") {
+        if (method === "GET" && path32 === "/release/latest") {
           writeJson(response, 200, await service.latestRelease({
             refresh: url.searchParams.get("refresh") === "1"
           }));
           return;
         }
-        if (method === "GET" && path31 === "/member-packages") {
+        if (method === "GET" && path32 === "/member-packages") {
           writeJson(response, 200, await service.memberPackages(url.searchParams.get("member") ?? ""));
           return;
         }
-        if (method === "GET" && path31 === "/release") {
+        if (method === "GET" && path32 === "/release") {
           writeJson(response, 200, await service.releaseSettings());
           return;
         }
-        if (method === "GET" && path31 === "/deploy/jobs") {
+        if (method === "GET" && path32 === "/deploy/jobs") {
           writeJson(response, 200, { ok: true, jobs: await service.deployJobs(30) });
           return;
         }
         if (method === "GET") {
-          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path31);
+          const deployRead = /^\/deploy\/([^/]+)(\/log)?$/u.exec(path32);
           if (deployRead !== null) {
             const lines = Number.parseInt(url.searchParams.get("lines") ?? "200", 10);
             const job = await service.deployStatus(deployRead[1]);
@@ -15797,7 +15797,7 @@ function registerApi(ctx, service, scheduler = null) {
             });
             return;
           }
-          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path31);
+          const read = /^\/build\/([^/]+)(\/log)?$/u.exec(path32);
           if (read !== null) {
             if (read[2] === "/log") {
               const lines = Number.parseInt(url.searchParams.get("lines") ?? "80", 10);
@@ -15819,12 +15819,12 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 403, { ok: false, error: { code: "forbidden", message: `Missing the ${AGENT_HEADER} header.` } });
           return;
         }
-        if (method === "POST" && path31 === "/release") {
+        if (method === "POST" && path32 === "/release") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.saveReleaseSettings(body));
           return;
         }
-        if (path31 === "/deploy") {
+        if (path32 === "/deploy") {
           const body = await readJson2(request);
           const result = await service.deployMember({
             member: typeof body.member === "string" ? body.member : void 0,
@@ -15835,12 +15835,12 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 202, result);
           return;
         }
-        if (path31 === "/session/promote") {
+        if (path32 === "/session/promote") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.promoteSession(String(body.member ?? "")));
           return;
         }
-        if (path31 === "/member-tags") {
+        if (path32 === "/member-tags") {
           const body = await readJson2(request);
           writeJson(response, 200, await service.setMemberTag(
             typeof body.id === "string" ? body.id : "",
@@ -15848,16 +15848,16 @@ function registerApi(ctx, service, scheduler = null) {
           ));
           return;
         }
-        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path31);
+        const clearLog = /^\/build\/([^/]+)\/log\/clear$/u.exec(path32);
         if (clearLog !== null) {
           writeJson(response, 200, await service.clearBuildLog(clearLog[1]));
           return;
         }
-        if (path31 === "/build/logs/clear") {
+        if (path32 === "/build/logs/clear") {
           writeJson(response, 200, await service.clearFinishedBuilds());
           return;
         }
-        if (path31 === "/deploy/cancel") {
+        if (path32 === "/deploy/cancel") {
           const body = await readJson2(request);
           const job = await service.cancelDeploy(typeof body.id === "string" ? body.id : "");
           if (job === null) {
@@ -15867,14 +15867,14 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, { ok: true, job });
           return;
         }
-        if (path31 === "/deploy/rollback") {
+        if (path32 === "/deploy/rollback") {
           const body = await readJson2(request);
           writeJson(response, 202, await service.rollbackMember({
             member: typeof body.member === "string" ? body.member : ""
           }));
           return;
         }
-        if (path31 === "/upgrade" || path31 === "/test-upgrade") {
+        if (path32 === "/upgrade" || path32 === "/test-upgrade") {
           const body = await readJson2(request);
           const request_ = {
             member: typeof body.member === "string" ? body.member : void 0,
@@ -15888,11 +15888,11 @@ function registerApi(ctx, service, scheduler = null) {
             ...typeof body.proxyMember === "string" && body.proxyMember.trim() !== "" ? { proxyMember: body.proxyMember.trim() } : {},
             ...body.direct === true ? { direct: true } : {}
           };
-          const test = path31 === "/test-upgrade" || body.test === true;
+          const test = path32 === "/test-upgrade" || body.test === true;
           writeJson(response, 202, test ? await service.testUpgradeMember(request_) : await service.upgradeMember(request_));
           return;
         }
-        if (path31 === "/schedule") {
+        if (path32 === "/schedule") {
           if (scheduler === null) {
             writeJson(response, 503, { ok: false, error: { code: "unavailable", message: "\u5B9A\u65F6\u4EFB\u52A1\u8FD8\u6CA1\u6709\u542F\u52A8\u3002" } });
             return;
@@ -15914,7 +15914,7 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 200, { ok: true, schedule: await scheduler.update(patch) });
           return;
         }
-        if (path31 === "/build") {
+        if (path32 === "/build") {
           const body = await readJson2(request);
           const job = await service.startBuild({
             source: typeof body.source === "string" ? body.source : void 0,
@@ -15932,12 +15932,12 @@ function registerApi(ctx, service, scheduler = null) {
           writeJson(response, 202, { ok: true, job });
           return;
         }
-        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path31);
+        const resume = /^\/build\/([^/]+)\/resume$/u.exec(path32);
         if (resume !== null) {
           writeJson(response, 202, { ok: true, job: await service.resumeBuild(resume[1]) });
           return;
         }
-        const match = /^\/build\/([^/]+)\/learn$/u.exec(path31);
+        const match = /^\/build\/([^/]+)\/learn$/u.exec(path32);
         if (match !== null) {
           writeJson(response, 200, { ok: true, job: await service.learn(match[1]) });
           return;
@@ -16004,10 +16004,147 @@ function registerWireGuardApi(ctx) {
 
 // src/lib/member-context.mjs
 import { randomUUID as randomUUID3 } from "node:crypto";
+
+// src/lib/member-roster.mjs
+import { readFile as readFile19 } from "node:fs/promises";
+import path29 from "node:path";
+var MEMBER_ROSTER_PATH = path29.join(".coder", "members", "all.md");
+var FIELD = /^(工作区名称|身份|工作范围|备注)\s*[：:]\s*(.*)$/u;
+var HOST_IN_NOTE = /(?:宿主|主机|host)\s*[：:]?\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3}|[A-Za-z0-9][A-Za-z0-9._-]*)/iu;
+function memberRosterHost(note) {
+  if (typeof note !== "string" || note.trim() === "") return null;
+  const match = HOST_IN_NOTE.exec(note);
+  return match === null ? null : match[1];
+}
+function parseMemberRoster(text) {
+  const members = [];
+  let main = null;
+  let current = null;
+  const flush = () => {
+    if (current === null) return;
+    if (current.kind === "main") {
+      main = { identity: current.identity, scope: current.scope };
+    } else if (current.workspace !== null) {
+      members.push({
+        title: current.title,
+        workspace: current.workspace,
+        identity: current.identity,
+        scope: current.scope,
+        note: current.note,
+        host: memberRosterHost(current.note)
+      });
+    }
+    current = null;
+  };
+  for (const line of String(text ?? "").split(/\r?\n/u)) {
+    const heading = /^#\s+(.+?)\s*$/u.exec(line);
+    if (heading !== null) {
+      flush();
+      const title = heading[1];
+      current = {
+        kind: title.startsWith("\u4E3B\u5BF9\u8BDD") ? "main" : "member",
+        title,
+        workspace: null,
+        identity: null,
+        scope: null,
+        note: null
+      };
+      continue;
+    }
+    if (current === null) continue;
+    const field = FIELD.exec(line);
+    if (field === null) continue;
+    const value = field[2].trim();
+    if (value === "") continue;
+    if (field[1] === "\u5DE5\u4F5C\u533A\u540D\u79F0") current.workspace = value;
+    else if (field[1] === "\u8EAB\u4EFD") current.identity = value;
+    else if (field[1] === "\u5DE5\u4F5C\u8303\u56F4") current.scope = value;
+    else if (field[1] === "\u5907\u6CE8") current.note = value;
+  }
+  flush();
+  return { main, members };
+}
+async function readMemberRoster(cwd) {
+  const dir = typeof cwd === "string" ? cwd.trim() : "";
+  if (dir === "") return null;
+  let text;
+  try {
+    text = await readFile19(path29.join(dir, MEMBER_ROSTER_PATH), "utf8");
+  } catch {
+    return null;
+  }
+  const roster = parseMemberRoster(text);
+  return roster.members.length === 0 ? null : roster;
+}
+function memberHostUsable(row) {
+  if (row === null || typeof row !== "object") return false;
+  return row.online !== false && row.dsh === true;
+}
+function hostNames(row) {
+  return [row.id, row.name, row.ip, row.hostname].filter((value) => typeof value === "string" && value !== "");
+}
+function memberRosterGaps(roster, tasks, scopes = {}, options = {}) {
+  if (roster === null || roster === void 0 || !Array.isArray(roster.members) || roster.members.length === 0) return null;
+  const hosts = Array.isArray(options.hosts) ? options.hosts.filter((row) => row !== null && typeof row === "object") : [];
+  const anyUsable = hosts.length === 0 ? true : hosts.some(memberHostUsable);
+  const coveredWorkspaces = /* @__PURE__ */ new Set();
+  const coveredIdentities = /* @__PURE__ */ new Set();
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    if (task === null || typeof task !== "object" || task.archived === true) continue;
+    const workspace = memberTaskWorkspace(task);
+    if (workspace !== "" && workspace !== "unknown") coveredWorkspaces.add(workspace);
+    const stored = scopes[String(task.conversationId ?? "")];
+    const profile = stored !== void 0 ? memberTaskProfile({ profile: stored }) : memberTaskProfile(task);
+    if (typeof profile?.identity === "string" && profile.identity !== "") coveredIdentities.add(profile.identity);
+  }
+  const missing = [];
+  const excused = [];
+  for (const member of roster.members) {
+    if (coveredWorkspaces.has(member.workspace)) continue;
+    if (member.identity !== null && coveredIdentities.has(member.identity)) continue;
+    if (member.host !== null && hosts.length > 0) {
+      const row = hosts.find((candidate) => hostNames(candidate).includes(member.host));
+      if (row === void 0) {
+        excused.push({ member, reason: `\u5BBF\u4E3B ${member.host} \u4E0D\u5728\u7EC4\u7F51\u91CC` });
+        continue;
+      }
+      if (!memberHostUsable(row)) {
+        excused.push({ member, reason: `\u5BBF\u4E3B ${member.host} \u5F53\u524D\u4E0D\u53EF\u7528\uFF08\u79BB\u7EBF\u6216\u6CA1\u6709\u5728\u8FD0\u884C DSH\uFF09` });
+        continue;
+      }
+      missing.push(member);
+      continue;
+    }
+    if (!anyUsable) {
+      excused.push({ member, reason: "\u6CA1\u6709\u53EF\u4EE5\u521B\u5EFA\u6210\u5458\u5BF9\u8BDD\u7684\u4E3B\u673A" });
+      continue;
+    }
+    missing.push(member);
+  }
+  return { total: roster.members.length, missing, excused };
+}
+function formatMemberGapLines(gaps) {
+  if (gaps === null || gaps === void 0) return [];
+  const lines = [];
+  if (Array.isArray(gaps.missing) && gaps.missing.length > 0) {
+    lines.push(`[\u6210\u5458\u7F3A\u53E3] .coder/members/all.md \u8BB0\u5F55\u4E86 ${String(gaps.total)} \u4E2A\u6210\u5458\uFF0C\u5176\u4E2D ${String(gaps.missing.length)} \u4E2A\u8FD8\u6CA1\u6709\u6210\u5458\u5BF9\u8BDD\uFF08\u6BCF\u4E2A\u6210\u5458\u90FD\u5FC5\u987B\u6709\u4E00\u4E2A\uFF09\uFF1A`);
+    for (const member of gaps.missing) {
+      const identity = member.identity === null ? "" : `, "identity": ${JSON.stringify(member.identity)}`;
+      lines.push(`- ${member.title}\uFF08\u5DE5\u4F5C\u533A ${member.workspace}${member.identity === null ? "" : `\uFF0C\u8EAB\u4EFD ${member.identity}`}\uFF09\u8FD8\u6CA1\u6709\u6210\u5458\u5BF9\u8BDD\uFF1Acall_member { "workspace": ${JSON.stringify(member.workspace)}${identity} }\uFF0C\u5DE5\u4F5C\u8303\u56F4\u6309\u540D\u518C\u91CC\u7684\u5199\u3002`);
+    }
+  }
+  if (Array.isArray(gaps.excused) && gaps.excused.length > 0) {
+    lines.push(`[\u6210\u5458\u7F3A\u53E3] \u540D\u518C\u91CC ${String(gaps.excused.length)} \u4E2A\u6210\u5458\u6682\u65F6\u5EFA\u4E0D\u4E86\u5BF9\u8BDD\uFF1A${gaps.excused.map((entry) => `${entry.member.title}\uFF08${entry.reason}\uFF09`).join("\u3001")}\u3002`);
+  }
+  return lines;
+}
+
+// src/lib/member-context.mjs
 var MEMBER_STATUS_INTERVAL_MS = 6e4;
 var MEMBER_REVIEW_INTERVAL_MS = 10 * 6e4;
 var PUSH_COMPACT_TIMEOUT_MS = 18e4;
 var LONG_JOB_WARN_MS = 6e4;
+var HOST_CACHE_MS = 5 * 6e4;
 var LONG_JOBS_MAX = 20;
 var MEMBER_CONTEXT_SOURCE = "member-context";
 function formatMemberPercent(value) {
@@ -16040,6 +16177,11 @@ function measureMemberContextPercent(ctx, agent) {
   const maxTokens = nonNegative(pressure.contextWindow);
   if (usedTokens === null || maxTokens === null || maxTokens <= 0) return null;
   return Math.round(usedTokens / maxTokens * 1e3) / 10;
+}
+function agentCwd(agent) {
+  const session = agent?.session;
+  const cwd = session?.header?.cwd ?? session?.meta?.cwd ?? session?.cwd;
+  return typeof cwd === "string" ? cwd.trim() : "";
 }
 async function compactMainAgent(ctx, agent) {
   const presets = typeof ctx?.get === "function" ? ctx.get("agentPresets") : void 0;
@@ -16104,10 +16246,12 @@ function formatMemberStatusSnapshot(tasks, options = {}) {
   const selfId = String(options.selfId ?? "");
   const selfScope = options.selfScope ?? null;
   const scopes = options.scopes ?? {};
+  const gapLines = Array.isArray(options.gaps) ? options.gaps : [];
   const lines = [
     `[\u6210\u5458\u4E0A\u4E0B\u6587] \u672C\u5BF9\u8BDD\u8DDF\u8E2A ${String(list.length)} \u4E2A\u6210\u5458\u4F1A\u8BDD\uFF0C\u5176\u4E2D ${String(running.length)} \u4E2A\u8FDB\u884C\u4E2D\uFF08\u5FEB\u7167 ${new Date(at).toISOString()}\uFF09\u3002`,
     formatSelfLine(selfId, selfScope),
-    ...list.map((task) => formatMemberConversationLine(task, scopes))
+    ...list.map((task) => formatMemberConversationLine(task, scopes)),
+    ...gapLines
   ];
   const longJobs = Array.isArray(options.longJobs) ? options.longJobs : [];
   if (longJobs.length > 0) {
@@ -16138,10 +16282,12 @@ function formatMemberDispatchPush(tasks, options = {}) {
     "[\u6210\u5458\u8C03\u5EA6] \u672C\u5BF9\u8BDD\u5DF2\u7A7A\u95F2\u3002\u8BF7\u7ACB\u5373\u7528 subagent \u65B0\u5EFA\u4E00\u4E2A\u5B50\u4EE3\u7406\u505A\u53EA\u8BFB\u5BA1\u67E5\uFF1A\u8BFB\u672C\u5DE5\u4F5C\u533A\u7684 `.coder/members/all.md`\u3001`.coder/members/flow.md` \u548C\u73B0\u6709 gap\uFF08`.coder/issues/open.md`\u3001`.coder/plan/todo.md`\u3001`.coder/plan/goal.md` \u7B49\uFF09\uFF0C\u5224\u65AD\u662F\u5426\u53EF\u4EE5\u6FC0\u6D3B\u90E8\u5206\u73B0\u6709\u7A7A\u95F2\u6210\u5458\u5BF9\u8BDD\u3002",
     "- \u5B50\u4EE3\u7406\u53EA\u8BFB\uFF1A\u4E0D\u6539\u4EE3\u7801\u3001\u4E0D\u8DD1\u91CD\u6D3B\uFF1B\u7ED3\u8BBA\u9010\u6761\u7ED9\u51FA\u53EF\u6FC0\u6D3B\u7684\u6210\u5458\u4F1A\u8BDD\uFF08conversationId\uFF09\u3001\u5EFA\u8BAE\u4EFB\u52A1\u4E0E\u4F9D\u636E\uFF1B\u4E0D\u5EFA\u8BAE\u6FC0\u6D3B\u7684\u5199\u539F\u56E0\u3002",
     "- \u53EA\u8003\u8651\u7A7A\u95F2\u6210\u5458\u4F1A\u8BDD\uFF1B\u8FDB\u884C\u4E2D/\u5F02\u5E38\u4E2D\u6B62\u7684\u4E00\u5F8B\u8DF3\u8FC7\uFF0C\u7981\u6B62\u91CD\u542F\u3001\u5F52\u6863\u6216\u65B0\u5EFA\u540C\u540D\u4F1A\u8BDD\u2014\u2014\u6D3E\u6D3B\u5FC5\u987B\u5E26\u539F conversationId \u7EE7\u7EED\u3002",
+    "- \u540D\u518C\u91CC\u5217\u51FA\u4F46\u8FD8\u6CA1\u6709\u6210\u5458\u5BF9\u8BDD\u7684\u6210\u5458\u5FC5\u987B\u5EFA\u51FA\u6765\uFF08\u89C1\u4E0B\u9762\u7684 [\u6210\u5458\u7F3A\u53E3]\uFF09\uFF0C\u9664\u975E\u5B83\u7684\u5BBF\u4E3B\u4E3B\u673A\u660E\u786E\u4E0D\u53EF\u7528\u3002",
     "- \u5BA1\u67E5\u7ED3\u8BBA\u4EA4\u56DE\u672C\u5BF9\u8BDD\uFF0C\u7531\u672C\u5BF9\u8BDD\u7528 call_member \u51B3\u5B9A\u662F\u5426\u6D3E\u6D3B\u3002",
     `- \u5F53\u524D\u6210\u5458\u4F1A\u8BDD\uFF08\u672C\u5BF9\u8BDD\u8DDF\u8E2A ${String(list.length)} \u4E2A\uFF0C\u5176\u4E2D ${String(running.length)} \u4E2A\u8FDB\u884C\u4E2D\uFF1B\u5FEB\u7167 ${new Date(at).toISOString()}\uFF09\uFF1A`,
     ...list.map((task) => formatMemberConversationLine(task, scopes)),
-    formatSelfLine(selfId, selfScope)
+    formatSelfLine(selfId, selfScope),
+    ...Array.isArray(options.gaps) ? options.gaps : []
   ].join("\n");
 }
 function createMemberContext({
@@ -16165,6 +16311,31 @@ function createMemberContext({
     if (typeof service?.memberScopes !== "function") return {};
     return await service.memberScopes().catch(() => ({}));
   }
+  let hostsCache = { at: 0, rows: null };
+  async function memberHosts() {
+    if (hostsCache.rows !== null && now() - hostsCache.at < HOST_CACHE_MS) return hostsCache.rows;
+    const read = typeof service?.members === "function" ? service.members : null;
+    if (read === null) return null;
+    const snapshot = await read.call(service).catch(() => null);
+    if (snapshot === null || typeof snapshot !== "object") return null;
+    const rows = [snapshot.local, ...Array.isArray(snapshot.members) ? snapshot.members : []].filter((row) => row !== null && row !== void 0 && typeof row === "object");
+    hostsCache = { at: now(), rows };
+    return rows;
+  }
+  async function rosterGaps(agent, tasks, scopes) {
+    const cwd = agentCwd(agent);
+    if (cwd === "") return null;
+    const roster = await readMemberRoster(cwd).catch(() => null);
+    if (roster === null) return null;
+    const covered = /* @__PURE__ */ new Set();
+    for (const task of tasks) {
+      const workspace = typeof task?.workspace === "string" ? task.workspace.trim() : "";
+      if (workspace !== "" && workspace !== "unknown") covered.add(workspace);
+    }
+    const uncovered = roster.members.some((member) => !covered.has(member.workspace));
+    const hosts = uncovered ? await memberHosts() : [];
+    return memberRosterGaps(roster, tasks, scopes, { hosts: Array.isArray(hosts) ? hosts : [] });
+  }
   async function snapshotFor(agent) {
     const sessionId = String(agent?.session?.id ?? agent?.id ?? "");
     if (sessionId === "") return null;
@@ -16174,7 +16345,19 @@ function createMemberContext({
     const running = await memberTasks.inFlightForOrigin(sessionId);
     if (!Array.isArray(running)) return null;
     const pendingJobs = (longJobs.get(sessionId)?.length ?? 0) > 0;
-    if (running.length === 0 && !pendingJobs) return null;
+    if (running.length === 0 && !pendingJobs) {
+      const [tasks2, scopes2] = await Promise.all([
+        memberTasks.listForOrigin(sessionId),
+        readScopes()
+      ]);
+      const gaps2 = await rosterGaps(agent, tasks2, scopes2);
+      const gapLines2 = formatMemberGapLines(gaps2);
+      if (gapLines2.length === 0) return null;
+      return {
+        text: formatMemberStatusSnapshot(tasks2, { now: at, selfId: sessionId, selfScope: scopes2[sessionId] ?? null, scopes: scopes2, gaps: gapLines2 }),
+        at
+      };
+    }
     const [tasks, scopes] = await Promise.all([
       memberTasks.listForOrigin(sessionId),
       readScopes()
@@ -16182,9 +16365,11 @@ function createMemberContext({
     const selfScope = scopes[sessionId] ?? null;
     const taken = takeLongJobs(sessionId, at, last);
     const hintJobs = selfScope?.avoidLongJobs === true ? taken : [];
-    if (running.length === 0 && hintJobs.length === 0) return null;
+    const gaps = await rosterGaps(agent, tasks, scopes);
+    const gapLines = formatMemberGapLines(gaps);
+    if (running.length === 0 && hintJobs.length === 0 && gapLines.length === 0) return null;
     return {
-      text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes, longJobs: hintJobs }),
+      text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes, longJobs: hintJobs, gaps: gapLines }),
       at
     };
   }
@@ -16243,7 +16428,9 @@ function createMemberContext({
     ]);
     if (closed || turns.get(sessionId) !== turn) return;
     const selfScope = scopes[sessionId] ?? null;
-    if (tasks.length === 0 && selfScope === null) return;
+    const rosterCwd = agentCwd(typeof ctx?.get === "function" ? ctx.get("agents")?.get(sessionId) : void 0);
+    const roster = rosterCwd === "" ? null : await readMemberRoster(rosterCwd).catch(() => null);
+    if (tasks.length === 0 && selfScope === null && roster === null) return;
     if (selfScope?.keep !== true) return;
     const last = lastReviewEnd.get(sessionId);
     if (typeof last === "number" && now() - last <= reviewIntervalMs) return;
@@ -16276,7 +16463,8 @@ function createMemberContext({
       compressionLine = `no compression\uFF08\u4E0A\u4E0B\u6587 ${formatMemberPercent(beforePercent)} <= \u9608\u503C ${formatMemberPercent(threshold)}\uFF09`;
     }
     const at = now();
-    const text = formatMemberDispatchPush(tasks, { now: at, selfId: sessionId, selfScope, scopes });
+    const gaps = roster === null ? null : memberRosterGaps(roster, tasks, scopes, { hosts: await memberHosts().catch(() => null) ?? [] });
+    const text = formatMemberDispatchPush(tasks, { now: at, selfId: sessionId, selfScope, scopes, gaps: formatMemberGapLines(gaps) });
     try {
       agent.followup({
         id: randomUUID3(),
@@ -17618,7 +17806,7 @@ import { createHash as createHash9, randomBytes as randomBytes3, randomUUID as r
 import { existsSync as existsSync15, mkdirSync as mkdirSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http3 from "node:http";
 import { homedir as homedir3, tmpdir as tmpdir5 } from "node:os";
-import path29 from "node:path";
+import path30 from "node:path";
 import { promisify as promisify4 } from "node:util";
 
 // code/shared/conversation-meta.mjs
@@ -17838,20 +18026,20 @@ function readEnvFile2(file) {
 function configCandidates() {
   const candidates = [];
   const explicit = process.env.DSH_INTEROP_CONFIG;
-  if (typeof explicit === "string" && explicit.trim() !== "") candidates.push(path29.resolve(explicit));
+  if (typeof explicit === "string" && explicit.trim() !== "") candidates.push(path30.resolve(explicit));
   const packageRoot = process.env.DSH_PACKAGE_ROOT;
   if (typeof packageRoot === "string" && packageRoot.trim() !== "") {
-    candidates.push(path29.join(packageRoot, "config", "interop.env"));
+    candidates.push(path30.join(packageRoot, "config", "interop.env"));
   }
   const home = process.env.DSH_HOME;
   if (typeof home === "string" && home.trim() !== "") {
-    candidates.push(path29.join(path29.dirname(home), "config", "interop.env"));
-    candidates.push(path29.join(home, "config", "interop.env"));
+    candidates.push(path30.join(path30.dirname(home), "config", "interop.env"));
+    candidates.push(path30.join(home, "config", "interop.env"));
   }
   let current = process.cwd();
   for (let depth = 0; depth < 7; depth += 1) {
-    candidates.push(path29.join(current, "config", "interop.env"));
-    const parent = path29.dirname(current);
+    candidates.push(path30.join(current, "config", "interop.env"));
+    const parent = path30.dirname(current);
     if (parent === current) break;
     current = parent;
   }
@@ -17870,7 +18058,7 @@ function asBool(value, fallback) {
 }
 function resolveInteropSettings(config = {}) {
   const file = findInteropConfig();
-  const root = file === null ? null : path29.dirname(path29.dirname(file));
+  const root = file === null ? null : path30.dirname(path30.dirname(file));
   const values = file === null ? {} : readEnvFile2(file);
   const setting = (name, fallback) => {
     const fromEnv = process.env[name];
@@ -17882,11 +18070,11 @@ function resolveInteropSettings(config = {}) {
     setting("DSH_INTEROP_USE_GATE_PASSWORD", config.interopUseGatePassword === true ? "1" : "0"),
     false
   );
-  const dataDir = root === null ? path29.join(process.env.DSH_HOME ?? path29.join(process.cwd(), ".dsh"), "mesh", "interop") : path29.join(root, "data");
-  const tokenFile = path29.join(dataDir, "interop-token");
+  const dataDir = root === null ? path30.join(process.env.DSH_HOME ?? path30.join(process.cwd(), ".dsh"), "mesh", "interop") : path30.join(root, "data");
+  const tokenFile = path30.join(dataDir, "interop-token");
   let gatePassword = typeof process.env.DSH_GATE_PASSWORD === "string" ? process.env.DSH_GATE_PASSWORD : "";
   if (useGatePassword && gatePassword === "" && root !== null) {
-    gatePassword = readEnvFile2(path29.join(root, "config", "gate.env")).DSH_GATE_PASSWORD ?? "";
+    gatePassword = readEnvFile2(path30.join(root, "config", "gate.env")).DSH_GATE_PASSWORD ?? "";
   }
   let token = "";
   if (useGatePassword) {
@@ -17918,15 +18106,15 @@ function resolveInteropSettings(config = {}) {
   const reasoning = setting("DSH_INTEROP_REASONING_EFFORT", "");
   const workdir = setting(
     "DSH_WORKDIR",
-    root === null ? process.cwd() : path29.join(root, "workspace")
+    root === null ? process.cwd() : path30.join(root, "workspace")
   );
   return {
     file,
     root,
     dataDir,
     tokenFile,
-    logFile: path29.join(dataDir, "interop-service.log"),
-    stateFile: path29.join(dataDir, "conversations.json"),
+    logFile: path30.join(dataDir, "interop-service.log"),
+    stateFile: path30.join(dataDir, "conversations.json"),
     token,
     useGatePassword,
     tokenSource: useGatePassword ? "gate password" : file === null ? "generated token file" : "interop.env",
@@ -17938,10 +18126,10 @@ function resolveInteropSettings(config = {}) {
     approve: asBool(setting("DSH_INTEROP_APPROVE", "0"), false),
     preset,
     agentPreset,
-    workdir: path29.resolve(workdir),
+    workdir: path30.resolve(workdir),
     // Task workspaces are always below this root, so a workspace name sent by
     // the panel can never address an arbitrary directory on the member.
-    workspaceRoot: path29.resolve(setting("DSH_WORKSPACES_DIR", path29.join(homedir3(), ".dsh", "workspaces"))),
+    workspaceRoot: path30.resolve(setting("DSH_WORKSPACES_DIR", path30.join(homedir3(), ".dsh", "workspaces"))),
     requestTimeoutMs: Number.parseInt(setting("DSH_INTEROP_REQUEST_TIMEOUT_MS", "180000"), 10)
   };
 }
@@ -17955,19 +18143,19 @@ function normalizeWorkspaceName(value) {
   return name;
 }
 function workspacePath(settings, name) {
-  return path29.join(workspaceRootOf(settings), name);
+  return path30.join(workspaceRootOf(settings), name);
 }
 function sameDirectory(left, right) {
   if (typeof left !== "string" || left === "" || typeof right !== "string" || right === "") return false;
   try {
-    return path29.resolve(left) === path29.resolve(right);
+    return path30.resolve(left) === path30.resolve(right);
   } catch {
     return false;
   }
 }
 function workspaceRootOf(settings) {
   const root = settings.workspaceRoot;
-  return typeof root === "string" && root.trim() !== "" ? path29.resolve(root) : path29.join(homedir3(), ".dsh", "workspaces");
+  return typeof root === "string" && root.trim() !== "" ? path30.resolve(root) : path30.join(homedir3(), ".dsh", "workspaces");
 }
 function listWorkspaces(settings) {
   const dir = workspaceRootOf(settings);
@@ -17979,7 +18167,7 @@ function listWorkspaces(settings) {
   try {
     for (const entry of readdirSync2(dir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      workspaces.push({ name: entry.name, path: path29.join(dir, entry.name) });
+      workspaces.push({ name: entry.name, path: path30.join(dir, entry.name) });
     }
   } catch {
   }
@@ -18012,9 +18200,9 @@ function writeScratch(body) {
   }
   const hint = typeof body.name === "string" && body.name.trim() !== "" ? body.name.trim() : "message";
   const safe = hint.replace(/[^A-Za-z0-9._-]/gu, "-").slice(0, 60) || "message";
-  const dir = path29.join(tmpdir5(), "dsh-mesh-messages");
+  const dir = path30.join(tmpdir5(), "dsh-mesh-messages");
   mkdirSync2(dir, { recursive: true });
-  const file = path29.join(dir, `${safe}-${Date.now().toString(36)}-${randomUUID4().slice(0, 8)}.md`);
+  const file = path30.join(dir, `${safe}-${Date.now().toString(36)}-${randomUUID4().slice(0, 8)}.md`);
   writeFileSync(file, text, "utf8");
   return { path: file, bytes: Buffer.byteLength(text, "utf8") };
 }
@@ -18086,7 +18274,7 @@ function createInteropService(options) {
   const logLine = options.log ?? (() => {
   });
   const retry = options.retry !== false;
-  const upgradePlanFile = typeof options.upgradePlanFile === "string" && options.upgradePlanFile !== "" ? options.upgradePlanFile : path29.join(settings.dataDir, "upgrade-plan.json");
+  const upgradePlanFile = typeof options.upgradePlanFile === "string" && options.upgradePlanFile !== "" ? options.upgradePlanFile : path30.join(settings.dataDir, "upgrade-plan.json");
   const conversations = /* @__PURE__ */ new Map();
   const bySession = /* @__PURE__ */ new Map();
   const handles = /* @__PURE__ */ new Map();
@@ -18492,12 +18680,12 @@ data: ${JSON.stringify(payload)}
     const id = randomUUID4();
     const registry = typeof ctx.get === "function" ? ctx.get("workspaceRegistry") : ctx.workspaceRegistry;
     const requested = normalizeWorkspaceName(request.workspace);
-    const explicitCwd = typeof request.cwd === "string" && request.cwd !== "" ? path29.resolve(request.cwd) : "";
+    const explicitCwd = typeof request.cwd === "string" && request.cwd !== "" ? path30.resolve(request.cwd) : "";
     const workspace = requested !== "" ? requested : explicitCwd === "" ? DEFAULT_WORKSPACE2 : "";
     const cwd = requested !== "" ? requested === DEFAULT_WORKSPACE2 ? defaultWorkspaceDirectory(registry, settings) : workspacePath(settings, requested) : explicitCwd !== "" ? explicitCwd : defaultWorkspaceDirectory(registry, settings);
     const occupied = [...conversations.values()].filter((conversation2) => !sessionArchived(conversation2) && sameDirectory(conversation2.cwd, cwd));
     if (occupied.length > 0) {
-      const busyName = workspace !== "" ? workspace : path29.basename(cwd) || cwd;
+      const busyName = workspace !== "" ? workspace : path30.basename(cwd) || cwd;
       const first = occupied[0];
       const label = occupied.map((conversation2) => `${conversation2.id}\uFF08${conversation2.status}\uFF09`).join("\u3001");
       throw httpError(
@@ -18575,7 +18763,7 @@ data: ${JSON.stringify(payload)}
         conversation.status = "running";
         conversation.idle = false;
       }
-      await attachWorkspaceSession(registry, cwd, workspace !== "" ? workspace : path29.basename(cwd) || DEFAULT_WORKSPACE2, id);
+      await attachWorkspaceSession(registry, cwd, workspace !== "" ? workspace : path30.basename(cwd) || DEFAULT_WORKSPACE2, id);
       scheduleSave();
       return conversation;
     } catch (error) {
@@ -18713,7 +18901,7 @@ data: ${JSON.stringify(payload)}
     scheduleSave();
   }
   async function removeWorkspaceFor(cwd) {
-    const directory = path29.resolve(cwd);
+    const directory = path30.resolve(cwd);
     const registry = workspaceRegistry();
     let recordRemoved = false;
     if (registry !== void 0 && registry !== null && typeof registry.list === "function" && typeof registry.delete === "function") {
@@ -18729,9 +18917,9 @@ data: ${JSON.stringify(payload)}
       }
     }
     let directoryRemoved = false;
-    const root = path29.resolve(workspaceRootOf(settings));
-    const relative = path29.relative(root, directory);
-    const inside = relative !== "" && !relative.startsWith("..") && !path29.isAbsolute(relative);
+    const root = path30.resolve(workspaceRootOf(settings));
+    const relative = path30.relative(root, directory);
+    const inside = relative !== "" && !relative.startsWith("..") && !path30.isAbsolute(relative);
     if (inside) {
       try {
         rmSync(directory, { recursive: true, force: true });
@@ -19227,8 +19415,8 @@ data: ${JSON.stringify(event)}
 // src/index.ts
 var inject = ["webServer"];
 function dataDirectory() {
-  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path30.join(homedir4(), ".dsh");
-  return path30.join(home, "mesh");
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path31.join(homedir4(), ".dsh");
+  return path31.join(home, "mesh");
 }
 async function apply(ctx, config = {}) {
   const service = new MeshService({
@@ -19261,7 +19449,7 @@ async function apply(ctx, config = {}) {
   } catch (error) {
     console.error(`mesh: tools service is unavailable: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const upgradePlanFile = path30.join(dataDirectory(), "upgrade-plan.json");
+  const upgradePlanFile = path31.join(dataDirectory(), "upgrade-plan.json");
   if (config.interopEmbedded !== false) {
     try {
       ctx.inject(["agents"], (agentsCtx) => {

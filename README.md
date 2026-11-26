@@ -152,6 +152,7 @@ curl -H "x-dsh-gate-token: $PW" --data-binary @dsh-mesh.7z \
 - `wait_member` 只有两种输入：`conversationIds` 指定会话，或 `all: true` 等本对话所有「进行中」的会话（推荐，工具描述和所有提示都推荐它）；两者互斥，同时传会报错。任意一个先有新回复或进入终态就立刻返回，其余会话在结果里列出。没有进行中的会话时 `all: true` 直接返回 ok 并附上所有会话状态，不报错。
 - `call_member` / `wait_member` 返回本对话跟踪的**所有成员会话**（按 `originSessionId`，不是成员上的全部对话）：会话id、进行中/空闲/异常中止、工作区名、轮次；当前会话带 `current` 标记，`call_member` 另给 `currentConversationId`。状态映射：running/starting=进行中，completed=空闲，failed/interrupted=异常中止。
 - **60 秒状态注入**：本对话有进行中的成员会话、或（开启「避免耗时」后）上次快照以来有超过 1 分钟的已结束 job 时，`agent/pre-step` 在每个 step 前把一份状态快照附加到 `decision.messages`（同一会话最多每 60 秒一次）：首行汇总、自身（会话id/身份/工作范围/保持目标/避免耗时）、每个成员会话一行，**身份和工作区在行首**，随后是会话 id/成员/状态/轮次/工作范围（缺失标 `未设置`）。缺身份/工作范围时按“成员会话”和“自身”分别聚合提示；全部齐全时不出现提示。快照不新开 turn、不调用 `followup`/`steer`，source kind 不是 `user`；读取失败吞掉，不影响 agent loop。
+- **名册缺口检查**：`[成员上下文]` 快照和派活推送会把 `.coder/members/all.md`（`工作区名称` / `身份` / `工作范围` / 可选 `备注`）和本对话的成员会话对一遍：名册里有、但没有对应会话的成员会列成 `[成员缺口]`，并要求用 `call_member` 建出来；只有名册备注写了 `宿主 <地址>` 且该宿主离线/不在组网、或当前没有任何可用成员主机时才记为「暂时建不了」。覆盖按工作区名匹配，旧记录按身份兜底；缺口存在时即使没有进行中的成员会话也会注入快照。详见 [Step 032](docs/Step%20032%20名册缺口检查.md)。
 - **一个工作区只允许一个对话**：新建对话时，解析出的目标目录里只要已经有对话——**进行中、空闲、异常中止、出错都算**——成员就返回 `409 workspace_occupied`，消息里给出那条对话的会话id，`call_member` 以 `ok:false` 直接返回说明（不创建对话），并明确建议 `call_member { "member": …, "conversationId": "<那条对话>", "prompt": … }` 继续它。没有 `force` 之类的覆盖开关；要并行工作就换一个 `workspace` 名（归档后该工作区名会重新可用）。继续已有 `conversationId` 永远不触发这个拦截。
 - **部署/升级期间拒发**：目标成员有正在跑的部署/升级任务（含自动升级前十分钟的准备期）时，`call_member` 在创建会话前就返回 `ok:false`，说明成员正在升级、阶段与开始时间；升级结束后用同一个 `conversationId` 继续。
 - **长消息落盘**：正文超过 48 000 字符时先写到成员本机的临时目录（`POST /v1/scratch`），投递的消息改成「请先用 read 读取 `<路径>`」的说明；`data.messageSpill` 是文件路径。成员版本过旧（没有该接口）时退回整段内联。
@@ -341,6 +342,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | [Step 029 成员对话概览入口与成员上下文行首格式](docs/Step%20029%20成员对话概览入口与成员上下文行首格式.md) | 会话头部的「N个成员对话」入口（悬停列表、详情弹窗、只读接口）、成员上下文快照以身份和工作区开头 |
 | [Step 030 新会话默认完全权限](docs/Step%20030%20新会话默认完全权限.md) | 安装器在 profile 缺 `permission` 行时补 `defaultPreset: danger-full-access`，保留操作者的显式选择，已有会话不追溯 |
 | [Step 031 部署期间拒发、长消息落盘、重启后续投与不可达重试](docs/Step%20031%20部署期间拒发、长消息落盘、重启后续投与不可达重试.md) | 升级/部署期间 `call_member` 拒发、48K 以上正文落盘成文件、手动升级也通知并在重启后续投、成员不可达 20 分钟重试、全隧道成员补回 wg-quick 策略规则 |
+| [Step 032 名册缺口检查](docs/Step%20032%20名册缺口检查.md) | 把 `.coder/members/all.md` 和成员会话对齐，缺的成员列成 `[成员缺口]` 并要求建出来，宿主不可用时豁免 |
 | [Step 018 成员升级与独立升级进程](docs/Step%20018%20成员升级与独立升级进程.md) | 为什么升级要独立进程、job 目录协议、原子状态、升级/取消、包内容 |
 | [Step 020 内嵌 interop 服务](docs/Step%20020%20内嵌interop服务.md) | 会话由 DSH Web 拥有、嵌入式 :8765、部署/回滚、冷读「已停止」根因 |
 
@@ -366,6 +368,7 @@ sudo ./install-interop-service.sh --dsh-home /root/.dsh --port 8765 --bind 127.0
 | `src/lib/member-tasks.mjs` | 成员任务：成员发现、HTTP 派发、后台等待、agent.followup 回调 |
 | `src/lib/member-context.mjs` | 成员会话状态快照：`agent/pre-step` 每 60 秒附加一次；主对话 `turn/end` 后若距上次 review 结束超过 10 分钟则 `followup` 一条派活指令（`keep` 控制是否开启），超过压缩阈值（默认 35%）先压缩 |
 | `src/lib/member-ui.mjs` | 会话头部「N个成员对话」的数据行：任务表 + `member-scopes.json` 合成 JSON 安全字段、成员短标签（IP 末段）、状态与计数 |
+| `src/lib/member-roster.mjs` | `.coder/members/all.md` 解析、按工作区/身份对齐成员会话、宿主不可用时的豁免、缺口文案 |
 | `code/dsh-service/supervisor.mjs` | 独立 DSH Web 的 token 交接 supervisor |
 | `src/lib/http-api.mjs` | 面板 API `/api/dsh-mesh/*` |
 | `src/lib/tools.mjs` | 模型可见的 `build` / `deploy` / `members` / `call_member` / `set_member_scope` / `wait_member` / `status_member` / `remove_member` 工具 |

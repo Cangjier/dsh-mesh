@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import {
+  MEMBER_KEEP_TEXT,
   MEMBER_STATUS_INTERVAL_MS,
   MEMBER_CONTEXT_SOURCE,
   createMemberContext,
@@ -41,10 +42,12 @@ function harness(options = {}) {
   const sessionId = options.sessionId ?? 'session-a'
   /** One session object, carrying a project directory when the test sets one. */
   const sessionOf = (id) => ({ id, ...(options.cwd === undefined ? {} : { header: { cwd: options.cwd } }) })
+  const followups = []
   const agent = options.agent ?? {
     id: sessionId,
     session: sessionOf(sessionId),
     status: 'idle',
+    followup: message => { followups.push(message) },
   }
   const scopes = options.scopes ?? {}
   const service = options.service ?? { async memberScopes() { return scopes } }
@@ -83,7 +86,7 @@ function harness(options = {}) {
     signal: { aborted: false },
   }
   const next = async () => ({ kind: 'enter', messages: [] })
-  return { context, handlers, preStep, payload, next, logs, sessionId, agent, emit, session, scopes }
+  return { context, handlers, preStep, payload, next, logs, sessionId, agent, emit, session, scopes, followups }
 }
 
 const running = {
@@ -270,15 +273,15 @@ test('a snapshot shows the self identity, work scope and effective settings', ()
     selfId: 'session-a',
     selfScope: { identity: '网关', scope: '成员发现', compressPercent: 12.5 },
   })
-  assert.match(text, /身份：网关（自身，会话 session-a）；工作范围：成员发现；避免耗时：关闭（只对主对话生效）；压缩阈值：12\.5%/u)
+  assert.match(text, /身份：网关（自身，会话 session-a）；工作范围：成员发现；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）；压缩阈值：12\.5%/u)
+  assert.match(text, /保持目标：关闭/u)
   assert.match(text, /避免耗时：关闭/u)
-  assert.doesNotMatch(text, /保持目标/u, 'the dispatch flag is gone')
   assert.doesNotMatch(text, /还没有身份\/工作范围/u)
 })
 
 test('a snapshot shows the default 35% threshold', () => {
   const text = formatMemberStatusSnapshot([], { now: 1_000_000, selfId: 'session-a' })
-  assert.doesNotMatch(text, /保持目标/u)
+  assert.match(text, /保持目标：关闭（只对主对话生效）/u)
   assert.match(text, /压缩阈值：35%/u)
 })
 
@@ -307,7 +310,7 @@ test('a member line only shows an explicitly configured compression threshold', 
 
 test('a snapshot asks for the self scope and marks missing fields', () => {
   const text = formatMemberStatusSnapshot([], { now: 1_000_000, selfId: 'session-a' })
-  assert.match(text, /身份：未设置（自身，会话 session-a）；工作范围：未设置；避免耗时：关闭（只对主对话生效）/u)
+  assert.match(text, /身份：未设置（自身，会话 session-a）；工作范围：未设置；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）/u)
   assert.match(text, /自身还没有身份\/工作范围：用 set_member_scope（省略 conversationId 或传 self）设置自身身份和工作范围。/u)
 })
 
@@ -324,7 +327,7 @@ test('a stored scope wins over the task profile snapshot', () => {
   assert.match(text, /身份：新身份；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）；工作范围：新范围/u)
 })
 
-/** Let one turn-end review and its async reads finish. */
+/** Let one turn-end nudge and its async reads finish. */
 async function sleep(ms) {
   await new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -503,6 +506,90 @@ test('a tracked conversation without a stage asks for one', async () => {
     const decision = await h.preStep(h.payload, h.next)
     assert.equal(decision.messages.length, 1)
     assert.match(decision.messages[0].content[0].text, /- 还没有设置产品阶段：用 set_product_stage/u)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('keep nudges 继续 once after a turn ends with no running member conversation', async () => {
+  const h = harness({
+    tasks: [],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', keep: true } },
+  })
+  try {
+    turn(h, 1)
+    await waitFollowups(h, 1)
+    assert.equal(h.followups.length, 1)
+    const message = h.followups[0]
+    assert.equal(message.role, 'user')
+    assert.deepEqual(message.content, [{ type: 'text', text: MEMBER_KEEP_TEXT }])
+    assert.equal(message.source.kind, MEMBER_CONTEXT_SOURCE)
+    assert.equal(message.source.form, 'keep')
+    assert.equal(h.context.keepPending.has('session-a'), true)
+
+    // The turn the nudge started is the nudge itself: it must not push again.
+    turn(h, 2)
+    await sleep(80)
+    assert.equal(h.followups.length, 1)
+    assert.equal(h.context.keepPending.has('session-a'), false)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('keep does not nudge while a member conversation is running', async () => {
+  const h = harness({
+    tasks: [running],
+    scopes: { 'session-a': { identity: '网关', scope: '成员发现', keep: true } },
+  })
+  try {
+    turn(h, 1)
+    await sleep(100)
+    assert.equal(h.followups.length, 0, 'a running member conversation is already the work')
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('keep defaults off and false stays silent', async () => {
+  const missing = harness({ tasks: [], scopes: {} })
+  try {
+    turn(missing, 1)
+    await sleep(80)
+    assert.equal(missing.followups.length, 0)
+  } finally {
+    missing.context.dispose()
+  }
+  const disabled = harness({ tasks: [], scopes: { 'session-a': { keep: false } } })
+  try {
+    turn(disabled, 1)
+    await sleep(80)
+    assert.equal(disabled.followups.length, 0)
+  } finally {
+    disabled.context.dispose()
+  }
+})
+
+test('a member conversation never receives the keep nudge', async () => {
+  const h = harness({ tasks: [], scopes: { 'session-a': { keep: true } } })
+  markMemberSession('session-a')
+  try {
+    turn(h, 1)
+    await sleep(80)
+    assert.equal(h.followups.length, 0)
+  } finally {
+    unmarkMemberSession('session-a')
+    h.context.dispose()
+  }
+})
+
+test('a new turn that starts before the keep check abandons the nudge', async () => {
+  const h = harness({ tasks: [], scopes: { 'session-a': { keep: true } } })
+  try {
+    h.emit('turn/end', { turn: 1 })
+    h.emit('turn/start', { turn: 2 })
+    await sleep(100)
+    assert.equal(h.followups.length, 0)
   } finally {
     h.context.dispose()
   }

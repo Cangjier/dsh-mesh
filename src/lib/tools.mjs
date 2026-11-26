@@ -387,9 +387,10 @@ export function registerTools(ctx, toolsCtx, service) {
       'identity 最长 40 字符，scope 最长 120 字符，note（备注）最长 500 字符。',
       '`role` 是成员的标准身份，只对成员会话生效：产品经理 / 研究员 / 开发 / 测试 / 业务；set_product_stage 的阶段参与校验按它判断。设置自身时忽略。',
       '`note` 仅对成员会话生效：它不会注入成员的系统上下文，也不会随 call_member 投递，只在主对话的 status_member 和成员上下文里可见；设置自身时忽略。',
+      '`keep` 默认 false，只对自身/主对话生效：开启后，每个 turn 结束且本对话没有进行中的成员会话时，插件向本对话投递一条用户消息「继续」；由这条消息拉起的这一轮结束时不会再次投递，避免自循环。设置成员会话时忽略。',
       '`avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，主对话下一次状态快照会列出距上一次快照之间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
       `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；成员会话下一次 call_member 投递前，上下文占比超过阈值就先压缩。`,
-      '至少提供 identity、role、scope、note、avoidLongJobs、compressPercent 之一；设置成员会话时必须有 identity、role、scope、note 或 compressPercent 之一。',
+      '至少提供 identity、role、scope、note、keep、avoidLongJobs、compressPercent 之一；设置成员会话时必须有 identity、role、scope、note 或 compressPercent 之一。',
       '成员会话可以未被本机跟踪，设置仍会保存，只是不会同步任务快照。',
       '这个工具只保存设置，不给成员会话发消息、不自动加投递前缀；随对话一起设置/更新用 call_member 的 identity/role/scope 参数。',
     ].join('\n'),
@@ -416,6 +417,10 @@ export function registerTools(ctx, toolsCtx, service) {
         note: {
           type: 'string',
           description: '备注，仅对成员会话生效，最长 500 字符；只存本机、只在主对话可见，不会注入或投递给成员；空字符串清除。设置自身时忽略。',
+        },
+        keep: {
+          type: 'boolean',
+          description: '只对自身/主对话生效，默认 false；开启后每个 turn 结束且没有进行中的成员会话时投递一条用户消息「继续」。设置成员会话时忽略。',
         },
         avoidLongJobs: {
           type: 'boolean',
@@ -446,20 +451,22 @@ export function registerTools(ctx, toolsCtx, service) {
       const hasRole = args.role !== undefined
       const hasScope = args.scope !== undefined
       const hasNote = args.note !== undefined
+      const hasKeep = args.keep !== undefined
       const hasAvoidLongJobs = args.avoidLongJobs !== undefined
       const hasCompressPercent = args.compressPercent !== undefined
-      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasAvoidLongJobs && !hasCompressPercent) {
-        throw new Error('identity, role, scope, note, avoidLongJobs, or compressPercent is required')
+      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasAvoidLongJobs && !hasCompressPercent) {
+        throw new Error('identity, role, scope, note, keep, avoidLongJobs, or compressPercent is required')
       }
       if (isSelf && selfId === '') throw new Error('cannot set the current session scope: no current session')
       if (!isSelf && !hasIdentity && !hasRole && !hasScope && !hasNote && !hasCompressPercent) {
-        throw new Error('avoidLongJobs only applies to the current session; set identity, role, scope, note, or compressPercent for a member conversation')
+        throw new Error('keep and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation')
       }
       const patch = {
         ...(hasIdentity ? { identity: args.identity } : {}),
         ...(!isSelf && hasRole ? { role: args.role } : {}),
         ...(hasScope ? { scope: args.scope } : {}),
         ...(!isSelf && hasNote ? { note: args.note } : {}),
+        ...(isSelf && hasKeep ? { keep: args.keep } : {}),
         ...(isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {}),
         ...(hasCompressPercent ? { compressPercent: args.compressPercent } : {}),
       }
@@ -485,12 +492,13 @@ export function registerTools(ctx, toolsCtx, service) {
         ...(!isSelf ? [`备注：${scope?.note ?? '未设置'}`] : []),
         ...(isSelf
           ? [
+              `保持目标：${scope?.keep === true ? '开启' : '关闭'}（只对主对话生效）`,
               `避免耗时：${scope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）`,
               `压缩阈值：${formatOneDecimal(compressThreshold)}%`,
             ]
           : [`压缩阈值：${formatOneDecimal(compressThreshold)}%（投递前超过该占比自动压缩）`]),
-        ...(!isSelf && hasAvoidLongJobs
-          ? ['avoidLongJobs 只对主对话自身生效，设置成员会话时已忽略。']
+        ...(!isSelf && (hasKeep || hasAvoidLongJobs)
+          ? ['keep / avoidLongJobs 只对主对话自身生效，设置成员会话时已忽略。']
           : []),
         ...(isSelf && hasRole ? ['role 只对成员会话生效，设置自身时已忽略。'] : []),
         ...(isSelf && hasNote ? ['note 只对成员会话生效，设置自身时已忽略。'] : []),
@@ -506,10 +514,12 @@ export function registerTools(ctx, toolsCtx, service) {
           scope,
           compressPercent: compressThreshold,
           role: !isSelf ? (scope?.role ?? null) : null,
+          keep: isSelf ? (scope?.keep === true) : null,
           avoidLongJobs: scope?.avoidLongJobs === true,
           tracked,
           note: !isSelf ? (scope?.note ?? null) : null,
           ignoredRole: isSelf && hasRole,
+          ignoredKeep: !isSelf && hasKeep,
           ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
           ignoredNote: isSelf && hasNote,
         },

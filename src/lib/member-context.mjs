@@ -19,8 +19,10 @@
  *   recommends delegating that work to a member conversation;
  * - member conversations are excluded from the snapshot via
  *   {@link isMemberSession};
- * - the dispatch push is gone: nothing is injected after a turn ends and no
- *   `keep` flag exists any more;
+ * - with the self scope's `keep` on, a turn end with no running member
+ *   conversation delivers one user message ("继续") to keep the conversation
+ *   going; the turn that message starts does not nudge again, so the nudge
+ *   cannot feed itself;
  * - a failure is logged and swallowed so the agent loop is never affected.
  *
  * @module @local/dsh-mesh/member-context
@@ -46,6 +48,9 @@ const LONG_JOBS_MAX = 20
 
 /** Source kind of the injected/pushed message; it must never read as user input. */
 export const MEMBER_CONTEXT_SOURCE = 'member-context'
+
+/** The one-word message a `keep` turn end delivers. */
+export const MEMBER_KEEP_TEXT = '继续'
 
 /**
  * Render a percentage threshold without a trailing `.0`.
@@ -165,7 +170,7 @@ function formatMemberConversationLine(task, scopes = {}) {
  */
 function formatSelfLine(selfId, selfScope) {
   // Same head order as a member line: the identity answers "who am I" first.
-  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
+  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${selfScope?.keep === true ? '开启' : '关闭'}（只对主对话生效）；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
 }
 
 /**
@@ -239,6 +244,10 @@ export function createMemberContext({
 }) {
   /** @type {Map<string, number>} session id -> last injection time */
   const lastInjection = new Map()
+  /** @type {Map<string, number|null>} session id -> current/ended turn */
+  const turns = new Map()
+  /** @type {Set<string>} sessions whose keep nudge started a turn not ended yet */
+  const keepPending = new Set()
   /** @type {Map<string, object[]>} session id -> settled jobs over the warn threshold */
   const longJobs = new Map()
   const disposers = []
@@ -418,7 +427,48 @@ export function createMemberContext({
   }
 
   /**
-   * Handle one session event for the long-job buffer.
+   * Deliver the one-word "继续" nudge after a turn ends with nothing running.
+   *
+   * Only an explicit `keep: true` opts in, and only when the conversation
+   * tracks no running/starting member conversation: the nudge is meant to keep
+   * the main conversation working while its members are idle, not to interrupt
+   * a delegation that is still in flight. The turn the nudge starts is marked,
+   * so its own end does not nudge again; the next real turn can.
+   * @param {string} sessionId session id.
+   * @param {number|null} turn the turn that just ended.
+   * @returns {Promise<void>} resolution after the attempt.
+   */
+  async function maybeKeep(sessionId, turn) {
+    if (closed) return
+    const scopes = await readScopes()
+    if (closed || turns.get(sessionId) !== turn) return
+    if ((scopes[sessionId] ?? null)?.keep !== true) return
+    const running = await memberTasks.inFlightForOrigin(sessionId).catch(() => null)
+    if (!Array.isArray(running)) return
+    if (running.length > 0) return
+    // `session/event` for `turn/end` fires while the loop still reports the
+    // agent as running; let that turn settle so the followup is not queued
+    // behind a turn that has already ended.
+    await new Promise(resolve => setImmediate(resolve))
+    if (closed || turns.get(sessionId) !== turn) return
+    const agent = typeof ctx?.get === 'function' ? ctx.get('agents')?.get(sessionId) : undefined
+    if (agent === undefined || agent === null || agent.status !== 'idle') return
+    try {
+      agent.followup({
+        id: randomUUID(),
+        role: 'user',
+        content: [{ type: 'text', text: MEMBER_KEEP_TEXT }],
+        source: { kind: MEMBER_CONTEXT_SOURCE, form: 'keep' },
+      })
+      keepPending.add(sessionId)
+      log(`member keep push to ${sessionId}: no member conversation is running`)
+    } catch (error) {
+      log(`member keep push failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * Handle one session event for the long-job buffer and the keep nudge.
    * @param {any} session session.
    * @param {any} event session event.
    * @returns {void}
@@ -427,18 +477,33 @@ export function createMemberContext({
     if (closed || session === undefined || event === undefined) return
     const sessionId = String(session.id ?? '')
     if (sessionId === '' || isMemberSession(sessionId)) return
-    if (event.type !== 'job/settled') return
-    const data = event.data ?? {}
-    const startedAt = Number(data.startedAt)
-    const finishedAt = Number.isFinite(Number(data.finishedAt)) ? Number(data.finishedAt) : Number(event.time)
-    if (!Number.isFinite(startedAt) || !Number.isFinite(finishedAt)) return
-    recordLongJob(sessionId, {
-      jobId: data.jobId,
-      kind: data.kind,
-      label: data.label,
-      startedAt,
-      finishedAt,
-      durationMs: finishedAt - startedAt,
+    if (event.type === 'job/settled') {
+      const data = event.data ?? {}
+      const startedAt = Number(data.startedAt)
+      const finishedAt = Number.isFinite(Number(data.finishedAt)) ? Number(data.finishedAt) : Number(event.time)
+      if (!Number.isFinite(startedAt) || !Number.isFinite(finishedAt)) return
+      recordLongJob(sessionId, {
+        jobId: data.jobId,
+        kind: data.kind,
+        label: data.label,
+        startedAt,
+        finishedAt,
+        durationMs: finishedAt - startedAt,
+      })
+      return
+    }
+    if (event.type === 'turn/start') {
+      turns.set(sessionId, Number.isSafeInteger(event.data?.turn) ? event.data.turn : null)
+      return
+    }
+    if (event.type !== 'turn/end') return
+    const turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : (turns.get(sessionId) ?? null)
+    turns.set(sessionId, turn)
+    // The turn a keep nudge started is the nudge itself: it must not push
+    // again, or a conversation with no members running would loop forever.
+    if (keepPending.delete(sessionId)) return
+    void maybeKeep(sessionId, turn).catch(error => {
+      log(`member keep check failed: ${error instanceof Error ? error.message : String(error)}`)
     })
   }
 
@@ -449,6 +514,8 @@ export function createMemberContext({
       const id = String(session?.id ?? '')
       if (id === '') return
       lastInjection.delete(id)
+      turns.delete(id)
+      keepPending.delete(id)
       longJobs.delete(id)
     }))
   }
@@ -457,12 +524,16 @@ export function createMemberContext({
     handler,
     onEvent,
     lastInjection,
+    turns,
+    keepPending,
     dispose() {
       closed = true
       for (const dispose of disposers.splice(0)) {
         try { dispose?.() } catch { }
       }
       lastInjection.clear()
+      turns.clear()
+      keepPending.clear()
       longJobs.clear()
     },
   }

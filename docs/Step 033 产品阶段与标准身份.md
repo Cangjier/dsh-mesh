@@ -11,7 +11,8 @@
 
 - `turn/end` 后按 `keep` 推送的 `[成员调度]` 指令（`formatMemberDispatchPush`）；
 - `set_member_scope` 的 `keep` 入参和 `member-scopes.json` 里的 `keep` 字段（旧文件里的
-  `keep` 读取时直接忽略，下次写入自然消失）；
+  `keep` 读取时直接忽略，下次写入自然消失；Step 034 随后以**自继续**语义重新引入 `keep`，
+  见该文档，派活审查语义没有恢复）；
 - `MEMBER_REVIEW_INTERVAL_MS` 的 10 分钟窗口、`reviewPending` / `lastReviewEnd` / `turns`
   这些只服务于推送的状态，以及推送前的 `compactMainAgent` / `measureMemberContextPercent`。
 
@@ -22,6 +23,9 @@
 - 60 秒一次的 `agent/pre-step` 快照。
 
 成员上下文不再在 turn 结束后主动注入任何内容，也不会调用 `followup`。
+
+> Step 034 重新引入了 `keep`，但只用于「没有进行中的成员会话时投递一条『继续』」；派活审查、
+> 10 分钟 review 窗口和推送前压缩都没有恢复。
 
 ## `set_product_stage`
 

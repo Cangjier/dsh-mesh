@@ -20,7 +20,16 @@ import {
   effectiveCompressPercent,
   normalizeMemberScopePatch,
 } from './service.mjs'
-import { MEMBER_ROLES, formatProductStageResult, productStageWarnings } from './product-stage.mjs'
+import {
+  MEMBER_ROLES,
+  applyProductStage,
+  formatProductStageBlocked,
+  formatProductStageResult,
+  isAdvancingProductStage,
+  normalizeProductStageInput,
+  productStageParticipationBlockers,
+  productStageWarnings,
+} from './product-stage.mjs'
 import { isMemberSession } from './member-sessions.mjs'
 
 /**
@@ -543,6 +552,7 @@ export function registerTools(ctx, toolsCtx, service) {
       '`stage` 省略时沿用当前阶段（首次调用默认 A），只更新目标状态时可以省略。',
       '阶段按项目目录保存，同一工作区的主对话共享。成员上下文会提示本轮哪些成员还没有参与、产品版本的目标与状态，以及后续可能走向（带条件的 set_product_stage 调用）。',
       '成员的标准身份由 set_member_scope 的 role 设置（产品经理 / 研究员 / 开发 / 测试 / 业务）；没有设置标准身份的成员会在阶段校验中被提示。',
+      '换阶段或开启新一轮（换 round）时，如果本轮要求的成员还没有全部参与，调用会被拒绝且不改变状态：先让成员回复，再重试。回到上一阶段返工不受此限制。',
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -592,6 +602,26 @@ export function registerTools(ctx, toolsCtx, service) {
         throw new Error('set_product_stage is only available in a main conversation; report the result back to the initiator')
       }
       const previous = await service.productStage(cwd)
+      const planned = applyProductStage(previous, normalizeProductStageInput({
+        stage: args.stage,
+        round: args.round,
+        goals: args.goals,
+      }))
+      const tasks = await memberTasks.listForOrigin(originSessionId).catch(() => [])
+      const scopes = await service.memberScopes().catch(() => ({}))
+      // Advancing (next stage or a new round) is refused until the current
+      // round's required participants have answered; backward rework is not
+      // gated because it releases nothing.
+      if (isAdvancingProductStage(previous, planned)) {
+        const blockers = productStageParticipationBlockers(previous, tasks, scopes)
+        if (blockers.length > 0) {
+          return {
+            ok: false,
+            text: formatProductStageBlocked(previous, planned, blockers),
+            data: { blocked: true, state: previous, requested: planned, blockers, project: cwd },
+          }
+        }
+      }
       const saved = await service.setProductStage({
         cwd,
         stage: args.stage,
@@ -599,8 +629,6 @@ export function registerTools(ctx, toolsCtx, service) {
         goals: args.goals,
         bySessionId: originSessionId,
       })
-      const tasks = await memberTasks.listForOrigin(originSessionId).catch(() => [])
-      const scopes = await service.memberScopes().catch(() => ({}))
       const warnings = productStageWarnings(saved.previous, tasks, scopes)
       return {
         ok: true,

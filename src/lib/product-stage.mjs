@@ -501,6 +501,64 @@ export function formatProductStageLines(state, tasks, scopes = {}) {
 }
 
 /**
+ * The reasons the current round's participants are not ready to advance.
+ *
+ * An advancing change (next stage or a new sub-stage round) is refused while
+ * any required participant is still missing: the stage exists to make every
+ * role answer before the product moves on. Backward rework is not gated by
+ * this list, because it does not release anything.
+ * @param {object} state current stage state.
+ * @param {object[]} tasks tracked conversations.
+ * @param {Record<string, object>} scopes conversation id -> stored scope.
+ * @returns {string[]} blocker lines; empty means the round may advance.
+ */
+export function productStageParticipationBlockers(state, tasks, scopes = {}) {
+  const view = productStageParticipants(state, tasks, scopes)
+  const lines = []
+  for (const entry of view.missing) {
+    lines.push(`${participantLabel(entry)} 还没有参与本轮（${entry.statusLabel}）`)
+  }
+  for (const role of view.missingRoles) {
+    lines.push(`没有${role}身份的成员会话`)
+  }
+  return lines
+}
+
+/**
+ * Whether one change advances the flow: the next stage or a new sub-stage
+ * round of the same stage. Backward rework and goal-only updates do not count.
+ * @param {object|null} previous state before the call.
+ * @param {object} next planned state.
+ * @returns {boolean} true when the change advances the flow.
+ */
+export function isAdvancingProductStage(previous, next) {
+  if (previous === null || previous === undefined || next === null || next === undefined) return false
+  if (previous.stage === next.stage) return next.round !== previous.round
+  const order = { A: 0, B: 1, C: 2, D: 3 }
+  const from = order[previous.stage]
+  const to = order[next.stage]
+  if (from === undefined || to === undefined) return false
+  return to > from || (previous.stage === 'D' && next.stage === 'A')
+}
+
+/**
+ * The refusal text when an advancing change finds missing participants.
+ * @param {object} previous current state.
+ * @param {object} next planned state.
+ * @param {string[]} blockers reasons from {@link productStageParticipationBlockers}.
+ * @returns {string} text.
+ */
+export function formatProductStageBlocked(previous, next, blockers) {
+  return [
+    `无法进入 ${next.stage} 阶段（第 ${String(next.round)} 轮迭代）：本轮参与人员不满足要求，阶段状态没有改变。`,
+    `- 当前：${previous.version} · ${previous.stage} 阶段（第 ${String(previous.round)} 轮迭代）`,
+    '参与检查：',
+    ...blockers.map(line => `- ${line}`),
+    '先让这些成员在本轮回复（call_member 派任务、wait_member 取回复），再重试 set_product_stage。',
+  ].join('\n')
+}
+
+/**
  * The tool result for one `set_product_stage` call.
  * @param {object} state saved state.
  * @param {{created?: boolean, tasks?: object[], scopes?: Record<string, object>, warnings?: string[]}} [options] extra facts.

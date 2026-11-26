@@ -13033,6 +13033,35 @@ function formatProductStageLines(state, tasks, scopes = {}) {
     ...formatProductStageNextMoves(state)
   ];
 }
+function productStageParticipationBlockers(state, tasks, scopes = {}) {
+  const view = productStageParticipants(state, tasks, scopes);
+  const lines = [];
+  for (const entry of view.missing) {
+    lines.push(`${participantLabel(entry)} \u8FD8\u6CA1\u6709\u53C2\u4E0E\u672C\u8F6E\uFF08${entry.statusLabel}\uFF09`);
+  }
+  for (const role of view.missingRoles) {
+    lines.push(`\u6CA1\u6709${role}\u8EAB\u4EFD\u7684\u6210\u5458\u4F1A\u8BDD`);
+  }
+  return lines;
+}
+function isAdvancingProductStage(previous, next) {
+  if (previous === null || previous === void 0 || next === null || next === void 0) return false;
+  if (previous.stage === next.stage) return next.round !== previous.round;
+  const order = { A: 0, B: 1, C: 2, D: 3 };
+  const from = order[previous.stage];
+  const to = order[next.stage];
+  if (from === void 0 || to === void 0) return false;
+  return to > from || previous.stage === "D" && next.stage === "A";
+}
+function formatProductStageBlocked(previous, next, blockers) {
+  return [
+    `\u65E0\u6CD5\u8FDB\u5165 ${next.stage} \u9636\u6BB5\uFF08\u7B2C ${String(next.round)} \u8F6E\u8FED\u4EE3\uFF09\uFF1A\u672C\u8F6E\u53C2\u4E0E\u4EBA\u5458\u4E0D\u6EE1\u8DB3\u8981\u6C42\uFF0C\u9636\u6BB5\u72B6\u6001\u6CA1\u6709\u6539\u53D8\u3002`,
+    `- \u5F53\u524D\uFF1A${previous.version} \xB7 ${previous.stage} \u9636\u6BB5\uFF08\u7B2C ${String(previous.round)} \u8F6E\u8FED\u4EE3\uFF09`,
+    "\u53C2\u4E0E\u68C0\u67E5\uFF1A",
+    ...blockers.map((line) => `- ${line}`),
+    "\u5148\u8BA9\u8FD9\u4E9B\u6210\u5458\u5728\u672C\u8F6E\u56DE\u590D\uFF08call_member \u6D3E\u4EFB\u52A1\u3001wait_member \u53D6\u56DE\u590D\uFF09\uFF0C\u518D\u91CD\u8BD5 set_product_stage\u3002"
+  ].join("\n");
+}
 function formatProductStageResult(state, options = {}) {
   const lines = [
     `${options.created === true ? "\u4EA7\u54C1\u9636\u6BB5\u5DF2\u5EFA\u7ACB" : "\u4EA7\u54C1\u9636\u6BB5\u5DF2\u66F4\u65B0"}\uFF1A${state.version} \xB7 ${state.stage} \u9636\u6BB5\uFF08\u7B2C ${String(state.round)} \u8F6E\u8FED\u4EE3\uFF09`,
@@ -17358,7 +17387,8 @@ function registerTools(ctx, toolsCtx, service) {
       "`round` \u662F\u5B50\u9636\u6BB5\u8F6E\u6B21\uFF08\u7B2C\u51E0\u8F6E\u8FED\u4EE3\uFF09\uFF1A\u7701\u7565\u65F6 D \u8FDB\u5165 A \u81EA\u52A8 +1\uFF0C\u5176\u4ED6\u9636\u6BB5\u6CBF\u7528\u5F53\u524D\u8F6E\u6B21\uFF1B\u4E5F\u53EF\u4EE5\u663E\u5F0F\u6307\u5B9A\u3002",
       "`stage` \u7701\u7565\u65F6\u6CBF\u7528\u5F53\u524D\u9636\u6BB5\uFF08\u9996\u6B21\u8C03\u7528\u9ED8\u8BA4 A\uFF09\uFF0C\u53EA\u66F4\u65B0\u76EE\u6807\u72B6\u6001\u65F6\u53EF\u4EE5\u7701\u7565\u3002",
       "\u9636\u6BB5\u6309\u9879\u76EE\u76EE\u5F55\u4FDD\u5B58\uFF0C\u540C\u4E00\u5DE5\u4F5C\u533A\u7684\u4E3B\u5BF9\u8BDD\u5171\u4EAB\u3002\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u63D0\u793A\u672C\u8F6E\u54EA\u4E9B\u6210\u5458\u8FD8\u6CA1\u6709\u53C2\u4E0E\u3001\u4EA7\u54C1\u7248\u672C\u7684\u76EE\u6807\u4E0E\u72B6\u6001\uFF0C\u4EE5\u53CA\u540E\u7EED\u53EF\u80FD\u8D70\u5411\uFF08\u5E26\u6761\u4EF6\u7684 set_product_stage \u8C03\u7528\uFF09\u3002",
-      "\u6210\u5458\u7684\u6807\u51C6\u8EAB\u4EFD\u7531 set_member_scope \u7684 role \u8BBE\u7F6E\uFF08\u4EA7\u54C1\u7ECF\u7406 / \u7814\u7A76\u5458 / \u5F00\u53D1 / \u6D4B\u8BD5 / \u4E1A\u52A1\uFF09\uFF1B\u6CA1\u6709\u8BBE\u7F6E\u6807\u51C6\u8EAB\u4EFD\u7684\u6210\u5458\u4F1A\u5728\u9636\u6BB5\u6821\u9A8C\u4E2D\u88AB\u63D0\u793A\u3002"
+      "\u6210\u5458\u7684\u6807\u51C6\u8EAB\u4EFD\u7531 set_member_scope \u7684 role \u8BBE\u7F6E\uFF08\u4EA7\u54C1\u7ECF\u7406 / \u7814\u7A76\u5458 / \u5F00\u53D1 / \u6D4B\u8BD5 / \u4E1A\u52A1\uFF09\uFF1B\u6CA1\u6709\u8BBE\u7F6E\u6807\u51C6\u8EAB\u4EFD\u7684\u6210\u5458\u4F1A\u5728\u9636\u6BB5\u6821\u9A8C\u4E2D\u88AB\u63D0\u793A\u3002",
+      "\u6362\u9636\u6BB5\u6216\u5F00\u542F\u65B0\u4E00\u8F6E\uFF08\u6362 round\uFF09\u65F6\uFF0C\u5982\u679C\u672C\u8F6E\u8981\u6C42\u7684\u6210\u5458\u8FD8\u6CA1\u6709\u5168\u90E8\u53C2\u4E0E\uFF0C\u8C03\u7528\u4F1A\u88AB\u62D2\u7EDD\u4E14\u4E0D\u6539\u53D8\u72B6\u6001\uFF1A\u5148\u8BA9\u6210\u5458\u56DE\u590D\uFF0C\u518D\u91CD\u8BD5\u3002\u56DE\u5230\u4E0A\u4E00\u9636\u6BB5\u8FD4\u5DE5\u4E0D\u53D7\u6B64\u9650\u5236\u3002"
     ].join("\n"),
     parameters: {
       type: "object",
@@ -17406,6 +17436,23 @@ function registerTools(ctx, toolsCtx, service) {
         throw new Error("set_product_stage is only available in a main conversation; report the result back to the initiator");
       }
       const previous = await service.productStage(cwd);
+      const planned = applyProductStage(previous, normalizeProductStageInput({
+        stage: args.stage,
+        round: args.round,
+        goals: args.goals
+      }));
+      const tasks = await memberTasks.listForOrigin(originSessionId).catch(() => []);
+      const scopes = await service.memberScopes().catch(() => ({}));
+      if (isAdvancingProductStage(previous, planned)) {
+        const blockers = productStageParticipationBlockers(previous, tasks, scopes);
+        if (blockers.length > 0) {
+          return {
+            ok: false,
+            text: formatProductStageBlocked(previous, planned, blockers),
+            data: { blocked: true, state: previous, requested: planned, blockers, project: cwd }
+          };
+        }
+      }
       const saved = await service.setProductStage({
         cwd,
         stage: args.stage,
@@ -17413,8 +17460,6 @@ function registerTools(ctx, toolsCtx, service) {
         goals: args.goals,
         bySessionId: originSessionId
       });
-      const tasks = await memberTasks.listForOrigin(originSessionId).catch(() => []);
-      const scopes = await service.memberScopes().catch(() => ({}));
       const warnings = productStageWarnings(saved.previous, tasks, scopes);
       return {
         ok: true,

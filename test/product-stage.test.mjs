@@ -6,8 +6,11 @@ import test from 'node:test'
 import {
   MEMBER_ROLES,
   applyProductStage,
+  formatProductStageBlocked,
   formatProductStageLines,
   formatProductStageResult,
+  isAdvancingProductStage,
+  productStageParticipationBlockers,
   nextProductVersion,
   normalizeProductStageInput,
   normalizeStoredProductStage,
@@ -251,6 +254,56 @@ test('leaving a stage warns about missing participants and unmet goals', () => {
   assert.deepEqual(productStageWarnings(null, tasks, {}), [])
 })
 
+test('an advancing change is blocked until the current round participants answer', () => {
+  const tasks = [
+    { conversationId: 'c1', statusLabel: '空闲', profile: { name: 'B', role: '开发' } },
+    { conversationId: 'c2', statusLabel: '进行中' },
+  ]
+  const scopes = { c2: { role: '测试' } }
+  const a = { version: '20261126.1', stage: 'A', round: 1, goals: {}, participation: {} }
+  assert.deepEqual(productStageParticipationBlockers(a, tasks, scopes), [
+    '开发 c1 还没有参与本轮（空闲）',
+    '测试 c2 还没有参与本轮（进行中）',
+  ])
+
+  const b = { version: '20261126.1', stage: 'B', round: 1, goals: {}, participation: { c1: { turn: 1, at: '' } } }
+  assert.deepEqual(productStageParticipationBlockers(b, tasks, scopes), [
+    '测试 c2 还没有参与本轮（进行中）',
+    '没有研究员身份的成员会话',
+  ])
+
+  const complete = {
+    version: '20261126.1',
+    stage: 'B',
+    round: 1,
+    goals: {},
+    participation: { c1: { turn: 1, at: '' }, c2: { turn: 2, at: '' }, c3: { turn: 1, at: '' } },
+  }
+  const completeTasks = [
+    ...tasks,
+    { conversationId: 'c3', statusLabel: '空闲', profile: { name: 'B', role: '研究员' } },
+  ]
+  assert.deepEqual(productStageParticipationBlockers(complete, completeTasks, scopes), [])
+
+  const text = formatProductStageBlocked(a, { ...a, round: 2 }, ['开发 c1 还没有参与本轮（空闲）'])
+  assert.match(text, /无法进入 A 阶段（第 2 轮迭代）：本轮参与人员不满足要求，阶段状态没有改变/u)
+  assert.match(text, /- 当前：20261126\.1 · A 阶段（第 1 轮迭代）/u)
+  assert.match(text, /开发 c1 还没有参与本轮（空闲）/u)
+  assert.match(text, /call_member 派任务、wait_member 取回复/u)
+})
+
+test('only advancing changes count as a new round', () => {
+  const a = { stage: 'A', round: 1 }
+  const b = { stage: 'B', round: 1 }
+  assert.equal(isAdvancingProductStage(null, a), false, 'the first call is not an advance')
+  assert.equal(isAdvancingProductStage(a, b), true)
+  assert.equal(isAdvancingProductStage(b, a), false, 'backward rework is not gated')
+  assert.equal(isAdvancingProductStage(b, { stage: 'B', round: 2 }), true, 'another round advances')
+  assert.equal(isAdvancingProductStage(b, { ...b }), false, 'a goal-only update is not an advance')
+  assert.equal(isAdvancingProductStage({ stage: 'D', round: 1 }, { stage: 'A', round: 2 }), true)
+  assert.equal(isAdvancingProductStage({ stage: 'C', round: 1 }, { stage: 'A', round: 1 }), false)
+})
+
 test('the service persists one stage per project and resets participation on a transition', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-stage-service-'))
   const dataDir = path.join(dir, 'mesh')
@@ -345,6 +398,36 @@ test('the set_product_stage tool writes the project state and reports possible n
     const updated = await set.execute({ goals: { dev: { status: '进行中' } } }, { agent })
     assert.match(updated.text, /^产品阶段已更新/u, 'a goal-only call keeps the stage')
     assert.equal((await service.productStage('/root/ws/project')).stage, 'A')
+
+    // A tracked member conversation makes the next round an advancing change;
+    // it is refused until that member answered this round.
+    service.memberTasks.tasks.set('task-c1', {
+      id: 'task-c1',
+      conversationId: 'c1',
+      member: 'B',
+      memberIp: '10.66.66.2',
+      workspace: 'dsh-mesh',
+      status: 'completed',
+      statusLabel: '空闲',
+      originSessionId: 'main-1',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      profile: { name: 'B', role: '开发' },
+    })
+    const blocked = await set.execute({ round: 2 }, { agent })
+    assert.equal(blocked.ok, false)
+    assert.match(blocked.text, /无法进入 A 阶段（第 2 轮迭代）/u)
+    assert.match(blocked.text, /开发 c1 还没有参与本轮/u)
+    assert.equal(blocked.data.blocked, true)
+    assert.deepEqual(blocked.data.blockers, ['开发 c1 还没有参与本轮（空闲）'])
+    assert.equal((await service.productStage('/root/ws/project')).round, 1, 'a blocked call writes nothing')
+
+    await service.noteMemberParticipation({ cwd: '/root/ws/project', conversationId: 'c1', turn: 1 })
+    const advanced = await set.execute({ round: 2 }, { agent })
+    assert.equal(advanced.ok, true)
+    assert.match(advanced.text, /^产品阶段已更新：.*A 阶段（第 2 轮迭代）/u)
+    assert.equal((await service.productStage('/root/ws/project')).round, 2)
+    assert.deepEqual((await service.productStage('/root/ws/project')).participation, {}, 'the new round starts empty')
 
     await assert.rejects(
       () => set.execute({ stage: 'B' }, { agent: { id: 'main-2', session: { id: 'main-2' } } }),

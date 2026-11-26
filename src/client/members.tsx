@@ -49,7 +49,8 @@ export interface MemberConversationRow {
   createdAt: string | null
   updatedAt: string | null
   lastSentAt: string | null
-  prompt: string
+  /** The latest task the initiator dispatched (without the member preamble). */
+  lastTask: string
 }
 
 interface Snapshot {
@@ -269,6 +270,36 @@ function groupRows(rows: MemberConversationRow[]): Array<{ title: string, rows: 
   return [...groups].map(([title, list]) => ({ title, rows: list }))
 }
 
+/** Characters shown before the task text offers its full view. */
+const TASK_PREVIEW_CHARS = 200
+
+/**
+ * One task text: inline when short, otherwise a truncated line plus a toggle.
+ *
+ * A dispatched task can be thousands of characters (a review, a discussion);
+ * the detail view keeps it scannable and opens the full text on request.
+ * @param props the task text.
+ * @returns the text.
+ */
+function TaskText({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false)
+  if (text.length <= TASK_PREVIEW_CHARS) {
+    return <span style={{ whiteSpace: 'pre-wrap' }}>{text}</span>
+  }
+  return (
+    <span style={{ whiteSpace: 'pre-wrap' }}>
+      {expanded ? text : `${text.slice(0, TASK_PREVIEW_CHARS)}…`}
+      {' '}
+      <Typography.Link
+        style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+        onClick={() => setExpanded(value => !value)}
+      >
+        {expanded ? '收起' : '显示详情'}
+      </Typography.Link>
+    </span>
+  )
+}
+
 /**
  * One detail block: every fact the host knows about a member conversation.
  * @param props row.
@@ -317,13 +348,9 @@ function MemberDetail({ row }: { row: MemberConversationRow }) {
           ...(updated === null
             ? []
             : [{ key: 'updated', label: '最近更新', children: updated.toLocaleString() }]),
-          ...(row.prompt === ''
+          ...(row.lastTask === ''
             ? []
-            : [{
-                key: 'prompt',
-                label: '最初任务',
-                children: <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>{row.prompt}</Typography.Paragraph>,
-              }]),
+            : [{ key: 'task', label: '最近任务', children: <TaskText text={row.lastTask} /> }]),
         ]}
       />
     </div>

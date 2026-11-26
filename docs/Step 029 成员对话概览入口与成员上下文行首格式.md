@@ -57,7 +57,7 @@ GET /api/dsh-mesh/member-conversations?session=<主对话 session id>
 | `status` / `statusLabel` | 任务状态与中文标签：running/starting=进行中，completed=空闲，failed/interrupted=异常中止 |
 | `turns` / `createdAt` / `updatedAt` / `lastSentAt` | 轮次与时间 |
 | `note` / `compressPercent` | 只存本机的备注、显式压缩阈值（未设置为 `null`） |
-| `prompt` | 最初任务的前 280 字符 |
+| `lastTask` | 最近一次派发的任务正文（不带【成员身份】/【成员环境】前缀），最多 2000 字符 |
 
 只列**本条主对话**（`originSessionId`）跟踪、未归档的会话，顺序与任务表一致（最早在前）。
 未注册任务表或会话 id 为空时返回空列表，不报错。
@@ -68,7 +68,7 @@ GET /api/dsh-mesh/member-conversations?session=<主对话 session id>
 - 悬停：列出每条会话的 `身份（未设置身份）`、状态标签、`成员 3 · 工作区 xxx`。
 - 点击某一行：只弹这一条成员会话的详情；点击入口本身或列表底部的「查看全部」才列出所有会话。
 - 详情弹窗，每条会话一块：身份、工作区、所属成员（短标签 + 成员名 + IP）、工作范围、状态、
-  轮次、会话 id、压缩阈值、备注、最近更新、最初任务；右上「刷新」立即重读。
+  轮次、会话 id、压缩阈值、备注、最近更新、最近任务（超过 200 字符先截断，点「显示详情」展开全文）；右上「刷新」立即重读。
 - 刷新：打开页面后每 10 秒读一次（页面隐藏时跳过），打开详情时再强制读一次；读取失败保留上一次
   成功的列表，不会让入口闪没或显示假状态。
 

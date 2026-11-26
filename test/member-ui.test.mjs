@@ -4,7 +4,7 @@ import test from 'node:test'
 import { MeshService } from '../src/lib/service.mjs'
 import { registerApi } from '../src/lib/http-api.mjs'
 import {
-  MEMBER_UI_PROMPT_MAX,
+  MEMBER_UI_TASK_MAX,
   memberConversationEntries,
   memberConversationEntry,
   memberConversationSummary,
@@ -45,7 +45,7 @@ test('one conversation row carries the facts the chip and the detail view need',
   assert.equal(entry.status, 'running')
   assert.equal(entry.statusLabel, '进行中')
   assert.equal(entry.turns, 2)
-  assert.equal(entry.prompt, task.prompt)
+  assert.equal(entry.lastTask, task.prompt, 'a record without lastTaskText falls back to its first prompt')
   assert.equal(entry.updatedAt, task.updatedAt)
 })
 
@@ -80,10 +80,12 @@ test('status labels cover running, idle and interrupted', () => {
   assert.deepEqual(labels, ['进行中', '空闲', '异常中止'])
 })
 
-test('the prompt preview is bounded', () => {
-  const entry = memberConversationEntry({ ...task, prompt: 'x'.repeat(MEMBER_UI_PROMPT_MAX + 50) })
-  assert.equal(entry.prompt.length, MEMBER_UI_PROMPT_MAX + 1)
-  assert.ok(entry.prompt.endsWith('…'))
+test('the task text is the latest one and it is bounded', () => {
+  const entry = memberConversationEntry({ ...task, prompt: '第一轮', lastTaskText: '第三轮' })
+  assert.equal(entry.lastTask, '第三轮')
+  const long = memberConversationEntry({ ...task, lastTaskText: 'x'.repeat(MEMBER_UI_TASK_MAX + 50) })
+  assert.equal(long.lastTask.length, MEMBER_UI_TASK_MAX + 1)
+  assert.ok(long.lastTask.endsWith('…'))
 })
 
 test('the summary counts every conversation and the running ones', () => {

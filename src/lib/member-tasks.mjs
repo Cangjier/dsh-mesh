@@ -571,6 +571,9 @@ export class MemberTaskService {
         task.archived = task.archived === true
         task.archivedAt = typeof task.archivedAt === 'string' ? task.archivedAt : null
         task.unreachableSince = Number.isFinite(task.unreachableSince) ? task.unreachableSince : null
+        // Older records only kept the first prompt; the detail view shows the
+        // latest dispatched task, so fall back to what they have.
+        task.lastTaskText = typeof task.lastTaskText === 'string' ? task.lastTaskText : String(task.prompt ?? '')
         task.repliesTakenByWait = task.repliesTakenByWait === true
         // Old records predate the workspace field. An empty value is not a
         // name, so both fall back to the same placeholder the model sees.
@@ -982,6 +985,8 @@ export class MemberTaskService {
       /** Workspace name the member resolved, or a best-known fallback. */
       workspace: reportedWorkspace,
       prompt: truncate(prompt, 2000),
+      /** The latest task text this initiator delivered, without the preamble. */
+      lastTaskText: truncate(prompt, 4000),
       /** Member-local file holding the body when it was too long to inline. */
       messageSpill: body.spill,
       status: 'running',
@@ -1825,6 +1830,7 @@ export class MemberTaskService {
     const environment = environmentPrompt(task.egressLine, await this.#tokenPair())
     const body = await this.#deliverableBody(task.baseUrl, prompt, `member-${task.conversationId}`, signal)
     task.messageSpill = body.spill
+    task.lastTaskText = truncate(prompt, 4000)
     const deliveredPrompt = [prefix, environment, body.text].filter(part => part !== '').join('\n')
     // A compaction record belongs to one delivery; the next one starts clean.
     task.lastCompaction = null

@@ -10741,6 +10741,7 @@ var MemberTaskService = class {
         task.archived = task.archived === true;
         task.archivedAt = typeof task.archivedAt === "string" ? task.archivedAt : null;
         task.unreachableSince = Number.isFinite(task.unreachableSince) ? task.unreachableSince : null;
+        task.lastTaskText = typeof task.lastTaskText === "string" ? task.lastTaskText : String(task.prompt ?? "");
         task.repliesTakenByWait = task.repliesTakenByWait === true;
         if (typeof task.workspace !== "string" || task.workspace.trim() === "") task.workspace = "unknown";
         task.profile = memberTaskProfile(task);
@@ -11098,6 +11099,8 @@ var MemberTaskService = class {
       /** Workspace name the member resolved, or a best-known fallback. */
       workspace: reportedWorkspace,
       prompt: truncate(prompt, 2e3),
+      /** The latest task text this initiator delivered, without the preamble. */
+      lastTaskText: truncate(prompt, 4e3),
       /** Member-local file holding the body when it was too long to inline. */
       messageSpill: body.spill,
       status: "running",
@@ -11891,6 +11894,7 @@ var MemberTaskService = class {
     const environment = environmentPrompt(task.egressLine, await this.#tokenPair());
     const body = await this.#deliverableBody(task.baseUrl, prompt, `member-${task.conversationId}`, signal);
     task.messageSpill = body.spill;
+    task.lastTaskText = truncate(prompt, 4e3);
     const deliveredPrompt = [prefix, environment, body.text].filter((part) => part !== "").join("\n");
     task.lastCompaction = null;
     task.liveStatus = "";
@@ -12641,7 +12645,7 @@ var MemberTaskService = class {
 };
 
 // src/lib/member-ui.mjs
-var MEMBER_UI_PROMPT_MAX = 280;
+var MEMBER_UI_TASK_MAX = 2e3;
 function memberShortLabel(task) {
   const ip = String(task?.memberIp ?? "").trim();
   const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(ip);
@@ -12655,7 +12659,7 @@ function memberConversationEntry(task, scopes = {}) {
   const profile = stored !== null ? memberTaskProfile({ profile: stored }) : memberTaskProfile(task);
   const note = typeof stored?.note === "string" && stored.note.trim() !== "" ? stored.note.trim() : null;
   const compressPercent = typeof stored?.compressPercent === "number" && Number.isFinite(stored.compressPercent) ? stored.compressPercent : null;
-  const rawPrompt = typeof task?.prompt === "string" ? task.prompt : typeof task?.lastPrompt === "string" ? task.lastPrompt : "";
+  const rawTask = typeof task?.lastTaskText === "string" && task.lastTaskText !== "" ? task.lastTaskText : typeof task?.prompt === "string" && task.prompt !== "" ? task.prompt : typeof task?.lastPrompt === "string" ? task.lastPrompt : "";
   return {
     conversationId: entry.conversationId,
     member: entry.member,
@@ -12673,7 +12677,7 @@ function memberConversationEntry(task, scopes = {}) {
     createdAt: typeof task?.createdAt === "string" ? task.createdAt : null,
     updatedAt: typeof task?.updatedAt === "string" ? task.updatedAt : null,
     lastSentAt: typeof task?.lastSentAt === "string" ? task.lastSentAt : null,
-    prompt: rawPrompt.length > MEMBER_UI_PROMPT_MAX ? `${rawPrompt.slice(0, MEMBER_UI_PROMPT_MAX)}\u2026` : rawPrompt
+    lastTask: rawTask.length > MEMBER_UI_TASK_MAX ? `${rawTask.slice(0, MEMBER_UI_TASK_MAX)}\u2026` : rawTask
   };
 }
 function memberConversationEntries(tasks, scopes = {}) {

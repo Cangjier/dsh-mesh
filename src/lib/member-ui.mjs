@@ -12,8 +12,8 @@
 
 import { describeMemberTask, memberTaskProfile } from './member-tasks.mjs'
 
-/** How much of the original prompt one detail row keeps. */
-export const MEMBER_UI_PROMPT_MAX = 280
+/** How much of the latest task one detail row keeps. */
+export const MEMBER_UI_TASK_MAX = 2000
 
 /**
  * The short member label a chip row shows.
@@ -50,9 +50,13 @@ export function memberConversationEntry(task, scopes = {}) {
   const compressPercent = typeof stored?.compressPercent === 'number' && Number.isFinite(stored.compressPercent)
     ? stored.compressPercent
     : null
-  const rawPrompt = typeof task?.prompt === 'string'
-    ? task.prompt
-    : typeof task?.lastPrompt === 'string' ? task.lastPrompt : ''
+  // The detail view shows what was dispatched last, not the conversation's
+  // opening prompt; older records fall back to it.
+  const rawTask = typeof task?.lastTaskText === 'string' && task.lastTaskText !== ''
+    ? task.lastTaskText
+    : typeof task?.prompt === 'string' && task.prompt !== ''
+      ? task.prompt
+      : typeof task?.lastPrompt === 'string' ? task.lastPrompt : ''
   return {
     conversationId: entry.conversationId,
     member: entry.member,
@@ -70,7 +74,7 @@ export function memberConversationEntry(task, scopes = {}) {
     createdAt: typeof task?.createdAt === 'string' ? task.createdAt : null,
     updatedAt: typeof task?.updatedAt === 'string' ? task.updatedAt : null,
     lastSentAt: typeof task?.lastSentAt === 'string' ? task.lastSentAt : null,
-    prompt: rawPrompt.length > MEMBER_UI_PROMPT_MAX ? `${rawPrompt.slice(0, MEMBER_UI_PROMPT_MAX)}…` : rawPrompt,
+    lastTask: rawTask.length > MEMBER_UI_TASK_MAX ? `${rawTask.slice(0, MEMBER_UI_TASK_MAX)}…` : rawTask,
   }
 }
 

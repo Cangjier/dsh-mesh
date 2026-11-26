@@ -31,9 +31,6 @@ export const MEMBER_CONVERSATIONS_PATH = '/api/dsh-mesh/member-conversations'
 /** How often the section refreshes while the page is visible. */
 const POLL_MS = 10_000
 
-/** Rows shown before the fold control, matching the subagent section's budget. */
-const FOLD_LIMIT = 5
-
 /** One member conversation, as the host renders it. */
 export interface MemberConversationRow {
   conversationId: string
@@ -153,6 +150,20 @@ const SECTION_CSS = `
   flex-direction: column;
   gap: 1px;
 }
+.dsh-mesh-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.dsh-mesh-group + .dsh-mesh-group {
+  margin-top: 6px;
+}
+.dsh-mesh-group-title {
+  padding: 2px 6px;
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.55;
+}
 .dsh-mesh-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -190,20 +201,6 @@ const SECTION_CSS = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dsh-mesh-more {
-  align-self: flex-start;
-  padding: 4px 6px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  opacity: 0.7;
-  font: inherit;
-  font-size: 11px;
-  cursor: pointer;
-}
-.dsh-mesh-more:hover {
-  opacity: 1;
-}
 .dsh-mesh-progress {
   font-size: 12px;
   opacity: 0.6;
@@ -228,6 +225,39 @@ function StatusTag({ status, label }: { status: string, label: string }) {
     ? 'processing'
     : status === 'failed' || status === 'interrupted' ? 'error' : 'default'
   return <Tag color={color} style={{ marginInlineEnd: 0 }}>{label}</Tag>
+}
+
+/**
+ * The role a conversation belongs to: its identity without the trailing number.
+ *
+ * `内核开发4` and `内核开发1` share 内核开发, `测试1` groups under 测试, and a
+ * conversation without an identity is listed under its own placeholder rather
+ * than dropped. This is the grouping the roster uses in prose ("测试", "内核
+ * 开发"), derived from the identity so no second field is needed.
+ * @param row conversation row.
+ * @returns group title.
+ */
+function memberGroupOf(row: MemberConversationRow): string {
+  const identity = typeof row.identity === 'string' ? row.identity.trim() : ''
+  if (identity === '') return '未设置身份'
+  const stripped = identity.replace(/[\s\d]+$/u, '').trim()
+  return stripped === '' ? identity : stripped
+}
+
+/**
+ * Group rows by role, keeping the order in which each role first appeared.
+ * @param rows conversation rows.
+ * @returns one entry per role.
+ */
+function groupRows(rows: MemberConversationRow[]): Array<{ title: string, rows: MemberConversationRow[] }> {
+  const groups = new Map<string, MemberConversationRow[]>()
+  for (const row of rows) {
+    const title = memberGroupOf(row)
+    const list = groups.get(title)
+    if (list === undefined) groups.set(title, [row])
+    else list.push(row)
+  }
+  return [...groups].map(([title, list]) => ({ title, rows: list }))
 }
 
 /**
@@ -294,8 +324,9 @@ function MemberDetail({ row }: { row: MemberConversationRow }) {
 /**
  * The section body: one row per tracked member conversation.
  *
- * Five rows show at first, matching the subagent section; the rest sit behind
- * a fold. Clicking a row opens that conversation's detail. Nothing renders
+ * With two or more conversations the rows are grouped by role (the identity
+ * without its trailing number); a single conversation is listed without a
+ * heading. Clicking a row opens that conversation's detail. Nothing renders
  * while the Session tracks no conversation, which also hides the section.
  * @param props slot props (`sessionId`) and the client context.
  * @returns the section body, or null with nothing to show.
@@ -304,7 +335,6 @@ export function MemberConversationsSection({ sessionId, ctx }: { sessionId: stri
   const mode = useThemeMode(ctx)
   const snapshot = useMemberConversations(sessionId)
   const [selected, setSelected] = useState<string | null>(null)
-  const [unfolded, setUnfolded] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
 
   const refresh = useCallback(async () => {
@@ -318,34 +348,36 @@ export function MemberConversationsSection({ sessionId, ctx }: { sessionId: stri
 
   if (snapshot === null || snapshot.rows.length === 0) return null
   const { rows } = snapshot
-  const shown = unfolded ? rows : rows.slice(0, FOLD_LIMIT)
   const selectedRow = rows.find(row => row.conversationId === selected) ?? null
+  // One conversation needs no heading; two or more are grouped by role.
+  const grouped = rows.length > 1 ? groupRows(rows) : []
+  const renderRow = (row: MemberConversationRow) => (
+    <button
+      key={row.conversationId}
+      type="button"
+      className="dsh-mesh-row"
+      title={`${row.identity ?? '未设置身份'} · ${row.workspace}`}
+      onClick={() => setSelected(row.conversationId)}
+    >
+      <span className="dsh-mesh-row-main">
+        <span className="dsh-mesh-row-identity">{row.identity ?? '未设置身份'}</span>
+        <span className="dsh-mesh-row-meta">{`成员 ${row.memberLabel} · ${row.workspace}`}</span>
+      </span>
+      <StatusTag status={row.status} label={row.statusLabel} />
+    </button>
+  )
   return (
     <ConfigProvider theme={{ algorithm: mode === 'dark' ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm }}>
       <style>{SECTION_CSS}</style>
       <div className="dsh-mesh-members">
-        {shown.map(row => (
-          <button
-            key={row.conversationId}
-            type="button"
-            className="dsh-mesh-row"
-            title={`${row.identity ?? '未设置身份'} · ${row.workspace}`}
-            onClick={() => setSelected(row.conversationId)}
-          >
-            <span className="dsh-mesh-row-main">
-              <span className="dsh-mesh-row-identity">{row.identity ?? '未设置身份'}</span>
-              <span className="dsh-mesh-row-meta">{`成员 ${row.memberLabel} · ${row.workspace}`}</span>
-            </span>
-            <StatusTag status={row.status} label={row.statusLabel} />
-          </button>
-        ))}
-        {rows.length > FOLD_LIMIT
-          ? (
-            <button type="button" className="dsh-mesh-more" onClick={() => setUnfolded(value => !value)}>
-              {unfolded ? '收起' : `显示其余 ${String(rows.length - FOLD_LIMIT)} 个`}
-            </button>
-          )
-          : null}
+        {grouped.length === 0
+          ? rows.map(renderRow)
+          : grouped.map(group => (
+            <div key={group.title} className="dsh-mesh-group">
+              <div className="dsh-mesh-group-title">{`${group.title}（${String(group.rows.length)}）`}</div>
+              {group.rows.map(renderRow)}
+            </div>
+          ))}
       </div>
       <Modal
         open={selectedRow !== null}

@@ -7,6 +7,7 @@ import {
   MEMBER_ROLES,
   applyProductStage,
   countCallMemberReplies,
+  defaultCallMemberBudget,
   formatCallMemberBudget,
   formatProductStageBlocked,
   formatProductStageDefinitions,
@@ -494,18 +495,28 @@ test('the call_member budget counts this round only and insists on advancing whe
     { conversationId: 'c1', replies: [{ at: '2026-11-26T17:59:00.000Z' }, { at: '2026-11-26T18:01:00.000Z' }, { at: '2026-11-26T18:02:00.000Z' }] },
     { conversationId: 'c2', replies: [{ at: '2026-11-26T18:03:00.000Z' }] },
   ]
+  const scopes = { c1: { role: '开发' }, c2: { role: '测试' } }
   assert.equal(countCallMemberReplies(state, tasks), 3, 'the reply before the round start does not count')
 
-  assert.deepEqual(formatCallMemberBudget(state, tasks, 5), [
-    '- call_member 预算：本轮已用 3/5，剩余 2',
+  assert.deepEqual(formatCallMemberBudget(state, tasks, { A: 9, B: 5, C: 2, D: 2 }, scopes), [
+    '- call_member 预算（B 阶段）：本轮已用 3/5，剩余 2（已设置）',
   ])
-  const spent = formatCallMemberBudget(state, tasks, 3).join('\n')
-  assert.match(spent, /\[call_member 预算用尽\] 本轮预算 3 次已用完/u)
+  const spent = formatCallMemberBudget(state, tasks, { A: 9, B: 3, C: 2, D: 2 }, scopes).join('\n')
+  assert.match(spent, /\[call_member 预算用尽\] B 阶段本轮预算 3 次已用完/u)
   assert.match(spent, /必须进入下一个阶段/u)
   assert.match(spent, /set_product_stage 及时更新阶段和目标状态/u)
-  assert.match(spent, /set_member_scope 调大 callMemberBudget/u)
+  assert.match(spent, /本轮参与未齐时，先 wait_member 取回已派任务的回复。$/mu)
+  assert.doesNotMatch(spent, /调大|callMemberBudget|set_member_scope/u, 'the prompt must not invite raising the budget')
 
-  assert.deepEqual(formatCallMemberBudget(state, tasks, undefined), [], 'no budget means no line')
+  // A stage with no explicit budget runs on twice its participating members.
+  assert.deepEqual(formatCallMemberBudget(state, tasks, undefined, scopes), [
+    '- call_member 预算（B 阶段）：本轮已用 3/4，剩余 1（默认 = 参与成员数 × 2）',
+  ])
+  assert.deepEqual(formatCallMemberBudget(state, tasks, { A: 9 }, scopes), [
+    '- call_member 预算（B 阶段）：本轮已用 3/4，剩余 1（默认 = 参与成员数 × 2）',
+  ], 'a missing stage falls back to its own default, not to another stage')
+  assert.equal(defaultCallMemberBudget({ ...state, stage: 'C', round: 1 }, [], {}), 1, 'no participant means one call, not zero')
+
   const nextRound = { ...state, round: 2, roundStartedAt: '2026-11-26T18:04:00.000Z' }
   assert.equal(countCallMemberReplies(nextRound, tasks), 0, 'a new round resets the budget')
 })

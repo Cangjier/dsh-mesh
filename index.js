@@ -12990,14 +12990,33 @@ function countCallMemberReplies(state, tasks) {
   }
   return count;
 }
-function formatCallMemberBudget(state, tasks, budget) {
-  if (!Number.isSafeInteger(budget) || budget < 1) return [];
+function callMemberBudgetFor(budgets, stage) {
+  const value = budgets?.[stage];
+  return Number.isSafeInteger(value) && value >= 1 ? value : null;
+}
+function formatCallMemberBudgetSettings(budgets) {
+  const map = budgets !== null && typeof budgets === "object" && !Array.isArray(budgets) ? budgets : {};
+  return PRODUCT_STAGES.map((stage) => {
+    const value = callMemberBudgetFor(map, stage);
+    return `${stage} ${value === null ? "\u9ED8\u8BA4" : String(value)}`;
+  }).join(" / ");
+}
+function defaultCallMemberBudget(state, tasks, scopes = {}) {
+  const count = productStageParticipants(state, tasks, scopes).required.length;
+  return Math.max(1, count * 2);
+}
+function formatCallMemberBudget(state, tasks, budgets, scopes = {}) {
+  const explicit = callMemberBudgetFor(budgets, state?.stage);
+  const budget = explicit ?? defaultCallMemberBudget(state, tasks, scopes);
+  const source = explicit === null ? "\u9ED8\u8BA4 = \u53C2\u4E0E\u6210\u5458\u6570 \xD7 2" : "\u5DF2\u8BBE\u7F6E";
   const used = countCallMemberReplies(state, tasks);
   const remaining = Math.max(0, budget - used);
-  const lines = [`- call_member \u9884\u7B97\uFF1A\u672C\u8F6E\u5DF2\u7528 ${String(used)}/${String(budget)}\uFF0C\u5269\u4F59 ${String(remaining)}`];
+  const lines = [
+    `- call_member \u9884\u7B97\uFF08${state.stage} \u9636\u6BB5\uFF09\uFF1A\u672C\u8F6E\u5DF2\u7528 ${String(used)}/${String(budget)}\uFF0C\u5269\u4F59 ${String(remaining)}\uFF08${source}\uFF09`
+  ];
   if (remaining > 0) return lines;
   lines.push(
-    `[call_member \u9884\u7B97\u7528\u5C3D] \u672C\u8F6E\u9884\u7B97 ${String(budget)} \u6B21\u5DF2\u7528\u5B8C\uFF08\u5DF2\u6709 ${String(used)} \u6761\u6210\u5458\u56DE\u590D\u8FD4\u56DE\u4E3B\u5BF9\u8BDD\uFF09\u3002\u4E0D\u8981\u518D\u6D3E\u65B0\u4EFB\u52A1\uFF1A\u5FC5\u987B\u8FDB\u5165\u4E0B\u4E00\u4E2A\u9636\u6BB5\uFF0C\u5E76\u7528 set_product_stage \u53CA\u65F6\u66F4\u65B0\u9636\u6BB5\u548C\u76EE\u6807\u72B6\u6001\uFF1B\u672C\u8F6E\u53C2\u4E0E\u672A\u9F50\u65F6\uFF0C\u5148 wait_member \u53D6\u56DE\u5DF2\u6D3E\u4EFB\u52A1\u7684\u56DE\u590D\uFF0C\u6216\u7528 set_member_scope \u8C03\u5927 callMemberBudget\u3002`
+    `[call_member \u9884\u7B97\u7528\u5C3D] ${state.stage} \u9636\u6BB5\u672C\u8F6E\u9884\u7B97 ${String(budget)} \u6B21\u5DF2\u7528\u5B8C\uFF08\u5DF2\u6709 ${String(used)} \u6761\u6210\u5458\u56DE\u590D\u8FD4\u56DE\u4E3B\u5BF9\u8BDD\uFF09\u3002\u4E0D\u8981\u518D\u6D3E\u65B0\u4EFB\u52A1\uFF1A\u5FC5\u987B\u8FDB\u5165\u4E0B\u4E00\u4E2A\u9636\u6BB5\uFF0C\u5E76\u7528 set_product_stage \u53CA\u65F6\u66F4\u65B0\u9636\u6BB5\u548C\u76EE\u6807\u72B6\u6001\uFF1B\u672C\u8F6E\u53C2\u4E0E\u672A\u9F50\u65F6\uFF0C\u5148 wait_member \u53D6\u56DE\u5DF2\u6D3E\u4EFB\u52A1\u7684\u56DE\u590D\u3002`
   );
   return lines;
 }
@@ -13118,7 +13137,7 @@ function formatProductStageNextMoves(state) {
 function formatProductStageLines(state, tasks, scopes = {}, options = {}) {
   return [
     `[\u4EA7\u54C1\u9636\u6BB5] ${state.version} \xB7 ${state.stage} \u9636\u6BB5\uFF08\u7B2C ${String(state.round)} \u8F6E\u8FED\u4EE3\uFF09\xB7 ${PRODUCT_STAGE_SHORT[state.stage] ?? ""}`,
-    ...formatCallMemberBudget(state, tasks, options.callMemberBudget),
+    ...formatCallMemberBudget(state, tasks, options.callMemberBudget, scopes),
     `- \u9636\u6BB5\u8981\u6C42\uFF1A${PRODUCT_STAGE_REQUIREMENTS[state.stage] ?? ""}`,
     ...PRODUCT_GOAL_KEYS.map((key) => `- ${PRODUCT_GOAL_LABELS[key]}\uFF1A${goalLine(state.goals?.[key])}`),
     ...formatProductStageParticipation(state, tasks, scopes, { statuses: options.statuses }),
@@ -13205,6 +13224,27 @@ var DEFAULT_COMPRESS_PERCENT = 35;
 var MEMBER_NOTE_MAX = 500;
 var MEMBER_KEEP_PROMPT_MAX = 200;
 var MEMBER_CALL_BUDGET_MAX = 999;
+function normalizeCallMemberBudgets(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("callMemberBudget must be an object mapping A, B, C, D to budgets (no single number)");
+  }
+  const keys = Object.keys(value);
+  if (keys.length === 0) throw new Error("callMemberBudget must set at least one of A, B, C, D");
+  for (const key of keys) {
+    if (!PRODUCT_STAGES.includes(key)) throw new Error(`unknown callMemberBudget stage: ${key}`);
+  }
+  const budgets = {};
+  for (const stage of PRODUCT_STAGES) {
+    const budget = value[stage];
+    if (budget === void 0) continue;
+    if (!Number.isSafeInteger(budget)) throw new Error(`callMemberBudget.${stage} must be an integer`);
+    if (budget < 1 || budget > MEMBER_CALL_BUDGET_MAX) {
+      throw new Error(`callMemberBudget.${stage} is out of range: ${String(budget)} (1-${String(MEMBER_CALL_BUDGET_MAX)})`);
+    }
+    budgets[stage] = budget;
+  }
+  return budgets;
+}
 function normalizeMemberScopePatch(patch = {}) {
   if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
     throw new Error("member scope must be an object");
@@ -13259,12 +13299,7 @@ function normalizeMemberScopePatch(patch = {}) {
     normalized.avoidLongJobs = patch.avoidLongJobs;
   }
   if (patch.callMemberBudget !== void 0) {
-    const value = patch.callMemberBudget;
-    if (!Number.isSafeInteger(value)) throw new Error("callMemberBudget must be an integer");
-    if (value < 1 || value > MEMBER_CALL_BUDGET_MAX) {
-      throw new Error(`callMemberBudget is out of range: ${String(value)} (1-${String(MEMBER_CALL_BUDGET_MAX)})`);
-    }
-    normalized.callMemberBudget = value;
+    normalized.callMemberBudget = normalizeCallMemberBudgets(patch.callMemberBudget);
   }
   if (patch.compressPercent !== void 0) {
     const value = patch.compressPercent;
@@ -13289,6 +13324,16 @@ function savedScopeText(value, max) {
 }
 function savedScopeNumber(value, valid) {
   return typeof value === "number" && Number.isFinite(value) && valid(value) ? value : void 0;
+}
+function savedCallMemberBudgets(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const budgets = {};
+  for (const stage of PRODUCT_STAGES) {
+    const budget = value[stage];
+    if (!Number.isSafeInteger(budget) || budget < 1 || budget > MEMBER_CALL_BUDGET_MAX) continue;
+    budgets[stage] = budget;
+  }
+  return Object.keys(budgets).length > 0 ? budgets : void 0;
 }
 function findRepositoryRoot(start) {
   let current = start;
@@ -13827,7 +13872,7 @@ var MeshService = class {
    * file is the same as "nothing set yet", never a startup failure. Only the
    * fields that were actually set are stored; defaults are applied by readers
    * ({@link effectiveCompressPercent}).
-   * @returns {Promise<Record<string, {identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: number, note?: string, compressPercent?: number}>>} scopes.
+   * @returns {Promise<Record<string, {identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, note?: string, compressPercent?: number}>>} scopes.
    */
   async memberScopes() {
     try {
@@ -13844,10 +13889,7 @@ var MeshService = class {
         const keep = typeof value.keep === "boolean" ? value.keep : void 0;
         const keepPrompt = savedScopeText(value.keepPrompt, MEMBER_KEEP_PROMPT_MAX);
         const avoidLongJobs = typeof value.avoidLongJobs === "boolean" ? value.avoidLongJobs : void 0;
-        const callMemberBudget = savedScopeNumber(
-          value.callMemberBudget,
-          (candidate) => Number.isSafeInteger(candidate) && candidate >= 1 && candidate <= MEMBER_CALL_BUDGET_MAX
-        );
+        const callMemberBudget = savedCallMemberBudgets(value.callMemberBudget);
         const note = savedScopeText(value.note, MEMBER_NOTE_MAX);
         const compressPercent = savedScopeNumber(value.compressPercent, (candidate) => candidate >= 1 && candidate <= 100);
         if (identity === null && role === null && scope === null && keep === void 0 && keepPrompt === null && avoidLongJobs === void 0 && callMemberBudget === void 0 && note === null && compressPercent === void 0) continue;
@@ -13871,7 +13913,7 @@ var MeshService = class {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: number, note?: string, compressPercent?: number}|null>} scope.
+   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, note?: string, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? "").trim();
@@ -13886,7 +13928,8 @@ var MeshService = class {
    * text field (the record is dropped when nothing remains). `role` is the
    * member's standard identity; only the member target is supposed to pass it.
    * `keep`, `keepPrompt`, `avoidLongJobs` and `callMemberBudget` are stored as
-   * given and only the self target uses them. `note` is main-conversation-only
+   * given and only the self target uses them (`callMemberBudget` is a complete
+   * per-stage map; there is no shared value). `note` is main-conversation-only
    * metadata and is never injected or delivered to the member.
    * `compressPercent` applies to both self and member conversations.
    * @param {string} conversationId conversation or session id.
@@ -13917,7 +13960,9 @@ var MeshService = class {
       else next.keepPrompt = normalized.keepPrompt;
     }
     if (normalized.avoidLongJobs !== void 0) next.avoidLongJobs = normalized.avoidLongJobs;
-    if (normalized.callMemberBudget !== void 0) next.callMemberBudget = normalized.callMemberBudget;
+    if (normalized.callMemberBudget !== void 0) {
+      next.callMemberBudget = { ...next.callMemberBudget ?? {}, ...normalized.callMemberBudget };
+    }
     if (normalized.note !== void 0) {
       if (normalized.note === null) delete next.note;
       else next.note = normalized.note;
@@ -16836,19 +16881,11 @@ function formatJobDuration(ms) {
   const seconds = total % 60;
   return seconds === 0 ? `${String(minutes)} \u5206\u949F` : `${String(minutes)} \u5206 ${String(seconds)} \u79D2`;
 }
-function formatMemberConversationLine(task, scopes = {}) {
-  const entry = describeMemberTask(task);
-  const profile = scopeForTask(task, scopes);
-  const stored = scopes[String(task?.conversationId ?? "")];
-  const explicitCompress = typeof stored?.compressPercent === "number" && Number.isFinite(stored.compressPercent) ? `\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(stored.compressPercent)}` : "";
-  const noteText = typeof stored?.note === "string" && stored.note.trim() !== "" ? `\uFF1B\u5907\u6CE8\uFF1A${stored.note.trim().length > 120 ? `${stored.note.trim().slice(0, 120)}\u2026` : stored.note.trim()}` : "";
-  return `- \u8EAB\u4EFD\uFF1A${profile?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u5DE5\u4F5C\u533A\uFF1A${entry.workspace}\uFF1B\u4F1A\u8BDD\uFF1A${entry.conversationId}\uFF08${entry.member} ${entry.memberIp}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${profile?.scope ?? "\u672A\u8BBE\u7F6E"}${explicitCompress}${noteText}`;
-}
 function formatSelfLine(selfId, selfScope) {
   const keep = selfScope?.keep === true;
   const keepPrompt = typeof selfScope?.keepPrompt === "string" && selfScope.keepPrompt !== "" ? selfScope.keepPrompt : DEFAULT_KEEP_PROMPT;
-  const budget = Number.isSafeInteger(selfScope?.callMemberBudget) && selfScope.callMemberBudget >= 1 ? `${String(selfScope.callMemberBudget)} \u6B21/\u8F6E` : "\u4E0D\u9650\u5236";
-  return `- \u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF08\u81EA\u8EAB\uFF0C\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${keep ? `\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u63D0\u793A\u8BED\u300C${keepPrompt}\u300D\uFF09` : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1Bcall_member \u9884\u7B97\uFF1A${budget}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
+  const budget = formatCallMemberBudgetSettings(selfScope?.callMemberBudget);
+  return `- \u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF08\u81EA\u8EAB\uFF0C\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${keep ? `\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u63D0\u793A\u8BED\u300C${keepPrompt}\u300D\uFF09` : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1Bcall_member \u9884\u7B97\uFF1A${budget}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC\u8BA1\uFF1B\u672A\u8BBE\u7F6E\u6309\u53C2\u4E0E\u6210\u5458\u6570 \xD7 2\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
 }
 function formatMemberStatusSnapshot(tasks, options = {}) {
   const list = Array.isArray(tasks) ? tasks : [];
@@ -16865,7 +16902,6 @@ function formatMemberStatusSnapshot(tasks, options = {}) {
     ...formatProductStageDefinitions(),
     ...stageLines,
     formatSelfLine(selfId, selfScope),
-    ...list.map((task) => formatMemberConversationLine(task, scopes)),
     ...gapLines
   ];
   const longJobs = Array.isArray(options.longJobs) ? options.longJobs : [];
@@ -16880,8 +16916,6 @@ function formatMemberStatusSnapshot(tasks, options = {}) {
       "\u63A8\u8350\u628A\u8FD9\u7C7B\u8017\u65F6\u5DE5\u4F5C\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\uFF1A\u7528 call_member \u6307\u5B9A\u6210\u5458\u548C\u5DE5\u4F5C\u533A\uFF0C\u907F\u514D\u4E3B\u5BF9\u8BDD\u88AB\u957F\u4EFB\u52A1\u5360\u7528\u3002"
     );
   }
-  const memberHint = formatMemberScopeMissingHint(list, scopes);
-  if (memberHint !== "") lines.push(memberHint);
   const selfHint = formatSelfScopeMissingHint(selfScope);
   if (selfHint !== "") lines.push(selfHint);
   return lines.join("\n");
@@ -17102,6 +17136,20 @@ function createMemberContext({
 }
 
 // src/lib/tools.mjs
+function callMemberBudgetSchema() {
+  return {
+    type: "object",
+    description: "\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC\u7684 call_member \u9884\u7B97\uFF1B\u53EF\u53EA\u7ED9\u8981\u8BBE\u7684\u9636\u6BB5\uFF0C\u6574\u6570 1\u2013999\uFF0C\u6CA1\u6709\u7EDF\u4E00\u503C\uFF1B\u6CA1\u8BBE\u7F6E\u7684\u9636\u6BB5\u9ED8\u8BA4\u4E3A\u53C2\u4E0E\u6210\u5458\u6570 \xD7 2\u3002\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\u3002",
+    properties: {
+      A: { type: "integer", minimum: 1, maximum: 999, description: "A \u8BA1\u5212\u4E0E\u76EE\u6807\u9636\u6BB5\u6BCF\u8F6E\u7684 call_member \u9884\u7B97\u3002" },
+      B: { type: "integer", minimum: 1, maximum: 999, description: "B \u5F00\u53D1\u4E0E\u6D4B\u8BD5\u9636\u6BB5\u6BCF\u8F6E\u7684 call_member \u9884\u7B97\u3002" },
+      C: { type: "integer", minimum: 1, maximum: 999, description: "C \u4EA7\u54C1\u7ECF\u7406\u4F7F\u7528\u9636\u6BB5\u6BCF\u8F6E\u7684 call_member \u9884\u7B97\u3002" },
+      D: { type: "integer", minimum: 1, maximum: 999, description: "D \u4E1A\u52A1\u4ECB\u5165\u9636\u6BB5\u6BCF\u8F6E\u7684 call_member \u9884\u7B97\u3002" }
+    },
+    minProperties: 1,
+    additionalProperties: false
+  };
+}
 function registerTools(ctx, toolsCtx, service) {
   const buildDefinition = {
     name: "build",
@@ -17425,7 +17473,7 @@ function registerTools(ctx, toolsCtx, service) {
       "`keep` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0C\u6BCF\u4E2A turn \u7ED3\u675F\u4E14\u672C\u5BF9\u8BDD\u6CA1\u6709\u8FDB\u884C\u4E2D\u7684\u6210\u5458\u4F1A\u8BDD\u65F6\uFF0C\u63D2\u4EF6\u5411\u672C\u5BF9\u8BDD\u6295\u9012\u4E00\u6761\u7528\u6237\u6D88\u606F\u300C\u7EE7\u7EED\u300D\uFF1B\u7531\u8FD9\u6761\u6D88\u606F\u62C9\u8D77\u7684\u8FD9\u4E00\u8F6E\u7ED3\u675F\u65F6\u4E0D\u4F1A\u518D\u6B21\u6295\u9012\uFF0C\u907F\u514D\u81EA\u5FAA\u73AF\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       "`keepPrompt`\uFF08\u4E5F\u53EF\u5199 `keep_prompt`\uFF09\u662F\u8FD9\u6761\u7528\u6237\u6D88\u606F\u7684\u6B63\u6587\uFF0C\u9ED8\u8BA4\u300C\u7EE7\u7EED\u300D\uFF0C\u6700\u957F 200 \u5B57\u7B26\uFF1B\u7A7A\u5B57\u7B26\u4E32\u6062\u590D\u9ED8\u8BA4\u3002\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       "`avoidLongJobs` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0C\u4E3B\u5BF9\u8BDD\u4E0B\u4E00\u6B21\u72B6\u6001\u5FEB\u7167\u4F1A\u5217\u51FA\u8DDD\u4E0A\u4E00\u6B21\u5FEB\u7167\u4E4B\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
-      "`callMemberBudget`\uFF08\u4E5F\u53EF\u5199 `call_member_budget`\uFF09\u662F\u4E3B\u5BF9\u8BDD\u6BCF\u4E2A\u5C0F\u9636\u6BB5\uFF08\u9636\u6BB5+\u8F6E\u6B21\uFF09\u53EF\u4EE5\u6D88\u8017\u7684 call_member \u6B21\u6570\uFF0C\u6574\u6570 1\u2013999\uFF0C\u9ED8\u8BA4\u4E0D\u9650\u5236\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u6210\u5458\u6BCF\u628A\u4E00\u6761\u56DE\u590D\u8FD4\u56DE\u7ED9\u4E3B\u5BF9\u8BDD\uFF08wait_member \u53D6\u8D70\u6216\u515C\u5E95\u6295\u9012\uFF09\u7B97\u6D88\u8017\u4E00\u6B21\uFF1B\u9884\u7B97\u7528\u5B8C\u65F6\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u5F3A\u8C03\u5FC5\u987B\u8FDB\u5165\u4E0B\u4E00\u4E2A\u9636\u6BB5\uFF0C\u5E76\u53CA\u65F6\u7528 set_product_stage \u66F4\u65B0\u9636\u6BB5\u548C\u76EE\u6807\u72B6\u6001\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
+      "`callMemberBudget`\uFF08\u4E5F\u53EF\u5199 `call_member_budget`\uFF09\u662F**\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC**\u7684 call_member \u9884\u7B97\uFF0C\u53EF\u53EA\u7ED9\u8981\u8BBE\u7684\u9636\u6BB5\uFF08A/B/C/D\uFF09\uFF0C\u6BCF\u4E2A\u6574\u6570 1\u2013999\uFF0C\u6CA1\u6709\u7EDF\u4E00\u503C\uFF1B\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\u3002\u6CA1\u8BBE\u7F6E\u7684\u9636\u6BB5\u5728\u8FD0\u884C\u65F6\u9ED8\u8BA4\u4E3A\u8BE5\u9636\u6BB5**\u53C2\u4E0E\u6210\u5458\u6570\u91CF \xD7 2**\uFF08\u8FD8\u6CA1\u6709\u53C2\u4E0E\u6210\u5458\u65F6\u6309 1 \u8BA1\uFF09\u3002\u6210\u5458\u6BCF\u628A\u4E00\u6761\u56DE\u590D\u8FD4\u56DE\u7ED9\u4E3B\u5BF9\u8BDD\uFF08wait_member \u53D6\u8D70\u6216\u515C\u5E95\u6295\u9012\uFF09\u7B97\u5BF9\u5E94\u9636\u6BB5\u6D88\u8017\u4E00\u6B21\uFF1B\u9884\u7B97\u7528\u5B8C\u65F6\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u5F3A\u8C03\u5FC5\u987B\u8FDB\u5165\u4E0B\u4E00\u4E2A\u9636\u6BB5\uFF0C\u5E76\u53CA\u65F6\u7528 set_product_stage \u66F4\u65B0\u9636\u6BB5\u548C\u76EE\u6807\u72B6\u6001\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       `\`compressPercent\`\uFF1A\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u6570\u5B57 1\u2013100\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_COMPRESS_PERCENT)}\uFF09\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0B\u4E00\u6B21 call_member \u6295\u9012\u524D\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u538B\u7F29\u3002`,
       "\u81F3\u5C11\u63D0\u4F9B identity\u3001role\u3001scope\u3001note\u3001keep\u3001keepPrompt\u3001avoidLongJobs\u3001callMemberBudget\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001role\u3001scope\u3001note \u6216 compressPercent \u4E4B\u4E00\u3002",
       "\u6210\u5458\u4F1A\u8BDD\u53EF\u4EE5\u672A\u88AB\u672C\u673A\u8DDF\u8E2A\uFF0C\u8BBE\u7F6E\u4ECD\u4F1A\u4FDD\u5B58\uFF0C\u53EA\u662F\u4E0D\u4F1A\u540C\u6B65\u4EFB\u52A1\u5FEB\u7167\u3002",
@@ -17473,16 +17521,9 @@ function registerTools(ctx, toolsCtx, service) {
           type: "boolean",
           description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF1B\u5F00\u542F\u540E\u72B6\u6001\u5FEB\u7167\u4F1A\u5217\u51FA\u4E24\u6B21\u5FEB\u7167\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
         },
-        callMemberBudget: {
-          type: "integer",
-          minimum: 1,
-          maximum: 999,
-          description: "call_member \u9884\u7B97\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4\u4E0D\u9650\u5236\uFF1B\u6BCF\u4E2A\u5C0F\u9636\u6BB5\uFF08\u9636\u6BB5+\u8F6E\u6B21\uFF09\u5185\uFF0C\u6210\u5458\u6BCF\u8FD4\u56DE\u4E00\u6761\u56DE\u590D\u6D88\u8017\u4E00\u6B21\uFF0C\u7528\u5B8C\u65F6\u6210\u5458\u4E0A\u4E0B\u6587\u5F3A\u8C03\u8FDB\u5165\u4E0B\u4E00\u9636\u6BB5\u5E76\u66F4\u65B0\u72B6\u6001\u3002"
-        },
+        callMemberBudget: callMemberBudgetSchema(),
         call_member_budget: {
-          type: "integer",
-          minimum: 1,
-          maximum: 999,
+          ...callMemberBudgetSchema(),
           description: "callMemberBudget \u7684\u522B\u540D\uFF1B\u4E0E callMemberBudget \u53EA\u4F20\u4E00\u4E2A\u3002"
         },
         compressPercent: {
@@ -17546,7 +17587,7 @@ function registerTools(ctx, toolsCtx, service) {
       const tracked = isSelf ? false : await memberTasks.syncTaskScope(targetId, scope, { profile: hasIdentity || hasRole || hasScope });
       const compressThreshold = effectiveCompressPercent(scope);
       const keepPrompt = typeof scope?.keepPrompt === "string" && scope.keepPrompt !== "" ? scope.keepPrompt : DEFAULT_KEEP_PROMPT;
-      const budgetText = Number.isSafeInteger(scope?.callMemberBudget) && scope.callMemberBudget >= 1 ? `${String(scope.callMemberBudget)} \u6B21/\u8F6E\uFF08\u7528\u5B8C\u540E\u63D0\u793A\u8FDB\u5165\u4E0B\u4E00\u9636\u6BB5\uFF09` : "\u4E0D\u9650\u5236";
+      const budgetText = formatCallMemberBudgetSettings(scope?.callMemberBudget);
       const lines = [
         isSelf ? `\u5DF2\u8BBE\u7F6E\u81EA\u8EAB\uFF08\u4F1A\u8BDD ${selfId}\uFF09\u7684\u8EAB\u4EFD/\u5DE5\u4F5C\u8303\u56F4\u4E0E\u914D\u7F6E\u3002` : `\u5DF2\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD ${targetId} \u7684\u8EAB\u4EFD\u3001\u6807\u51C6\u8EAB\u4EFD\u4E0E\u538B\u7F29\u9608\u503C\u3002`,
         ...!isSelf ? [`\u6807\u51C6\u8EAB\u4EFD\uFF1A${scope?.role ?? "\u672A\u8BBE\u7F6E"}`] : [],
@@ -17556,7 +17597,7 @@ function registerTools(ctx, toolsCtx, service) {
         ...isSelf ? [
           `\u4FDD\u6301\u76EE\u6807\uFF1A${scope?.keep === true ? `\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u63D0\u793A\u8BED\u300C${keepPrompt}\u300D\uFF09` : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}`,
           `\u907F\u514D\u8017\u65F6\uFF1A${scope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
-          `call_member \u9884\u7B97\uFF1A${budgetText}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
+          `call_member \u9884\u7B97\uFF1A${budgetText}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC\u8BA1\uFF1B\u672A\u8BBE\u7F6E\u6309\u53C2\u4E0E\u6210\u5458\u6570 \xD7 2\uFF09`,
           `\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%`
         ] : [`\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%\uFF08\u6295\u9012\u524D\u8D85\u8FC7\u8BE5\u5360\u6BD4\u81EA\u52A8\u538B\u7F29\uFF09`],
         ...!isSelf && (hasKeep || hasKeepPrompt || hasAvoidLongJobs || hasCallMemberBudget) ? ["keep / keepPrompt / avoidLongJobs / callMemberBudget \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
@@ -17577,7 +17618,7 @@ function registerTools(ctx, toolsCtx, service) {
           keep: isSelf ? scope?.keep === true : null,
           keepPrompt: isSelf ? keepPrompt : null,
           avoidLongJobs: scope?.avoidLongJobs === true,
-          callMemberBudget: isSelf && Number.isSafeInteger(scope?.callMemberBudget) ? scope.callMemberBudget : null,
+          callMemberBudget: isSelf ? scope?.callMemberBudget ?? null : null,
           tracked,
           note: !isSelf ? scope?.note ?? null : null,
           ignoredRole: isSelf && hasRole,

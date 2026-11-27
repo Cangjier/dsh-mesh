@@ -404,26 +404,74 @@ export function countCallMemberReplies(state, tasks) {
 }
 
 /**
- * The budget lines for one round, including the exhausted emphasis.
+ * One big stage's configured call_member budget.
+ * @param {Record<string, number>|null|undefined} budgets per-stage map.
+ * @param {string} stage stage letter.
+ * @returns {number|null} the budget, or null when that stage has none.
+ */
+export function callMemberBudgetFor(budgets, stage) {
+  const value = budgets?.[stage]
+  return Number.isSafeInteger(value) && value >= 1 ? value : null
+}
+
+/**
+ * Render the configured per-stage budgets for a model-facing line.
  *
- * The budget is set on the main conversation's own scope (`callMemberBudget`)
- * and resets whenever the stage or the round changes, because it counts the
- * replies accepted in the current round window.
+ * A stage without an explicit budget shows `默认`: the snapshot's stage block
+ * resolves it to the live default (twice the participating members).
+ * @param {Record<string, number>|null|undefined} budgets per-stage map.
+ * @returns {string} "A 13 / B 默认 / C 2 / D 默认".
+ */
+export function formatCallMemberBudgetSettings(budgets) {
+  const map = budgets !== null && typeof budgets === 'object' && !Array.isArray(budgets) ? budgets : {}
+  return PRODUCT_STAGES.map((stage) => {
+    const value = callMemberBudgetFor(map, stage)
+    return `${stage} ${value === null ? '默认' : String(value)}`
+  }).join(' / ')
+}
+
+/**
+ * The budget a stage runs on when the main conversation did not set one.
+ *
+ * The default scales with the members that stage actually expects: twice their
+ * number. A stage with no member yet gets one call rather than zero, so the
+ * context does not declare a budget exhausted before there is anyone to call.
  * @param {object} state stage state.
  * @param {object[]} tasks tracked member conversations.
- * @param {unknown} budget configured call_member budget, or a non-number for unlimited.
- * @returns {string[]} lines; empty when the budget is not configured.
+ * @param {Record<string, object>} scopes conversation id -> stored scope.
+ * @returns {number} default budget.
  */
-export function formatCallMemberBudget(state, tasks, budget) {
-  if (!Number.isSafeInteger(budget) || budget < 1) return []
+export function defaultCallMemberBudget(state, tasks, scopes = {}) {
+  const count = productStageParticipants(state, tasks, scopes).required.length
+  return Math.max(1, count * 2)
+}
+
+/**
+ * The budget lines for one round, including the exhausted emphasis.
+ *
+ * Every big stage has its own budget. A stage without an explicit setting runs
+ * on {@link defaultCallMemberBudget} (twice its participating members); there
+ * is no shared number and no unlimited state.
+ * @param {object} state stage state.
+ * @param {object[]} tasks tracked member conversations.
+ * @param {Record<string, number>|null|undefined} budgets per-stage budget map.
+ * @param {Record<string, object>} [scopes] conversation id -> stored scope.
+ * @returns {string[]} lines.
+ */
+export function formatCallMemberBudget(state, tasks, budgets, scopes = {}) {
+  const explicit = callMemberBudgetFor(budgets, state?.stage)
+  const budget = explicit ?? defaultCallMemberBudget(state, tasks, scopes)
+  const source = explicit === null ? '默认 = 参与成员数 × 2' : '已设置'
   const used = countCallMemberReplies(state, tasks)
   const remaining = Math.max(0, budget - used)
-  const lines = [`- call_member 预算：本轮已用 ${String(used)}/${String(budget)}，剩余 ${String(remaining)}`]
+  const lines = [
+    `- call_member 预算（${state.stage} 阶段）：本轮已用 ${String(used)}/${String(budget)}，剩余 ${String(remaining)}（${source}）`,
+  ]
   if (remaining > 0) return lines
   lines.push(
-    `[call_member 预算用尽] 本轮预算 ${String(budget)} 次已用完（已有 ${String(used)} 条成员回复返回主对话）。`
-    + '不要再派新任务：必须进入下一个阶段，并用 set_product_stage 及时更新阶段和目标状态；'
-    + '本轮参与未齐时，先 wait_member 取回已派任务的回复，或用 set_member_scope 调大 callMemberBudget。',
+    `[call_member 预算用尽] ${state.stage} 阶段本轮预算 ${String(budget)} 次已用完`
+    + `（已有 ${String(used)} 条成员回复返回主对话）。不要再派新任务：必须进入下一个阶段，`
+    + '并用 set_product_stage 及时更新阶段和目标状态；本轮参与未齐时，先 wait_member 取回已派任务的回复。',
   )
   return lines
 }
@@ -627,7 +675,7 @@ export function formatProductStageNextMoves(state) {
 export function formatProductStageLines(state, tasks, scopes = {}, options = {}) {
   return [
     `[产品阶段] ${state.version} · ${state.stage} 阶段（第 ${String(state.round)} 轮迭代）· ${PRODUCT_STAGE_SHORT[state.stage] ?? ''}`,
-    ...formatCallMemberBudget(state, tasks, options.callMemberBudget),
+    ...formatCallMemberBudget(state, tasks, options.callMemberBudget, scopes),
     `- 阶段要求：${PRODUCT_STAGE_REQUIREMENTS[state.stage] ?? ''}`,
     ...PRODUCT_GOAL_KEYS.map(key => `- ${PRODUCT_GOAL_LABELS[key]}：${goalLine(state.goals?.[key])}`),
     ...formatProductStageParticipation(state, tasks, scopes, { statuses: options.statuses }),

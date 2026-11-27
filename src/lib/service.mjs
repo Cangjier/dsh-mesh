@@ -64,6 +64,7 @@ import { EGRESS_PROBE_SOURCE } from './egress-probe.mjs'
 import { memberConversationEntries, memberConversationSummary } from './member-ui.mjs'
 import {
   MEMBER_ROLES,
+  PRODUCT_STAGES,
   applyProductStage,
   normalizeProductStageInput,
   normalizeStoredProductStage,
@@ -115,6 +116,37 @@ export const MEMBER_KEEP_PROMPT_MAX = 200
 export const MEMBER_CALL_BUDGET_MAX = 999
 
 /**
+ * Validate a per-stage `call_member` budget patch.
+ *
+ * Each big stage is configured separately: any subset of A/B/C/D may be given
+ * and the rest stay as they were (or fall back to the runtime default). A
+ * plain number is refused because there is no shared budget.
+ * @param {unknown} value raw map.
+ * @returns {Record<string, number>} the stages present in this patch.
+ */
+export function normalizeCallMemberBudgets(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('callMemberBudget must be an object mapping A, B, C, D to budgets (no single number)')
+  }
+  const keys = Object.keys(value)
+  if (keys.length === 0) throw new Error('callMemberBudget must set at least one of A, B, C, D')
+  for (const key of keys) {
+    if (!PRODUCT_STAGES.includes(key)) throw new Error(`unknown callMemberBudget stage: ${key}`)
+  }
+  const budgets = {}
+  for (const stage of PRODUCT_STAGES) {
+    const budget = value[stage]
+    if (budget === undefined) continue
+    if (!Number.isSafeInteger(budget)) throw new Error(`callMemberBudget.${stage} must be an integer`)
+    if (budget < 1 || budget > MEMBER_CALL_BUDGET_MAX) {
+      throw new Error(`callMemberBudget.${stage} is out of range: ${String(budget)} (1-${String(MEMBER_CALL_BUDGET_MAX)})`)
+    }
+    budgets[stage] = budget
+  }
+  return budgets
+}
+
+/**
  * Normalise one session-scope patch.
  *
  * `undefined` means "leave this field alone", an empty string means "clear
@@ -124,12 +156,14 @@ export const MEMBER_CALL_BUDGET_MAX = 999
  * `keepPrompt` is a trimmed string (at most {@link MEMBER_KEEP_PROMPT_MAX})
  * that replaces the default "继续" nudge; `note` is a trimmed string (at most
  * {@link MEMBER_NOTE_MAX}) that is never delivered to the member.
- * `callMemberBudget` is an integer 1..{@link MEMBER_CALL_BUDGET_MAX} that caps
- * the replies one round may bring back to a main conversation.
+ * `callMemberBudget` is a per-stage map (`A`/`B`/`C`/`D`) of integers
+ * 1..{@link MEMBER_CALL_BUDGET_MAX}; stages are set separately and there is no
+ * shared value. A stage without an entry runs on the default computed at read
+ * time (twice its participating members).
  * `compressPercent` a number within 1..100. The caller merges the result into
  * the stored record.
  * @param {{identity?: unknown, role?: unknown, scope?: unknown, keep?: unknown, keepPrompt?: unknown, avoidLongJobs?: unknown, callMemberBudget?: unknown, note?: unknown, compressPercent?: unknown}} [patch] raw patch.
- * @returns {{identity?: string|null, role?: string|null, scope?: string|null, keep?: boolean, keepPrompt?: string|null, avoidLongJobs?: boolean, callMemberBudget?: number, note?: string|null, compressPercent?: number}} normalised patch.
+ * @returns {{identity?: string|null, role?: string|null, scope?: string|null, keep?: boolean, keepPrompt?: string|null, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, note?: string|null, compressPercent?: number}} normalised patch.
  */
 export function normalizeMemberScopePatch(patch = {}) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
@@ -185,12 +219,7 @@ export function normalizeMemberScopePatch(patch = {}) {
     normalized.avoidLongJobs = patch.avoidLongJobs
   }
   if (patch.callMemberBudget !== undefined) {
-    const value = patch.callMemberBudget
-    if (!Number.isSafeInteger(value)) throw new Error('callMemberBudget must be an integer')
-    if (value < 1 || value > MEMBER_CALL_BUDGET_MAX) {
-      throw new Error(`callMemberBudget is out of range: ${String(value)} (1-${String(MEMBER_CALL_BUDGET_MAX)})`)
-    }
-    normalized.callMemberBudget = value
+    normalized.callMemberBudget = normalizeCallMemberBudgets(patch.callMemberBudget)
   }
   if (patch.compressPercent !== undefined) {
     const value = patch.compressPercent
@@ -247,6 +276,26 @@ function savedScopeText(value, max) {
  */
 function savedScopeNumber(value, valid) {
   return typeof value === 'number' && Number.isFinite(value) && valid(value) ? value : undefined
+}
+
+/**
+ * Read one stored per-stage budget map.
+ *
+ * Unusable entries are dropped instead of failing the whole record: the stage
+ * then falls back to its runtime default. Only stages that were actually set
+ * are returned.
+ * @param {unknown} value raw stored value.
+ * @returns {Record<string, number>|undefined} usable entries, or undefined.
+ */
+function savedCallMemberBudgets(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const budgets = {}
+  for (const stage of PRODUCT_STAGES) {
+    const budget = value[stage]
+    if (!Number.isSafeInteger(budget) || budget < 1 || budget > MEMBER_CALL_BUDGET_MAX) continue
+    budgets[stage] = budget
+  }
+  return Object.keys(budgets).length > 0 ? budgets : undefined
 }
 
 /**
@@ -870,7 +919,7 @@ export class MeshService {
    * file is the same as "nothing set yet", never a startup failure. Only the
    * fields that were actually set are stored; defaults are applied by readers
    * ({@link effectiveCompressPercent}).
-   * @returns {Promise<Record<string, {identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: number, note?: string, compressPercent?: number}>>} scopes.
+   * @returns {Promise<Record<string, {identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, note?: string, compressPercent?: number}>>} scopes.
    */
   async memberScopes() {
     try {
@@ -887,10 +936,7 @@ export class MeshService {
         const keep = typeof value.keep === 'boolean' ? value.keep : undefined
         const keepPrompt = savedScopeText(value.keepPrompt, MEMBER_KEEP_PROMPT_MAX)
         const avoidLongJobs = typeof value.avoidLongJobs === 'boolean' ? value.avoidLongJobs : undefined
-        const callMemberBudget = savedScopeNumber(
-          value.callMemberBudget,
-          candidate => Number.isSafeInteger(candidate) && candidate >= 1 && candidate <= MEMBER_CALL_BUDGET_MAX,
-        )
+        const callMemberBudget = savedCallMemberBudgets(value.callMemberBudget)
         const note = savedScopeText(value.note, MEMBER_NOTE_MAX)
         const compressPercent = savedScopeNumber(value.compressPercent, candidate => candidate >= 1 && candidate <= 100)
         if (identity === null && role === null && scope === null && keep === undefined && keepPrompt === null
@@ -916,7 +962,7 @@ export class MeshService {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: number, note?: string, compressPercent?: number}|null>} scope.
+   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, note?: string, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? '').trim()
@@ -932,7 +978,8 @@ export class MeshService {
    * text field (the record is dropped when nothing remains). `role` is the
    * member's standard identity; only the member target is supposed to pass it.
    * `keep`, `keepPrompt`, `avoidLongJobs` and `callMemberBudget` are stored as
-   * given and only the self target uses them. `note` is main-conversation-only
+   * given and only the self target uses them (`callMemberBudget` is a complete
+   * per-stage map; there is no shared value). `note` is main-conversation-only
    * metadata and is never injected or delivered to the member.
    * `compressPercent` applies to both self and member conversations.
    * @param {string} conversationId conversation or session id.
@@ -963,7 +1010,10 @@ export class MeshService {
       else next.keepPrompt = normalized.keepPrompt
     }
     if (normalized.avoidLongJobs !== undefined) next.avoidLongJobs = normalized.avoidLongJobs
-    if (normalized.callMemberBudget !== undefined) next.callMemberBudget = normalized.callMemberBudget
+    if (normalized.callMemberBudget !== undefined) {
+      // Each big stage is set separately: a patch for A must not wipe B.
+      next.callMemberBudget = { ...(next.callMemberBudget ?? {}), ...normalized.callMemberBudget }
+    }
     if (normalized.note !== undefined) {
       if (normalized.note === null) delete next.note
       else next.note = normalized.note

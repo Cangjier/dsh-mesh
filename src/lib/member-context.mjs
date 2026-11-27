@@ -34,11 +34,11 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { describeMemberTask, memberTaskProfile } from './member-tasks.mjs'
+import { memberTaskProfile } from './member-tasks.mjs'
 import { isMemberSession } from './member-sessions.mjs'
 import { DEFAULT_COMPRESS_PERCENT, effectiveCompressPercent } from './service.mjs'
 import { formatMemberGapLines, memberRosterGaps, readMemberRoster } from './member-roster.mjs'
-import { formatProductStageDefinitions, formatProductStageLines } from './product-stage.mjs'
+import { formatCallMemberBudgetSettings, formatProductStageDefinitions, formatProductStageLines } from './product-stage.mjs'
 
 /** Minimum distance between two status snapshots in one session. */
 export const MEMBER_STATUS_INTERVAL_MS = 60_000
@@ -145,47 +145,19 @@ export function formatJobDuration(ms) {
 }
 
 /**
- * Render one tracked conversation line for the snapshot.
- *
- * The line carries identity, workspace and scope only: member conversation
- * statuses are not part of the snapshot. The main conversation asks for a
- * status with `status_member` when it actually needs one.
- * @param {object} task task or status entry.
- * @param {Record<string, object>} [scopes] conversation id -> stored scope.
- * @returns {string} the bullet line.
- */
-function formatMemberConversationLine(task, scopes = {}) {
-  const entry = describeMemberTask(task)
-  const profile = scopeForTask(task, scopes)
-  const stored = scopes[String(task?.conversationId ?? '')]
-  const explicitCompress = typeof stored?.compressPercent === 'number' && Number.isFinite(stored.compressPercent)
-    ? `；压缩阈值：${formatMemberPercent(stored.compressPercent)}`
-    : ''
-  const noteText = typeof stored?.note === 'string' && stored.note.trim() !== ''
-    ? `；备注：${stored.note.trim().length > 120 ? `${stored.note.trim().slice(0, 120)}…` : stored.note.trim()}`
-    : ''
-  // Identity and workspace lead the line: a main conversation with several
-  // parallel member conversations scans by identity (and secondarily by
-  // workspace), not by an opaque conversation id.
-  return `- 身份：${profile?.identity ?? '未设置'}；工作区：${entry.workspace}；会话：${entry.conversationId}（${entry.member} ${entry.memberIp}）；工作范围：${profile?.scope ?? '未设置'}${explicitCompress}${noteText}`
-}
-
-/**
  * Render the current conversation's own settings line.
  * @param {string} selfId current conversation id.
  * @param {object|null} selfScope stored self scope.
  * @returns {string} the bullet line.
  */
 function formatSelfLine(selfId, selfScope) {
-  // Same head order as a member line: the identity answers "who am I" first.
+  // The identity answers "who am I" first.
   const keep = selfScope?.keep === true
   const keepPrompt = typeof selfScope?.keepPrompt === 'string' && selfScope.keepPrompt !== ''
     ? selfScope.keepPrompt
     : DEFAULT_KEEP_PROMPT
-  const budget = Number.isSafeInteger(selfScope?.callMemberBudget) && selfScope.callMemberBudget >= 1
-    ? `${String(selfScope.callMemberBudget)} 次/轮`
-    : '不限制'
-  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${keep ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；call_member 预算：${budget}（只对主对话生效）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
+  const budget = formatCallMemberBudgetSettings(selfScope?.callMemberBudget)
+  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${keep ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；call_member 预算：${budget}（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
 }
 
 /**
@@ -193,8 +165,9 @@ function formatSelfLine(selfId, selfScope) {
  *
  * The snapshot leads with the big-stage definitions, then the product stage
  * (version, round, goals, budget, participation and the possible next moves),
- * then the conversation's own settings and the tracked conversations'
- * identity/workspace. Member conversation statuses are deliberately absent.
+ * then the conversation's own settings and the roster gaps. It does not list
+ * the tracked member conversations: identity, workspace, status and turn are
+ * all left to `call_member` / `wait_member` / `status_member` results.
  * @param {object[]} tasks every conversation this session tracks.
  * @param {{selfId?: string, selfScope?: object|null, scopes?: Record<string, object>, longJobs?: object[], gaps?: string[], stage?: object|null}} [options] snapshot facts.
  * @returns {string} snapshot text.
@@ -218,7 +191,6 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
     ...formatProductStageDefinitions(),
     ...stageLines,
     formatSelfLine(selfId, selfScope),
-    ...list.map(task => formatMemberConversationLine(task, scopes)),
     ...gapLines,
   ]
   const longJobs = Array.isArray(options.longJobs) ? options.longJobs : []
@@ -233,8 +205,6 @@ export function formatMemberStatusSnapshot(tasks, options = {}) {
       '推荐把这类耗时工作交给成员对话执行：用 call_member 指定成员和工作区，避免主对话被长任务占用。',
     )
   }
-  const memberHint = formatMemberScopeMissingHint(list, scopes)
-  if (memberHint !== '') lines.push(memberHint)
   const selfHint = formatSelfScopeMissingHint(selfScope)
   if (selfHint !== '') lines.push(selfHint)
   return lines.join('\n')

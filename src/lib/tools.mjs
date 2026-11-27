@@ -23,6 +23,7 @@ import {
 import {
   MEMBER_ROLES,
   applyProductStage,
+  formatCallMemberBudgetSettings,
   formatProductStageBlocked,
   formatProductStageResult,
   isAdvancingProductStage,
@@ -31,6 +32,25 @@ import {
   productStageWarnings,
 } from './product-stage.mjs'
 import { isMemberSession } from './member-sessions.mjs'
+
+/**
+ * JSON schema for the required per-stage `call_member` budget map.
+ * @returns {object} schema.
+ */
+function callMemberBudgetSchema() {
+  return {
+    type: 'object',
+    description: '每个大阶段单独的 call_member 预算；可只给要设的阶段，整数 1–999，没有统一值；没设置的阶段默认为参与成员数 × 2。只对自身/主对话生效。',
+    properties: {
+      A: { type: 'integer', minimum: 1, maximum: 999, description: 'A 计划与目标阶段每轮的 call_member 预算。' },
+      B: { type: 'integer', minimum: 1, maximum: 999, description: 'B 开发与测试阶段每轮的 call_member 预算。' },
+      C: { type: 'integer', minimum: 1, maximum: 999, description: 'C 产品经理使用阶段每轮的 call_member 预算。' },
+      D: { type: 'integer', minimum: 1, maximum: 999, description: 'D 业务介入阶段每轮的 call_member 预算。' },
+    },
+    minProperties: 1,
+    additionalProperties: false,
+  }
+}
 
 /**
  * Register the tools on an injected `tools` context.
@@ -390,7 +410,7 @@ export function registerTools(ctx, toolsCtx, service) {
       '`keep` 默认 false，只对自身/主对话生效：开启后，每个 turn 结束且本对话没有进行中的成员会话时，插件向本对话投递一条用户消息「继续」；由这条消息拉起的这一轮结束时不会再次投递，避免自循环。设置成员会话时忽略。',
       '`keepPrompt`（也可写 `keep_prompt`）是这条用户消息的正文，默认「继续」，最长 200 字符；空字符串恢复默认。只对自身/主对话生效，设置成员会话时忽略。',
       '`avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，主对话下一次状态快照会列出距上一次快照之间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
-      '`callMemberBudget`（也可写 `call_member_budget`）是主对话每个小阶段（阶段+轮次）可以消耗的 call_member 次数，整数 1–999，默认不限制，只对自身/主对话生效：成员每把一条回复返回给主对话（wait_member 取走或兜底投递）算消耗一次；预算用完时成员上下文会强调必须进入下一个阶段，并及时用 set_product_stage 更新阶段和目标状态。设置成员会话时忽略。',
+      '`callMemberBudget`（也可写 `call_member_budget`）是**每个大阶段单独**的 call_member 预算，可只给要设的阶段（A/B/C/D），每个整数 1–999，没有统一值；只对自身/主对话生效。没设置的阶段在运行时默认为该阶段**参与成员数量 × 2**（还没有参与成员时按 1 计）。成员每把一条回复返回给主对话（wait_member 取走或兜底投递）算对应阶段消耗一次；预算用完时成员上下文会强调必须进入下一个阶段，并及时用 set_product_stage 更新阶段和目标状态。设置成员会话时忽略。',
       `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；成员会话下一次 call_member 投递前，上下文占比超过阈值就先压缩。`,
       '至少提供 identity、role、scope、note、keep、keepPrompt、avoidLongJobs、callMemberBudget、compressPercent 之一；设置成员会话时必须有 identity、role、scope、note 或 compressPercent 之一。',
       '成员会话可以未被本机跟踪，设置仍会保存，只是不会同步任务快照。',
@@ -438,16 +458,9 @@ export function registerTools(ctx, toolsCtx, service) {
           type: 'boolean',
           description: '只对自身/主对话生效，默认 false；开启后状态快照会列出两次快照间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
         },
-        callMemberBudget: {
-          type: 'integer',
-          minimum: 1,
-          maximum: 999,
-          description: 'call_member 预算，只对自身/主对话生效，默认不限制；每个小阶段（阶段+轮次）内，成员每返回一条回复消耗一次，用完时成员上下文强调进入下一阶段并更新状态。',
-        },
+        callMemberBudget: callMemberBudgetSchema(),
         call_member_budget: {
-          type: 'integer',
-          minimum: 1,
-          maximum: 999,
+          ...callMemberBudgetSchema(),
           description: 'callMemberBudget 的别名；与 callMemberBudget 只传一个。',
         },
         compressPercent: {
@@ -523,9 +536,7 @@ export function registerTools(ctx, toolsCtx, service) {
       const keepPrompt = typeof scope?.keepPrompt === 'string' && scope.keepPrompt !== ''
         ? scope.keepPrompt
         : DEFAULT_KEEP_PROMPT
-      const budgetText = Number.isSafeInteger(scope?.callMemberBudget) && scope.callMemberBudget >= 1
-        ? `${String(scope.callMemberBudget)} 次/轮（用完后提示进入下一阶段）`
-        : '不限制'
+      const budgetText = formatCallMemberBudgetSettings(scope?.callMemberBudget)
       const lines = [
         isSelf
           ? `已设置自身（会话 ${selfId}）的身份/工作范围与配置。`
@@ -538,7 +549,7 @@ export function registerTools(ctx, toolsCtx, service) {
           ? [
               `保持目标：${scope?.keep === true ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}`,
               `避免耗时：${scope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）`,
-              `call_member 预算：${budgetText}（只对主对话生效）`,
+              `call_member 预算：${budgetText}（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）`,
               `压缩阈值：${formatOneDecimal(compressThreshold)}%`,
             ]
           : [`压缩阈值：${formatOneDecimal(compressThreshold)}%（投递前超过该占比自动压缩）`]),
@@ -562,7 +573,7 @@ export function registerTools(ctx, toolsCtx, service) {
           keep: isSelf ? (scope?.keep === true) : null,
           keepPrompt: isSelf ? keepPrompt : null,
           avoidLongJobs: scope?.avoidLongJobs === true,
-          callMemberBudget: isSelf && Number.isSafeInteger(scope?.callMemberBudget) ? scope.callMemberBudget : null,
+          callMemberBudget: isSelf ? (scope?.callMemberBudget ?? null) : null,
           tracked,
           note: !isSelf ? (scope?.note ?? null) : null,
           ignoredRole: isSelf && hasRole,

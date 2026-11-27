@@ -145,9 +145,12 @@ test('member scopes persist per conversation, merge, clear, and read as empty wi
     await assert.rejects(service.setMemberScope('x', { role: '老板' }), /role must be one of/u)
     await assert.rejects(service.setMemberScope('x', { identity: 'a'.repeat(41) }), /identity is too long: 41 > 40/u)
     await assert.rejects(service.setMemberScope('x', { scope: 'b'.repeat(121) }), /scope is too long: 121 > 120/u)
-    await assert.rejects(service.setMemberScope('x', { callMemberBudget: 0 }), /callMemberBudget is out of range: 0 \(1-999\)/u)
-    await assert.rejects(service.setMemberScope('x', { callMemberBudget: 1000 }), /callMemberBudget is out of range/u)
-    await assert.rejects(service.setMemberScope('x', { callMemberBudget: 1.5 }), /callMemberBudget must be an integer/u)
+    await assert.rejects(service.setMemberScope('x', { callMemberBudget: 8 }), /callMemberBudget must be an object mapping A, B, C, D to budgets \(no single number\)/u)
+    await assert.rejects(service.setMemberScope('x', { callMemberBudget: {} }), /callMemberBudget must set at least one of A, B, C, D/u)
+    await assert.rejects(service.setMemberScope('x', { callMemberBudget: { A: 0 } }), /callMemberBudget.A is out of range: 0 \(1-999\)/u)
+    await assert.rejects(service.setMemberScope('x', { callMemberBudget: { A: 1000 } }), /callMemberBudget.A is out of range/u)
+    await assert.rejects(service.setMemberScope('x', { callMemberBudget: { A: 1.5 } }), /callMemberBudget.A must be an integer/u)
+    await assert.rejects(service.setMemberScope('x', { callMemberBudget: { E: 3 } }), /unknown callMemberBudget stage: E/u)
     await assert.rejects(service.setMemberScope('x', { compressPercent: '35' }), /compressPercent must be a number/u)
     await assert.rejects(service.setMemberScope('x', { compressPercent: 0 }), /compressPercent is out of range: 0/u)
     await assert.rejects(service.setMemberScope('x', { compressPercent: 101 }), /compressPercent is out of range/u)
@@ -175,15 +178,15 @@ test('scope readers apply defaults and drop unusable stored values', async () =>
     const service = new MeshService({ dataDir, config: {}, log: () => {} })
     await mkdir(dataDir, { recursive: true })
     await writeFile(path.join(dataDir, 'member-scopes.json'), JSON.stringify({
-      good: { identity: '开发', role: '开发', keep: true, keepPrompt: '检查成员结果', avoidLongJobs: true, callMemberBudget: 20, note: '只读复核', compressPercent: 75 },
+      good: { identity: '开发', role: '开发', keep: true, keepPrompt: '检查成员结果', avoidLongJobs: true, callMemberBudget: { A: 20, C: 3 }, note: '只读复核', compressPercent: 75 },
       badIdle: { identity: '测试' },
       badPercent: { compressPercent: 0 },
-      badBudget: { callMemberBudget: 0 },
+      badBudget: { callMemberBudget: { A: 0 } },
       onlyJunk: { compressPercent: 101, role: '老板', avoidLongJobs: 'yes' },
       badNote: { note: 'x'.repeat(501) },
     }), 'utf8')
     assert.deepEqual(await service.memberScopes(), {
-      good: { identity: '开发', role: '开发', keep: true, keepPrompt: '检查成员结果', avoidLongJobs: true, callMemberBudget: 20, note: '只读复核', compressPercent: 75 },
+      good: { identity: '开发', role: '开发', keep: true, keepPrompt: '检查成员结果', avoidLongJobs: true, callMemberBudget: { A: 20, C: 3 }, note: '只读复核', compressPercent: 75 },
       badIdle: { identity: '测试' },
     })
   } finally {
@@ -359,17 +362,19 @@ test('set_member_scope stores a self-only call_member budget and shows it', asyn
     service = new MeshService({ dataDir, config: {}, log: () => {} })
     const set = register(service).find(tool => tool.name === 'set_member_scope')
 
-    const configured = await set.execute({ callMemberBudget: 8 }, { agent: mainAgent })
-    assert.match(configured.text, /call_member 预算：8 次\/轮（用完后提示进入下一阶段）（只对主对话生效）/u)
-    assert.equal(configured.data.callMemberBudget, 8)
-    assert.deepEqual(await service.memberScope('main-1'), { callMemberBudget: 8 })
+    const configured = await set.execute({ callMemberBudget: { A: 8 } }, { agent: mainAgent })
+    assert.match(configured.text, /call_member 预算：A 8 \/ B 默认 \/ C 默认 \/ D 默认（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）/u)
+    assert.deepEqual(configured.data.callMemberBudget, { A: 8 })
+    assert.deepEqual(await service.memberScope('main-1'), { callMemberBudget: { A: 8 } })
 
-    const viaAlias = await set.execute({ call_member_budget: 12 }, { agent: mainAgent })
-    assert.equal(viaAlias.data.callMemberBudget, 12)
-    assert.deepEqual(await service.memberScope('main-1'), { callMemberBudget: 12 })
+    // Each big stage is set separately; a later stage must not wipe the first.
+    const viaAlias = await set.execute({ call_member_budget: { B: 12 } }, { agent: mainAgent })
+    assert.deepEqual(viaAlias.data.callMemberBudget, { A: 8, B: 12 })
+    assert.deepEqual(await service.memberScope('main-1'), { callMemberBudget: { A: 8, B: 12 } })
+    assert.match(viaAlias.text, /A 8 \/ B 12 \/ C 默认 \/ D 默认/u)
 
     const memberTarget = await set.execute(
-      { conversationId: 'conv-x', identity: '开发', callMemberBudget: 3 },
+      { conversationId: 'conv-x', identity: '开发', callMemberBudget: { A: 3 } },
       { agent: mainAgent },
     )
     assert.equal(memberTarget.data.ignoredCallMemberBudget, true)
@@ -377,23 +382,35 @@ test('set_member_scope stores a self-only call_member budget and shows it', asyn
     assert.match(memberTarget.text, /callMemberBudget 只对主对话自身生效/u)
 
     await assert.rejects(
-      () => set.execute({ conversationId: 'conv-x', callMemberBudget: 3 }, { agent: mainAgent }),
+      () => set.execute({ conversationId: 'conv-x', callMemberBudget: { A: 3 } }, { agent: mainAgent }),
       /only apply to the current session/u,
     )
     await assert.rejects(
-      () => set.execute({ callMemberBudget: 0 }, { agent: mainAgent }),
-      /callMemberBudget is out of range: 0 \(1-999\)/u,
+      () => set.execute({ callMemberBudget: 8 }, { agent: mainAgent }),
+      /must be an object mapping A, B, C, D to budgets \(no single number\)/u,
     )
     await assert.rejects(
-      () => set.execute({ callMemberBudget: 1000 }, { agent: mainAgent }),
-      /callMemberBudget is out of range/u,
+      () => set.execute({ callMemberBudget: {} }, { agent: mainAgent }),
+      /must set at least one of A, B, C, D/u,
     )
     await assert.rejects(
-      () => set.execute({ callMemberBudget: 1.5 }, { agent: mainAgent }),
-      /callMemberBudget must be an integer/u,
+      () => set.execute({ callMemberBudget: { A: 0 } }, { agent: mainAgent }),
+      /callMemberBudget.A is out of range: 0 \(1-999\)/u,
     )
     await assert.rejects(
-      () => set.execute({ callMemberBudget: 3, call_member_budget: 4 }, { agent: mainAgent }),
+      () => set.execute({ callMemberBudget: { A: 1000 } }, { agent: mainAgent }),
+      /callMemberBudget.A is out of range/u,
+    )
+    await assert.rejects(
+      () => set.execute({ callMemberBudget: { A: 1.5 } }, { agent: mainAgent }),
+      /callMemberBudget.A must be an integer/u,
+    )
+    await assert.rejects(
+      () => set.execute({ callMemberBudget: { E: 3 } }, { agent: mainAgent }),
+      /unknown callMemberBudget stage: E/u,
+    )
+    await assert.rejects(
+      () => set.execute({ callMemberBudget: { A: 3 }, call_member_budget: { B: 4 } }, { agent: mainAgent }),
       /use only one of callMemberBudget and call_member_budget/u,
     )
   } finally {

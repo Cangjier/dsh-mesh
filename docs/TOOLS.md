@@ -3,7 +3,7 @@
 - 插件：`@local/dsh-mesh`
 - 工具注册：`src/lib/tools.mjs` → `registerTools()`
 - 当前共 10 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`set_member_scope`、`set_product_stage`、`wait_member`、`status_member`、`remove_member`
-- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续（不再有 `compress` 参数），`set_member_scope` 单独设置任意会话或自身的身份、标准身份、工作范围、自动压缩阈值和主对话每轮 `call_member` 预算，`set_product_stage` 维护产品版本、A/B/C/D 大阶段、子阶段轮次和目标状态，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）；`remove_member` 输入会话id，在目标成员上归档、删除对话、删除工作区记录并清空工作区目录，同时删掉本机跟踪记录。
+- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续（不再有 `compress` 参数），`set_member_scope` 单独设置任意会话或自身的身份、标准身份、工作范围、自动压缩阈值和主对话每个大阶段单独的 `call_member` 预算，`set_product_stage` 维护产品版本、A/B/C/D 大阶段、子阶段轮次和目标状态，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）；`remove_member` 输入会话id，在目标成员上归档、删除对话、删除工作区记录并清空工作区目录，同时删掉本机跟踪记录。
 - 所有工具统一返回 `{ ok, text, data }`。`text` 是给人看的摘要，`data` 是结构化结果。
 - 同步执行的工具会在 `text` 和 `data` 里都返回日志文件地址，便于调用结束后继续读取完整日志。
 
@@ -16,7 +16,7 @@
 | `repack` | 用当前仓库刷新已有离线包 | `package` | `false` |
 | `members` | 只读成员发现 | 无 | `true` |
 | `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `cwd` / `workspace` / `identity` / `role` / `scope` | `false` |
-| `set_member_scope` | 设置成员会话或自身的身份、标准身份、工作范围、备注、自继续、`call_member` 预算与压缩阈值 | `conversationId` / `identity` / `role` / `scope` / `note` / `keep` / `keepPrompt` / `avoidLongJobs` / `callMemberBudget` / `call_member_budget` / `compressPercent` | `false` |
+| `set_member_scope` | 设置成员会话或自身的身份、标准身份、工作范围、备注、自继续、分阶段 `call_member` 预算与压缩阈值 | `conversationId` / `identity` / `role` / `scope` / `note` / `keep` / `keepPrompt` / `avoidLongJobs` / `callMemberBudget` / `call_member_budget` / `compressPercent` | `false` |
 | `set_product_stage` | 设置产品阶段、子阶段轮次和三个目标及状态；版本自动维护 | `stage` / `round` / `goals` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
 | `status_member` | 目标会话状态 + 身份/工作范围 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区/身份/工作范围，已归档的不列出）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
@@ -612,7 +612,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 - C 产品经理使用：产品经理真实使用；发现问题回到 B 阶段，直到产品经理放行。
 - D 业务介入：业务人员开展业务工作；发现问题回到 C 阶段，业务放行后回到 A 阶段并升产品版本。
 [产品阶段] 20261126.1 · B 阶段（第 1 轮迭代）· 开发与测试
-- call_member 预算：本轮已用 2/3，剩余 1
+- call_member 预算（B 阶段）：本轮已用 2/3，剩余 1（已设置）
 - 阶段要求：开发、测试、研究员参与；本轮开发的功能没有 BUG（疑难杂症除外）。
 - 产品目标：可用的成员面板（进行中）
 - 开发目标：无 BUG（进行中）
@@ -625,9 +625,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 2. 如果发现问题需要回到计划重新定目标，则 set_product_stage({ "stage": "A" })
 3. 如果本轮还需要继续修复或验证，则 set_product_stage({ "round": 2 })
 4. 如果只需要更新开发目标状态，则 set_product_stage({ "goals": { "dev": { "status": "已达成" } } })
-- 身份：网关（自身，会话 <selfId>）；工作范围：成员发现；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）；call_member 预算：3 次/轮（只对主对话生效）；压缩阈值：35%
-- 身份：开发；工作区：dsh-mesh；会话：c1（B 10.66.66.2）；工作范围：…
-- 身份：未设置；工作区：unknown；会话：c2（B 10.66.66.2）；工作范围：未设置；压缩阈值：10%
+- 身份：网关（自身，会话 <selfId>）；工作范围：成员发现；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）；call_member 预算：A 13 / B 3 / C 2 / D 2（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）；压缩阈值：35%
 ```
 
 - 通过 `agent/pre-step` 把消息附加到 `decision.messages`，和 time-context 同一条路径；
@@ -635,18 +633,17 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 - 注入消息的 `source.kind` 是 `member-context`（不是 `user`），带
   `form: "snapshot"` 和 `sections`；
 - 没有进行中的会话、没有产品阶段、没有名册缺口、没有耗时提醒时不注入；距上次注入不足 60 秒不注入；
-- **不报告成员对话状态**：快照里没有 `进行中 / 空闲 / 异常中止`，成员行也没有轮次；需要状态时
-  用 `status_member`。参与度只列本轮已参与/未参与和缺失的标准身份，未参与成员不带状态后缀
-  （`set_product_stage` 的工具结果仍带状态，见 6.6.1）；
+- **不列出成员会话明细**：快照里没有逐行的身份、工作区、会话 id、工作范围、备注、成员压缩阈值，
+  也没有 `进行中 / 空闲 / 异常中止` 和轮次；需要时用 `status_member`。参与度只列本轮已参与/未参与
+  和缺失的标准身份，未参与成员不带状态后缀（`set_product_stage` 的工具结果仍带状态，见 6.6.1）；
 - 产品阶段块在自身行之前，包含版本、阶段、轮次、`call_member` 预算、阶段要求、三个目标及状态、
   本轮参与度、未参与/缺身份提示和「后续可能走向」的条件式调用；
-- 身份/工作范围优先取 `member-scopes.json`（按 conversationId），回退任务 profile 快照；已归档的会话不进入快照；
-- 成员行在设置了备注时追加 `；备注：…`（备注只在主对话可见，不注入成员）；自身行显示有效配置：
-  保持目标（`keep`，默认关闭；开启时附提示语）、避免耗时（`avoidLongJobs`，默认关闭）、
-  `call_member` 预算（`callMemberBudget`，默认不限制）和压缩阈值（`compressPercent`，默认 35%）；
-  成员行只在显式设置过 `compressPercent` 时显示该阈值；
-- 缺成员会话身份/工作范围时聚合提示 `call_member` / `set_member_scope`；自身缺失时提示
-  `set_member_scope`（省略 conversationId 或传 `self`）；全齐时不提示；
+- 参与度里的标准身份优先取 `member-scopes.json`（按 conversationId），回退任务 profile 快照；
+- 自身行显示有效配置：保持目标（`keep`，默认关闭；开启时附提示语）、避免耗时
+  （`avoidLongJobs`，默认关闭）、`call_member` 预算（`callMemberBudget`，按 A/B/C/D 分阶段；
+  没设的阶段显示 `默认`，运行时取参与成员数 × 2）和压缩阈值（`compressPercent`，默认 35%）；
+- 自身缺身份/工作范围时提示 `set_member_scope`（省略 conversationId 或传 `self`）；
+  成员会话缺身份/范围的聚合提示不在快照里出现，仍保留在 `status_member` 的结果中；
 - 跟踪了成员会话但还没有产品阶段时，提示用 `set_product_stage` 建立（如 `{ "stage": "A" }`）；
 - 读取任务表失败只记日志并吞掉，step 的 decision 原样返回，不影响 agent loop；
 - 每个会话的注入时钟在 `session/disposed` 时清掉。
@@ -693,7 +690,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 - **参与度**：成员的一轮回复被接受时（`wait_member` 取走和兜底投递共用同一张回复表）自动记到当前 `(stage, round)`；读取时还会把 `roundStartedAt` 之后有新回复的会话算作已参与（兼容旧任务 `originCwd` 缺失、插件重启）。阶段或轮次变化后重新计；只更新目标不会移动本轮开始时间。
 - **前进门槛**：换到下一阶段或开启新一轮 `round` 时，本轮要求的成员必须全部参与；否则 `set_product_stage` 返回 `ok:false`（`data.blocked: true`），状态不写入，并列出未参与的成员和没有对应身份的成员会话。退回上一阶段返工（B→A、C→B、D→C）和只更新目标不受此限制。
 - **放行检查**：成功前进时，工具结果用 `[放行检查]` 列出上一阶段未满足的目标（离开 A 产品目标未设置、离开 B 开发目标不是「已达成」、离开 C 产品目标不是「已达成」）和未设置标准身份的成员；这些只提示，不阻断。
-- **`call_member` 预算**：主对话的 `callMemberBudget` 按当前 `(stage, round)` 计，成员每返回一条回复消耗一次（`wait_member` 与兜底投递共用回复表）；阶段或轮次变化时随 `roundStartedAt` 重置，只更新目标不重置。用尽时成员上下文强调进入下一个阶段，但 `set_product_stage` 的前进门槛不受影响，见 6.6.3。
+- **`call_member` 预算**：主对话的 `callMemberBudget` 按大阶段分开设置，当前阶段的预算按 `(stage, round)` 计；没设置的阶段默认为该阶段参与成员数 × 2。成员每返回一条回复消耗一次（`wait_member` 与兜底投递共用回复表）；阶段或轮次变化时随 `roundStartedAt` 重置，只更新目标不重置。用尽时成员上下文强调进入下一个阶段，但 `set_product_stage` 的前进门槛不受影响，见 6.6.3。
 - 成员的标准身份由 `set_member_scope` 的 `role` 设置（产品经理 / 研究员 / 开发 / 测试 / 业务）；未设置的成员在快照里被点名，不按自由文本 `identity` 推断。
 
 ```text
@@ -721,33 +718,39 @@ set_product_stage { "stage": "C", "round": 2 }
 
 ### 6.6.3 `call_member` 预算
 
-`set_member_scope { "callMemberBudget": 8 }`（别名 `call_member_budget`，整数 1–999，只对
-自身/主对话生效）给每个小阶段（阶段 + 轮次）设一个 `call_member` 预算：
+`set_member_scope` 的 `callMemberBudget`（别名 `call_member_budget`）**按大阶段**设置，可以只给
+要设的阶段，每个阶段整数 1–999；只对自身/主对话生效，没有统一值：
 
 ```text
-set_member_scope { "callMemberBudget": 8 }
-set_member_scope { "conversationId": "self", "call_member_budget": 8 }
+set_member_scope { "callMemberBudget": { "A": 26 } }
+set_member_scope { "callMemberBudget": { "B": 6, "C": 2, "D": 2 } }
+set_member_scope { "conversationId": "self", "call_member_budget": { "A": 26 } }
 ```
 
+- **默认**：没有设置的阶段运行时默认为**该阶段参与成员数量 × 2**（还没有参与成员时按 1 计）。
+  参与成员按当前阶段要求算：A 阶段是所有跟踪的会话，B 是开发/测试/研究员，C 是产品经理，
+  D 是业务；成员会话变化后下一次快照重新计算。
+- **独立合并**：先设 A、再设 B 不会清掉 A；每个阶段单独保存。
 - **消耗**：成员对话的回复返回到主对话算一次——`wait_member` 取走回复和兜底投递共用
   `task.replies`，回复被接受一次就计一次；不是按派发次数或会话个数计。
 - **窗口**：只统计当前 `roundStartedAt`（旧状态回退 `updatedAt`）之后接受的回复；换阶段、
   开新一轮（含 D→A）时重置，只更新目标不重置。只统计本对话 `originSessionId` 下的任务。
-- **展示**：快照的产品阶段块显示 `- call_member 预算：本轮已用 x/n，剩余 y`；自身行显示
-  配置值（`n 次/轮` 或 `不限制`）。没有设置时不出现预算行。
+- **展示**：快照的产品阶段块显示
+  `- call_member 预算（A 阶段）：本轮已用 x/n，剩余 y（已设置｜默认 = 参与成员数 × 2）`；
+  自身行显示 `A 26 / B 默认 / C 默认 / D 默认`。
 - **用尽**：`x >= n` 时追加
 
   ```text
-  [call_member 预算用尽] 本轮预算 n 次已用完（已有 x 条成员回复返回主对话）。不要再派新任务：
+  [call_member 预算用尽] A 阶段本轮预算 n 次已用完（已有 x 条成员回复返回主对话）。不要再派新任务：
   必须进入下一个阶段，并用 set_product_stage 及时更新阶段和目标状态；本轮参与未齐时，
-  先 wait_member 取回已派任务的回复，或用 set_member_scope 调大 callMemberBudget。
+  先 wait_member 取回已派任务的回复。
   ```
 
 - **软约束**：`call_member` 不会因为预算用尽而拒绝调用；`set_product_stage` 的前进门槛
-  仍按参与度判断。预算建议按本轮需要的回复条数设置（A 阶段有 13 个成员至少设 13）。
+  仍按参与度判断。
 - 存储位置与 `identity` / `role` / `scope` / `note` / `keep` / `keepPrompt` / `avoidLongJobs` /
-  `compressPercent` 相同，都在 `member-scopes.json` 的同一个会话记录里；未设置表示不限制，
-  工具不接受 0 或负数。
+  `compressPercent` 相同，都在 `member-scopes.json` 的同一个会话记录里；传一个数字会被拒绝，
+  每个阶段只接受 1–999 的整数。
 
 ### 6.7 任务文件
 
@@ -820,7 +823,7 @@ set_member_scope { "identity": "开发", "scope": "插件开发" }
 set_member_scope { "conversationId": "self", "keep": true }
 set_member_scope { "conversationId": "self", "keep": true, "keepPrompt": "继续推进成员结果" }
 set_member_scope { "conversationId": "self", "avoidLongJobs": true }
-set_member_scope { "conversationId": "self", "callMemberBudget": 8 }
+set_member_scope { "conversationId": "self", "callMemberBudget": { "A": 26 } }
 set_member_scope { "conversationId": "<成员会话id>", "role": "测试", "note": "只读复核，不要改内核文件" }
 set_member_scope { "compressPercent": 35 }
 set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "role": "测试", "scope": "跨平台验收", "compressPercent": 10 }
@@ -832,8 +835,7 @@ set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "
 - `role`（标准身份）只对成员会话生效，取值只能是 产品经理 / 研究员 / 开发 / 测试 / 业务；
   `set_product_stage` 的阶段参与校验按它判断谁该参与。设置自身时忽略，返回文字会说明。
 - `note`（备注）只对成员会话生效：只写本机的 `member-scopes.json`，**不注入成员系统上下文、
-  不随 `call_member` 投递**；只在主对话的 `status_member` 和成员上下文快照里可见。设置自身
-  时忽略，返回文字会说明。
+  不随 `call_member` 投递**；只在主对话的 `status_member` 里可见。设置自身时忽略，返回文字会说明。
 - `keep` 默认 false，只对自身/主对话生效：开启后每次 `turn/end` 检查本对话有没有进行中的
   成员会话，没有就用 `agent.followup` 投递一条用户消息「继续」；由它拉起的这一轮结束时不再
   投递，避免自循环。设置成员会话时忽略，返回文字会说明。
@@ -842,16 +844,17 @@ set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "
 - `avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，下一次状态快照会检查距上一次快照
   之间结束、耗时超过 1 分钟的 job，并在注入里列出它们、建议交给成员对话执行；设置成员会话
   时忽略，返回文字会说明。
-- `callMemberBudget`（别名 `call_member_budget`）是主对话每个小阶段（阶段 + 轮次）可消耗的
-  `call_member` 次数，整数 1–999，默认不限制；成员每把一条回复返回给主对话消耗一次，用尽时
-  成员上下文强调进入下一个阶段并更新状态（详见 6.6.3）。只对自身/主对话生效，设置成员会话
-  时忽略，两个名字同时传会报错。
+- `callMemberBudget`（别名 `call_member_budget`）是**按大阶段**（A/B/C/D）设置的主对话
+  `call_member` 预算，每个阶段整数 1–999；可以只给要设的阶段，没有统一值。没设置的阶段
+  运行时默认为该阶段参与成员数 × 2；成员每把一条回复返回给主对话消耗一次，用尽时成员上下文
+  强调进入下一个阶段并更新状态（详见 6.6.3）。只对自身/主对话生效，设置成员会话时忽略，
+  两个名字同时传会报错。
 - `compressPercent`：自动压缩阈值，数字 1–100，默认 35；成员会话下一次 `call_member` 投递前
   用它检查上下文占比。派活推送移除后，主对话自身不再有推送前压缩时机，该值仍会保存并显示。
 - `compressPercent` 目前只能设置数值，不支持直接清除；要恢复默认就设回 `35`。
 - 至少提供 `identity` / `role` / `scope` / `note` / `keep` / `keepPrompt` / `avoidLongJobs` / `callMemberBudget` / `compressPercent` 之一；设置成员会话时
   必须有 `identity` / `role` / `scope` / `note` / `compressPercent` 之一（允许只设 `compressPercent`）。
-- 返回文字显示有效值（例如 `标准身份：测试`、`保持目标：开启（只对主对话生效，提示语「继续」）`、`call_member 预算：8 次/轮（用完后提示进入下一阶段）（只对主对话生效）`、`压缩阈值：35%`）以及被忽略的字段。
+- 返回文字显示有效值（例如 `标准身份：测试`、`保持目标：开启（只对主对话生效，提示语「继续」）`、`call_member 预算：A 26 / B 默认 / C 默认 / D 默认（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）`、`压缩阈值：35%`）以及被忽略的字段。
 - “自身”写入当前 session id；成员会话写入 conversationId，并同步本机跟踪任务的 profile
   快照。未跟踪的 conversationId 仍保存，返回注明“本机未跟踪该会话，只保存设置”。
 - 不给成员会话投递消息，也不自动在下次投递加前缀；随对话设置/更新仍用 `call_member` 的

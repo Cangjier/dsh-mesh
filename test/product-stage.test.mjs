@@ -45,12 +45,12 @@ test('the product version bumps on the same day and resets on a new day', () => 
 test('a first call creates one version, round and goal set', () => {
   const state = applyProductStage(null, {
     stage: 'A',
-    goals: { product: { text: '可用的成员面板' } },
+    goals: { product: { text: '应用功能 现状 只有基础列表，预期 可用的成员面板。' } },
   }, DAY)
   assert.equal(state.version, '20261126.1')
   assert.equal(state.stage, 'A')
   assert.equal(state.round, 1)
-  assert.deepEqual(state.goals, { product: { text: '可用的成员面板', status: '未开始' } })
+  assert.deepEqual(state.goals, { product: { text: '应用功能 现状 只有基础列表，预期 可用的成员面板。', status: '未开始' } })
   assert.deepEqual(state.participation, {})
   assert.equal(state.roundStartedAt, DAY.toISOString())
   assert.equal(state.updatedAt, DAY.toISOString())
@@ -109,13 +109,34 @@ test('the stage input is validated before anything is saved', () => {
   assert.throws(() => normalizeProductStageInput({}), /stage, round, or goals is required/u)
 })
 
+test('goal text follows the category / 现状 / 预期 shape', () => {
+  const normalized = normalizeProductStageInput({ goals: {
+    product: '应用功能：现状 只能做基础建模；预期 支持参数化特征',
+    dev: { text: '内核 现状 依赖旧几何核，预期 换用 OCC' },
+  } })
+  assert.equal(normalized.goals.product.text, '应用功能 现状 只能做基础建模，预期 支持参数化特征。')
+  assert.equal(normalized.goals.dev.text, '内核 现状 依赖旧几何核，预期 换用 OCC。')
+  assert.throws(
+    () => normalizeProductStageInput({ goals: { product: { text: '可用的成员面板' } } }),
+    /现状.*预期/u,
+  )
+  assert.throws(
+    () => normalizeProductStageInput({ goals: { product: { text: '应用功能 现状 只有列表' } } }),
+    /预期/u,
+  )
+  assert.throws(
+    () => normalizeProductStageInput({ goals: { product: { text: '现状 只有列表，预期 有' } } }),
+    /现状/u,
+  )
+})
+
 test('goal text and status can be cleared independently', () => {
   const a = applyProductStage(null, {
     stage: 'A',
-    goals: { product: { text: '目标', status: '已达成' } },
+    goals: { product: { text: '应用功能 现状 未定义，预期 目标。', status: '已达成' } },
   }, DAY)
   const cleared = applyProductStage(a, normalizeProductStageInput({ goals: { product: { status: '' } } }), DAY)
-  assert.deepEqual(cleared.goals.product, { text: '目标', status: '未开始' }, 'a text goal defaults to 未开始')
+  assert.deepEqual(cleared.goals.product, { text: '应用功能 现状 未定义，预期 目标。', status: '未开始' }, 'a text goal defaults to 未开始')
   const removed = applyProductStage(cleared, normalizeProductStageInput({ goals: { product: { text: '' } } }), DAY)
   assert.deepEqual(removed.goals, {})
 })
@@ -337,7 +358,7 @@ test('the service persists one stage per project and resets participation on a t
     const first = await service.setProductStage({
       cwd: '/root/ws/project',
       stage: 'A',
-      goals: { product: { text: '目标' } },
+      goals: { product: { text: '应用功能 现状 未定义，预期 目标。' } },
       bySessionId: 'session-a',
       now: DAY,
     })
@@ -408,10 +429,10 @@ test('the set_product_stage tool writes the project state and reports possible n
     const set = tools.find(tool => tool.name === 'set_product_stage')
     const agent = { id: 'main-1', session: { id: 'main-1', header: { cwd: '/root/ws/project' } } }
 
-    const created = await set.execute({ stage: 'A', goals: { product: { text: '目标' } } }, { agent })
+    const created = await set.execute({ stage: 'A', goals: { product: { text: '应用功能 现状 未定义，预期 目标。' } } }, { agent })
     assert.equal(created.ok, true)
     assert.match(created.text, /^产品阶段已建立：\d{8}\.1 · A 阶段（第 1 轮迭代）/u)
-    assert.match(created.text, /- 产品目标：目标（未开始）/u)
+    assert.match(created.text, /- 产品目标：应用功能 现状 未定义，预期 目标。（未开始）/u)
     assert.match(created.text, /后续可能走向：/u)
     assert.ok(created.text.includes('1. 如果所有成员已参与建议、本轮计划与目标已经确定，则 set_product_stage({ "stage": "B" })'))
     const stored = await service.productStage('/root/ws/project')
@@ -556,7 +577,7 @@ test('budget audits are capped at three per stage and ten minutes apart', async 
 
     const goalOnly = await service.setProductStage({
       cwd,
-      goals: { product: { text: '可用的成员面板' } },
+      goals: { product: { text: '应用功能 现状 只有基础列表，预期 可用的成员面板。' } },
       now: new Date(at + 31 * 60_000),
     })
     assert.equal(goalOnly.state.audits?.count, 3, 'a goal-only update keeps the audit count')

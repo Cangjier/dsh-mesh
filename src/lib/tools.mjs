@@ -628,7 +628,11 @@ export function registerTools(ctx, toolsCtx, service) {
       type: 'object',
       additionalProperties: false,
       properties: {
-        text: { type: 'string', maxLength: 300, description: `${label}文本；空字符串表示清除。` },
+        text: {
+          type: 'string',
+          maxLength: 300,
+          description: `${label}文本，固定格式「<类别> 现状 <现在怎样>，预期 <要变成怎样>。」（类别如 应用功能 / 应用界面 / 应用服务 / 算法 / 数据 / 性能 / 稳定性 / 安全 / 工程质量 / 交付 / …）；例：应用功能 现状 只能做基础建模，预期 支持参数化特征。空字符串表示清除。`,
+        },
         status: {
           type: 'string',
           enum: ['未开始', '进行中', '已达成', '未达成', ''],
@@ -649,6 +653,7 @@ export function registerTools(ctx, toolsCtx, service) {
       'D 业务介入（业务人员开展业务工作，发现问题回到 C 阶段，业务放行后回到 A 阶段）。',
       '产品版本自动维护，不需要传入：D 完成进入 A 时升版（同一天小版本 +1，跨天重置为当天 .1）。',
       '`goals` 只改传入的目标：product 产品目标 / dev 开发目标 / research 研究目标；每项 { text, status }，status 取 未开始 / 进行中 / 已达成 / 未达成。',
+      '目标文本固定格式：「<类别> 现状 <现在怎样>，预期 <要变成怎样>。」，类别如 应用功能 / 应用界面 / 应用服务 / 算法 / 数据 / 性能 / 稳定性 / 安全 / 工程质量 / 交付 / …；例：应用功能 现状 只能做基础建模，预期 支持参数化特征与历史回放。不符合时调用被拒绝、状态不变。',
       '`round` 是子阶段轮次（第几轮迭代）：省略时 D 进入 A 自动 +1，其他阶段沿用当前轮次；也可以显式指定。',
       '`stage` 省略时沿用当前阶段（首次调用默认 A），只更新目标状态时可以省略。',
       '阶段按项目目录保存，同一工作区的主对话共享。成员上下文会提示本轮哪些成员还没有参与、产品版本的目标与状态，以及后续可能走向（带条件的 set_product_stage 调用）。',

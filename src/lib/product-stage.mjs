@@ -59,6 +59,30 @@ export const PRODUCT_GOAL_STATUSES = ['未开始', '进行中', '已达成', '�
 /** Longest goal text one version keeps. */
 export const PRODUCT_GOAL_TEXT_MAX = 300
 
+/**
+ * The goal categories the format names as examples; any other short category
+ * word is accepted too, since a product may have goals the list does not name.
+ */
+export const PRODUCT_GOAL_CATEGORIES = [
+  '应用功能', '应用界面', '应用服务', '算法',
+  '数据', '性能', '稳定性', '安全', '兼容性',
+  '工程质量', '体验', '交付', '文档',
+]
+
+/** A short example list for one-line hints; the full list is for refusals and docs. */
+export const PRODUCT_GOAL_CATEGORY_HINT = '应用功能 / 应用界面 / 应用服务 / 算法 / 数据 / 性能 / …'
+
+/** The fixed goal shape: a category, the current state, and the expected state. */
+export const PRODUCT_GOAL_FORMAT = '<类别> 现状 <现在怎样>，预期 <要变成怎样>。'
+
+/**
+ * The one shape every goal text takes: `<category> 现状 <current>，预期 <expected>。`
+ * The category is any short word (the examples are in
+ * {@link PRODUCT_GOAL_CATEGORIES}); a free sentence is refused so every goal
+ * says what is true now and what should become true.
+ */
+const PRODUCT_GOAL_TEXT_PATTERN = /^(.{1,20}?)[\s：:]*现状[\s：:]*(.+?)[，,；;]\s*预期[\s：:]*(.+?)[。.]?$/u
+
 /** Highest sub-stage round accepted. */
 export const PRODUCT_ROUND_MAX = 999
 
@@ -148,7 +172,35 @@ function normalizeGoalText(value, key) {
   if (text.length > PRODUCT_GOAL_TEXT_MAX) {
     throw new Error(`${key} goal text is too long: ${String(text.length)} > ${String(PRODUCT_GOAL_TEXT_MAX)} characters`)
   }
-  return text === '' ? null : text
+  if (text === '') return null
+  const match = PRODUCT_GOAL_TEXT_PATTERN.exec(text)
+  if (match === null) throw goalFormatError(key, text)
+  const category = match[1].trim().replace(/[\s：:，,。；;]+$/u, '')
+  const current = match[2].trim().replace(/[\s，,；;。.]+$/u, '')
+  const expected = match[3].trim().replace(/[\s。.]+$/u, '')
+  if (category === '' || /[，,。；;\n]/u.test(category) || current === '' || expected === '') {
+    throw goalFormatError(key, text)
+  }
+  const normalized = `${category} 现状 ${current}，预期 ${expected}。`
+  if (normalized.length > PRODUCT_GOAL_TEXT_MAX) {
+    throw new Error(`${key} goal text is too long after formatting: ${String(normalized.length)} > ${String(PRODUCT_GOAL_TEXT_MAX)} characters`)
+  }
+  return normalized
+}
+
+/**
+ * The refusal for a goal that does not name a category, the current state and
+ * the expected state in the fixed shape.
+ * @param {string} key goal key, for the message.
+ * @param {string} text the rejected text.
+ * @returns {Error} the error to throw.
+ */
+function goalFormatError(key, text) {
+  return new Error(
+    `${PRODUCT_GOAL_LABELS[key] ?? key}的 text 必须是「${PRODUCT_GOAL_FORMAT}」`
+    + `（类别如 ${PRODUCT_GOAL_CATEGORIES.join(' / ')} / …；例：应用功能 现状 只能做基础建模，预期 支持参数化特征与历史回放。）；`
+    + `收到：${text.slice(0, 80)}`,
+  )
 }
 
 /**
@@ -688,6 +740,7 @@ export function formatProductStageLines(state, tasks, scopes = {}, options = {})
     ...formatCallMemberBudget(state, tasks, options.callMemberBudget, scopes),
     `- 阶段要求：${PRODUCT_STAGE_REQUIREMENTS[state.stage] ?? ''}`,
     ...PRODUCT_GOAL_KEYS.map(key => `- ${PRODUCT_GOAL_LABELS[key]}：${goalLine(state.goals?.[key])}`),
+    `- 目标文本格式：${PRODUCT_GOAL_FORMAT}（类别如 ${PRODUCT_GOAL_CATEGORY_HINT}）`,
     ...formatProductStageParticipation(state, tasks, scopes, { statuses: options.statuses }),
     ...formatProductStageNextMoves(state),
   ]

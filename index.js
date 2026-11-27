@@ -12793,6 +12793,24 @@ var PRODUCT_GOAL_LABELS = {
 };
 var PRODUCT_GOAL_STATUSES = ["\u672A\u5F00\u59CB", "\u8FDB\u884C\u4E2D", "\u5DF2\u8FBE\u6210", "\u672A\u8FBE\u6210"];
 var PRODUCT_GOAL_TEXT_MAX = 300;
+var PRODUCT_GOAL_CATEGORIES = [
+  "\u5E94\u7528\u529F\u80FD",
+  "\u5E94\u7528\u754C\u9762",
+  "\u5E94\u7528\u670D\u52A1",
+  "\u7B97\u6CD5",
+  "\u6570\u636E",
+  "\u6027\u80FD",
+  "\u7A33\u5B9A\u6027",
+  "\u5B89\u5168",
+  "\u517C\u5BB9\u6027",
+  "\u5DE5\u7A0B\u8D28\u91CF",
+  "\u4F53\u9A8C",
+  "\u4EA4\u4ED8",
+  "\u6587\u6863"
+];
+var PRODUCT_GOAL_CATEGORY_HINT = "\u5E94\u7528\u529F\u80FD / \u5E94\u7528\u754C\u9762 / \u5E94\u7528\u670D\u52A1 / \u7B97\u6CD5 / \u6570\u636E / \u6027\u80FD / \u2026";
+var PRODUCT_GOAL_FORMAT = "<\u7C7B\u522B> \u73B0\u72B6 <\u73B0\u5728\u600E\u6837>\uFF0C\u9884\u671F <\u8981\u53D8\u6210\u600E\u6837>\u3002";
+var PRODUCT_GOAL_TEXT_PATTERN = /^(.{1,20}?)[\s：:]*现状[\s：:]*(.+?)[，,；;]\s*预期[\s：:]*(.+?)[。.]?$/u;
 var PRODUCT_ROUND_MAX = 999;
 var PRODUCT_VERSION_PATTERN = /^(\d{8})\.(\d{1,4})$/u;
 function productDay(date = /* @__PURE__ */ new Date()) {
@@ -12832,7 +12850,25 @@ function normalizeGoalText(value, key) {
   if (text.length > PRODUCT_GOAL_TEXT_MAX) {
     throw new Error(`${key} goal text is too long: ${String(text.length)} > ${String(PRODUCT_GOAL_TEXT_MAX)} characters`);
   }
-  return text === "" ? null : text;
+  if (text === "") return null;
+  const match = PRODUCT_GOAL_TEXT_PATTERN.exec(text);
+  if (match === null) throw goalFormatError(key, text);
+  const category = match[1].trim().replace(/[\s：:，,。；;]+$/u, "");
+  const current = match[2].trim().replace(/[\s，,；;。.]+$/u, "");
+  const expected = match[3].trim().replace(/[\s。.]+$/u, "");
+  if (category === "" || /[，,。；;\n]/u.test(category) || current === "" || expected === "") {
+    throw goalFormatError(key, text);
+  }
+  const normalized = `${category} \u73B0\u72B6 ${current}\uFF0C\u9884\u671F ${expected}\u3002`;
+  if (normalized.length > PRODUCT_GOAL_TEXT_MAX) {
+    throw new Error(`${key} goal text is too long after formatting: ${String(normalized.length)} > ${String(PRODUCT_GOAL_TEXT_MAX)} characters`);
+  }
+  return normalized;
+}
+function goalFormatError(key, text) {
+  return new Error(
+    `${PRODUCT_GOAL_LABELS[key] ?? key}\u7684 text \u5FC5\u987B\u662F\u300C${PRODUCT_GOAL_FORMAT}\u300D\uFF08\u7C7B\u522B\u5982 ${PRODUCT_GOAL_CATEGORIES.join(" / ")} / \u2026\uFF1B\u4F8B\uFF1A\u5E94\u7528\u529F\u80FD \u73B0\u72B6 \u53EA\u80FD\u505A\u57FA\u7840\u5EFA\u6A21\uFF0C\u9884\u671F \u652F\u6301\u53C2\u6570\u5316\u7279\u5F81\u4E0E\u5386\u53F2\u56DE\u653E\u3002\uFF09\uFF1B\u6536\u5230\uFF1A${text.slice(0, 80)}`
+  );
 }
 function normalizeGoalStatus(value, key) {
   if (typeof value !== "string") throw new Error(`${key} goal status must be a string`);
@@ -13149,6 +13185,7 @@ function formatProductStageLines(state, tasks, scopes = {}, options = {}) {
     ...formatCallMemberBudget(state, tasks, options.callMemberBudget, scopes),
     `- \u9636\u6BB5\u8981\u6C42\uFF1A${PRODUCT_STAGE_REQUIREMENTS[state.stage] ?? ""}`,
     ...PRODUCT_GOAL_KEYS.map((key) => `- ${PRODUCT_GOAL_LABELS[key]}\uFF1A${goalLine(state.goals?.[key])}`),
+    `- \u76EE\u6807\u6587\u672C\u683C\u5F0F\uFF1A${PRODUCT_GOAL_FORMAT}\uFF08\u7C7B\u522B\u5982 ${PRODUCT_GOAL_CATEGORY_HINT}\uFF09`,
     ...formatProductStageParticipation(state, tasks, scopes, { statuses: options.statuses }),
     ...formatProductStageNextMoves(state)
   ];
@@ -17842,7 +17879,11 @@ function registerTools(ctx, toolsCtx, service) {
       type: "object",
       additionalProperties: false,
       properties: {
-        text: { type: "string", maxLength: 300, description: `${label}\u6587\u672C\uFF1B\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002` },
+        text: {
+          type: "string",
+          maxLength: 300,
+          description: `${label}\u6587\u672C\uFF0C\u56FA\u5B9A\u683C\u5F0F\u300C<\u7C7B\u522B> \u73B0\u72B6 <\u73B0\u5728\u600E\u6837>\uFF0C\u9884\u671F <\u8981\u53D8\u6210\u600E\u6837>\u3002\u300D\uFF08\u7C7B\u522B\u5982 \u5E94\u7528\u529F\u80FD / \u5E94\u7528\u754C\u9762 / \u5E94\u7528\u670D\u52A1 / \u7B97\u6CD5 / \u6570\u636E / \u6027\u80FD / \u7A33\u5B9A\u6027 / \u5B89\u5168 / \u5DE5\u7A0B\u8D28\u91CF / \u4EA4\u4ED8 / \u2026\uFF09\uFF1B\u4F8B\uFF1A\u5E94\u7528\u529F\u80FD \u73B0\u72B6 \u53EA\u80FD\u505A\u57FA\u7840\u5EFA\u6A21\uFF0C\u9884\u671F \u652F\u6301\u53C2\u6570\u5316\u7279\u5F81\u3002\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002`
+        },
         status: {
           type: "string",
           enum: ["\u672A\u5F00\u59CB", "\u8FDB\u884C\u4E2D", "\u5DF2\u8FBE\u6210", "\u672A\u8FBE\u6210", ""],
@@ -17862,6 +17903,7 @@ function registerTools(ctx, toolsCtx, service) {
       "D \u4E1A\u52A1\u4ECB\u5165\uFF08\u4E1A\u52A1\u4EBA\u5458\u5F00\u5C55\u4E1A\u52A1\u5DE5\u4F5C\uFF0C\u53D1\u73B0\u95EE\u9898\u56DE\u5230 C \u9636\u6BB5\uFF0C\u4E1A\u52A1\u653E\u884C\u540E\u56DE\u5230 A \u9636\u6BB5\uFF09\u3002",
       "\u4EA7\u54C1\u7248\u672C\u81EA\u52A8\u7EF4\u62A4\uFF0C\u4E0D\u9700\u8981\u4F20\u5165\uFF1AD \u5B8C\u6210\u8FDB\u5165 A \u65F6\u5347\u7248\uFF08\u540C\u4E00\u5929\u5C0F\u7248\u672C +1\uFF0C\u8DE8\u5929\u91CD\u7F6E\u4E3A\u5F53\u5929 .1\uFF09\u3002",
       "`goals` \u53EA\u6539\u4F20\u5165\u7684\u76EE\u6807\uFF1Aproduct \u4EA7\u54C1\u76EE\u6807 / dev \u5F00\u53D1\u76EE\u6807 / research \u7814\u7A76\u76EE\u6807\uFF1B\u6BCF\u9879 { text, status }\uFF0Cstatus \u53D6 \u672A\u5F00\u59CB / \u8FDB\u884C\u4E2D / \u5DF2\u8FBE\u6210 / \u672A\u8FBE\u6210\u3002",
+      "\u76EE\u6807\u6587\u672C\u56FA\u5B9A\u683C\u5F0F\uFF1A\u300C<\u7C7B\u522B> \u73B0\u72B6 <\u73B0\u5728\u600E\u6837>\uFF0C\u9884\u671F <\u8981\u53D8\u6210\u600E\u6837>\u3002\u300D\uFF0C\u7C7B\u522B\u5982 \u5E94\u7528\u529F\u80FD / \u5E94\u7528\u754C\u9762 / \u5E94\u7528\u670D\u52A1 / \u7B97\u6CD5 / \u6570\u636E / \u6027\u80FD / \u7A33\u5B9A\u6027 / \u5B89\u5168 / \u5DE5\u7A0B\u8D28\u91CF / \u4EA4\u4ED8 / \u2026\uFF1B\u4F8B\uFF1A\u5E94\u7528\u529F\u80FD \u73B0\u72B6 \u53EA\u80FD\u505A\u57FA\u7840\u5EFA\u6A21\uFF0C\u9884\u671F \u652F\u6301\u53C2\u6570\u5316\u7279\u5F81\u4E0E\u5386\u53F2\u56DE\u653E\u3002\u4E0D\u7B26\u5408\u65F6\u8C03\u7528\u88AB\u62D2\u7EDD\u3001\u72B6\u6001\u4E0D\u53D8\u3002",
       "`round` \u662F\u5B50\u9636\u6BB5\u8F6E\u6B21\uFF08\u7B2C\u51E0\u8F6E\u8FED\u4EE3\uFF09\uFF1A\u7701\u7565\u65F6 D \u8FDB\u5165 A \u81EA\u52A8 +1\uFF0C\u5176\u4ED6\u9636\u6BB5\u6CBF\u7528\u5F53\u524D\u8F6E\u6B21\uFF1B\u4E5F\u53EF\u4EE5\u663E\u5F0F\u6307\u5B9A\u3002",
       "`stage` \u7701\u7565\u65F6\u6CBF\u7528\u5F53\u524D\u9636\u6BB5\uFF08\u9996\u6B21\u8C03\u7528\u9ED8\u8BA4 A\uFF09\uFF0C\u53EA\u66F4\u65B0\u76EE\u6807\u72B6\u6001\u65F6\u53EF\u4EE5\u7701\u7565\u3002",
       "\u9636\u6BB5\u6309\u9879\u76EE\u76EE\u5F55\u4FDD\u5B58\uFF0C\u540C\u4E00\u5DE5\u4F5C\u533A\u7684\u4E3B\u5BF9\u8BDD\u5171\u4EAB\u3002\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u63D0\u793A\u672C\u8F6E\u54EA\u4E9B\u6210\u5458\u8FD8\u6CA1\u6709\u53C2\u4E0E\u3001\u4EA7\u54C1\u7248\u672C\u7684\u76EE\u6807\u4E0E\u72B6\u6001\uFF0C\u4EE5\u53CA\u540E\u7EED\u53EF\u80FD\u8D70\u5411\uFF08\u5E26\u6761\u4EF6\u7684 set_product_stage \u8C03\u7528\uFF09\u3002",

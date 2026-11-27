@@ -17,7 +17,7 @@
 | `members` | 只读成员发现 | 无 | `true` |
 | `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `cwd` / `workspace` / `identity` / `role` / `scope` | `false` |
 | `set_member_scope` | 设置成员会话或自身的身份、标准身份、工作范围、备注、自继续、分阶段 `call_member` 预算与压缩阈值 | `conversationId` / `identity` / `role` / `scope` / `note` / `keep` / `keepPrompt` / `avoidLongJobs` / `callMemberBudget` / `call_member_budget` / `compressPercent` | `false` |
-| `set_product_stage` | 设置产品阶段、子阶段轮次和三个目标及状态；版本自动维护 | `stage` / `round` / `goals` | `false` |
+| `set_product_stage` | 设置产品阶段、子阶段轮次和三个目标及状态；目标文本固定格式 `<类别> 现状 …，预期 …。`；版本自动维护 | `stage` / `round` / `goals` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
 | `status_member` | 目标会话状态 + 身份/工作范围 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区/身份/工作范围，已归档的不列出）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
 | `remove_member` | 彻底删除一个对话、它的工作区记录和目录，并停止本机跟踪 | `conversationId` | `false` |
@@ -615,9 +615,10 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 [产品阶段] 20261126.1 · B 阶段（第 1 轮迭代）· 开发与测试
 - call_member 预算（B 阶段）：本轮已用 2/3，剩余 1（已设置）
 - 阶段要求：开发、测试、研究员参与；本轮开发的功能没有 BUG（疑难杂症除外）。
-- 产品目标：可用的成员面板（进行中）
-- 开发目标：无 BUG（进行中）
+- 产品目标：应用功能 现状 只有成员列表，预期 可用的成员面板。（进行中）
+- 开发目标：应用功能 现状 基础功能已通，预期 本轮功能无 BUG。（进行中）
 - 研究目标：未设置
+- 目标文本格式：<类别> 现状 <现在怎样>，预期 <要变成怎样>。（类别如 应用功能 / 应用界面 / 应用服务 / 算法 / 数据 / 性能 / …）
 - 本轮参与：1/3（开发 c1）
 - 未参与：测试 c2、研究员 c3
 - 标准身份未设置：c4（身份 前端开发1）；用 set_member_scope { "conversationId": "c4", "role": "开发" } 设置。
@@ -667,8 +668,8 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
     "stage": "B",
     "round": 1,
     "goals": {
-      "product": { "text": "可用的成员面板", "status": "进行中" },
-      "dev": { "text": "无 BUG", "status": "进行中" }
+      "product": { "text": "应用功能 现状 只有成员列表，预期 可用的成员面板。", "status": "进行中" },
+      "dev": { "text": "应用功能 现状 基础功能已通，预期 本轮功能无 BUG。", "status": "进行中" }
     },
     "participation": { "<conversationId>": { "turn": 2, "at": "2026-11-26T02:00:00.000Z" } },
     "updatedAt": "2026-11-26T02:00:00.000Z",
@@ -691,6 +692,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 - **产品版本** `YYYYMMDD.N` 自动维护、不需要传入：只在 `D -> A` 时移动，同一天小版本 `+1`，跨天重置为当天 `.1`；首次调用建立当天 `.1`。
 - **子阶段轮次** `round`：默认 `D -> A` 自动 `+1`，其他阶段沿用当前轮次；显式传 `round` 可开启新一轮（阶段或轮次变化会清空本轮参与记录）。
 - **目标**：`product` 产品目标 / `dev` 开发目标 / `research` 研究目标；每项 `{ text, status }`，`status` 取 未开始 / 进行中 / 已达成 / 未达成。只改传入的项，`text` 为空表示清除该目标。
+- **目标文本固定格式**：`<类别> 现状 <现在怎样>，预期 <要变成怎样>。`，类别如 应用功能 / 应用界面 / 应用服务 / 算法 / 数据 / 性能 / 稳定性 / 安全 / 工程质量 / 交付 / …（也接受其他短类别词）；例 `应用功能 现状 只能做基础建模，预期 支持参数化特征与历史回放。`。工具会去掉多余冒号、统一全角逗号和结尾句号；不符合格式时返回 `ok:false`、状态不变，并给出格式与例子。
 - **参与度**：成员的一轮回复被接受时（`wait_member` 取走和兜底投递共用同一张回复表）自动记到当前 `(stage, round)`；读取时还会把 `roundStartedAt` 之后有新回复的会话算作已参与（兼容旧任务 `originCwd` 缺失、插件重启）。阶段或轮次变化后重新计；只更新目标不会移动本轮开始时间。
 - **前进门槛**：换到下一阶段或开启新一轮 `round` 时，本轮要求的成员必须全部参与；否则 `set_product_stage` 返回 `ok:false`（`data.blocked: true`），状态不写入，并列出未参与的成员和没有对应身份的成员会话。退回上一阶段返工（B→A、C→B、D→C）和只更新目标不受此限制。
 - **放行检查**：成功前进时，工具结果用 `[放行检查]` 列出上一阶段未满足的目标（离开 A 产品目标未设置、离开 B 开发目标不是「已达成」、离开 C 产品目标不是「已达成」）和未设置标准身份的成员；这些只提示，不阻断。
@@ -698,7 +700,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 - 成员的标准身份由 `set_member_scope` 的 `role` 设置（产品经理 / 研究员 / 开发 / 测试 / 业务）；未设置的成员在快照里被点名，不按自由文本 `identity` 推断。
 
 ```text
-set_product_stage { "stage": "A", "goals": { "product": { "text": "可用的成员面板" } } }
+set_product_stage { "stage": "A", "goals": { "product": { "text": "应用功能 现状 只有成员列表，预期 可用的成员面板。" } } }
 set_product_stage { "stage": "B" }
 set_product_stage { "goals": { "dev": { "status": "已达成" } } }
 set_product_stage { "stage": "A" }

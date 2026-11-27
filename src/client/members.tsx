@@ -11,14 +11,12 @@
  * touches the task records directly.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ConfigProvider,
   Descriptions,
-  Modal,
   Space,
   Tag,
-  Tooltip,
   Typography,
   theme as antdTheme,
 } from 'antd'
@@ -389,6 +387,25 @@ const SECTION_CSS = `
 .dsh-mesh-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
+.dsh-mesh-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 2px 4px;
+}
+.dsh-mesh-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+/* A 264px-wide panel cannot afford a fixed label column plus clipped values:
+   let the content wrap anywhere, including a long session id or a task. */
+.dsh-mesh-detail .ant-descriptions-item-content {
+  overflow-wrap: anywhere;
+}
 .dsh-mesh-detail-member + .dsh-mesh-detail-member {
   margin-top: 12px;
 }
@@ -579,6 +596,13 @@ export function MemberConversationsSection({ sessionId, ctx }: { sessionId: stri
   const { state, toggleCollapsed, toggleGroup, setView } = useMemberSection(sessionId)
   const [selected, setSelected] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const detailRef = useRef<HTMLDivElement | null>(null)
+
+  // The panel overlay is the scrollport; a detail opened from a row far down
+  // the list should start at its head rather than halfway through.
+  useEffect(() => {
+    if (selected !== null) detailRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [selected])
 
   const refresh = async (): Promise<void> => {
     setRefreshing(true)
@@ -590,6 +614,12 @@ export function MemberConversationsSection({ sessionId, ctx }: { sessionId: stri
   }
 
   const snapshot = state.snapshot
+  // A conversation that leaves the list (removed, or a stale id after a
+  // reconnect) ends the detail instead of reopening it if the id returns.
+  useEffect(() => {
+    if (selected === null || snapshot === null) return
+    if (!snapshot.rows.some(row => row.conversationId === selected)) setSelected(null)
+  }, [snapshot, selected])
   if (snapshot === null || snapshot.rows.length === 0) return null
   const { rows } = snapshot
   const selectedRow = rows.find(row => row.conversationId === selected) ?? null
@@ -617,50 +647,48 @@ export function MemberConversationsSection({ sessionId, ctx }: { sessionId: stri
         ? <div className="dsh-mesh-collapsed" />
         : (
           <div className="dsh-mesh-members">
-            {state.view === 'running'
-              ? (runningRows.length === 0
-                  ? <div className="dsh-mesh-empty">没有进行中的成员对话</div>
-                  : runningRows.map(renderRow))
-              : (groups.length === 0
-                  ? rows.map(renderRow)
-                  : groups.map((group) => {
-                    const folded = state.closedGroups.has(group.title)
-                    return (
-                      <div key={group.title} className="dsh-mesh-group">
-                        <GroupHeading
-                          title={group.title}
-                          running={groupRunning(group.rows)}
-                          total={group.rows.length}
-                          folded={folded}
-                          onToggle={() => toggleGroup(group.title)}
-                        />
-                        {folded ? null : group.rows.map(renderRow)}
-                      </div>
-                    )
-                  }))}
+            {selectedRow !== null
+              // The detail is part of the panel, not a dialog portalled to the
+              // page: the Session panel closes on a pointerdown outside itself,
+              // and a dialog in the body would count as outside, so the first
+              // touch to scroll the detail would dismiss the whole panel.
+              ? (
+                  <div className="dsh-mesh-detail" ref={detailRef}>
+                    <div className="dsh-mesh-detail-head">
+                      <Typography.Link onClick={() => setSelected(null)}>← 返回列表</Typography.Link>
+                      <Typography.Link
+                        title="从这台 DSH 重新读取成员会话状态"
+                        onClick={() => { void refresh() }}
+                      >
+                        <ReloadOutlined spin={refreshing} /> 刷新
+                      </Typography.Link>
+                    </div>
+                    <MemberDetail row={selectedRow} />
+                  </div>
+                )
+              : state.view === 'running'
+                ? (runningRows.length === 0
+                    ? <div className="dsh-mesh-empty">没有进行中的成员对话</div>
+                    : runningRows.map(renderRow))
+                : (groups.length === 0
+                    ? rows.map(renderRow)
+                    : groups.map((group) => {
+                      const folded = state.closedGroups.has(group.title)
+                      return (
+                        <div key={group.title} className="dsh-mesh-group">
+                          <GroupHeading
+                            title={group.title}
+                            running={groupRunning(group.rows)}
+                            total={group.rows.length}
+                            folded={folded}
+                            onToggle={() => toggleGroup(group.title)}
+                          />
+                          {folded ? null : group.rows.map(renderRow)}
+                        </div>
+                      )
+                    }))}
           </div>
         )}
-      <Modal
-        open={selectedRow !== null}
-        title={`成员对话 · ${selectedRow?.identity ?? selectedRow?.conversationId ?? ''}`}
-        width={720}
-        onCancel={() => setSelected(null)}
-        footer={(
-          <Space>
-            <Tooltip title="从这台 DSH 重新读取成员会话状态">
-              <span>
-                <Typography.Link onClick={() => { void refresh() }}>
-                  <ReloadOutlined spin={refreshing} /> 刷新
-                </Typography.Link>
-              </span>
-            </Tooltip>
-            <Typography.Link onClick={() => setSelected(null)}>关闭</Typography.Link>
-          </Space>
-        )}
-        destroyOnHidden
-      >
-        {selectedRow === null ? null : <MemberDetail row={selectedRow} />}
-      </Modal>
     </ConfigProvider>
   )
 }

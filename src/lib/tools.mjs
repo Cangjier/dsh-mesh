@@ -16,6 +16,7 @@
 
 import { DEFAULT_COMPRESS_PERCENT, MemberTaskService, describeMemberTask, memberTaskProfile, memberTaskResultAlreadyDelivered, memberTaskWorkspace } from './member-tasks.mjs'
 import { DEFAULT_KEEP_PROMPT, createMemberContext, formatMemberScopeMissingHint } from './member-context.mjs'
+import { BUDGET_AUTH_MESSAGE_WINDOW, hasBudgetInstructionFromUser } from './user-intent.mjs'
 import {
   effectiveCompressPercent,
   normalizeMemberScopePatch,
@@ -411,6 +412,8 @@ export function registerTools(ctx, toolsCtx, service) {
       '`keepPrompt`（也可写 `keep_prompt`）是这条用户消息的正文，默认「继续」，最长 200 字符；空字符串恢复默认。只对自身/主对话生效，设置成员会话时忽略。',
       '`avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，主对话下一次状态快照会列出距上一次快照之间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
       '`callMemberBudget`（也可写 `call_member_budget`）是**每个大阶段单独**的 call_member 预算，可只给要设的阶段（A/B/C/D），每个整数 1–999，没有统一值；只对自身/主对话生效。没设置的阶段在运行时默认为该阶段**参与成员数量 × 2**（还没有参与成员时按 1 计）。成员每把一条回复返回给主对话（wait_member 取走或兜底投递）算对应阶段消耗一次；预算用完时成员上下文会强调必须进入下一个阶段，并及时用 set_product_stage 更新阶段和目标状态。设置成员会话时忽略。',
+      `预算额度只能由用户调整：设置 callMemberBudget 时工具会读取最近 ${String(BUDGET_AUTH_MESSAGE_WINDOW)} 条用户消息，只有其中存在“预算 + 调整/设置 + 数字”的明确指示才写入；没有则返回 ok:false，配置不变。`,
+      '预算用尽时，成员上下文会自动启动一个 fork 子代理审查当前产品流程（每个小阶段最多 3 次、间隔至少 10 分钟）：检查是否按阶段工作、是否超出阶段、预算为什么耗尽；如果主对话使用不合理，审查结论会作为警告和下一步建议投递回主对话。',
       `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；成员会话下一次 call_member 投递前，上下文占比超过阈值就先压缩。`,
       '至少提供 identity、role、scope、note、keep、keepPrompt、avoidLongJobs、callMemberBudget、compressPercent 之一；设置成员会话时必须有 identity、role、scope、note 或 compressPercent 之一。',
       '成员会话可以未被本机跟踪，设置仍会保存，只是不会同步任务快照。',
@@ -524,6 +527,18 @@ export function registerTools(ctx, toolsCtx, service) {
       // Validate before touching the store, then let the service normalise the
       // same raw patch (so an empty string still means "clear").
       normalizeMemberScopePatch(patch)
+      // The budget is the user's lever: a model-initiated change without a
+      // recent human instruction is refused before anything is written.
+      if (isSelf && hasCallMemberBudget && !hasBudgetInstructionFromUser(exec?.agent)) {
+        return {
+          ok: false,
+          text: [
+            `预算额度只能由用户调整：最近 ${String(BUDGET_AUTH_MESSAGE_WINDOW)} 条用户消息里没有调整 call_member 预算的指示，本次设置已拒绝，配置没有改变。`,
+            '请让用户明确说明要调整哪个大阶段、调整到多少（例如「把 A 阶段预算调到 26」），再重试。',
+          ].join('\n'),
+          data: { refused: true, reason: 'budget_requires_user_instruction' },
+        }
+      }
       const targetId = isSelf ? selfId : rawId
       const saved = await service.setMemberScope(targetId, patch)
       const scope = saved.scope ?? null

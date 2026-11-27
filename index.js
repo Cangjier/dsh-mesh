@@ -12935,6 +12935,10 @@ function normalizeStoredProductStage(value) {
     }
   }
   const roundStartedAt = typeof value.roundStartedAt === "string" && value.roundStartedAt !== "" ? value.roundStartedAt : "";
+  const audits = value.audits !== null && typeof value.audits === "object" && !Array.isArray(value.audits) && Number.isSafeInteger(value.audits.count) && value.audits.count >= 0 ? {
+    count: value.audits.count,
+    lastAt: typeof value.audits.lastAt === "string" ? value.audits.lastAt : ""
+  } : null;
   return {
     version,
     stage,
@@ -12942,6 +12946,7 @@ function normalizeStoredProductStage(value) {
     goals,
     participation,
     ...roundStartedAt === "" ? {} : { roundStartedAt },
+    ...audits === null ? {} : { audits },
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
     updatedBy: typeof value.updatedBy === "string" ? value.updatedBy : ""
   };
@@ -12954,12 +12959,14 @@ function applyProductStage(previous, input, now = /* @__PURE__ */ new Date()) {
   const round2 = Math.min(input.round ?? automaticRound, PRODUCT_ROUND_MAX);
   const reset = prev === null || prev.stage !== stage || prev.round !== round2;
   const previousStart = typeof prev?.roundStartedAt === "string" && prev.roundStartedAt !== "" ? prev.roundStartedAt : typeof prev?.updatedAt === "string" ? prev.updatedAt : "";
+  const audits = reset ? null : prev?.audits ?? null;
   return {
     version,
     stage,
     round: round2,
     goals: mergeGoals(prev?.goals, input.goals),
     participation: reset ? {} : { ...prev?.participation ?? {} },
+    ...audits === null ? {} : { audits: { ...audits } },
     // A goal-only update keeps the round's start: replies collected before it
     // still count, and the participation window cannot move under the caller.
     roundStartedAt: reset || previousStart === "" ? new Date(now).toISOString() : previousStart,
@@ -13224,6 +13231,8 @@ var DEFAULT_COMPRESS_PERCENT = 35;
 var MEMBER_NOTE_MAX = 500;
 var MEMBER_KEEP_PROMPT_MAX = 200;
 var MEMBER_CALL_BUDGET_MAX = 999;
+var BUDGET_AUDIT_MAX = 3;
+var BUDGET_AUDIT_INTERVAL_MS = 10 * 6e4;
 function normalizeCallMemberBudgets(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("callMemberBudget must be an object mapping A, B, C, D to budgets (no single number)");
@@ -14054,6 +14063,49 @@ var MeshService = class {
         turn: Number.isSafeInteger(turn) ? turn : Number.isSafeInteger(current?.turn) ? current.turn : null,
         at
       };
+      return true;
+    });
+  }
+  /**
+   * Claim one budget-exhaustion audit slot for the project's current stage.
+   *
+   * At most three audits may run in one small stage (stage + round) and two
+   * audits must be at least ten minutes apart. The claim is written inside the
+   * serialised stage mutation, so concurrent snapshots cannot both start an
+   * audit for the same window.
+   * @param {{cwd?: string, now?: number}} [facts] project and claim time.
+   * @returns {Promise<{count: number, lastAt: string}|null>} claimed slot, or null when refused.
+   */
+  async claimBudgetAudit({ cwd, now = Date.now() } = {}) {
+    const key = productStageKey(cwd);
+    const at = Number(now);
+    if (key === "" || !Number.isFinite(at)) return null;
+    return await this.#updateProductStages((stages) => {
+      const state = stages[key];
+      if (state === void 0) return null;
+      const previous = state.audits ?? { count: 0, lastAt: "" };
+      const count = Number.isSafeInteger(previous.count) ? previous.count : 0;
+      if (count >= BUDGET_AUDIT_MAX) return null;
+      const last = typeof previous.lastAt === "string" && previous.lastAt !== "" ? Date.parse(previous.lastAt) : Number.NaN;
+      if (Number.isFinite(last) && at - last < BUDGET_AUDIT_INTERVAL_MS) return null;
+      state.audits = { count: count + 1, lastAt: new Date(at).toISOString() };
+      return { ...state.audits };
+    });
+  }
+  /**
+   * Give back a claimed audit slot after the audit could not be started.
+   * @param {{cwd?: string, lastAt?: string}} [facts] project and the claim time.
+   * @returns {Promise<boolean>} whether the matching claim was released.
+   */
+  async releaseBudgetAudit({ cwd, lastAt } = {}) {
+    const key = productStageKey(cwd);
+    if (key === "" || typeof lastAt !== "string" || lastAt === "") return false;
+    return await this.#updateProductStages((stages) => {
+      const state = stages[key];
+      if (state?.audits?.lastAt !== lastAt) return false;
+      const count = Number.isSafeInteger(state.audits.count) ? state.audits.count : 0;
+      if (count <= 1) delete state.audits;
+      else state.audits = { ...state.audits, count: count - 1 };
       return true;
     });
   }
@@ -16836,6 +16888,42 @@ function formatMemberGapLines(gaps) {
   return lines;
 }
 
+// src/lib/user-intent.mjs
+var BUDGET_AUTH_MESSAGE_WINDOW = 8;
+function userMessageText(message) {
+  const content = Array.isArray(message?.content) ? message.content : [];
+  return content.filter((block) => block?.type === "text" && typeof block.text === "string").map((block) => block.text).join("\n").trim();
+}
+function recentHumanUserMessages(agent, limit = BUDGET_AUTH_MESSAGE_WINDOW) {
+  const session = agent?.session;
+  const nodes = Array.isArray(session?.surface?.nodes) ? session.surface.nodes : [];
+  if (nodes.length === 0 || typeof session?.eventAt !== "function") return [];
+  const messages = [];
+  for (let index = nodes.length - 1; index >= 0 && messages.length < limit; index -= 1) {
+    const event = session.eventAt(nodes[index]);
+    if (event?.type !== "user/message") continue;
+    const message = event.data;
+    if (message?.role !== "user" || message?.source?.kind !== "user") continue;
+    if (userMessageText(message) === "") continue;
+    messages.push(message);
+  }
+  return messages;
+}
+function isBudgetAdjustmentText(text) {
+  const value = typeof text === "string" ? text : "";
+  if (!/(预算|call[\s_-]*member|callMemberBudget)/iu.test(value)) return false;
+  if (/(不要|不用|别|无需|先不|暂不)[^。；;！!\n]{0,4}(调整|修改|设置|设定|改|调|提高|降低|增加|减少)/u.test(value)) {
+    return false;
+  }
+  if (!/(调整|修改|设置|设定|改成|改为|设为|调到|调成|提到|提高到|降到|降低到|增加到|减少到|加到|定为)/u.test(value)) {
+    return false;
+  }
+  return /\d/u.test(value);
+}
+function hasBudgetInstructionFromUser(agent, limit = BUDGET_AUTH_MESSAGE_WINDOW) {
+  return recentHumanUserMessages(agent, limit).some((message) => isBudgetAdjustmentText(userMessageText(message)));
+}
+
 // src/lib/member-context.mjs
 var MEMBER_STATUS_INTERVAL_MS = 6e4;
 var LONG_JOB_WARN_MS = 6e4;
@@ -16991,10 +17079,73 @@ function createMemberContext({
     const gaps = await rosterGaps(agent, tasks, scopes);
     const gapLines = formatMemberGapLines(gaps);
     if (running.length === 0 && hintJobs.length === 0 && gapLines.length === 0 && stage === null) return null;
+    if (stage !== null) {
+      void maybeAuditBudget(agent, sessionId, stage, tasks, scopes, selfScope).catch((error) => {
+        log(`budget audit skipped: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
     return {
       text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes, longJobs: hintJobs, gaps: gapLines, stage }),
       at
     };
+  }
+  async function maybeAuditBudget(agent, sessionId, stage, tasks, scopes, selfScope) {
+    if (closed || isMemberSession(sessionId)) return;
+    if (typeof service?.claimBudgetAudit !== "function") return;
+    const budget = callMemberBudgetFor(selfScope?.callMemberBudget, stage.stage) ?? defaultCallMemberBudget(stage, tasks, scopes);
+    if (countCallMemberReplies(stage, tasks) < budget) return;
+    const cwd = agentCwd(agent);
+    if (cwd === "") return;
+    const claim = await service.claimBudgetAudit({ cwd, now: now() }).catch(() => null);
+    if (claim === null) return;
+    if (closed) return;
+    const subagents = typeof ctx?.get === "function" ? ctx.get("subagents") : void 0;
+    if (subagents === void 0 || subagents === null || typeof subagents.startActivation !== "function") {
+      await service.releaseBudgetAudit?.({ cwd, lastAt: claim.lastAt }).catch(() => {
+      });
+      return;
+    }
+    try {
+      await subagents.startActivation({
+        provider: "fork",
+        label: "\u9884\u7B97\u5BA1\u67E5",
+        prompt: [{ type: "text", text: budgetAuditPrompt(agent, stage, tasks, scopes, selfScope) }],
+        parent: agent,
+        delivery: "parent",
+        // The audit must outlive this pre-step: it is an independent check, not
+        // part of the step's cancellable work.
+        signal: new AbortController().signal
+      });
+      log(`budget audit started for ${sessionId}: ${stage.stage} round ${String(stage.round)} (${String(claim.count)} in this stage)`);
+    } catch (error) {
+      await service.releaseBudgetAudit?.({ cwd, lastAt: claim.lastAt }).catch(() => {
+      });
+      log(`budget audit failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  function budgetAuditPrompt(agent, stage, tasks, scopes, selfScope) {
+    const stageBlock = formatProductStageLines(stage, tasks, scopes, {
+      callMemberBudget: selfScope?.callMemberBudget,
+      statuses: true
+    }).join("\n");
+    const recent = recentHumanUserMessages(agent, 6).map((message) => `- ${userMessageText(message).slice(0, 400)}`).join("\n");
+    return [
+      "\u4F60\u662F\u72EC\u7ACB\u7684\u9884\u7B97\u5BA1\u67E5\u5B50\u4EE3\u7406\u3002\u4E3B\u5BF9\u8BDD\u7684 call_member \u672C\u8F6E\u9884\u7B97\u5DF2\u7ECF\u8017\u5C3D\uFF0C\u8BF7\u53EA\u505A\u5BA1\u67E5\uFF1A\u4E0D\u8981\u4FEE\u6539\u6587\u4EF6\uFF0C\u4E0D\u8981\u8C03\u7528 call_member / set_member_scope / set_product_stage\u3002",
+      "",
+      "[\u5F53\u524D\u9636\u6BB5]",
+      stageBlock,
+      "",
+      "[\u6700\u8FD1\u7528\u6237\u6D88\u606F]",
+      recent === "" ? "- \uFF08\u6CA1\u6709\u53EF\u7528\u7684\u7528\u6237\u6D88\u606F\uFF09" : recent,
+      "",
+      "\u8BF7\u68C0\u67E5\uFF1A",
+      "1. \u4E3B\u5BF9\u8BDD\u662F\u5426\u6309\u5F53\u524D\u4EA7\u54C1\u9636\u6BB5\u5DE5\u4F5C\uFF1B",
+      "2. \u662F\u5426\u505A\u4E86\u8D85\u51FA\u5F53\u524D\u9636\u6BB5\u7684\u5DE5\u4F5C\uFF1B",
+      "3. \u9884\u7B97\u4E3A\u4EC0\u4E48\u8017\u5C3D\uFF1A\u91CD\u590D\u6D3E\u6D3B\u3001\u4E0E\u9636\u6BB5\u65E0\u5173\u7684\u8C03\u7528\u3001\u6210\u5458\u7A7A\u8F6C\u3001\u65E0\u610F\u4E49\u8F6E\u8BE2\u7B49\uFF1B",
+      "4. \u5982\u679C\u4E3B\u5BF9\u8BDD\u7684\u4F7F\u7528\u4E0D\u5408\u7406\uFF0C\u8F93\u51FA\u300C[\u9884\u7B97\u5BA1\u67E5] \u8B66\u544A\uFF1A\u2026\u300D\u5E76\u7ED9\u51FA\u660E\u786E\u7684\u4E0B\u4E00\u6B65\u5EFA\u8BAE\uFF1B",
+      "   \u5982\u679C\u672A\u53D1\u73B0\u95EE\u9898\uFF0C\u53EA\u8F93\u51FA\u4E00\u884C\u300C[\u9884\u7B97\u5BA1\u67E5] \u672A\u53D1\u73B0\u4E3B\u5BF9\u8BDD\u6EE5\u7528\u9884\u7B97\u300D\u3002",
+      "\u53EA\u8F93\u51FA\u7ED3\u8BBA\u4E0E\u5EFA\u8BAE\uFF0C\u4E0D\u8981\u590D\u8FF0\u5BF9\u8BDD\u3002"
+    ].join("\n");
   }
   function recordLongJob(sessionId, job) {
     if (!(job.durationMs > LONG_JOB_WARN_MS)) return;
@@ -17474,6 +17625,8 @@ function registerTools(ctx, toolsCtx, service) {
       "`keepPrompt`\uFF08\u4E5F\u53EF\u5199 `keep_prompt`\uFF09\u662F\u8FD9\u6761\u7528\u6237\u6D88\u606F\u7684\u6B63\u6587\uFF0C\u9ED8\u8BA4\u300C\u7EE7\u7EED\u300D\uFF0C\u6700\u957F 200 \u5B57\u7B26\uFF1B\u7A7A\u5B57\u7B26\u4E32\u6062\u590D\u9ED8\u8BA4\u3002\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       "`avoidLongJobs` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0C\u4E3B\u5BF9\u8BDD\u4E0B\u4E00\u6B21\u72B6\u6001\u5FEB\u7167\u4F1A\u5217\u51FA\u8DDD\u4E0A\u4E00\u6B21\u5FEB\u7167\u4E4B\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       "`callMemberBudget`\uFF08\u4E5F\u53EF\u5199 `call_member_budget`\uFF09\u662F**\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC**\u7684 call_member \u9884\u7B97\uFF0C\u53EF\u53EA\u7ED9\u8981\u8BBE\u7684\u9636\u6BB5\uFF08A/B/C/D\uFF09\uFF0C\u6BCF\u4E2A\u6574\u6570 1\u2013999\uFF0C\u6CA1\u6709\u7EDF\u4E00\u503C\uFF1B\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\u3002\u6CA1\u8BBE\u7F6E\u7684\u9636\u6BB5\u5728\u8FD0\u884C\u65F6\u9ED8\u8BA4\u4E3A\u8BE5\u9636\u6BB5**\u53C2\u4E0E\u6210\u5458\u6570\u91CF \xD7 2**\uFF08\u8FD8\u6CA1\u6709\u53C2\u4E0E\u6210\u5458\u65F6\u6309 1 \u8BA1\uFF09\u3002\u6210\u5458\u6BCF\u628A\u4E00\u6761\u56DE\u590D\u8FD4\u56DE\u7ED9\u4E3B\u5BF9\u8BDD\uFF08wait_member \u53D6\u8D70\u6216\u515C\u5E95\u6295\u9012\uFF09\u7B97\u5BF9\u5E94\u9636\u6BB5\u6D88\u8017\u4E00\u6B21\uFF1B\u9884\u7B97\u7528\u5B8C\u65F6\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u5F3A\u8C03\u5FC5\u987B\u8FDB\u5165\u4E0B\u4E00\u4E2A\u9636\u6BB5\uFF0C\u5E76\u53CA\u65F6\u7528 set_product_stage \u66F4\u65B0\u9636\u6BB5\u548C\u76EE\u6807\u72B6\u6001\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
+      `\u9884\u7B97\u989D\u5EA6\u53EA\u80FD\u7531\u7528\u6237\u8C03\u6574\uFF1A\u8BBE\u7F6E callMemberBudget \u65F6\u5DE5\u5177\u4F1A\u8BFB\u53D6\u6700\u8FD1 ${String(BUDGET_AUTH_MESSAGE_WINDOW)} \u6761\u7528\u6237\u6D88\u606F\uFF0C\u53EA\u6709\u5176\u4E2D\u5B58\u5728\u201C\u9884\u7B97 + \u8C03\u6574/\u8BBE\u7F6E + \u6570\u5B57\u201D\u7684\u660E\u786E\u6307\u793A\u624D\u5199\u5165\uFF1B\u6CA1\u6709\u5219\u8FD4\u56DE ok:false\uFF0C\u914D\u7F6E\u4E0D\u53D8\u3002`,
+      "\u9884\u7B97\u7528\u5C3D\u65F6\uFF0C\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u81EA\u52A8\u542F\u52A8\u4E00\u4E2A fork \u5B50\u4EE3\u7406\u5BA1\u67E5\u5F53\u524D\u4EA7\u54C1\u6D41\u7A0B\uFF08\u6BCF\u4E2A\u5C0F\u9636\u6BB5\u6700\u591A 3 \u6B21\u3001\u95F4\u9694\u81F3\u5C11 10 \u5206\u949F\uFF09\uFF1A\u68C0\u67E5\u662F\u5426\u6309\u9636\u6BB5\u5DE5\u4F5C\u3001\u662F\u5426\u8D85\u51FA\u9636\u6BB5\u3001\u9884\u7B97\u4E3A\u4EC0\u4E48\u8017\u5C3D\uFF1B\u5982\u679C\u4E3B\u5BF9\u8BDD\u4F7F\u7528\u4E0D\u5408\u7406\uFF0C\u5BA1\u67E5\u7ED3\u8BBA\u4F1A\u4F5C\u4E3A\u8B66\u544A\u548C\u4E0B\u4E00\u6B65\u5EFA\u8BAE\u6295\u9012\u56DE\u4E3B\u5BF9\u8BDD\u3002",
       `\`compressPercent\`\uFF1A\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u6570\u5B57 1\u2013100\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_COMPRESS_PERCENT)}\uFF09\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0B\u4E00\u6B21 call_member \u6295\u9012\u524D\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u538B\u7F29\u3002`,
       "\u81F3\u5C11\u63D0\u4F9B identity\u3001role\u3001scope\u3001note\u3001keep\u3001keepPrompt\u3001avoidLongJobs\u3001callMemberBudget\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001role\u3001scope\u3001note \u6216 compressPercent \u4E4B\u4E00\u3002",
       "\u6210\u5458\u4F1A\u8BDD\u53EF\u4EE5\u672A\u88AB\u672C\u673A\u8DDF\u8E2A\uFF0C\u8BBE\u7F6E\u4ECD\u4F1A\u4FDD\u5B58\uFF0C\u53EA\u662F\u4E0D\u4F1A\u540C\u6B65\u4EFB\u52A1\u5FEB\u7167\u3002",
@@ -17581,6 +17734,16 @@ function registerTools(ctx, toolsCtx, service) {
         ...hasCompressPercent ? { compressPercent: args.compressPercent } : {}
       };
       normalizeMemberScopePatch(patch);
+      if (isSelf && hasCallMemberBudget && !hasBudgetInstructionFromUser(exec?.agent)) {
+        return {
+          ok: false,
+          text: [
+            `\u9884\u7B97\u989D\u5EA6\u53EA\u80FD\u7531\u7528\u6237\u8C03\u6574\uFF1A\u6700\u8FD1 ${String(BUDGET_AUTH_MESSAGE_WINDOW)} \u6761\u7528\u6237\u6D88\u606F\u91CC\u6CA1\u6709\u8C03\u6574 call_member \u9884\u7B97\u7684\u6307\u793A\uFF0C\u672C\u6B21\u8BBE\u7F6E\u5DF2\u62D2\u7EDD\uFF0C\u914D\u7F6E\u6CA1\u6709\u6539\u53D8\u3002`,
+            "\u8BF7\u8BA9\u7528\u6237\u660E\u786E\u8BF4\u660E\u8981\u8C03\u6574\u54EA\u4E2A\u5927\u9636\u6BB5\u3001\u8C03\u6574\u5230\u591A\u5C11\uFF08\u4F8B\u5982\u300C\u628A A \u9636\u6BB5\u9884\u7B97\u8C03\u5230 26\u300D\uFF09\uFF0C\u518D\u91CD\u8BD5\u3002"
+          ].join("\n"),
+          data: { refused: true, reason: "budget_requires_user_instruction" }
+        };
+      }
       const targetId = isSelf ? selfId : rawId;
       const saved = await service.setMemberScope(targetId, patch);
       const scope = saved.scope ?? null;

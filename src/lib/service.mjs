@@ -115,6 +115,12 @@ export const MEMBER_KEEP_PROMPT_MAX = 200
 /** Highest call_member budget a main conversation may set for one round. */
 export const MEMBER_CALL_BUDGET_MAX = 999
 
+/** Maximum budget-exhaustion audits one small stage may start. */
+export const BUDGET_AUDIT_MAX = 3
+
+/** Minimum distance between two budget-exhaustion audits. */
+export const BUDGET_AUDIT_INTERVAL_MS = 10 * 60_000
+
 /**
  * Validate a per-stage `call_member` budget patch.
  *
@@ -1108,6 +1114,53 @@ export class MeshService {
         turn: Number.isSafeInteger(turn) ? turn : (Number.isSafeInteger(current?.turn) ? current.turn : null),
         at,
       }
+      return true
+    })
+  }
+
+  /**
+   * Claim one budget-exhaustion audit slot for the project's current stage.
+   *
+   * At most three audits may run in one small stage (stage + round) and two
+   * audits must be at least ten minutes apart. The claim is written inside the
+   * serialised stage mutation, so concurrent snapshots cannot both start an
+   * audit for the same window.
+   * @param {{cwd?: string, now?: number}} [facts] project and claim time.
+   * @returns {Promise<{count: number, lastAt: string}|null>} claimed slot, or null when refused.
+   */
+  async claimBudgetAudit({ cwd, now = Date.now() } = {}) {
+    const key = productStageKey(cwd)
+    const at = Number(now)
+    if (key === '' || !Number.isFinite(at)) return null
+    return await this.#updateProductStages((stages) => {
+      const state = stages[key]
+      if (state === undefined) return null
+      const previous = state.audits ?? { count: 0, lastAt: '' }
+      const count = Number.isSafeInteger(previous.count) ? previous.count : 0
+      if (count >= BUDGET_AUDIT_MAX) return null
+      const last = typeof previous.lastAt === 'string' && previous.lastAt !== ''
+        ? Date.parse(previous.lastAt)
+        : Number.NaN
+      if (Number.isFinite(last) && at - last < BUDGET_AUDIT_INTERVAL_MS) return null
+      state.audits = { count: count + 1, lastAt: new Date(at).toISOString() }
+      return { ...state.audits }
+    })
+  }
+
+  /**
+   * Give back a claimed audit slot after the audit could not be started.
+   * @param {{cwd?: string, lastAt?: string}} [facts] project and the claim time.
+   * @returns {Promise<boolean>} whether the matching claim was released.
+   */
+  async releaseBudgetAudit({ cwd, lastAt } = {}) {
+    const key = productStageKey(cwd)
+    if (key === '' || typeof lastAt !== 'string' || lastAt === '') return false
+    return await this.#updateProductStages((stages) => {
+      const state = stages[key]
+      if (state?.audits?.lastAt !== lastAt) return false
+      const count = Number.isSafeInteger(state.audits.count) ? state.audits.count : 0
+      if (count <= 1) delete state.audits
+      else state.audits = { ...state.audits, count: count - 1 }
       return true
     })
   }

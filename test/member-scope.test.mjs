@@ -110,6 +110,29 @@ function register(service) {
 
 const mainAgent = { id: 'main-1', session: { id: 'main-1' } }
 
+/**
+ * A main agent whose session surface carries the given messages.
+ * @param {{text: string, kind?: string}[]} messages user messages, oldest first.
+ * @returns {object} agent.
+ */
+function agentWithMessages(messages) {
+  const nodes = []
+  const events = new Map()
+  messages.forEach((message, index) => {
+    const seq = index + 1
+    nodes.push(seq)
+    events.set(seq, {
+      type: 'user/message',
+      data: {
+        role: 'user',
+        source: { kind: message.kind ?? 'user' },
+        content: [{ type: 'text', text: message.text }],
+      },
+    })
+  })
+  return { id: 'main-1', session: { id: 'main-1', surface: { nodes }, eventAt: seq => events.get(seq) } }
+}
+
 test('member scopes persist per conversation, merge, clear, and read as empty without a file', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-scope-service-'))
   const dataDir = path.join(dir, 'mesh')
@@ -361,14 +384,48 @@ test('set_member_scope stores a self-only call_member budget and shows it', asyn
   try {
     service = new MeshService({ dataDir, config: {}, log: () => {} })
     const set = register(service).find(tool => tool.name === 'set_member_scope')
+    const budgetAgent = agentWithMessages([{ text: '把 A 阶段预算调到 26，B 阶段预算调到 10' }])
 
-    const configured = await set.execute({ callMemberBudget: { A: 8 } }, { agent: mainAgent })
+    // Without a recent human instruction the whole call is refused.
+    const refused = await set.execute({ callMemberBudget: { A: 8 } }, { agent: mainAgent })
+    assert.equal(refused.ok, false)
+    assert.match(refused.text, /预算额度只能由用户调整/u)
+    assert.equal(refused.data.reason, 'budget_requires_user_instruction')
+    assert.equal(await service.memberScope('main-1'), null, 'nothing was written')
+
+    // An injected context message is not a human instruction.
+    const injected = await set.execute(
+      { callMemberBudget: { A: 8 } },
+      { agent: agentWithMessages([{ text: '把 A 阶段预算调到 26', kind: 'member-context' }]) },
+    )
+    assert.equal(injected.ok, false)
+    assert.match(injected.text, /预算额度只能由用户调整/u)
+
+    // A negated or non-adjustment mention does not authorise.
+    for (const text of ['不要调整预算到 26', '预算用完了', '继续推进']) {
+      const denied = await set.execute({ callMemberBudget: { A: 8 } }, { agent: agentWithMessages([{ text }]) })
+      assert.equal(denied.ok, false, text)
+    }
+
+    // Only the recent window counts: the authorising message is now too old.
+    const old = await set.execute(
+      { callMemberBudget: { A: 8 } },
+      {
+        agent: agentWithMessages([
+          { text: '把 A 阶段预算调到 26' },
+          ...Array.from({ length: 8 }, () => ({ text: '继续推进' })),
+        ]),
+      },
+    )
+    assert.equal(old.ok, false, 'an instruction outside the recent window is ignored')
+
+    const configured = await set.execute({ callMemberBudget: { A: 8 } }, { agent: budgetAgent })
     assert.match(configured.text, /call_member 预算：A 8 \/ B 默认 \/ C 默认 \/ D 默认（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）/u)
     assert.deepEqual(configured.data.callMemberBudget, { A: 8 })
     assert.deepEqual(await service.memberScope('main-1'), { callMemberBudget: { A: 8 } })
 
     // Each big stage is set separately; a later stage must not wipe the first.
-    const viaAlias = await set.execute({ call_member_budget: { B: 12 } }, { agent: mainAgent })
+    const viaAlias = await set.execute({ call_member_budget: { B: 12 } }, { agent: budgetAgent })
     assert.deepEqual(viaAlias.data.callMemberBudget, { A: 8, B: 12 })
     assert.deepEqual(await service.memberScope('main-1'), { callMemberBudget: { A: 8, B: 12 } })
     assert.match(viaAlias.text, /A 8 \/ B 12 \/ C 默认 \/ D 默认/u)

@@ -298,6 +298,13 @@ export function normalizeStoredProductStage(value) {
   const roundStartedAt = typeof value.roundStartedAt === 'string' && value.roundStartedAt !== ''
     ? value.roundStartedAt
     : ''
+  const audits = value.audits !== null && typeof value.audits === 'object' && !Array.isArray(value.audits)
+    && Number.isSafeInteger(value.audits.count) && value.audits.count >= 0
+    ? {
+        count: value.audits.count,
+        lastAt: typeof value.audits.lastAt === 'string' ? value.audits.lastAt : '',
+      }
+    : null
   return {
     version,
     stage,
@@ -305,6 +312,7 @@ export function normalizeStoredProductStage(value) {
     goals,
     participation,
     ...(roundStartedAt === '' ? {} : { roundStartedAt }),
+    ...(audits === null ? {} : { audits }),
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : '',
     updatedBy: typeof value.updatedBy === 'string' ? value.updatedBy : '',
   }
@@ -338,12 +346,14 @@ export function applyProductStage(previous, input, now = new Date()) {
   const previousStart = typeof prev?.roundStartedAt === 'string' && prev.roundStartedAt !== ''
     ? prev.roundStartedAt
     : (typeof prev?.updatedAt === 'string' ? prev.updatedAt : '')
+  const audits = reset ? null : (prev?.audits ?? null)
   return {
     version,
     stage,
     round,
     goals: mergeGoals(prev?.goals, input.goals),
     participation: reset ? {} : { ...(prev?.participation ?? {}) },
+    ...(audits === null ? {} : { audits: { ...audits } }),
     // A goal-only update keeps the round's start: replies collected before it
     // still count, and the participation window cannot move under the caller.
     roundStartedAt: reset || previousStart === '' ? new Date(now).toISOString() : previousStart,

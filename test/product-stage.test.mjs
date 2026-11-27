@@ -537,3 +537,40 @@ test('the member-context stage block hides member conversation statuses', () => 
   const shown = formatProductStageLines(state, tasks, {}).join('\n')
   assert.match(shown, /- 未参与：c2（异常中止，需先恢复会话）/u, 'tool results keep the status')
 })
+
+test('budget audits are capped at three per stage and ten minutes apart', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-stage-audit-'))
+  const dataDir = path.join(dir, 'mesh')
+  try {
+    const service = new MeshService({ dataDir, config: {}, log: () => {} })
+    const cwd = '/root/ws/project'
+    const at = DAY.getTime()
+    await service.setProductStage({ cwd, stage: 'A', now: DAY })
+
+    const first = await service.claimBudgetAudit({ cwd, now: at })
+    assert.deepEqual(first, { count: 1, lastAt: new Date(at).toISOString() })
+    assert.equal(await service.claimBudgetAudit({ cwd, now: at + 60_000 }), null, 'ten minutes apart')
+    assert.equal((await service.claimBudgetAudit({ cwd, now: at + 10 * 60_000 }))?.count, 2)
+    assert.equal((await service.claimBudgetAudit({ cwd, now: at + 20 * 60_000 }))?.count, 3)
+    assert.equal(await service.claimBudgetAudit({ cwd, now: at + 30 * 60_000 }), null, 'at most three per stage')
+
+    const goalOnly = await service.setProductStage({
+      cwd,
+      goals: { product: { text: '可用的成员面板' } },
+      now: new Date(at + 31 * 60_000),
+    })
+    assert.equal(goalOnly.state.audits?.count, 3, 'a goal-only update keeps the audit count')
+
+    const moved = await service.setProductStage({ cwd, stage: 'B', now: new Date(at + 32 * 60_000) })
+    assert.equal(moved.state.audits, undefined, 'a stage change resets the audit count')
+    assert.equal((await service.claimBudgetAudit({ cwd, now: at + 40 * 60_000 }))?.count, 1)
+
+    const saved = JSON.parse(await readFile(path.join(dataDir, 'product-stages.json'), 'utf8'))
+    const stored = saved[path.resolve(cwd)]
+    assert.equal(stored.audits.count, 1)
+    assert.equal(await service.releaseBudgetAudit({ cwd, lastAt: stored.audits.lastAt }), true)
+    assert.equal((await service.productStage(cwd)).audits, undefined, 'releasing the only claim removes the record')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

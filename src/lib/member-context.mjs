@@ -38,7 +38,15 @@ import { memberTaskProfile } from './member-tasks.mjs'
 import { isMemberSession } from './member-sessions.mjs'
 import { DEFAULT_COMPRESS_PERCENT, effectiveCompressPercent } from './service.mjs'
 import { formatMemberGapLines, memberRosterGaps, readMemberRoster } from './member-roster.mjs'
-import { formatCallMemberBudgetSettings, formatProductStageDefinitions, formatProductStageLines } from './product-stage.mjs'
+import {
+  callMemberBudgetFor,
+  countCallMemberReplies,
+  defaultCallMemberBudget,
+  formatCallMemberBudgetSettings,
+  formatProductStageDefinitions,
+  formatProductStageLines,
+} from './product-stage.mjs'
+import { recentHumanUserMessages, userMessageText } from './user-intent.mjs'
 
 /** Minimum distance between two status snapshots in one session. */
 export const MEMBER_STATUS_INTERVAL_MS = 60_000
@@ -337,10 +345,102 @@ export function createMemberContext({
     // An active product stage is its own reason to speak: it carries the
     // version, the goals, and who still owes this round an answer.
     if (running.length === 0 && hintJobs.length === 0 && gapLines.length === 0 && stage === null) return null
+    if (stage !== null) {
+      void maybeAuditBudget(agent, sessionId, stage, tasks, scopes, selfScope).catch((error) => {
+        log(`budget audit skipped: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
     return {
       text: formatMemberStatusSnapshot(tasks, { now: at, selfId: sessionId, selfScope, scopes, longJobs: hintJobs, gaps: gapLines, stage }),
       at,
     }
+  }
+
+  /**
+   * Start one independent audit when this round's call_member budget is spent.
+   *
+   * The audit is a forked subagent: it sees the main conversation's completed
+   * turns and receives the current stage facts, so it can judge whether the
+   * main conversation worked outside the stage. Service-side claims enforce
+   * at most three audits per small stage and ten minutes between audits; a
+   * failed start gives the claim back. The audit's own delivery to the parent
+   * carries its warning and next-step advice.
+   * @param {any} agent live main agent.
+   * @param {string} sessionId main conversation id.
+   * @param {object} stage current product stage.
+   * @param {object[]} tasks tracked conversations.
+   * @param {Record<string, object>} scopes conversation id -> stored scope.
+   * @param {object|null} selfScope main conversation scope.
+   * @returns {Promise<void>} resolution after the start attempt.
+   */
+  async function maybeAuditBudget(agent, sessionId, stage, tasks, scopes, selfScope) {
+    if (closed || isMemberSession(sessionId)) return
+    if (typeof service?.claimBudgetAudit !== 'function') return
+    const budget = callMemberBudgetFor(selfScope?.callMemberBudget, stage.stage)
+      ?? defaultCallMemberBudget(stage, tasks, scopes)
+    if (countCallMemberReplies(stage, tasks) < budget) return
+    const cwd = agentCwd(agent)
+    if (cwd === '') return
+    const claim = await service.claimBudgetAudit({ cwd, now: now() }).catch(() => null)
+    if (claim === null) return
+    if (closed) return
+    const subagents = typeof ctx?.get === 'function' ? ctx.get('subagents') : undefined
+    if (subagents === undefined || subagents === null || typeof subagents.startActivation !== 'function') {
+      await service.releaseBudgetAudit?.({ cwd, lastAt: claim.lastAt }).catch(() => {})
+      return
+    }
+    try {
+      await subagents.startActivation({
+        provider: 'fork',
+        label: '预算审查',
+        prompt: [{ type: 'text', text: budgetAuditPrompt(agent, stage, tasks, scopes, selfScope) }],
+        parent: agent,
+        delivery: 'parent',
+        // The audit must outlive this pre-step: it is an independent check, not
+        // part of the step's cancellable work.
+        signal: new AbortController().signal,
+      })
+      log(`budget audit started for ${sessionId}: ${stage.stage} round ${String(stage.round)} (${String(claim.count)} in this stage)`)
+    } catch (error) {
+      await service.releaseBudgetAudit?.({ cwd, lastAt: claim.lastAt }).catch(() => {})
+      log(`budget audit failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * Build the self-contained prompt for one budget audit.
+   * @param {any} agent live main agent.
+   * @param {object} stage current product stage.
+   * @param {object[]} tasks tracked conversations.
+   * @param {Record<string, object>} scopes conversation id -> stored scope.
+   * @param {object|null} selfScope main conversation scope.
+   * @returns {string} audit prompt.
+   */
+  function budgetAuditPrompt(agent, stage, tasks, scopes, selfScope) {
+    const stageBlock = formatProductStageLines(stage, tasks, scopes, {
+      callMemberBudget: selfScope?.callMemberBudget,
+      statuses: true,
+    }).join('\n')
+    const recent = recentHumanUserMessages(agent, 6)
+      .map(message => `- ${userMessageText(message).slice(0, 400)}`)
+      .join('\n')
+    return [
+      '你是独立的预算审查子代理。主对话的 call_member 本轮预算已经耗尽，请只做审查：不要修改文件，不要调用 call_member / set_member_scope / set_product_stage。',
+      '',
+      '[当前阶段]',
+      stageBlock,
+      '',
+      '[最近用户消息]',
+      recent === '' ? '- （没有可用的用户消息）' : recent,
+      '',
+      '请检查：',
+      '1. 主对话是否按当前产品阶段工作；',
+      '2. 是否做了超出当前阶段的工作；',
+      '3. 预算为什么耗尽：重复派活、与阶段无关的调用、成员空转、无意义轮询等；',
+      '4. 如果主对话的使用不合理，输出「[预算审查] 警告：…」并给出明确的下一步建议；',
+      '   如果未发现问题，只输出一行「[预算审查] 未发现主对话滥用预算」。',
+      '只输出结论与建议，不要复述对话。',
+    ].join('\n')
   }
 
   /**

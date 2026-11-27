@@ -573,6 +573,111 @@ test('a stage without a configured budget uses twice its participating members',
   }
 })
 
+test('a spent budget starts one forked audit with the stage facts', async () => {
+  let clock = 1_000_000
+  let allowClaim = true
+  const starts = []
+  const claims = []
+  const stage = {
+    version: '20261126.1',
+    stage: 'A',
+    round: 1,
+    goals: {},
+    participation: {},
+    roundStartedAt: '2026-11-26T18:00:00.000Z',
+  }
+  const service = {
+    async memberScopes() {
+      return { 'session-a': { identity: '网关', scope: '成员发现', callMemberBudget: { A: 1, B: 1, C: 1, D: 1 } } }
+    },
+    async productStage() { return stage },
+    async claimBudgetAudit(facts) {
+      claims.push(facts)
+      if (!allowClaim) return null
+      return { count: claims.length, lastAt: new Date(facts.now).toISOString() }
+    },
+    async releaseBudgetAudit() {},
+  }
+  const subagents = {
+    async startActivation(spec) {
+      starts.push(spec)
+      return { childId: 'audit-child' }
+    },
+  }
+  const tasks = [{
+    ...settled,
+    conversationId: 'c1',
+    replies: [{ at: '2026-11-26T18:01:00.000Z' }],
+  }]
+  const h = harness({
+    tasks,
+    cwd: '/root/ws/project',
+    service,
+    services: { subagents },
+    now: () => clock,
+  })
+  try {
+    const decision = await h.preStep(h.payload, h.next)
+    await sleep(40)
+    assert.equal(decision.messages.length, 1)
+    assert.equal(starts.length, 1)
+    assert.equal(claims.length, 1)
+    assert.equal(claims[0].cwd, '/root/ws/project')
+    const spec = starts[0]
+    assert.equal(spec.provider, 'fork')
+    assert.equal(spec.delivery, 'parent')
+    assert.equal(spec.label, '预算审查')
+    const prompt = spec.prompt[0].text
+    assert.match(prompt, /\[预算审查\]/u)
+    assert.match(prompt, /A 阶段/u)
+    assert.match(prompt, /call_member 预算（A 阶段）：本轮已用 1\/1/u)
+    assert.match(prompt, /不要调用 call_member/u)
+
+    // The service claim enforces the ten-minute gap; no second audit starts.
+    allowClaim = false
+    clock += MEMBER_STATUS_INTERVAL_MS
+    await h.preStep(h.payload, h.next)
+    await sleep(40)
+    assert.equal(claims.length, 2)
+    assert.equal(starts.length, 1)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('a failed audit start releases its claimed slot', async () => {
+  const released = []
+  const stage = {
+    version: '20261126.1',
+    stage: 'A',
+    round: 1,
+    goals: {},
+    participation: {},
+    roundStartedAt: '2026-11-26T18:00:00.000Z',
+  }
+  const service = {
+    async memberScopes() {
+      return { 'session-a': { callMemberBudget: { A: 1, B: 1, C: 1, D: 1 } } }
+    },
+    async productStage() { return stage },
+    async claimBudgetAudit() { return { count: 1, lastAt: '2026-11-26T18:05:00.000Z' } },
+    async releaseBudgetAudit(facts) { released.push(facts); return true },
+  }
+  const subagents = {
+    async startActivation() { throw new Error('fork unavailable') },
+  }
+  const tasks = [{ ...settled, conversationId: 'c1', replies: [{ at: '2026-11-26T18:01:00.000Z' }] }]
+  const h = harness({ tasks, cwd: '/root/ws/project', service, services: { subagents } })
+  try {
+    await h.preStep(h.payload, h.next)
+    await sleep(40)
+    assert.deepEqual(released, [{ cwd: '/root/ws/project', lastAt: '2026-11-26T18:05:00.000Z' }])
+    assert.equal(h.logs.some(line => /budget audit failed: fork unavailable/u.test(line)), true)
+  } finally {
+    h.context.dispose()
+  }
+})
+
 test('keep nudges 继续 once after a turn ends with no running member conversation', async () => {
   const h = harness({
     tasks: [],

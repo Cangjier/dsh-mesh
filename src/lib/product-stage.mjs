@@ -353,6 +353,82 @@ export function applyProductStage(previous, input, now = new Date()) {
 }
 
 /**
+ * The definitions of every big stage, as a block the member context leads with.
+ *
+ * The main conversation and its members must share one vocabulary for A/B/C/D;
+ * repeating the full definition in each snapshot keeps the stage name from
+ * being the only clue to what a stage is asking for.
+ * @returns {string[]} lines.
+ */
+export function formatProductStageDefinitions() {
+  return [
+    '[产品阶段定义] 产品按 A → B → C → D → A 循环：',
+    ...PRODUCT_STAGES.map(stage => `- ${stage} ${PRODUCT_STAGE_SHORT[stage]}：${PRODUCT_STAGE_REQUIREMENTS[stage]}`),
+  ]
+}
+
+/**
+ * The moment the current sub-stage round started.
+ * @param {object} state stage state.
+ * @returns {number} epoch milliseconds, or NaN when the state carries no usable time.
+ */
+function roundStartedMs(state) {
+  return Date.parse(
+    typeof state?.roundStartedAt === 'string' && state.roundStartedAt !== ''
+      ? state.roundStartedAt
+      : (typeof state?.updatedAt === 'string' ? state.updatedAt : ''),
+  )
+}
+
+/**
+ * How many member replies returned to the main conversation this round.
+ *
+ * One accepted reply is one call_member unit: `wait_member` and the fallback
+ * delivery share the same reply table, so a reply is counted once no matter
+ * which path handed it over.
+ * @param {object} state stage state.
+ * @param {object[]} tasks tracked member conversations.
+ * @returns {number} replies accepted since the round started.
+ */
+export function countCallMemberReplies(state, tasks) {
+  const startedAt = roundStartedMs(state)
+  if (!Number.isFinite(startedAt)) return 0
+  let count = 0
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    for (const reply of Array.isArray(task?.replies) ? task.replies : []) {
+      const at = typeof reply?.at === 'string' ? Date.parse(reply.at) : Number.NaN
+      if (Number.isFinite(at) && at >= startedAt) count += 1
+    }
+  }
+  return count
+}
+
+/**
+ * The budget lines for one round, including the exhausted emphasis.
+ *
+ * The budget is set on the main conversation's own scope (`callMemberBudget`)
+ * and resets whenever the stage or the round changes, because it counts the
+ * replies accepted in the current round window.
+ * @param {object} state stage state.
+ * @param {object[]} tasks tracked member conversations.
+ * @param {unknown} budget configured call_member budget, or a non-number for unlimited.
+ * @returns {string[]} lines; empty when the budget is not configured.
+ */
+export function formatCallMemberBudget(state, tasks, budget) {
+  if (!Number.isSafeInteger(budget) || budget < 1) return []
+  const used = countCallMemberReplies(state, tasks)
+  const remaining = Math.max(0, budget - used)
+  const lines = [`- call_member 预算：本轮已用 ${String(used)}/${String(budget)}，剩余 ${String(remaining)}`]
+  if (remaining > 0) return lines
+  lines.push(
+    `[call_member 预算用尽] 本轮预算 ${String(budget)} 次已用完（已有 ${String(used)} 条成员回复返回主对话）。`
+    + '不要再派新任务：必须进入下一个阶段，并用 set_product_stage 及时更新阶段和目标状态；'
+    + '本轮参与未齐时，先 wait_member 取回已派任务的回复，或用 set_member_scope 调大 callMemberBudget。',
+  )
+  return lines
+}
+
+/**
  * One goal's model-facing line.
  * @param {{text?: string|null, status?: string|null}|undefined} goal stored goal.
  * @returns {string} text.
@@ -405,11 +481,7 @@ export function productStageParticipants(state, tasks, scopes = {}) {
   // A reply after the round started counts even if the participation map was
   // never written (tasks created before `originCwd`, a plugin restart between
   // the reply and the record, or a state restored from an older build).
-  const startedAt = Date.parse(
-    typeof state?.roundStartedAt === 'string' && state.roundStartedAt !== ''
-      ? state.roundStartedAt
-      : (typeof state?.updatedAt === 'string' ? state.updatedAt : ''),
-  )
+  const startedAt = roundStartedMs(state)
   const entries = list.map((task) => {
     const conversationId = String(task?.conversationId ?? '')
     const stored = scopes[conversationId] ?? null
@@ -450,15 +522,22 @@ function participantLabel(entry) {
 
 /**
  * The participation lines for one stage state.
+ *
+ * Member conversation statuses (进行中 / 空闲 / 异常中止) are deliberately not
+ * part of the member context: the context names who still owes this round an
+ * answer, not what their conversations are doing. Tool results keep the
+ * statuses so a refusal can explain an interrupted conversation.
  * @param {object} state stage state.
  * @param {object[]} tasks tracked conversations.
  * @param {Record<string, object>} scopes conversation id -> stored scope.
+ * @param {{statuses?: boolean}} [options] `statuses: false` omits the conversation status.
  * @returns {string[]} lines.
  */
-export function formatProductStageParticipation(state, tasks, scopes = {}) {
+export function formatProductStageParticipation(state, tasks, scopes = {}, options = {}) {
+  const withStatuses = options.statuses !== false
   const view = productStageParticipants(state, tasks, scopes)
   const done = view.required.filter(entry => entry.participated)
-  const missingLabel = entry => `${participantLabel(entry)}（${entry.statusLabel}${entry.failed ? '，需先恢复会话' : ''}）`
+  const missingLabel = entry => `${participantLabel(entry)}${withStatuses ? `（${entry.statusLabel}${entry.failed ? '，需先恢复会话' : ''}）` : ''}`
   const lines = [
     `- 本轮参与：${String(done.length)}/${String(view.required.length)}${done.length === 0 ? '' : `（${done.map(participantLabel).join('；')}）`}`,
   ]
@@ -542,14 +621,16 @@ export function formatProductStageNextMoves(state) {
  * @param {object} state stage state.
  * @param {object[]} tasks tracked conversations.
  * @param {Record<string, object>} scopes conversation id -> stored scope.
+ * @param {{callMemberBudget?: unknown, statuses?: boolean}} [options] self budget and status switch.
  * @returns {string[]} lines.
  */
-export function formatProductStageLines(state, tasks, scopes = {}) {
+export function formatProductStageLines(state, tasks, scopes = {}, options = {}) {
   return [
     `[产品阶段] ${state.version} · ${state.stage} 阶段（第 ${String(state.round)} 轮迭代）· ${PRODUCT_STAGE_SHORT[state.stage] ?? ''}`,
+    ...formatCallMemberBudget(state, tasks, options.callMemberBudget),
     `- 阶段要求：${PRODUCT_STAGE_REQUIREMENTS[state.stage] ?? ''}`,
     ...PRODUCT_GOAL_KEYS.map(key => `- ${PRODUCT_GOAL_LABELS[key]}：${goalLine(state.goals?.[key])}`),
-    ...formatProductStageParticipation(state, tasks, scopes),
+    ...formatProductStageParticipation(state, tasks, scopes, { statuses: options.statuses }),
     ...formatProductStageNextMoves(state),
   ]
 }

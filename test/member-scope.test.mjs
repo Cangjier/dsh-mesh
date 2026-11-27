@@ -145,6 +145,9 @@ test('member scopes persist per conversation, merge, clear, and read as empty wi
     await assert.rejects(service.setMemberScope('x', { role: '老板' }), /role must be one of/u)
     await assert.rejects(service.setMemberScope('x', { identity: 'a'.repeat(41) }), /identity is too long: 41 > 40/u)
     await assert.rejects(service.setMemberScope('x', { scope: 'b'.repeat(121) }), /scope is too long: 121 > 120/u)
+    await assert.rejects(service.setMemberScope('x', { callMemberBudget: 0 }), /callMemberBudget is out of range: 0 \(1-999\)/u)
+    await assert.rejects(service.setMemberScope('x', { callMemberBudget: 1000 }), /callMemberBudget is out of range/u)
+    await assert.rejects(service.setMemberScope('x', { callMemberBudget: 1.5 }), /callMemberBudget must be an integer/u)
     await assert.rejects(service.setMemberScope('x', { compressPercent: '35' }), /compressPercent must be a number/u)
     await assert.rejects(service.setMemberScope('x', { compressPercent: 0 }), /compressPercent is out of range: 0/u)
     await assert.rejects(service.setMemberScope('x', { compressPercent: 101 }), /compressPercent is out of range/u)
@@ -172,14 +175,15 @@ test('scope readers apply defaults and drop unusable stored values', async () =>
     const service = new MeshService({ dataDir, config: {}, log: () => {} })
     await mkdir(dataDir, { recursive: true })
     await writeFile(path.join(dataDir, 'member-scopes.json'), JSON.stringify({
-      good: { identity: '开发', role: '开发', keep: true, keepPrompt: '检查成员结果', avoidLongJobs: true, note: '只读复核', compressPercent: 75 },
+      good: { identity: '开发', role: '开发', keep: true, keepPrompt: '检查成员结果', avoidLongJobs: true, callMemberBudget: 20, note: '只读复核', compressPercent: 75 },
       badIdle: { identity: '测试' },
       badPercent: { compressPercent: 0 },
+      badBudget: { callMemberBudget: 0 },
       onlyJunk: { compressPercent: 101, role: '老板', avoidLongJobs: 'yes' },
       badNote: { note: 'x'.repeat(501) },
     }), 'utf8')
     assert.deepEqual(await service.memberScopes(), {
-      good: { identity: '开发', role: '开发', keep: true, keepPrompt: '检查成员结果', avoidLongJobs: true, note: '只读复核', compressPercent: 75 },
+      good: { identity: '开发', role: '开发', keep: true, keepPrompt: '检查成员结果', avoidLongJobs: true, callMemberBudget: 20, note: '只读复核', compressPercent: 75 },
       badIdle: { identity: '测试' },
     })
   } finally {
@@ -287,7 +291,7 @@ test('set_member_scope on self stores compressPercent and shows effective values
     )
     await assert.rejects(
       () => set.execute({}, { agent: mainAgent }),
-      /identity, role, scope, note, keep, keepPrompt, avoidLongJobs, or compressPercent is required/u,
+      /identity, role, scope, note, keep, keepPrompt, avoidLongJobs, callMemberBudget, or compressPercent is required/u,
     )
   } finally {
     await service?.memberTasks.dispose()
@@ -326,7 +330,7 @@ test('set_member_scope stores keep only for the current conversation', async () 
     const ignored = await set.execute({ conversationId: 'conv-x', identity: '开发', keep: true }, { agent: mainAgent })
     assert.equal(ignored.data.ignoredKeep, true)
     assert.deepEqual(await service.memberScope('conv-x'), { identity: '开发' })
-    assert.match(ignored.text, /keep \/ keepPrompt \/ avoidLongJobs 只对主对话自身生效/u)
+    assert.match(ignored.text, /keep \/ keepPrompt \/ avoidLongJobs \/ callMemberBudget 只对主对话自身生效/u)
 
     const ignoredPrompt = await set.execute({ conversationId: 'conv-x', identity: '开发', keep_prompt: '看这里' }, { agent: mainAgent })
     assert.equal(ignoredPrompt.data.ignoredKeepPrompt, true)
@@ -339,7 +343,58 @@ test('set_member_scope stores keep only for the current conversation', async () 
     )
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-x', keep: false }, { agent: mainAgent }),
-      /keep, keepPrompt and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent/u,
+      /keep, keepPrompt, avoidLongJobs and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent/u,
+    )
+  } finally {
+    await service?.memberTasks.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('set_member_scope stores a self-only call_member budget and shows it', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-scope-budget-'))
+  const dataDir = path.join(dir, 'mesh')
+  let service
+  try {
+    service = new MeshService({ dataDir, config: {}, log: () => {} })
+    const set = register(service).find(tool => tool.name === 'set_member_scope')
+
+    const configured = await set.execute({ callMemberBudget: 8 }, { agent: mainAgent })
+    assert.match(configured.text, /call_member 预算：8 次\/轮（用完后提示进入下一阶段）（只对主对话生效）/u)
+    assert.equal(configured.data.callMemberBudget, 8)
+    assert.deepEqual(await service.memberScope('main-1'), { callMemberBudget: 8 })
+
+    const viaAlias = await set.execute({ call_member_budget: 12 }, { agent: mainAgent })
+    assert.equal(viaAlias.data.callMemberBudget, 12)
+    assert.deepEqual(await service.memberScope('main-1'), { callMemberBudget: 12 })
+
+    const memberTarget = await set.execute(
+      { conversationId: 'conv-x', identity: '开发', callMemberBudget: 3 },
+      { agent: mainAgent },
+    )
+    assert.equal(memberTarget.data.ignoredCallMemberBudget, true)
+    assert.deepEqual(await service.memberScope('conv-x'), { identity: '开发' })
+    assert.match(memberTarget.text, /callMemberBudget 只对主对话自身生效/u)
+
+    await assert.rejects(
+      () => set.execute({ conversationId: 'conv-x', callMemberBudget: 3 }, { agent: mainAgent }),
+      /only apply to the current session/u,
+    )
+    await assert.rejects(
+      () => set.execute({ callMemberBudget: 0 }, { agent: mainAgent }),
+      /callMemberBudget is out of range: 0 \(1-999\)/u,
+    )
+    await assert.rejects(
+      () => set.execute({ callMemberBudget: 1000 }, { agent: mainAgent }),
+      /callMemberBudget is out of range/u,
+    )
+    await assert.rejects(
+      () => set.execute({ callMemberBudget: 1.5 }, { agent: mainAgent }),
+      /callMemberBudget must be an integer/u,
+    )
+    await assert.rejects(
+      () => set.execute({ callMemberBudget: 3, call_member_budget: 4 }, { agent: mainAgent }),
+      /use only one of callMemberBudget and call_member_budget/u,
     )
   } finally {
     await service?.memberTasks.dispose()
@@ -412,12 +467,12 @@ test('set_member_scope updates a tracked member conversation and stores its stan
       { agent: mainAgent },
     )
     assert.deepEqual(await service.memberScope('conv-9'), { identity: '开发', compressPercent: 10 })
-    assert.match(ignored.text, /keep \/ keepPrompt \/ avoidLongJobs 只对主对话自身生效/u)
+    assert.match(ignored.text, /keep \/ keepPrompt \/ avoidLongJobs \/ callMemberBudget 只对主对话自身生效/u)
     assert.equal(ignored.data.ignoredAvoidLongJobs, true)
 
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-9', avoidLongJobs: true }, { agent: mainAgent }),
-      /keep, keepPrompt and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent/u,
+      /keep, keepPrompt, avoidLongJobs and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent/u,
     )
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-9', compressPercent: 0 }, { agent: mainAgent }),
@@ -587,10 +642,10 @@ test('set_member_scope saves an untracked conversation and rejects invalid input
     assert.match(untracked.text, /本机未跟踪该会话，只保存设置/u)
     assert.deepEqual(await service.memberScope('conv-other'), { scope: '外部会话' })
 
-    await assert.rejects(() => set.execute({}, { agent: mainAgent }), /identity, role, scope, note, keep, keepPrompt, avoidLongJobs, or compressPercent is required/u)
+    await assert.rejects(() => set.execute({}, { agent: mainAgent }), /identity, role, scope, note, keep, keepPrompt, avoidLongJobs, callMemberBudget, or compressPercent is required/u)
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-other', avoidLongJobs: true }, { agent: mainAgent }),
-      /keep, keepPrompt and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent/u,
+      /keep, keepPrompt, avoidLongJobs and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent/u,
     )
     await assert.rejects(
       () => set.execute({ identity: 'a'.repeat(41) }, { agent: mainAgent }),

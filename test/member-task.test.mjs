@@ -646,7 +646,7 @@ test('registerTools exposes the build, deploy, member and product-stage tools', 
     assert.equal(setScope.parameters.properties.action, undefined)
     assert.deepEqual(
       Object.keys(setScope.parameters.properties).sort(),
-      ['avoidLongJobs', 'compressPercent', 'conversationId', 'identity', 'keep', 'keepPrompt', 'keep_prompt', 'note', 'role', 'scope'].sort(),
+      ['avoidLongJobs', 'callMemberBudget', 'call_member_budget', 'compressPercent', 'conversationId', 'identity', 'keep', 'keepPrompt', 'keep_prompt', 'note', 'role', 'scope'].sort(),
     )
     const setStage = tools.find(candidate => candidate.name === 'set_product_stage')
     assert.deepEqual(Object.keys(setStage.parameters.properties).sort(), ['goals', 'round', 'stage'].sort())

@@ -6,7 +6,10 @@ import test from 'node:test'
 import {
   MEMBER_ROLES,
   applyProductStage,
+  countCallMemberReplies,
+  formatCallMemberBudget,
   formatProductStageBlocked,
+  formatProductStageDefinitions,
   formatProductStageLines,
   formatProductStageResult,
   isAdvancingProductStage,
@@ -467,4 +470,59 @@ test('the set_product_stage tool writes the project state and reports possible n
     await service?.memberTasks?.dispose()
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('the stage definitions lead with all four big stages', () => {
+  const lines = formatProductStageDefinitions()
+  assert.equal(lines[0], '[产品阶段定义] 产品按 A → B → C → D → A 循环：')
+  const text = lines.join('\n')
+  assert.match(text, /- A 计划与目标：所有成员参与并提出建议/u)
+  assert.match(text, /- B 开发与测试：开发、测试、研究员参与/u)
+  assert.match(text, /- C 产品经理使用：产品经理真实使用/u)
+  assert.match(text, /- D 业务介入：业务人员开展业务工作/u)
+})
+
+test('the call_member budget counts this round only and insists on advancing when spent', () => {
+  const state = {
+    version: '20261126.1',
+    stage: 'B',
+    round: 1,
+    goals: {},
+    roundStartedAt: '2026-11-26T18:00:00.000Z',
+  }
+  const tasks = [
+    { conversationId: 'c1', replies: [{ at: '2026-11-26T17:59:00.000Z' }, { at: '2026-11-26T18:01:00.000Z' }, { at: '2026-11-26T18:02:00.000Z' }] },
+    { conversationId: 'c2', replies: [{ at: '2026-11-26T18:03:00.000Z' }] },
+  ]
+  assert.equal(countCallMemberReplies(state, tasks), 3, 'the reply before the round start does not count')
+
+  assert.deepEqual(formatCallMemberBudget(state, tasks, 5), [
+    '- call_member 预算：本轮已用 3/5，剩余 2',
+  ])
+  const spent = formatCallMemberBudget(state, tasks, 3).join('\n')
+  assert.match(spent, /\[call_member 预算用尽\] 本轮预算 3 次已用完/u)
+  assert.match(spent, /必须进入下一个阶段/u)
+  assert.match(spent, /set_product_stage 及时更新阶段和目标状态/u)
+  assert.match(spent, /set_member_scope 调大 callMemberBudget/u)
+
+  assert.deepEqual(formatCallMemberBudget(state, tasks, undefined), [], 'no budget means no line')
+  const nextRound = { ...state, round: 2, roundStartedAt: '2026-11-26T18:04:00.000Z' }
+  assert.equal(countCallMemberReplies(nextRound, tasks), 0, 'a new round resets the budget')
+})
+
+test('the member-context stage block hides member conversation statuses', () => {
+  const state = {
+    version: '20261126.1',
+    stage: 'A',
+    round: 1,
+    goals: {},
+    participation: {},
+  }
+  const tasks = [{ conversationId: 'c2', status: 'failed', statusLabel: '异常中止' }]
+  const hidden = formatProductStageLines(state, tasks, {}, { statuses: false }).join('\n')
+  assert.match(hidden, /- 未参与：c2$/mu)
+  assert.doesNotMatch(hidden, /异常中止|需先恢复会话/u)
+
+  const shown = formatProductStageLines(state, tasks, {}).join('\n')
+  assert.match(shown, /- 未参与：c2（异常中止，需先恢复会话）/u, 'tool results keep the status')
 })

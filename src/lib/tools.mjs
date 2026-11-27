@@ -390,8 +390,9 @@ export function registerTools(ctx, toolsCtx, service) {
       '`keep` 默认 false，只对自身/主对话生效：开启后，每个 turn 结束且本对话没有进行中的成员会话时，插件向本对话投递一条用户消息「继续」；由这条消息拉起的这一轮结束时不会再次投递，避免自循环。设置成员会话时忽略。',
       '`keepPrompt`（也可写 `keep_prompt`）是这条用户消息的正文，默认「继续」，最长 200 字符；空字符串恢复默认。只对自身/主对话生效，设置成员会话时忽略。',
       '`avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，主对话下一次状态快照会列出距上一次快照之间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
+      '`callMemberBudget`（也可写 `call_member_budget`）是主对话每个小阶段（阶段+轮次）可以消耗的 call_member 次数，整数 1–999，默认不限制，只对自身/主对话生效：成员每把一条回复返回给主对话（wait_member 取走或兜底投递）算消耗一次；预算用完时成员上下文会强调必须进入下一个阶段，并及时用 set_product_stage 更新阶段和目标状态。设置成员会话时忽略。',
       `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；成员会话下一次 call_member 投递前，上下文占比超过阈值就先压缩。`,
-      '至少提供 identity、role、scope、note、keep、keepPrompt、avoidLongJobs、compressPercent 之一；设置成员会话时必须有 identity、role、scope、note 或 compressPercent 之一。',
+      '至少提供 identity、role、scope、note、keep、keepPrompt、avoidLongJobs、callMemberBudget、compressPercent 之一；设置成员会话时必须有 identity、role、scope、note 或 compressPercent 之一。',
       '成员会话可以未被本机跟踪，设置仍会保存，只是不会同步任务快照。',
       '这个工具只保存设置，不给成员会话发消息、不自动加投递前缀；随对话一起设置/更新用 call_member 的 identity/role/scope 参数。',
     ].join('\n'),
@@ -437,6 +438,18 @@ export function registerTools(ctx, toolsCtx, service) {
           type: 'boolean',
           description: '只对自身/主对话生效，默认 false；开启后状态快照会列出两次快照间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
         },
+        callMemberBudget: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 999,
+          description: 'call_member 预算，只对自身/主对话生效，默认不限制；每个小阶段（阶段+轮次）内，成员每返回一条回复消耗一次，用完时成员上下文强调进入下一阶段并更新状态。',
+        },
+        call_member_budget: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 999,
+          description: 'callMemberBudget 的别名；与 callMemberBudget 只传一个。',
+        },
         compressPercent: {
           type: 'number',
           minimum: 1,
@@ -465,16 +478,20 @@ export function registerTools(ctx, toolsCtx, service) {
       const hasKeep = args.keep !== undefined
       const hasKeepPrompt = args.keepPrompt !== undefined || args.keep_prompt !== undefined
       const hasAvoidLongJobs = args.avoidLongJobs !== undefined
+      const hasCallMemberBudget = args.callMemberBudget !== undefined || args.call_member_budget !== undefined
       const hasCompressPercent = args.compressPercent !== undefined
-      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasKeepPrompt && !hasAvoidLongJobs && !hasCompressPercent) {
-        throw new Error('identity, role, scope, note, keep, keepPrompt, avoidLongJobs, or compressPercent is required')
+      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasKeepPrompt && !hasAvoidLongJobs && !hasCallMemberBudget && !hasCompressPercent) {
+        throw new Error('identity, role, scope, note, keep, keepPrompt, avoidLongJobs, callMemberBudget, or compressPercent is required')
       }
       if (args.keepPrompt !== undefined && args.keep_prompt !== undefined) {
         throw new Error('use only one of keepPrompt and keep_prompt')
       }
+      if (args.callMemberBudget !== undefined && args.call_member_budget !== undefined) {
+        throw new Error('use only one of callMemberBudget and call_member_budget')
+      }
       if (isSelf && selfId === '') throw new Error('cannot set the current session scope: no current session')
       if (!isSelf && !hasIdentity && !hasRole && !hasScope && !hasNote && !hasCompressPercent) {
-        throw new Error('keep, keepPrompt and avoidLongJobs only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation')
+        throw new Error('keep, keepPrompt, avoidLongJobs and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation')
       }
       const patch = {
         ...(hasIdentity ? { identity: args.identity } : {}),
@@ -486,6 +503,9 @@ export function registerTools(ctx, toolsCtx, service) {
           ? { keepPrompt: args.keepPrompt !== undefined ? args.keepPrompt : args.keep_prompt }
           : {}),
         ...(isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {}),
+        ...(isSelf && hasCallMemberBudget
+          ? { callMemberBudget: args.callMemberBudget !== undefined ? args.callMemberBudget : args.call_member_budget }
+          : {}),
         ...(hasCompressPercent ? { compressPercent: args.compressPercent } : {}),
       }
       // Validate before touching the store, then let the service normalise the
@@ -503,6 +523,9 @@ export function registerTools(ctx, toolsCtx, service) {
       const keepPrompt = typeof scope?.keepPrompt === 'string' && scope.keepPrompt !== ''
         ? scope.keepPrompt
         : DEFAULT_KEEP_PROMPT
+      const budgetText = Number.isSafeInteger(scope?.callMemberBudget) && scope.callMemberBudget >= 1
+        ? `${String(scope.callMemberBudget)} 次/轮（用完后提示进入下一阶段）`
+        : '不限制'
       const lines = [
         isSelf
           ? `已设置自身（会话 ${selfId}）的身份/工作范围与配置。`
@@ -515,11 +538,12 @@ export function registerTools(ctx, toolsCtx, service) {
           ? [
               `保持目标：${scope?.keep === true ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}`,
               `避免耗时：${scope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）`,
+              `call_member 预算：${budgetText}（只对主对话生效）`,
               `压缩阈值：${formatOneDecimal(compressThreshold)}%`,
             ]
           : [`压缩阈值：${formatOneDecimal(compressThreshold)}%（投递前超过该占比自动压缩）`]),
-        ...(!isSelf && (hasKeep || hasKeepPrompt || hasAvoidLongJobs)
-          ? ['keep / keepPrompt / avoidLongJobs 只对主对话自身生效，设置成员会话时已忽略。']
+        ...(!isSelf && (hasKeep || hasKeepPrompt || hasAvoidLongJobs || hasCallMemberBudget)
+          ? ['keep / keepPrompt / avoidLongJobs / callMemberBudget 只对主对话自身生效，设置成员会话时已忽略。']
           : []),
         ...(isSelf && hasRole ? ['role 只对成员会话生效，设置自身时已忽略。'] : []),
         ...(isSelf && hasNote ? ['note 只对成员会话生效，设置自身时已忽略。'] : []),
@@ -538,12 +562,14 @@ export function registerTools(ctx, toolsCtx, service) {
           keep: isSelf ? (scope?.keep === true) : null,
           keepPrompt: isSelf ? keepPrompt : null,
           avoidLongJobs: scope?.avoidLongJobs === true,
+          callMemberBudget: isSelf && Number.isSafeInteger(scope?.callMemberBudget) ? scope.callMemberBudget : null,
           tracked,
           note: !isSelf ? (scope?.note ?? null) : null,
           ignoredRole: isSelf && hasRole,
           ignoredKeep: !isSelf && hasKeep,
           ignoredKeepPrompt: !isSelf && hasKeepPrompt,
           ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
+          ignoredCallMemberBudget: !isSelf && hasCallMemberBudget,
           ignoredNote: isSelf && hasNote,
         },
       }

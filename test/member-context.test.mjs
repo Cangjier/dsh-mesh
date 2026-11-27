@@ -121,10 +121,13 @@ test('a step with running member conversations carries one status snapshot', asy
     assert.equal(message.source.kind, MEMBER_CONTEXT_SOURCE)
     assert.equal(message.source.form, 'snapshot')
     const text = message.content[0].text
-    assert.match(text, /本对话跟踪 2 个成员会话，其中 1 个进行中/u)
-    assert.match(text, /工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）/u)
-    assert.match(text, /工作区：unknown；会话：c2（B 10\.66\.66\.2，空闲，第 4 轮）/u)
-    assert.match(text, /^\[成员上下文\]/u)
+    // The big-stage definitions lead, and no member conversation status leaks
+    // into the snapshot.
+    assert.match(text, /^\[产品阶段定义\] 产品按 A → B → C → D → A 循环：/u)
+    assert.match(text, /- A 计划与目标：所有成员参与并提出建议/u)
+    assert.match(text, /- 身份：未设置；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2）；工作范围：未设置/u)
+    assert.match(text, /- 身份：未设置；工作区：unknown；会话：c2（B 10\.66\.66\.2）；工作范围：未设置/u)
+    assert.doesNotMatch(text, /进行中|空闲|异常中止/u)
     assert.doesNotMatch(text, /wait_member/u)
   } finally {
     h.context.dispose()
@@ -222,7 +225,7 @@ test('disposing a session forgets its injection clock', async () => {
   }
 })
 
-test('the snapshot formatter covers every documented state', () => {
+test('the snapshot never reports member conversation statuses', () => {
   const text = formatMemberStatusSnapshot([
     { ...running, conversationId: 'a', status: 'running' },
     { ...running, conversationId: 'b', status: 'starting' },
@@ -230,11 +233,11 @@ test('the snapshot formatter covers every documented state', () => {
     { ...running, conversationId: 'd', status: 'failed' },
     { ...running, conversationId: 'e', status: 'interrupted' },
   ], { now: 1_000_000 })
-  assert.match(text, /工作区：dsh-mesh；会话：a（B 10\.66\.66\.2，进行中/u)
-  assert.match(text, /工作区：dsh-mesh；会话：b（B 10\.66\.66\.2，进行中/u)
-  assert.match(text, /工作区：dsh-mesh；会话：c（B 10\.66\.66\.2，空闲/u)
-  assert.match(text, /工作区：dsh-mesh；会话：d（B 10\.66\.66\.2，异常中止/u)
-  assert.match(text, /工作区：dsh-mesh；会话：e（B 10\.66\.66\.2，异常中止/u)
+  assert.doesNotMatch(text, /进行中|空闲|异常中止|需先恢复会话/u)
+  assert.doesNotMatch(text, /第 \d+ 轮/u, 'a member line carries no turn counter')
+  for (const id of ['a', 'b', 'c', 'd', 'e']) {
+    assert.match(text, new RegExp(`会话：${id}（B 10\\.66\\.66\\.2）`, 'u'))
+  }
 })
 
 test('a snapshot shows each conversation identity and work scope', () => {
@@ -242,8 +245,8 @@ test('a snapshot shows each conversation identity and work scope', () => {
     { ...running, conversationId: 'c1', profile: { name: 'B', identity: '开发', scope: '插件开发' } },
     { ...settled, conversationId: 'c2', profile: { name: 'B', identity: '测试', scope: null } },
   ], { now: 1_000_000 })
-  assert.match(text, /身份：开发；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）；工作范围：插件开发/u)
-  assert.match(text, /身份：测试；工作区：unknown；会话：c2（B 10\.66\.66\.2，空闲，第 4 轮）；工作范围：未设置/u)
+  assert.match(text, /身份：开发；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2）；工作范围：插件开发/u)
+  assert.match(text, /身份：测试；工作区：unknown；会话：c2（B 10\.66\.66\.2）；工作范围：未设置/u)
   assert.equal(text.match(/下次 call_member 带 identity 和 scope 参数/gu)?.length, 1, 'one aggregate hint, not one per line')
   assert.match(text, /还有成员会话没有身份\/工作范围：c2（B）/u)
 })
@@ -258,7 +261,7 @@ test('a fully profiled snapshot carries no profile hint', () => {
 
 test('an old conversation without a profile snapshot is reported as missing', () => {
   const text = formatMemberStatusSnapshot([{ ...running, conversationId: 'legacy' }], { now: 1_000_000 })
-  assert.match(text, /身份：未设置；工作区：dsh-mesh；会话：legacy（B 10\.66\.66\.2，进行中，第 2 轮）；工作范围：未设置/u)
+  assert.match(text, /身份：未设置；工作区：dsh-mesh；会话：legacy（B 10\.66\.66\.2）；工作范围：未设置/u)
   assert.match(text, /还有成员会话没有身份\/工作范围：legacy（B）/u)
   assert.equal(text.match(/下次 call_member 带 identity 和 scope 参数/gu)?.length, 1)
 })
@@ -273,7 +276,7 @@ test('a snapshot shows the self identity, work scope and effective settings', ()
     selfId: 'session-a',
     selfScope: { identity: '网关', scope: '成员发现', compressPercent: 12.5 },
   })
-  assert.match(text, /身份：网关（自身，会话 session-a）；工作范围：成员发现；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）；压缩阈值：12\.5%/u)
+  assert.match(text, /身份：网关（自身，会话 session-a）；工作范围：成员发现；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）；call_member 预算：不限制（只对主对话生效）；压缩阈值：12\.5%/u)
   assert.match(text, /保持目标：关闭/u)
   assert.match(text, /避免耗时：关闭/u)
   assert.doesNotMatch(text, /还没有身份\/工作范围/u)
@@ -293,7 +296,7 @@ test('a member line shows the main-only note when the scope carries one', () => 
     selfId: 'session-a',
     scopes: { c1: { note: '只读复核，不要改内核文件' } },
   })
-  assert.match(text, /身份：未设置；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）；工作范围：未设置；备注：只读复核，不要改内核文件/u)
+  assert.match(text, /身份：未设置；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2）；工作范围：未设置；备注：只读复核，不要改内核文件/u)
 })
 
 test('a member line only shows an explicitly configured compression threshold', () => {
@@ -304,7 +307,7 @@ test('a member line only shows an explicitly configured compression threshold', 
     now: 1_000_000,
     scopes: { c1: { compressPercent: 10 } },
   })
-  assert.match(text, /身份：未设置；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）；工作范围：未设置；压缩阈值：10%/u)
+  assert.match(text, /身份：未设置；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2）；工作范围：未设置；压缩阈值：10%/u)
   assert.doesNotMatch(text, /c2（B[^\n]*压缩阈值/u, 'the default 35% is not repeated on every member line')
 })
 
@@ -324,7 +327,7 @@ test('a stored scope wins over the task profile snapshot', () => {
     selfScope: { identity: '网关', scope: '成员发现' },
     scopes: { c1: { identity: '新身份', scope: '新范围' } },
   })
-  assert.match(text, /身份：新身份；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2，进行中，第 2 轮）；工作范围：新范围/u)
+  assert.match(text, /身份：新身份；工作区：dsh-mesh；会话：c1（B 10\.66\.66\.2）；工作范围：新范围/u)
 })
 
 /** Let one turn-end nudge and its async reads finish. */
@@ -433,7 +436,7 @@ test('a long job with a running member conversation still injects the normal sna
     const decision = await h.preStep(h.payload, h.next)
     assert.equal(decision.messages.length, 1)
     const text = decision.messages[0].content[0].text
-    assert.match(text, /c1（B 10\.66\.66\.2/u)
+    assert.match(text, /c1（B 10\.66\.66\.2）/u)
     assert.match(text, /bash：audit（耗时 1 分 40 秒）/u)
   } finally {
     h.context.dispose()
@@ -506,6 +509,44 @@ test('a tracked conversation without a stage asks for one', async () => {
     const decision = await h.preStep(h.payload, h.next)
     assert.equal(decision.messages.length, 1)
     assert.match(decision.messages[0].content[0].text, /- 还没有设置产品阶段：用 set_product_stage/u)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('a spent call_member budget makes the snapshot insist on the next stage', async () => {
+  const stage = {
+    version: '20261126.1',
+    stage: 'A',
+    round: 1,
+    goals: {},
+    participation: {},
+    roundStartedAt: '2026-11-26T18:00:00.000Z',
+  }
+  const service = {
+    async memberScopes() {
+      return { 'session-a': { identity: '网关', scope: '成员发现', callMemberBudget: 2 } }
+    },
+    async productStage() { return stage },
+  }
+  const tasks = [{
+    ...settled,
+    conversationId: 'c1',
+    replies: [
+      { at: '2026-11-26T18:01:00.000Z' },
+      { at: '2026-11-26T18:02:00.000Z' },
+    ],
+  }]
+  const h = harness({ tasks, cwd: '/root/ws/project', service })
+  try {
+    const decision = await h.preStep(h.payload, h.next)
+    assert.equal(decision.messages.length, 1)
+    const text = decision.messages[0].content[0].text
+    assert.equal(text.split('\n')[0], '[产品阶段定义] 产品按 A → B → C → D → A 循环：')
+    assert.match(text, /- call_member 预算：本轮已用 2\/2，剩余 0/u)
+    assert.match(text, /\[call_member 预算用尽\][^\n]*必须进入下一个阶段/u)
+    assert.match(text, /set_product_stage 及时更新阶段和目标状态/u)
+    assert.match(text, /call_member 预算：2 次\/轮/u)
   } finally {
     h.context.dispose()
   }

@@ -1,19 +1,24 @@
 /**
- * Member status context: the pre-step snapshot.
+ * Member context: the pre-step snapshot.
  *
  * A conversation that delegated to members should not have to remember to ask
  * `status_member`/`wait_member` in every turn. Once it has tracked member
- * conversations, each of its steps may carry a snapshot of every conversation
- * it tracks, the conversation's own identity/work scope, and the product stage
- * (version, A/B/C/D stage, goals, participation and the next
- * `set_product_stage` calls):
+ * conversations, each of its steps may carry the big-stage definitions, the
+ * product stage (version, A/B/C/D stage, goals, call_member budget,
+ * participation and the next `set_product_stage` calls), the conversation's
+ * own identity/work scope, and the tracked conversations' identity/workspace:
  *
  * - the snapshot is request-only context attached to `decision.messages` from
  *   an `agent/pre-step` listener, at most once per
  *   {@link MEMBER_STATUS_INTERVAL_MS};
+ * - member conversation statuses (进行中 / 空闲 / 异常中止) are not part of it;
+ *   `status_member` answers that question when it is actually asked;
  * - a running member conversation, a long job kept by `avoidLongJobs`, a roster
  *   gap in `.coder/members/all.md`, or an active product stage makes the step
  *   eligible;
+ * - when the self scope sets `callMemberBudget`, the stage block counts the
+ *   replies accepted this round and, once the budget is spent, insists on
+ *   moving to the next stage and updating the stage state;
  * - when the self scope sets `avoidLongJobs`, the snapshot names the settled
  *   jobs longer than {@link LONG_JOB_WARN_MS} since the previous snapshot and
  *   recommends delegating that work to a member conversation;
@@ -33,7 +38,7 @@ import { describeMemberTask, memberTaskProfile } from './member-tasks.mjs'
 import { isMemberSession } from './member-sessions.mjs'
 import { DEFAULT_COMPRESS_PERCENT, effectiveCompressPercent } from './service.mjs'
 import { formatMemberGapLines, memberRosterGaps, readMemberRoster } from './member-roster.mjs'
-import { formatProductStageLines } from './product-stage.mjs'
+import { formatProductStageDefinitions, formatProductStageLines } from './product-stage.mjs'
 
 /** Minimum distance between two status snapshots in one session. */
 export const MEMBER_STATUS_INTERVAL_MS = 60_000
@@ -140,7 +145,11 @@ export function formatJobDuration(ms) {
 }
 
 /**
- * Render one tracked conversation line, shared by the snapshot and the push.
+ * Render one tracked conversation line for the snapshot.
+ *
+ * The line carries identity, workspace and scope only: member conversation
+ * statuses are not part of the snapshot. The main conversation asks for a
+ * status with `status_member` when it actually needs one.
  * @param {object} task task or status entry.
  * @param {Record<string, object>} [scopes] conversation id -> stored scope.
  * @returns {string} the bullet line.
@@ -155,11 +164,10 @@ function formatMemberConversationLine(task, scopes = {}) {
   const noteText = typeof stored?.note === 'string' && stored.note.trim() !== ''
     ? `；备注：${stored.note.trim().length > 120 ? `${stored.note.trim().slice(0, 120)}…` : stored.note.trim()}`
     : ''
-  const turn = entry.turns !== null && entry.turns > 0 ? `，第 ${String(entry.turns)} 轮` : ''
   // Identity and workspace lead the line: a main conversation with several
   // parallel member conversations scans by identity (and secondarily by
   // workspace), not by an opaque conversation id.
-  return `- 身份：${profile?.identity ?? '未设置'}；工作区：${entry.workspace}；会话：${entry.conversationId}（${entry.member} ${entry.memberIp}，${entry.statusLabel}${turn}）；工作范围：${profile?.scope ?? '未设置'}${explicitCompress}${noteText}`
+  return `- 身份：${profile?.identity ?? '未设置'}；工作区：${entry.workspace}；会话：${entry.conversationId}（${entry.member} ${entry.memberIp}）；工作范围：${profile?.scope ?? '未设置'}${explicitCompress}${noteText}`
 }
 
 /**
@@ -174,34 +182,40 @@ function formatSelfLine(selfId, selfScope) {
   const keepPrompt = typeof selfScope?.keepPrompt === 'string' && selfScope.keepPrompt !== ''
     ? selfScope.keepPrompt
     : DEFAULT_KEEP_PROMPT
-  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${keep ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
+  const budget = Number.isSafeInteger(selfScope?.callMemberBudget) && selfScope.callMemberBudget >= 1
+    ? `${String(selfScope.callMemberBudget)} 次/轮`
+    : '不限制'
+  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${keep ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；call_member 预算：${budget}（只对主对话生效）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
 }
 
 /**
  * Render one status snapshot for the model.
  *
- * Statuses are the initiator's task states, matching the documented mapping:
- * running/starting = 进行中, completed = 空闲, failed/interrupted = 异常中止.
+ * The snapshot leads with the big-stage definitions, then the product stage
+ * (version, round, goals, budget, participation and the possible next moves),
+ * then the conversation's own settings and the tracked conversations'
+ * identity/workspace. Member conversation statuses are deliberately absent.
  * @param {object[]} tasks every conversation this session tracks.
- * @param {{now?: number, selfId?: string, selfScope?: object|null, scopes?: Record<string, object>, longJobs?: object[], gaps?: string[], stage?: object|null}} [options] snapshot facts (tests pin the time).
+ * @param {{selfId?: string, selfScope?: object|null, scopes?: Record<string, object>, longJobs?: object[], gaps?: string[], stage?: object|null}} [options] snapshot facts.
  * @returns {string} snapshot text.
  */
 export function formatMemberStatusSnapshot(tasks, options = {}) {
   const list = Array.isArray(tasks) ? tasks : []
-  const running = list.filter(task => task?.status === 'running' || task?.status === 'starting')
-  const at = Number.isFinite(options.now) ? options.now : Date.now()
   const selfId = String(options.selfId ?? '')
   const selfScope = options.selfScope ?? null
   const scopes = options.scopes ?? {}
   const gapLines = Array.isArray(options.gaps) ? options.gaps : []
   const stage = options.stage ?? null
-  // The stage block leads: it answers what version and round the conversation
-  // is working on before it lists who answered.
+  // The stage block follows the definitions: it answers what version and round
+  // the conversation is working on before it lists who answered.
   const stageLines = stage === null
     ? (list.length === 0 ? [] : ['- 还没有设置产品阶段：用 set_product_stage 设置版本、阶段与目标（如 { "stage": "A" }）。'])
-    : formatProductStageLines(stage, list, scopes)
+    : formatProductStageLines(stage, list, scopes, {
+        callMemberBudget: selfScope?.callMemberBudget,
+        statuses: false,
+      })
   const lines = [
-    `[成员上下文] 本对话跟踪 ${String(list.length)} 个成员会话，其中 ${String(running.length)} 个进行中（快照 ${new Date(at).toISOString()}）。`,
+    ...formatProductStageDefinitions(),
     ...stageLines,
     formatSelfLine(selfId, selfScope),
     ...list.map(task => formatMemberConversationLine(task, scopes)),

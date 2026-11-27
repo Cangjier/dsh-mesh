@@ -111,6 +111,9 @@ export const MEMBER_NOTE_MAX = 500
 /** Longest custom keep prompt a main conversation may carry. */
 export const MEMBER_KEEP_PROMPT_MAX = 200
 
+/** Highest call_member budget a main conversation may set for one round. */
+export const MEMBER_CALL_BUDGET_MAX = 999
+
 /**
  * Normalise one session-scope patch.
  *
@@ -121,10 +124,12 @@ export const MEMBER_KEEP_PROMPT_MAX = 200
  * `keepPrompt` is a trimmed string (at most {@link MEMBER_KEEP_PROMPT_MAX})
  * that replaces the default "继续" nudge; `note` is a trimmed string (at most
  * {@link MEMBER_NOTE_MAX}) that is never delivered to the member.
+ * `callMemberBudget` is an integer 1..{@link MEMBER_CALL_BUDGET_MAX} that caps
+ * the replies one round may bring back to a main conversation.
  * `compressPercent` a number within 1..100. The caller merges the result into
  * the stored record.
- * @param {{identity?: unknown, role?: unknown, scope?: unknown, keep?: unknown, keepPrompt?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] raw patch.
- * @returns {{identity?: string|null, role?: string|null, scope?: string|null, keep?: boolean, keepPrompt?: string|null, avoidLongJobs?: boolean, note?: string|null, compressPercent?: number}} normalised patch.
+ * @param {{identity?: unknown, role?: unknown, scope?: unknown, keep?: unknown, keepPrompt?: unknown, avoidLongJobs?: unknown, callMemberBudget?: unknown, note?: unknown, compressPercent?: unknown}} [patch] raw patch.
+ * @returns {{identity?: string|null, role?: string|null, scope?: string|null, keep?: boolean, keepPrompt?: string|null, avoidLongJobs?: boolean, callMemberBudget?: number, note?: string|null, compressPercent?: number}} normalised patch.
  */
 export function normalizeMemberScopePatch(patch = {}) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
@@ -178,6 +183,14 @@ export function normalizeMemberScopePatch(patch = {}) {
   if (patch.avoidLongJobs !== undefined) {
     if (typeof patch.avoidLongJobs !== 'boolean') throw new Error('avoidLongJobs must be a boolean')
     normalized.avoidLongJobs = patch.avoidLongJobs
+  }
+  if (patch.callMemberBudget !== undefined) {
+    const value = patch.callMemberBudget
+    if (!Number.isSafeInteger(value)) throw new Error('callMemberBudget must be an integer')
+    if (value < 1 || value > MEMBER_CALL_BUDGET_MAX) {
+      throw new Error(`callMemberBudget is out of range: ${String(value)} (1-${String(MEMBER_CALL_BUDGET_MAX)})`)
+    }
+    normalized.callMemberBudget = value
   }
   if (patch.compressPercent !== undefined) {
     const value = patch.compressPercent
@@ -850,14 +863,14 @@ export class MeshService {
   }
 
   /**
-   * Identity, standard role, work scope, keep flag and compaction settings for
-   * conversations, keyed by conversation id.
+   * Identity, standard role, work scope, keep flag, call_member budget and
+   * compaction settings for conversations, keyed by conversation id.
    *
    * The file is only an optional hint book: a missing, unreadable, or damaged
    * file is the same as "nothing set yet", never a startup failure. Only the
    * fields that were actually set are stored; defaults are applied by readers
    * ({@link effectiveCompressPercent}).
-   * @returns {Promise<Record<string, {identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, note?: string, compressPercent?: number}>>} scopes.
+   * @returns {Promise<Record<string, {identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: number, note?: string, compressPercent?: number}>>} scopes.
    */
   async memberScopes() {
     try {
@@ -874,10 +887,14 @@ export class MeshService {
         const keep = typeof value.keep === 'boolean' ? value.keep : undefined
         const keepPrompt = savedScopeText(value.keepPrompt, MEMBER_KEEP_PROMPT_MAX)
         const avoidLongJobs = typeof value.avoidLongJobs === 'boolean' ? value.avoidLongJobs : undefined
+        const callMemberBudget = savedScopeNumber(
+          value.callMemberBudget,
+          candidate => Number.isSafeInteger(candidate) && candidate >= 1 && candidate <= MEMBER_CALL_BUDGET_MAX,
+        )
         const note = savedScopeText(value.note, MEMBER_NOTE_MAX)
         const compressPercent = savedScopeNumber(value.compressPercent, candidate => candidate >= 1 && candidate <= 100)
         if (identity === null && role === null && scope === null && keep === undefined && keepPrompt === null
-          && avoidLongJobs === undefined && note === null && compressPercent === undefined) continue
+          && avoidLongJobs === undefined && callMemberBudget === undefined && note === null && compressPercent === undefined) continue
         scopes[rawId.trim()] = {
           ...(identity === null ? {} : { identity }),
           ...(role === null ? {} : { role }),
@@ -885,6 +902,7 @@ export class MeshService {
           ...(keep === undefined ? {} : { keep }),
           ...(keepPrompt === null ? {} : { keepPrompt }),
           ...(avoidLongJobs === undefined ? {} : { avoidLongJobs }),
+          ...(callMemberBudget === undefined ? {} : { callMemberBudget }),
           ...(note === null ? {} : { note }),
           ...(compressPercent === undefined ? {} : { compressPercent }),
         }
@@ -898,7 +916,7 @@ export class MeshService {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, note?: string, compressPercent?: number}|null>} scope.
+   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: number, note?: string, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? '').trim()
@@ -913,12 +931,12 @@ export class MeshService {
    * Only the fields present in the patch change. An empty string clears that
    * text field (the record is dropped when nothing remains). `role` is the
    * member's standard identity; only the member target is supposed to pass it.
-   * `keep`, `keepPrompt` and `avoidLongJobs` are stored as given and only the
-   * self target uses them. `note` is main-conversation-only metadata and is
-   * never injected or delivered to the member. `compressPercent` applies to
-   * both self and member conversations.
+   * `keep`, `keepPrompt`, `avoidLongJobs` and `callMemberBudget` are stored as
+   * given and only the self target uses them. `note` is main-conversation-only
+   * metadata and is never injected or delivered to the member.
+   * `compressPercent` applies to both self and member conversations.
    * @param {string} conversationId conversation or session id.
-   * @param {{identity?: unknown, role?: unknown, scope?: unknown, keep?: unknown, keepPrompt?: unknown, avoidLongJobs?: unknown, note?: unknown, compressPercent?: unknown}} [patch] fields to change.
+   * @param {{identity?: unknown, role?: unknown, scope?: unknown, keep?: unknown, keepPrompt?: unknown, avoidLongJobs?: unknown, callMemberBudget?: unknown, note?: unknown, compressPercent?: unknown}} [patch] fields to change.
    * @returns {Promise<{ok: boolean, scopes: Record<string, object>, scope: object|null}>} saved scopes.
    */
   async setMemberScope(conversationId, patch = {}) {
@@ -945,6 +963,7 @@ export class MeshService {
       else next.keepPrompt = normalized.keepPrompt
     }
     if (normalized.avoidLongJobs !== undefined) next.avoidLongJobs = normalized.avoidLongJobs
+    if (normalized.callMemberBudget !== undefined) next.callMemberBudget = normalized.callMemberBudget
     if (normalized.note !== undefined) {
       if (normalized.note === null) delete next.note
       else next.note = normalized.note

@@ -1,15 +1,18 @@
 /**
  * Model-visible tools for the mesh plugin.
  *
- * Nine tools:
- *   build          deterministic source build, waits for the final state
- *   deploy         SSH blue-green deployment, waits for the final state
- *   repack         refresh an existing offline package from this checkout
- *   members        read-only WireGuard member discovery
- *   call_member    start / continue a conversation on another member
- *   wait_member    bounded wait for one or more member tasks, returns on the first
- *   status_member  live state and the last two delivered messages of tracked tasks
- *   remove_member  delete a conversation, its workspace, and the workspace directory
+ * Eleven tools:
+ *   build            deterministic source build, waits for the final state
+ *   deploy           SSH blue-green deployment, waits for the final state
+ *   repack           refresh an existing offline package from this checkout
+ *   members          read-only WireGuard member discovery
+ *   call_member      start / continue a conversation on another member
+ *   set_member_scope identity, standard role, scope and per-stage settings
+ *   set_product_stage product version, A/B/C/D stage, round and goals
+ *   wait_member      bounded wait for one or more member tasks, returns on the first
+ *   status_member    live state and the last two delivered messages of tracked tasks
+ *   remove_member    delete a conversation, its workspace, and the workspace directory
+ *   stop_all_member  ask every running member conversation to converge and stop
  *
  * @module @local/dsh-mesh/tools
  */
@@ -52,6 +55,9 @@ function callMemberBudgetSchema() {
     additionalProperties: false,
   }
 }
+
+/** The fixed instruction `stop_all_member` sends to every running member conversation. */
+export const STOP_ALL_MEMBER_PROMPT = '请尽快停止工作，收敛手中工作，该提交推送的尽快处理。'
 
 /**
  * Register the tools on an injected `tools` context.
@@ -411,11 +417,12 @@ export function registerTools(ctx, toolsCtx, service) {
       '`keep` 默认 false，只对自身/主对话生效：开启后，每个 turn 结束且本对话没有进行中的成员会话时，插件向本对话投递一条用户消息「继续」；由这条消息拉起的这一轮结束时不会再次投递，避免自循环。设置成员会话时忽略。',
       '`keepPrompt`（也可写 `keep_prompt`）是这条用户消息的正文，默认「继续」，最长 200 字符；空字符串恢复默认。只对自身/主对话生效，设置成员会话时忽略。',
       '`avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，主对话下一次状态快照会列出距上一次快照之间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
+      '`budgetAudit` 默认 false，只对自身/主对话生效：开启后，call_member 预算耗尽时启动 fork 子代理审查产品流程（每个小阶段最多 3 次、间隔至少 10 分钟）。设置成员会话时忽略。',
       '`callMemberBudget`（也可写 `call_member_budget`）是**每个大阶段单独**的 call_member 预算，可只给要设的阶段（A/B/C/D），每个整数 1–999，没有统一值；只对自身/主对话生效。没设置的阶段在运行时默认为该阶段**参与成员数量 × 2**（还没有参与成员时按 1 计）。成员每把一条回复返回给主对话（wait_member 取走或兜底投递）算对应阶段消耗一次；预算用完时成员上下文会强调必须进入下一个阶段，并及时用 set_product_stage 更新阶段和目标状态。设置成员会话时忽略。',
       `预算额度只能由用户调整：设置 callMemberBudget 时工具会读取最近 ${String(BUDGET_AUTH_MESSAGE_WINDOW)} 条用户消息，只有其中存在“预算 + 调整/设置 + 数字”的明确指示才写入；没有则返回 ok:false，配置不变。`,
       '预算用尽时，成员上下文会自动启动一个 fork 子代理审查当前产品流程（每个小阶段最多 3 次、间隔至少 10 分钟）：检查是否按阶段工作、是否超出阶段、预算为什么耗尽；如果主对话使用不合理，审查结论会作为警告和下一步建议投递回主对话。',
       `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；成员会话下一次 call_member 投递前，上下文占比超过阈值就先压缩。`,
-      '至少提供 identity、role、scope、note、keep、keepPrompt、avoidLongJobs、callMemberBudget、compressPercent 之一；设置成员会话时必须有 identity、role、scope、note 或 compressPercent 之一。',
+      '至少提供 identity、role、scope、note、keep、keepPrompt、avoidLongJobs、budgetAudit、callMemberBudget、compressPercent 之一；设置成员会话时必须有 identity、role、scope、note 或 compressPercent 之一。',
       '成员会话可以未被本机跟踪，设置仍会保存，只是不会同步任务快照。',
       '这个工具只保存设置，不给成员会话发消息、不自动加投递前缀；随对话一起设置/更新用 call_member 的 identity/role/scope 参数。',
     ].join('\n'),
@@ -461,6 +468,10 @@ export function registerTools(ctx, toolsCtx, service) {
           type: 'boolean',
           description: '只对自身/主对话生效，默认 false；开启后状态快照会列出两次快照间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
         },
+        budgetAudit: {
+          type: 'boolean',
+          description: '只对自身/主对话生效，默认 false；开启后 call_member 预算耗尽时自动起 fork 子代理审查产品流程（每阶段最多 3 次、间隔 10 分钟）。设置成员会话时忽略。',
+        },
         callMemberBudget: callMemberBudgetSchema(),
         call_member_budget: {
           ...callMemberBudgetSchema(),
@@ -494,10 +505,11 @@ export function registerTools(ctx, toolsCtx, service) {
       const hasKeep = args.keep !== undefined
       const hasKeepPrompt = args.keepPrompt !== undefined || args.keep_prompt !== undefined
       const hasAvoidLongJobs = args.avoidLongJobs !== undefined
+      const hasBudgetAudit = args.budgetAudit !== undefined
       const hasCallMemberBudget = args.callMemberBudget !== undefined || args.call_member_budget !== undefined
       const hasCompressPercent = args.compressPercent !== undefined
-      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasKeepPrompt && !hasAvoidLongJobs && !hasCallMemberBudget && !hasCompressPercent) {
-        throw new Error('identity, role, scope, note, keep, keepPrompt, avoidLongJobs, callMemberBudget, or compressPercent is required')
+      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasKeepPrompt && !hasAvoidLongJobs && !hasBudgetAudit && !hasCallMemberBudget && !hasCompressPercent) {
+        throw new Error('identity, role, scope, note, keep, keepPrompt, avoidLongJobs, budgetAudit, callMemberBudget, or compressPercent is required')
       }
       if (args.keepPrompt !== undefined && args.keep_prompt !== undefined) {
         throw new Error('use only one of keepPrompt and keep_prompt')
@@ -507,7 +519,7 @@ export function registerTools(ctx, toolsCtx, service) {
       }
       if (isSelf && selfId === '') throw new Error('cannot set the current session scope: no current session')
       if (!isSelf && !hasIdentity && !hasRole && !hasScope && !hasNote && !hasCompressPercent) {
-        throw new Error('keep, keepPrompt, avoidLongJobs and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation')
+        throw new Error('keep, keepPrompt, avoidLongJobs, budgetAudit and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation')
       }
       const patch = {
         ...(hasIdentity ? { identity: args.identity } : {}),
@@ -519,6 +531,7 @@ export function registerTools(ctx, toolsCtx, service) {
           ? { keepPrompt: args.keepPrompt !== undefined ? args.keepPrompt : args.keep_prompt }
           : {}),
         ...(isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {}),
+        ...(isSelf && hasBudgetAudit ? { budgetAudit: args.budgetAudit } : {}),
         ...(isSelf && hasCallMemberBudget
           ? { callMemberBudget: args.callMemberBudget !== undefined ? args.callMemberBudget : args.call_member_budget }
           : {}),
@@ -564,12 +577,13 @@ export function registerTools(ctx, toolsCtx, service) {
           ? [
               `保持目标：${scope?.keep === true ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}`,
               `避免耗时：${scope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）`,
+              `预算审查：${scope?.budgetAudit === true ? '开启（只对主对话生效）' : '关闭（只对主对话生效）'}`,
               `call_member 预算：${budgetText}（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）`,
               `压缩阈值：${formatOneDecimal(compressThreshold)}%`,
             ]
           : [`压缩阈值：${formatOneDecimal(compressThreshold)}%（投递前超过该占比自动压缩）`]),
-        ...(!isSelf && (hasKeep || hasKeepPrompt || hasAvoidLongJobs || hasCallMemberBudget)
-          ? ['keep / keepPrompt / avoidLongJobs / callMemberBudget 只对主对话自身生效，设置成员会话时已忽略。']
+        ...(!isSelf && (hasKeep || hasKeepPrompt || hasAvoidLongJobs || hasBudgetAudit || hasCallMemberBudget)
+          ? ['keep / keepPrompt / avoidLongJobs / budgetAudit / callMemberBudget 只对主对话自身生效，设置成员会话时已忽略。']
           : []),
         ...(isSelf && hasRole ? ['role 只对成员会话生效，设置自身时已忽略。'] : []),
         ...(isSelf && hasNote ? ['note 只对成员会话生效，设置自身时已忽略。'] : []),
@@ -588,6 +602,7 @@ export function registerTools(ctx, toolsCtx, service) {
           keep: isSelf ? (scope?.keep === true) : null,
           keepPrompt: isSelf ? keepPrompt : null,
           avoidLongJobs: scope?.avoidLongJobs === true,
+          budgetAudit: isSelf ? (scope?.budgetAudit === true) : null,
           callMemberBudget: isSelf ? (scope?.callMemberBudget ?? null) : null,
           tracked,
           note: !isSelf ? (scope?.note ?? null) : null,
@@ -595,6 +610,7 @@ export function registerTools(ctx, toolsCtx, service) {
           ignoredKeep: !isSelf && hasKeep,
           ignoredKeepPrompt: !isSelf && hasKeepPrompt,
           ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
+          ignoredBudgetAudit: !isSelf && hasBudgetAudit,
           ignoredCallMemberBudget: !isSelf && hasCallMemberBudget,
           ignoredNote: isSelf && hasNote,
         },
@@ -1152,7 +1168,7 @@ export function registerTools(ctx, toolsCtx, service) {
       '顺序固定：先在成员上归档（停止正在跑的工作、把会话移出 Web 列表），再删除 interop 对话记录，再删除工作区记录，最后递归清空并删除工作区目录。',
       '删除后这个会话id 不能再投递，它占用的工作区名也会空出来，可以重新用同名 workspace 发起新对话。',
       '工作区目录只有在成员的工作区根目录（~/.dsh/workspaces）之下才会被删除；默认工作区可能指向 Documents 之类的用户目录，那种情况只删记录、不删目录。',
-      '目标成员需要带删除接口的新版插件；旧版本会返回明确错误，不会假装成功。',
+      '成员侧可能因版本旧、不可达、目录占用等原因无法归档/删除；无论成员侧结果如何，本机任务记录和日志都会被删除，本机不再跟踪这个会话。失败会在返回里用 [警告] 说明原因。',
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -1177,16 +1193,24 @@ export function registerTools(ctx, toolsCtx, service) {
       const task = result.task
       const workspace = result.workspace !== '' ? result.workspace : memberTaskWorkspace(task)
       const directory = result.cwd !== '' ? result.cwd : '（成员未报告目录）'
+      const memberRemoved = result.memberRemoved === true
+      const text = memberRemoved
+        ? [
+            `已删除成员会话 ${task.conversationId}（${task.member} ${task.memberIp}，工作区 ${workspace}）。`,
+            `成员侧已归档、删除对话记录、删除工作区记录（${result.recordRemoved ? '已删除' : '没有对应记录'}）。`,
+            result.directoryRemoved
+              ? `工作区目录已清空并删除：${directory}`
+              : `工作区目录没有删除（可能不在工作区根目录下，或删除失败）：${directory}`,
+            '本机的任务记录和日志也已删除；这个会话id 不能再投递，工作区名可以重新使用。',
+          ].join('\n')
+        : [
+            `[警告] 已移除本机成员记录 ${task.conversationId}（${task.member} ${task.memberIp}）；成员侧归档/删除失败。`,
+            `成员侧失败原因：${result.memberError ?? '未知错误'}`,
+            '本机任务记录和日志已删除，本机不再跟踪这个会话；成员上的对话可能仍然存在，需要时到成员的 Web UI 归档/删除。',
+          ].join('\n')
       return {
         ok: true,
-        text: [
-          `已删除成员会话 ${task.conversationId}（${task.member} ${task.memberIp}，工作区 ${workspace}）。`,
-          `成员侧已归档、删除对话记录、删除工作区记录（${result.recordRemoved ? '已删除' : '没有对应记录'}）。`,
-          result.directoryRemoved
-            ? `工作区目录已清空并删除：${directory}`
-            : `工作区目录没有删除（可能不在工作区根目录下，或删除失败）：${directory}`,
-          '本机的任务记录和日志也已删除；这个会话id 不能再投递，工作区名可以重新使用。',
-        ].join('\n'),
+        text,
         data: {
           conversationId: task.conversationId,
           member: task.member,
@@ -1194,10 +1218,91 @@ export function registerTools(ctx, toolsCtx, service) {
           workspace,
           cwd: result.cwd,
           removed: true,
-          archived: true,
+          localRemoved: true,
+          memberRemoved,
+          memberError: result.memberError ?? null,
+          archived: memberRemoved,
           workspaceRecordRemoved: result.recordRemoved,
           workspaceDirectoryRemoved: result.directoryRemoved,
         },
+      }
+    },
+  }
+
+  const stopAllMemberDefinition = {
+    name: 'stop_all_member',
+    description: [
+      '向本对话所有进行中的成员对话发送一条固定的停止请求：',
+      `「${STOP_ALL_MEMBER_PROMPT}」`,
+      '',
+      '只处理本对话跟踪的 running / starting 成员对话；不中断、不取消对话，也不等待它们结束。',
+      '对每个会话依次投递；某个会话失败会继续处理其余的。',
+      '返回发送成功/失败数量，以及每个会话的投递方式（steer 插入当前轮，或排队到下一轮）。',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{
+        type: 'text',
+        text: typeof value?.text === 'string' ? value.text : JSON.stringify(value, null, 2),
+      }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(_args, exec) {
+      const originSessionId = originSessionOf(exec?.agent)
+      if (originSessionId === '') throw new Error('stop_all_member needs the current session')
+      const running = await memberTasks.inFlightForOrigin(originSessionId)
+      const targets = Array.isArray(running) ? running : []
+      if (targets.length === 0) {
+        return {
+          ok: true,
+          text: '没有进行中的成员对话；没有发送任何消息。',
+          data: { total: 0, sent: 0, failed: 0, prompt: STOP_ALL_MEMBER_PROMPT, conversations: [] },
+        }
+      }
+      const results = []
+      for (const task of targets) {
+        const base = {
+          conversationId: String(task?.conversationId ?? ''),
+          member: String(task?.member ?? ''),
+          memberIp: String(task?.memberIp ?? ''),
+        }
+        try {
+          const sent = await memberTasks.send({
+            conversationId: base.conversationId,
+            prompt: STOP_ALL_MEMBER_PROMPT,
+            agent: exec.agent,
+            signal: exec.signal,
+          })
+          results.push({ ...base, ok: true, delivery: sent?.lastDelivery ?? null })
+        } catch (error) {
+          results.push({
+            ...base,
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+      const sent = results.filter(result => result.ok).length
+      const failed = results.length - sent
+      return {
+        ok: failed === 0,
+        text: [
+          `已向 ${String(sent)}/${String(results.length)} 个进行中的成员对话发送停止请求：`,
+          ...results.map((result) => {
+            const target = `${result.conversationId}（${result.member} ${result.memberIp}）`
+            if (!result.ok) return `- ${target}：失败：${result.error}`
+            const delivery = result.delivery === 'steer'
+              ? '已插入当前轮'
+              : result.delivery === 'followup' ? '已排队到下一轮' : '已投递'
+            return `- ${target}：${delivery}`
+          }),
+        ].join('\n'),
+        data: { total: results.length, sent, failed, prompt: STOP_ALL_MEMBER_PROMPT, conversations: results },
       }
     },
   }
@@ -1266,7 +1371,7 @@ export function registerTools(ctx, toolsCtx, service) {
     },
   }
 
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, setProductStageDefinition, waitMemberDefinition, statusMemberDefinition, removeMemberDefinition, membersDefinition, repackDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, setProductStageDefinition, waitMemberDefinition, statusMemberDefinition, removeMemberDefinition, stopAllMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool)
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`)

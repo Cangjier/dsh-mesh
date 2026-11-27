@@ -122,7 +122,7 @@ test('the service answers with an empty list before the task table exists', asyn
   const service = Object.create(MeshService.prototype)
   service.memberScopes = async () => ({})
   const result = await service.memberConversations('session-a')
-  assert.deepEqual(result, { ok: true, total: 0, running: 0, conversations: [] })
+  assert.deepEqual(result, { ok: true, total: 0, running: 0, conversations: [], stage: null, budget: null })
   const blank = await service.memberConversations('')
   assert.deepEqual(blank.conversations, [])
 })

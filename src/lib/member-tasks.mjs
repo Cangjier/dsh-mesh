@@ -1537,22 +1537,27 @@ export class MemberTaskService {
     if (key === '') throw new Error('conversationId is required')
     const task = this.#taskOfConversation(key)
     if (task === undefined) throw new Error(`本机没有跟踪会话 ${key}；先 call_member 发起或继续一次，或确认会话id 正确。`)
-    let result
-    try {
-      result = await this.#request(
-        task.baseUrl,
-        'POST',
-        `/v1/conversations/${encodeURIComponent(task.conversationId)}/remove`,
-        undefined,
-        120_000,
-      )
-    } catch (error) {
-      if (error?.status === 404) {
-        throw new Error(`目标成员 ${task.member}（${task.memberIp}）的插件版本不支持完全删除会话；先给该成员升级到带 remove_member 的版本。`)
-      }
-      throw error
-    }
+    // The local record is the initiator's source of truth: removing it must not
+    // depend on the member being reachable, upgraded, or able to delete its
+    // workspace. Start the member request, but drop the local record regardless
+    // of how that request ends.
+    const pending = this.#request(
+      task.baseUrl,
+      'POST',
+      `/v1/conversations/${encodeURIComponent(task.conversationId)}/remove`,
+      undefined,
+      120_000,
+    ).then(result => ({ result })).catch(error => ({ error }))
     await this.#forget(task)
+    const outcome = await pending
+    const error = outcome.error
+    let memberError = null
+    if (error !== undefined) {
+      memberError = error?.status === 404
+        ? `目标成员 ${task.member}（${task.memberIp}）的插件版本不支持完全删除会话；先给该成员升级到带 remove_member 的版本。`
+        : (error instanceof Error ? error.message : String(error))
+    }
+    const result = outcome.result
     return {
       task,
       workspace: typeof result?.workspace === 'string' ? result.workspace : '',
@@ -1560,6 +1565,9 @@ export class MemberTaskService {
       recordRemoved: result?.recordRemoved === true,
       directoryRemoved: result?.directoryRemoved === true,
       alreadyArchived: result?.alreadyArchived === true,
+      memberRemoved: memberError === null,
+      memberError,
+      localRemoved: true,
     }
   }
 

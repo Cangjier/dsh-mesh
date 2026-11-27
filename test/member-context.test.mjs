@@ -277,7 +277,7 @@ test('a snapshot shows the self identity, work scope and effective settings', ()
     selfId: 'session-a',
     selfScope: { identity: '网关', scope: '成员发现', compressPercent: 12.5 },
   })
-  assert.match(text, /身份：网关（自身，会话 session-a）；工作范围：成员发现；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）；call_member 预算：A 默认 \/ B 默认 \/ C 默认 \/ D 默认（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）；压缩阈值：12\.5%/u)
+  assert.match(text, /身份：网关（自身，会话 session-a）；工作范围：成员发现；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）；预算审查：关闭（只对主对话生效）；call_member 预算：A 默认 \/ B 默认 \/ C 默认 \/ D 默认（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）；压缩阈值：12\.5%/u)
   assert.match(text, /保持目标：关闭/u)
   assert.match(text, /避免耗时：关闭/u)
   assert.doesNotMatch(text, /还没有身份\/工作范围/u)
@@ -573,6 +573,39 @@ test('a stage without a configured budget uses twice its participating members',
   }
 })
 
+test('a spent budget does not audit unless budgetAudit is on', async () => {
+  const claims = []
+  const starts = []
+  const stage = {
+    version: '20261126.1',
+    stage: 'A',
+    round: 1,
+    goals: {},
+    participation: {},
+    roundStartedAt: '2026-11-26T18:00:00.000Z',
+  }
+  const service = {
+    async memberScopes() {
+      return { 'session-a': { callMemberBudget: { A: 1, B: 1, C: 1, D: 1 } } }
+    },
+    async productStage() { return stage },
+    async claimBudgetAudit(facts) { claims.push(facts); return { count: 1, lastAt: '2026-11-26T18:05:00.000Z' } },
+    async releaseBudgetAudit() {},
+  }
+  const subagents = { async startActivation(spec) { starts.push(spec) } }
+  const tasks = [{ ...settled, conversationId: 'c1', replies: [{ at: '2026-11-26T18:01:00.000Z' }] }]
+  const h = harness({ tasks, cwd: '/root/ws/project', service, services: { subagents } })
+  try {
+    const decision = await h.preStep(h.payload, h.next)
+    await sleep(40)
+    assert.equal(decision.messages.length, 1)
+    assert.equal(claims.length, 0, 'the opt-in switch is off by default')
+    assert.equal(starts.length, 0)
+  } finally {
+    h.context.dispose()
+  }
+})
+
 test('a spent budget starts one forked audit with the stage facts', async () => {
   let clock = 1_000_000
   let allowClaim = true
@@ -588,7 +621,7 @@ test('a spent budget starts one forked audit with the stage facts', async () => 
   }
   const service = {
     async memberScopes() {
-      return { 'session-a': { identity: '网关', scope: '成员发现', callMemberBudget: { A: 1, B: 1, C: 1, D: 1 } } }
+      return { 'session-a': { identity: '网关', scope: '成员发现', budgetAudit: true, callMemberBudget: { A: 1, B: 1, C: 1, D: 1 } } }
     },
     async productStage() { return stage },
     async claimBudgetAudit(facts) {
@@ -657,7 +690,7 @@ test('a failed audit start releases its claimed slot', async () => {
   }
   const service = {
     async memberScopes() {
-      return { 'session-a': { callMemberBudget: { A: 1, B: 1, C: 1, D: 1 } } }
+      return { 'session-a': { budgetAudit: true, callMemberBudget: { A: 1, B: 1, C: 1, D: 1 } } }
     },
     async productStage() { return stage },
     async claimBudgetAudit() { return { count: 1, lastAt: '2026-11-26T18:05:00.000Z' } },

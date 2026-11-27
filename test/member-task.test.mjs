@@ -628,7 +628,7 @@ test('registerTools exposes the build, deploy, member and product-stage tools', 
   const toolsCtx = { tools: { register: tool => { names.push(tool.name); tools.push(tool) } } }
   try {
     registerTools(ctx, toolsCtx, service)
-    assert.deepEqual(names.sort(), ['build', 'call_member', 'deploy', 'members', 'remove_member', 'repack', 'set_member_scope', 'set_product_stage', 'status_member', 'wait_member'].sort())
+    assert.deepEqual(names.sort(), ['build', 'call_member', 'deploy', 'members', 'remove_member', 'repack', 'set_member_scope', 'set_product_stage', 'status_member', 'stop_all_member', 'wait_member'].sort())
     for (const name of ['build', 'deploy', 'members']) {
       const tool = tools.find(candidate => candidate.name === name)
       assert.equal(tool.parameters.properties.action, undefined)
@@ -646,7 +646,7 @@ test('registerTools exposes the build, deploy, member and product-stage tools', 
     assert.equal(setScope.parameters.properties.action, undefined)
     assert.deepEqual(
       Object.keys(setScope.parameters.properties).sort(),
-      ['avoidLongJobs', 'callMemberBudget', 'call_member_budget', 'compressPercent', 'conversationId', 'identity', 'keep', 'keepPrompt', 'keep_prompt', 'note', 'role', 'scope'].sort(),
+      ['avoidLongJobs', 'budgetAudit', 'callMemberBudget', 'call_member_budget', 'compressPercent', 'conversationId', 'identity', 'keep', 'keepPrompt', 'keep_prompt', 'note', 'role', 'scope'].sort(),
     )
     const setStage = tools.find(candidate => candidate.name === 'set_product_stage')
     assert.deepEqual(Object.keys(setStage.parameters.properties).sort(), ['goals', 'round', 'stage'].sort())

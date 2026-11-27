@@ -200,16 +200,35 @@ test('status_member hides a conversation archived in the member Web UI', async (
   }
 })
 
-test('remove_member reports an old member that has no remove route', async () => {
+test('remove_member drops the local record even when the member has no remove route', async () => {
   const h = await harness({ removeStatus: 404 })
   try {
+    const result = await h.remove.execute({ conversationId: 'conv-1' }, { agent: { session: { id: 'session-1' } } })
+    assert.equal(result.ok, true, 'the local removal is the guaranteed outcome')
+    assert.match(result.text, /\[警告\] 已移除本机成员记录 conv-1/u)
+    assert.match(result.text, /不支持完全删除会话/u)
+    assert.equal(result.data.localRemoved, true)
+    assert.equal(result.data.memberRemoved, false)
+    assert.match(result.data.memberError, /不支持完全删除会话/u)
+    assert.equal(await h.service.memberTasks.find('conv-1'), undefined)
+    assert.deepEqual(await h.service.memberTasks.listForOrigin('session-1'), [])
     await assert.rejects(
-      () => h.remove.execute({ conversationId: 'conv-1' }, { agent: { session: { id: 'session-1' } } }),
-      /不支持完全删除会话/u,
+      () => h.status.execute({ conversationId: 'conv-1' }, { agent: { session: { id: 'session-1' } } }),
+      /本机没有跟踪会话/u,
     )
-    const task = await h.service.memberTasks.find('conv-1')
-    assert.notEqual(task.archived, true, 'a refused archive must leave the task tracked')
-    assert.equal((await h.service.memberTasks.listForOrigin('session-1')).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('remove_member drops the local record on a member-side server error too', async () => {
+  const h = await harness({ removeStatus: 500 })
+  try {
+    const result = await h.remove.execute({ conversationId: 'conv-1' }, { agent: { session: { id: 'session-1' } } })
+    assert.equal(result.ok, true)
+    assert.equal(result.data.memberRemoved, false)
+    assert.match(result.text, /成员侧归档\/删除失败/u)
+    assert.equal(await h.service.memberTasks.find('conv-1'), undefined)
   } finally {
     await h.cleanup()
   }

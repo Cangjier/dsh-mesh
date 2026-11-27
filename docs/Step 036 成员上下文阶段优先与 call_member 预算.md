@@ -103,5 +103,5 @@ set_member_scope { "conversationId": "self", "call_member_budget": { "A": 26 } }
   时按参与成员数 × 2 计算默认值、用尽文案、`statuses: false` 隐藏参与状态而工具结果保留。
 - `test/member-scope.test.mjs`：`callMemberBudget` 按阶段合并保存、别名、仅自身生效、
   范围校验、读取时丢弃非法值。
-- 全量 `npm test` 590 通过，`npm run typecheck` 通过。
+- 全量 `npm test` 595 通过，`npm run typecheck` 通过。
 - 预算调整的用户授权与耗尽审查见 [Step 037](Step%20037%20预算用户授权与耗尽审查.md)。

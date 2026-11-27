@@ -165,7 +165,7 @@ function formatSelfLine(selfId, selfScope) {
     ? selfScope.keepPrompt
     : DEFAULT_KEEP_PROMPT
   const budget = formatCallMemberBudgetSettings(selfScope?.callMemberBudget)
-  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${keep ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；call_member 预算：${budget}（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
+  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${keep ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；预算审查：${selfScope?.budgetAudit === true ? '开启' : '关闭'}（只对主对话生效）；call_member 预算：${budget}（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
 }
 
 /**
@@ -375,6 +375,7 @@ export function createMemberContext({
    */
   async function maybeAuditBudget(agent, sessionId, stage, tasks, scopes, selfScope) {
     if (closed || isMemberSession(sessionId)) return
+    if (selfScope?.budgetAudit !== true) return
     if (typeof service?.claimBudgetAudit !== 'function') return
     const budget = callMemberBudgetFor(selfScope?.callMemberBudget, stage.stage)
       ?? defaultCallMemberBudget(stage, tasks, scopes)

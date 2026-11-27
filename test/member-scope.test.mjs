@@ -6,7 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { MeshService, effectiveCompressPercent } from '../src/lib/service.mjs'
 import { MemberTaskService } from '../src/lib/member-tasks.mjs'
-import { registerTools } from '../src/lib/tools.mjs'
+import { STOP_ALL_MEMBER_PROMPT, registerTools } from '../src/lib/tools.mjs'
 
 /**
  * A member interop fake that records create and message payloads.
@@ -317,7 +317,7 @@ test('set_member_scope on self stores compressPercent and shows effective values
     )
     await assert.rejects(
       () => set.execute({}, { agent: mainAgent }),
-      /identity, role, scope, note, keep, keepPrompt, avoidLongJobs, callMemberBudget, or compressPercent is required/u,
+      /identity, role, scope, note, keep, keepPrompt, avoidLongJobs, budgetAudit, callMemberBudget, or compressPercent is required/u,
     )
   } finally {
     await service?.memberTasks.dispose()
@@ -356,7 +356,7 @@ test('set_member_scope stores keep only for the current conversation', async () 
     const ignored = await set.execute({ conversationId: 'conv-x', identity: '开发', keep: true }, { agent: mainAgent })
     assert.equal(ignored.data.ignoredKeep, true)
     assert.deepEqual(await service.memberScope('conv-x'), { identity: '开发' })
-    assert.match(ignored.text, /keep \/ keepPrompt \/ avoidLongJobs \/ callMemberBudget 只对主对话自身生效/u)
+    assert.match(ignored.text, /keep \/ keepPrompt \/ avoidLongJobs \/ budgetAudit \/ callMemberBudget 只对主对话自身生效/u)
 
     const ignoredPrompt = await set.execute({ conversationId: 'conv-x', identity: '开发', keep_prompt: '看这里' }, { agent: mainAgent })
     assert.equal(ignoredPrompt.data.ignoredKeepPrompt, true)
@@ -369,7 +369,47 @@ test('set_member_scope stores keep only for the current conversation', async () 
     )
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-x', keep: false }, { agent: mainAgent }),
-      /keep, keepPrompt, avoidLongJobs and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent/u,
+      /keep, keepPrompt, avoidLongJobs, budgetAudit and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent/u,
+    )
+  } finally {
+    await service?.memberTasks.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('set_member_scope stores the opt-in budget audit on self only', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-scope-audit-'))
+  const dataDir = path.join(dir, 'mesh')
+  let service
+  try {
+    service = new MeshService({ dataDir, config: {}, log: () => {} })
+    const set = register(service).find(tool => tool.name === 'set_member_scope')
+
+    const initial = await set.execute({ identity: '网关' }, { agent: mainAgent })
+    assert.match(initial.text, /预算审查：关闭（只对主对话生效）/u)
+    assert.equal(initial.data.budgetAudit, false)
+    assert.deepEqual(await service.memberScope('main-1'), { identity: '网关' })
+
+    const enabled = await set.execute({ budgetAudit: true }, { agent: mainAgent })
+    assert.match(enabled.text, /预算审查：开启（只对主对话生效）/u)
+    assert.equal(enabled.data.budgetAudit, true)
+    assert.deepEqual(await service.memberScope('main-1'), { identity: '网关', budgetAudit: true })
+
+    const ignored = await set.execute(
+      { conversationId: 'conv-x', identity: '开发', budgetAudit: true },
+      { agent: mainAgent },
+    )
+    assert.equal(ignored.data.ignoredBudgetAudit, true)
+    assert.deepEqual(await service.memberScope('conv-x'), { identity: '开发' })
+    assert.match(ignored.text, /budgetAudit \/ callMemberBudget 只对主对话自身生效/u)
+
+    await assert.rejects(
+      () => set.execute({ budgetAudit: 'yes' }, { agent: mainAgent }),
+      /budgetAudit must be a boolean/u,
+    )
+    await assert.rejects(
+      () => set.execute({ conversationId: 'conv-x', budgetAudit: true }, { agent: mainAgent }),
+      /only apply to the current session/u,
     )
   } finally {
     await service?.memberTasks.dispose()
@@ -541,12 +581,12 @@ test('set_member_scope updates a tracked member conversation and stores its stan
       { agent: mainAgent },
     )
     assert.deepEqual(await service.memberScope('conv-9'), { identity: '开发', compressPercent: 10 })
-    assert.match(ignored.text, /keep \/ keepPrompt \/ avoidLongJobs \/ callMemberBudget 只对主对话自身生效/u)
+    assert.match(ignored.text, /keep \/ keepPrompt \/ avoidLongJobs \/ budgetAudit \/ callMemberBudget 只对主对话自身生效/u)
     assert.equal(ignored.data.ignoredAvoidLongJobs, true)
 
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-9', avoidLongJobs: true }, { agent: mainAgent }),
-      /keep, keepPrompt, avoidLongJobs and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent/u,
+      /keep, keepPrompt, avoidLongJobs, budgetAudit and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent/u,
     )
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-9', compressPercent: 0 }, { agent: mainAgent }),
@@ -656,6 +696,83 @@ test('setting only compressPercent preserves the tracked task profile', async ()
   }
 })
 
+test('stop_all_member messages every running conversation and continues after a failure', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-stop-all-'))
+  const dataDir = path.join(dir, 'mesh')
+  let service
+  try {
+    service = new MeshService({ dataDir, config: {}, log: () => {} })
+    const stop = register(service).find(tool => tool.name === 'stop_all_member')
+    const sent = []
+    service.memberTasks.inFlightForOrigin = async () => [
+      { conversationId: 'c1', member: 'B', memberIp: '10.66.66.2', status: 'running' },
+      { conversationId: 'c2', member: 'C', memberIp: '10.66.66.3', status: 'starting' },
+    ]
+    service.memberTasks.send = async ({ conversationId, prompt }) => {
+      sent.push({ conversationId, prompt })
+      if (conversationId === 'c2') throw new Error('unreachable')
+      return { conversationId, lastDelivery: 'steer' }
+    }
+
+    const result = await stop.execute({}, { agent: mainAgent })
+    assert.deepEqual(sent.map(item => item.conversationId), ['c1', 'c2'])
+    assert.equal(sent[0].prompt, STOP_ALL_MEMBER_PROMPT)
+    assert.equal(result.ok, false, 'one failed delivery')
+    assert.equal(result.data.total, 2)
+    assert.equal(result.data.sent, 1)
+    assert.equal(result.data.failed, 1)
+    assert.match(result.text, /已向 1\/2 个进行中的成员对话发送停止请求/u)
+    assert.match(result.text, /c1（B 10\.66\.66\.2）：已插入当前轮/u)
+    assert.match(result.text, /c2（C 10\.66\.66\.3）：失败：unreachable/u)
+
+    service.memberTasks.inFlightForOrigin = async () => []
+    const empty = await stop.execute({}, { agent: mainAgent })
+    assert.equal(empty.ok, true)
+    assert.match(empty.text, /没有进行中的成员对话/u)
+    assert.equal(empty.data.total, 0)
+  } finally {
+    await service?.memberTasks.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('member conversations expose the current stage and budget for the header', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-member-stage-'))
+  const dataDir = path.join(dir, 'mesh')
+  try {
+    const service = new MeshService({ dataDir, config: {}, log: () => {} })
+    const cwd = '/root/ws/project'
+    await service.setProductStage({ cwd, stage: 'A', now: new Date(2026, 10, 26, 18, 0, 0) })
+    await service.setMemberScope('main-1', { callMemberBudget: { A: 4 } })
+    const tasks = [{
+      conversationId: 'c1',
+      member: 'B',
+      memberIp: '10.66.66.2',
+      workspace: 'dsh-mesh',
+      status: 'running',
+      originCwd: cwd,
+      replies: [{ at: '2026-11-26T18:01:00.000Z' }],
+      createdAt: '2026-11-26T18:00:00.000Z',
+      updatedAt: '2026-11-26T18:01:00.000Z',
+    }]
+    service.memberTasks = { listForOrigin: async () => tasks }
+    const view = await service.memberConversations('main-1')
+    assert.deepEqual(view.stage, {
+      version: '20261126.1', stage: 'A', round: 1, label: '计划与目标',
+    })
+    assert.deepEqual(view.budget, {
+      stage: 'A', used: 1, limit: 4, remaining: 3, source: 'explicit', exhausted: false,
+    })
+
+    service.memberTasks = { listForOrigin: async () => [] }
+    const noTasks = await service.memberConversations('main-1')
+    assert.equal(noTasks.stage, null)
+    assert.equal(noTasks.budget, null)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('concurrent saves of one task serialize and never collide on a temporary file', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mesh-scope-concurrent-'))
   const dataDir = path.join(dir, 'mesh')
@@ -716,10 +833,10 @@ test('set_member_scope saves an untracked conversation and rejects invalid input
     assert.match(untracked.text, /本机未跟踪该会话，只保存设置/u)
     assert.deepEqual(await service.memberScope('conv-other'), { scope: '外部会话' })
 
-    await assert.rejects(() => set.execute({}, { agent: mainAgent }), /identity, role, scope, note, keep, keepPrompt, avoidLongJobs, callMemberBudget, or compressPercent is required/u)
+    await assert.rejects(() => set.execute({}, { agent: mainAgent }), /identity, role, scope, note, keep, keepPrompt, avoidLongJobs, budgetAudit, callMemberBudget, or compressPercent is required/u)
     await assert.rejects(
       () => set.execute({ conversationId: 'conv-other', avoidLongJobs: true }, { agent: mainAgent }),
-      /keep, keepPrompt, avoidLongJobs and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent/u,
+      /keep, keepPrompt, avoidLongJobs, budgetAudit and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent/u,
     )
     await assert.rejects(
       () => set.execute({ identity: 'a'.repeat(41) }, { agent: mainAgent }),

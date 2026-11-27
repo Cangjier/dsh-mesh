@@ -11598,29 +11598,31 @@ var MemberTaskService = class {
     if (key === "") throw new Error("conversationId is required");
     const task = this.#taskOfConversation(key);
     if (task === void 0) throw new Error(`\u672C\u673A\u6CA1\u6709\u8DDF\u8E2A\u4F1A\u8BDD ${key}\uFF1B\u5148 call_member \u53D1\u8D77\u6216\u7EE7\u7EED\u4E00\u6B21\uFF0C\u6216\u786E\u8BA4\u4F1A\u8BDDid \u6B63\u786E\u3002`);
-    let result;
-    try {
-      result = await this.#request(
-        task.baseUrl,
-        "POST",
-        `/v1/conversations/${encodeURIComponent(task.conversationId)}/remove`,
-        void 0,
-        12e4
-      );
-    } catch (error) {
-      if (error?.status === 404) {
-        throw new Error(`\u76EE\u6807\u6210\u5458 ${task.member}\uFF08${task.memberIp}\uFF09\u7684\u63D2\u4EF6\u7248\u672C\u4E0D\u652F\u6301\u5B8C\u5168\u5220\u9664\u4F1A\u8BDD\uFF1B\u5148\u7ED9\u8BE5\u6210\u5458\u5347\u7EA7\u5230\u5E26 remove_member \u7684\u7248\u672C\u3002`);
-      }
-      throw error;
-    }
+    const pending = this.#request(
+      task.baseUrl,
+      "POST",
+      `/v1/conversations/${encodeURIComponent(task.conversationId)}/remove`,
+      void 0,
+      12e4
+    ).then((result2) => ({ result: result2 })).catch((error2) => ({ error: error2 }));
     await this.#forget(task);
+    const outcome = await pending;
+    const error = outcome.error;
+    let memberError = null;
+    if (error !== void 0) {
+      memberError = error?.status === 404 ? `\u76EE\u6807\u6210\u5458 ${task.member}\uFF08${task.memberIp}\uFF09\u7684\u63D2\u4EF6\u7248\u672C\u4E0D\u652F\u6301\u5B8C\u5168\u5220\u9664\u4F1A\u8BDD\uFF1B\u5148\u7ED9\u8BE5\u6210\u5458\u5347\u7EA7\u5230\u5E26 remove_member \u7684\u7248\u672C\u3002` : error instanceof Error ? error.message : String(error);
+    }
+    const result = outcome.result;
     return {
       task,
       workspace: typeof result?.workspace === "string" ? result.workspace : "",
       cwd: typeof result?.cwd === "string" ? result.cwd : "",
       recordRemoved: result?.recordRemoved === true,
       directoryRemoved: result?.directoryRemoved === true,
-      alreadyArchived: result?.alreadyArchived === true
+      alreadyArchived: result?.alreadyArchived === true,
+      memberRemoved: memberError === null,
+      memberError,
+      localRemoved: true
     };
   }
   /**
@@ -13307,6 +13309,10 @@ function normalizeMemberScopePatch(patch = {}) {
     if (typeof patch.avoidLongJobs !== "boolean") throw new Error("avoidLongJobs must be a boolean");
     normalized.avoidLongJobs = patch.avoidLongJobs;
   }
+  if (patch.budgetAudit !== void 0) {
+    if (typeof patch.budgetAudit !== "boolean") throw new Error("budgetAudit must be a boolean");
+    normalized.budgetAudit = patch.budgetAudit;
+  }
   if (patch.callMemberBudget !== void 0) {
     normalized.callMemberBudget = normalizeCallMemberBudgets(patch.callMemberBudget);
   }
@@ -13867,11 +13873,33 @@ var MeshService = class {
    */
   async memberConversations(sessionId) {
     const id = String(sessionId ?? "").trim();
-    if (id === "") return { ok: true, total: 0, running: 0, conversations: [] };
+    if (id === "") return { ok: true, total: 0, running: 0, conversations: [], stage: null, budget: null };
     const tasks = typeof this.memberTasks?.listForOrigin === "function" ? await this.memberTasks.listForOrigin(id).catch(() => []) : [];
     const scopes = await this.memberScopes();
     const conversations = memberConversationEntries(tasks, scopes);
-    return { ok: true, ...memberConversationSummary(conversations), conversations };
+    const originCwd = tasks.find((task) => typeof task?.originCwd === "string" && task.originCwd !== "")?.originCwd ?? "";
+    const stage = originCwd === "" ? null : await this.productStage(originCwd).catch(() => null);
+    let budget = null;
+    if (stage !== null) {
+      const explicit = callMemberBudgetFor(scopes[id]?.callMemberBudget, stage.stage);
+      const limit = explicit ?? defaultCallMemberBudget(stage, tasks, scopes);
+      const used = countCallMemberReplies(stage, tasks);
+      budget = {
+        stage: stage.stage,
+        used,
+        limit,
+        remaining: Math.max(0, limit - used),
+        source: explicit === null ? "default" : "explicit",
+        exhausted: used >= limit
+      };
+    }
+    return {
+      ok: true,
+      ...memberConversationSummary(conversations),
+      conversations,
+      stage: stage === null ? null : { version: stage.version, stage: stage.stage, round: stage.round, label: PRODUCT_STAGE_SHORT[stage.stage] ?? "" },
+      budget
+    };
   }
   /**
    * Identity, standard role, work scope, keep flag, call_member budget and
@@ -13881,7 +13909,7 @@ var MeshService = class {
    * file is the same as "nothing set yet", never a startup failure. Only the
    * fields that were actually set are stored; defaults are applied by readers
    * ({@link effectiveCompressPercent}).
-   * @returns {Promise<Record<string, {identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, note?: string, compressPercent?: number}>>} scopes.
+   * @returns {Promise<Record<string, {identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, budgetAudit?: boolean, note?: string, compressPercent?: number}>>} scopes.
    */
   async memberScopes() {
     try {
@@ -13898,10 +13926,11 @@ var MeshService = class {
         const keep = typeof value.keep === "boolean" ? value.keep : void 0;
         const keepPrompt = savedScopeText(value.keepPrompt, MEMBER_KEEP_PROMPT_MAX);
         const avoidLongJobs = typeof value.avoidLongJobs === "boolean" ? value.avoidLongJobs : void 0;
+        const budgetAudit = typeof value.budgetAudit === "boolean" ? value.budgetAudit : void 0;
         const callMemberBudget = savedCallMemberBudgets(value.callMemberBudget);
         const note = savedScopeText(value.note, MEMBER_NOTE_MAX);
         const compressPercent = savedScopeNumber(value.compressPercent, (candidate) => candidate >= 1 && candidate <= 100);
-        if (identity === null && role === null && scope === null && keep === void 0 && keepPrompt === null && avoidLongJobs === void 0 && callMemberBudget === void 0 && note === null && compressPercent === void 0) continue;
+        if (identity === null && role === null && scope === null && keep === void 0 && keepPrompt === null && avoidLongJobs === void 0 && budgetAudit === void 0 && callMemberBudget === void 0 && note === null && compressPercent === void 0) continue;
         scopes[rawId.trim()] = {
           ...identity === null ? {} : { identity },
           ...role === null ? {} : { role },
@@ -13909,6 +13938,7 @@ var MeshService = class {
           ...keep === void 0 ? {} : { keep },
           ...keepPrompt === null ? {} : { keepPrompt },
           ...avoidLongJobs === void 0 ? {} : { avoidLongJobs },
+          ...budgetAudit === void 0 ? {} : { budgetAudit },
           ...callMemberBudget === void 0 ? {} : { callMemberBudget },
           ...note === null ? {} : { note },
           ...compressPercent === void 0 ? {} : { compressPercent }
@@ -13922,7 +13952,7 @@ var MeshService = class {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, note?: string, compressPercent?: number}|null>} scope.
+   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, budgetAudit?: boolean, note?: string, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? "").trim();
@@ -13936,9 +13966,9 @@ var MeshService = class {
    * Only the fields present in the patch change. An empty string clears that
    * text field (the record is dropped when nothing remains). `role` is the
    * member's standard identity; only the member target is supposed to pass it.
-   * `keep`, `keepPrompt`, `avoidLongJobs` and `callMemberBudget` are stored as
-   * given and only the self target uses them (`callMemberBudget` is a complete
-   * per-stage map; there is no shared value). `note` is main-conversation-only
+   * `keep`, `keepPrompt`, `avoidLongJobs`, `budgetAudit` and `callMemberBudget`
+   * are stored as given and only the self target uses them
+   * (`callMemberBudget` is a per-stage map; there is no shared value). `note` is main-conversation-only
    * metadata and is never injected or delivered to the member.
    * `compressPercent` applies to both self and member conversations.
    * @param {string} conversationId conversation or session id.
@@ -13969,6 +13999,7 @@ var MeshService = class {
       else next.keepPrompt = normalized.keepPrompt;
     }
     if (normalized.avoidLongJobs !== void 0) next.avoidLongJobs = normalized.avoidLongJobs;
+    if (normalized.budgetAudit !== void 0) next.budgetAudit = normalized.budgetAudit;
     if (normalized.callMemberBudget !== void 0) {
       next.callMemberBudget = { ...next.callMemberBudget ?? {}, ...normalized.callMemberBudget };
     }
@@ -16973,7 +17004,7 @@ function formatSelfLine(selfId, selfScope) {
   const keep = selfScope?.keep === true;
   const keepPrompt = typeof selfScope?.keepPrompt === "string" && selfScope.keepPrompt !== "" ? selfScope.keepPrompt : DEFAULT_KEEP_PROMPT;
   const budget = formatCallMemberBudgetSettings(selfScope?.callMemberBudget);
-  return `- \u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF08\u81EA\u8EAB\uFF0C\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${keep ? `\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u63D0\u793A\u8BED\u300C${keepPrompt}\u300D\uFF09` : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1Bcall_member \u9884\u7B97\uFF1A${budget}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC\u8BA1\uFF1B\u672A\u8BBE\u7F6E\u6309\u53C2\u4E0E\u6210\u5458\u6570 \xD7 2\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
+  return `- \u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF08\u81EA\u8EAB\uFF0C\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${keep ? `\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u63D0\u793A\u8BED\u300C${keepPrompt}\u300D\uFF09` : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u9884\u7B97\u5BA1\u67E5\uFF1A${selfScope?.budgetAudit === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1Bcall_member \u9884\u7B97\uFF1A${budget}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC\u8BA1\uFF1B\u672A\u8BBE\u7F6E\u6309\u53C2\u4E0E\u6210\u5458\u6570 \xD7 2\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
 }
 function formatMemberStatusSnapshot(tasks, options = {}) {
   const list = Array.isArray(tasks) ? tasks : [];
@@ -17091,6 +17122,7 @@ function createMemberContext({
   }
   async function maybeAuditBudget(agent, sessionId, stage, tasks, scopes, selfScope) {
     if (closed || isMemberSession(sessionId)) return;
+    if (selfScope?.budgetAudit !== true) return;
     if (typeof service?.claimBudgetAudit !== "function") return;
     const budget = callMemberBudgetFor(selfScope?.callMemberBudget, stage.stage) ?? defaultCallMemberBudget(stage, tasks, scopes);
     if (countCallMemberReplies(stage, tasks) < budget) return;
@@ -17301,6 +17333,7 @@ function callMemberBudgetSchema() {
     additionalProperties: false
   };
 }
+var STOP_ALL_MEMBER_PROMPT = "\u8BF7\u5C3D\u5FEB\u505C\u6B62\u5DE5\u4F5C\uFF0C\u6536\u655B\u624B\u4E2D\u5DE5\u4F5C\uFF0C\u8BE5\u63D0\u4EA4\u63A8\u9001\u7684\u5C3D\u5FEB\u5904\u7406\u3002";
 function registerTools(ctx, toolsCtx, service) {
   const buildDefinition = {
     name: "build",
@@ -17624,11 +17657,12 @@ function registerTools(ctx, toolsCtx, service) {
       "`keep` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0C\u6BCF\u4E2A turn \u7ED3\u675F\u4E14\u672C\u5BF9\u8BDD\u6CA1\u6709\u8FDB\u884C\u4E2D\u7684\u6210\u5458\u4F1A\u8BDD\u65F6\uFF0C\u63D2\u4EF6\u5411\u672C\u5BF9\u8BDD\u6295\u9012\u4E00\u6761\u7528\u6237\u6D88\u606F\u300C\u7EE7\u7EED\u300D\uFF1B\u7531\u8FD9\u6761\u6D88\u606F\u62C9\u8D77\u7684\u8FD9\u4E00\u8F6E\u7ED3\u675F\u65F6\u4E0D\u4F1A\u518D\u6B21\u6295\u9012\uFF0C\u907F\u514D\u81EA\u5FAA\u73AF\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       "`keepPrompt`\uFF08\u4E5F\u53EF\u5199 `keep_prompt`\uFF09\u662F\u8FD9\u6761\u7528\u6237\u6D88\u606F\u7684\u6B63\u6587\uFF0C\u9ED8\u8BA4\u300C\u7EE7\u7EED\u300D\uFF0C\u6700\u957F 200 \u5B57\u7B26\uFF1B\u7A7A\u5B57\u7B26\u4E32\u6062\u590D\u9ED8\u8BA4\u3002\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       "`avoidLongJobs` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0C\u4E3B\u5BF9\u8BDD\u4E0B\u4E00\u6B21\u72B6\u6001\u5FEB\u7167\u4F1A\u5217\u51FA\u8DDD\u4E0A\u4E00\u6B21\u5FEB\u7167\u4E4B\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
+      "`budgetAudit` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0Ccall_member \u9884\u7B97\u8017\u5C3D\u65F6\u542F\u52A8 fork \u5B50\u4EE3\u7406\u5BA1\u67E5\u4EA7\u54C1\u6D41\u7A0B\uFF08\u6BCF\u4E2A\u5C0F\u9636\u6BB5\u6700\u591A 3 \u6B21\u3001\u95F4\u9694\u81F3\u5C11 10 \u5206\u949F\uFF09\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       "`callMemberBudget`\uFF08\u4E5F\u53EF\u5199 `call_member_budget`\uFF09\u662F**\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC**\u7684 call_member \u9884\u7B97\uFF0C\u53EF\u53EA\u7ED9\u8981\u8BBE\u7684\u9636\u6BB5\uFF08A/B/C/D\uFF09\uFF0C\u6BCF\u4E2A\u6574\u6570 1\u2013999\uFF0C\u6CA1\u6709\u7EDF\u4E00\u503C\uFF1B\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\u3002\u6CA1\u8BBE\u7F6E\u7684\u9636\u6BB5\u5728\u8FD0\u884C\u65F6\u9ED8\u8BA4\u4E3A\u8BE5\u9636\u6BB5**\u53C2\u4E0E\u6210\u5458\u6570\u91CF \xD7 2**\uFF08\u8FD8\u6CA1\u6709\u53C2\u4E0E\u6210\u5458\u65F6\u6309 1 \u8BA1\uFF09\u3002\u6210\u5458\u6BCF\u628A\u4E00\u6761\u56DE\u590D\u8FD4\u56DE\u7ED9\u4E3B\u5BF9\u8BDD\uFF08wait_member \u53D6\u8D70\u6216\u515C\u5E95\u6295\u9012\uFF09\u7B97\u5BF9\u5E94\u9636\u6BB5\u6D88\u8017\u4E00\u6B21\uFF1B\u9884\u7B97\u7528\u5B8C\u65F6\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u5F3A\u8C03\u5FC5\u987B\u8FDB\u5165\u4E0B\u4E00\u4E2A\u9636\u6BB5\uFF0C\u5E76\u53CA\u65F6\u7528 set_product_stage \u66F4\u65B0\u9636\u6BB5\u548C\u76EE\u6807\u72B6\u6001\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       `\u9884\u7B97\u989D\u5EA6\u53EA\u80FD\u7531\u7528\u6237\u8C03\u6574\uFF1A\u8BBE\u7F6E callMemberBudget \u65F6\u5DE5\u5177\u4F1A\u8BFB\u53D6\u6700\u8FD1 ${String(BUDGET_AUTH_MESSAGE_WINDOW)} \u6761\u7528\u6237\u6D88\u606F\uFF0C\u53EA\u6709\u5176\u4E2D\u5B58\u5728\u201C\u9884\u7B97 + \u8C03\u6574/\u8BBE\u7F6E + \u6570\u5B57\u201D\u7684\u660E\u786E\u6307\u793A\u624D\u5199\u5165\uFF1B\u6CA1\u6709\u5219\u8FD4\u56DE ok:false\uFF0C\u914D\u7F6E\u4E0D\u53D8\u3002`,
       "\u9884\u7B97\u7528\u5C3D\u65F6\uFF0C\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u81EA\u52A8\u542F\u52A8\u4E00\u4E2A fork \u5B50\u4EE3\u7406\u5BA1\u67E5\u5F53\u524D\u4EA7\u54C1\u6D41\u7A0B\uFF08\u6BCF\u4E2A\u5C0F\u9636\u6BB5\u6700\u591A 3 \u6B21\u3001\u95F4\u9694\u81F3\u5C11 10 \u5206\u949F\uFF09\uFF1A\u68C0\u67E5\u662F\u5426\u6309\u9636\u6BB5\u5DE5\u4F5C\u3001\u662F\u5426\u8D85\u51FA\u9636\u6BB5\u3001\u9884\u7B97\u4E3A\u4EC0\u4E48\u8017\u5C3D\uFF1B\u5982\u679C\u4E3B\u5BF9\u8BDD\u4F7F\u7528\u4E0D\u5408\u7406\uFF0C\u5BA1\u67E5\u7ED3\u8BBA\u4F1A\u4F5C\u4E3A\u8B66\u544A\u548C\u4E0B\u4E00\u6B65\u5EFA\u8BAE\u6295\u9012\u56DE\u4E3B\u5BF9\u8BDD\u3002",
       `\`compressPercent\`\uFF1A\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u6570\u5B57 1\u2013100\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_COMPRESS_PERCENT)}\uFF09\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0B\u4E00\u6B21 call_member \u6295\u9012\u524D\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u538B\u7F29\u3002`,
-      "\u81F3\u5C11\u63D0\u4F9B identity\u3001role\u3001scope\u3001note\u3001keep\u3001keepPrompt\u3001avoidLongJobs\u3001callMemberBudget\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001role\u3001scope\u3001note \u6216 compressPercent \u4E4B\u4E00\u3002",
+      "\u81F3\u5C11\u63D0\u4F9B identity\u3001role\u3001scope\u3001note\u3001keep\u3001keepPrompt\u3001avoidLongJobs\u3001budgetAudit\u3001callMemberBudget\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001role\u3001scope\u3001note \u6216 compressPercent \u4E4B\u4E00\u3002",
       "\u6210\u5458\u4F1A\u8BDD\u53EF\u4EE5\u672A\u88AB\u672C\u673A\u8DDF\u8E2A\uFF0C\u8BBE\u7F6E\u4ECD\u4F1A\u4FDD\u5B58\uFF0C\u53EA\u662F\u4E0D\u4F1A\u540C\u6B65\u4EFB\u52A1\u5FEB\u7167\u3002",
       "\u8FD9\u4E2A\u5DE5\u5177\u53EA\u4FDD\u5B58\u8BBE\u7F6E\uFF0C\u4E0D\u7ED9\u6210\u5458\u4F1A\u8BDD\u53D1\u6D88\u606F\u3001\u4E0D\u81EA\u52A8\u52A0\u6295\u9012\u524D\u7F00\uFF1B\u968F\u5BF9\u8BDD\u4E00\u8D77\u8BBE\u7F6E/\u66F4\u65B0\u7528 call_member \u7684 identity/role/scope \u53C2\u6570\u3002"
     ].join("\n"),
@@ -17674,6 +17708,10 @@ function registerTools(ctx, toolsCtx, service) {
           type: "boolean",
           description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF1B\u5F00\u542F\u540E\u72B6\u6001\u5FEB\u7167\u4F1A\u5217\u51FA\u4E24\u6B21\u5FEB\u7167\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
         },
+        budgetAudit: {
+          type: "boolean",
+          description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF1B\u5F00\u542F\u540E call_member \u9884\u7B97\u8017\u5C3D\u65F6\u81EA\u52A8\u8D77 fork \u5B50\u4EE3\u7406\u5BA1\u67E5\u4EA7\u54C1\u6D41\u7A0B\uFF08\u6BCF\u9636\u6BB5\u6700\u591A 3 \u6B21\u3001\u95F4\u9694 10 \u5206\u949F\uFF09\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
+        },
         callMemberBudget: callMemberBudgetSchema(),
         call_member_budget: {
           ...callMemberBudgetSchema(),
@@ -17707,10 +17745,11 @@ function registerTools(ctx, toolsCtx, service) {
       const hasKeep = args.keep !== void 0;
       const hasKeepPrompt = args.keepPrompt !== void 0 || args.keep_prompt !== void 0;
       const hasAvoidLongJobs = args.avoidLongJobs !== void 0;
+      const hasBudgetAudit = args.budgetAudit !== void 0;
       const hasCallMemberBudget = args.callMemberBudget !== void 0 || args.call_member_budget !== void 0;
       const hasCompressPercent = args.compressPercent !== void 0;
-      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasKeepPrompt && !hasAvoidLongJobs && !hasCallMemberBudget && !hasCompressPercent) {
-        throw new Error("identity, role, scope, note, keep, keepPrompt, avoidLongJobs, callMemberBudget, or compressPercent is required");
+      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasKeepPrompt && !hasAvoidLongJobs && !hasBudgetAudit && !hasCallMemberBudget && !hasCompressPercent) {
+        throw new Error("identity, role, scope, note, keep, keepPrompt, avoidLongJobs, budgetAudit, callMemberBudget, or compressPercent is required");
       }
       if (args.keepPrompt !== void 0 && args.keep_prompt !== void 0) {
         throw new Error("use only one of keepPrompt and keep_prompt");
@@ -17720,7 +17759,7 @@ function registerTools(ctx, toolsCtx, service) {
       }
       if (isSelf && selfId === "") throw new Error("cannot set the current session scope: no current session");
       if (!isSelf && !hasIdentity && !hasRole && !hasScope && !hasNote && !hasCompressPercent) {
-        throw new Error("keep, keepPrompt, avoidLongJobs and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation");
+        throw new Error("keep, keepPrompt, avoidLongJobs, budgetAudit and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation");
       }
       const patch = {
         ...hasIdentity ? { identity: args.identity } : {},
@@ -17730,6 +17769,7 @@ function registerTools(ctx, toolsCtx, service) {
         ...isSelf && hasKeep ? { keep: args.keep } : {},
         ...isSelf && hasKeepPrompt ? { keepPrompt: args.keepPrompt !== void 0 ? args.keepPrompt : args.keep_prompt } : {},
         ...isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {},
+        ...isSelf && hasBudgetAudit ? { budgetAudit: args.budgetAudit } : {},
         ...isSelf && hasCallMemberBudget ? { callMemberBudget: args.callMemberBudget !== void 0 ? args.callMemberBudget : args.call_member_budget } : {},
         ...hasCompressPercent ? { compressPercent: args.compressPercent } : {}
       };
@@ -17760,10 +17800,11 @@ function registerTools(ctx, toolsCtx, service) {
         ...isSelf ? [
           `\u4FDD\u6301\u76EE\u6807\uFF1A${scope?.keep === true ? `\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u63D0\u793A\u8BED\u300C${keepPrompt}\u300D\uFF09` : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}`,
           `\u907F\u514D\u8017\u65F6\uFF1A${scope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
+          `\u9884\u7B97\u5BA1\u67E5\uFF1A${scope?.budgetAudit === true ? "\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09" : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}`,
           `call_member \u9884\u7B97\uFF1A${budgetText}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC\u8BA1\uFF1B\u672A\u8BBE\u7F6E\u6309\u53C2\u4E0E\u6210\u5458\u6570 \xD7 2\uFF09`,
           `\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%`
         ] : [`\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%\uFF08\u6295\u9012\u524D\u8D85\u8FC7\u8BE5\u5360\u6BD4\u81EA\u52A8\u538B\u7F29\uFF09`],
-        ...!isSelf && (hasKeep || hasKeepPrompt || hasAvoidLongJobs || hasCallMemberBudget) ? ["keep / keepPrompt / avoidLongJobs / callMemberBudget \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
+        ...!isSelf && (hasKeep || hasKeepPrompt || hasAvoidLongJobs || hasBudgetAudit || hasCallMemberBudget) ? ["keep / keepPrompt / avoidLongJobs / budgetAudit / callMemberBudget \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...isSelf && hasRole ? ["role \u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...isSelf && hasNote ? ["note \u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...!isSelf && !tracked ? ["\u672C\u673A\u672A\u8DDF\u8E2A\u8BE5\u4F1A\u8BDD\uFF0C\u53EA\u4FDD\u5B58\u8BBE\u7F6E\u3002"] : []
@@ -17781,6 +17822,7 @@ function registerTools(ctx, toolsCtx, service) {
           keep: isSelf ? scope?.keep === true : null,
           keepPrompt: isSelf ? keepPrompt : null,
           avoidLongJobs: scope?.avoidLongJobs === true,
+          budgetAudit: isSelf ? scope?.budgetAudit === true : null,
           callMemberBudget: isSelf ? scope?.callMemberBudget ?? null : null,
           tracked,
           note: !isSelf ? scope?.note ?? null : null,
@@ -17788,6 +17830,7 @@ function registerTools(ctx, toolsCtx, service) {
           ignoredKeep: !isSelf && hasKeep,
           ignoredKeepPrompt: !isSelf && hasKeepPrompt,
           ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
+          ignoredBudgetAudit: !isSelf && hasBudgetAudit,
           ignoredCallMemberBudget: !isSelf && hasCallMemberBudget,
           ignoredNote: isSelf && hasNote
         }
@@ -18301,7 +18344,7 @@ ${replyText}` : "",
       "\u987A\u5E8F\u56FA\u5B9A\uFF1A\u5148\u5728\u6210\u5458\u4E0A\u5F52\u6863\uFF08\u505C\u6B62\u6B63\u5728\u8DD1\u7684\u5DE5\u4F5C\u3001\u628A\u4F1A\u8BDD\u79FB\u51FA Web \u5217\u8868\uFF09\uFF0C\u518D\u5220\u9664 interop \u5BF9\u8BDD\u8BB0\u5F55\uFF0C\u518D\u5220\u9664\u5DE5\u4F5C\u533A\u8BB0\u5F55\uFF0C\u6700\u540E\u9012\u5F52\u6E05\u7A7A\u5E76\u5220\u9664\u5DE5\u4F5C\u533A\u76EE\u5F55\u3002",
       "\u5220\u9664\u540E\u8FD9\u4E2A\u4F1A\u8BDDid \u4E0D\u80FD\u518D\u6295\u9012\uFF0C\u5B83\u5360\u7528\u7684\u5DE5\u4F5C\u533A\u540D\u4E5F\u4F1A\u7A7A\u51FA\u6765\uFF0C\u53EF\u4EE5\u91CD\u65B0\u7528\u540C\u540D workspace \u53D1\u8D77\u65B0\u5BF9\u8BDD\u3002",
       "\u5DE5\u4F5C\u533A\u76EE\u5F55\u53EA\u6709\u5728\u6210\u5458\u7684\u5DE5\u4F5C\u533A\u6839\u76EE\u5F55\uFF08~/.dsh/workspaces\uFF09\u4E4B\u4E0B\u624D\u4F1A\u88AB\u5220\u9664\uFF1B\u9ED8\u8BA4\u5DE5\u4F5C\u533A\u53EF\u80FD\u6307\u5411 Documents \u4E4B\u7C7B\u7684\u7528\u6237\u76EE\u5F55\uFF0C\u90A3\u79CD\u60C5\u51B5\u53EA\u5220\u8BB0\u5F55\u3001\u4E0D\u5220\u76EE\u5F55\u3002",
-      "\u76EE\u6807\u6210\u5458\u9700\u8981\u5E26\u5220\u9664\u63A5\u53E3\u7684\u65B0\u7248\u63D2\u4EF6\uFF1B\u65E7\u7248\u672C\u4F1A\u8FD4\u56DE\u660E\u786E\u9519\u8BEF\uFF0C\u4E0D\u4F1A\u5047\u88C5\u6210\u529F\u3002"
+      "\u6210\u5458\u4FA7\u53EF\u80FD\u56E0\u7248\u672C\u65E7\u3001\u4E0D\u53EF\u8FBE\u3001\u76EE\u5F55\u5360\u7528\u7B49\u539F\u56E0\u65E0\u6CD5\u5F52\u6863/\u5220\u9664\uFF1B\u65E0\u8BBA\u6210\u5458\u4FA7\u7ED3\u679C\u5982\u4F55\uFF0C\u672C\u673A\u4EFB\u52A1\u8BB0\u5F55\u548C\u65E5\u5FD7\u90FD\u4F1A\u88AB\u5220\u9664\uFF0C\u672C\u673A\u4E0D\u518D\u8DDF\u8E2A\u8FD9\u4E2A\u4F1A\u8BDD\u3002\u5931\u8D25\u4F1A\u5728\u8FD4\u56DE\u91CC\u7528 [\u8B66\u544A] \u8BF4\u660E\u539F\u56E0\u3002"
     ].join("\n"),
     parameters: {
       type: "object",
@@ -18326,14 +18369,20 @@ ${replyText}` : "",
       const task = result.task;
       const workspace = result.workspace !== "" ? result.workspace : memberTaskWorkspace(task);
       const directory = result.cwd !== "" ? result.cwd : "\uFF08\u6210\u5458\u672A\u62A5\u544A\u76EE\u5F55\uFF09";
+      const memberRemoved = result.memberRemoved === true;
+      const text = memberRemoved ? [
+        `\u5DF2\u5220\u9664\u6210\u5458\u4F1A\u8BDD ${task.conversationId}\uFF08${task.member} ${task.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${workspace}\uFF09\u3002`,
+        `\u6210\u5458\u4FA7\u5DF2\u5F52\u6863\u3001\u5220\u9664\u5BF9\u8BDD\u8BB0\u5F55\u3001\u5220\u9664\u5DE5\u4F5C\u533A\u8BB0\u5F55\uFF08${result.recordRemoved ? "\u5DF2\u5220\u9664" : "\u6CA1\u6709\u5BF9\u5E94\u8BB0\u5F55"}\uFF09\u3002`,
+        result.directoryRemoved ? `\u5DE5\u4F5C\u533A\u76EE\u5F55\u5DF2\u6E05\u7A7A\u5E76\u5220\u9664\uFF1A${directory}` : `\u5DE5\u4F5C\u533A\u76EE\u5F55\u6CA1\u6709\u5220\u9664\uFF08\u53EF\u80FD\u4E0D\u5728\u5DE5\u4F5C\u533A\u6839\u76EE\u5F55\u4E0B\uFF0C\u6216\u5220\u9664\u5931\u8D25\uFF09\uFF1A${directory}`,
+        "\u672C\u673A\u7684\u4EFB\u52A1\u8BB0\u5F55\u548C\u65E5\u5FD7\u4E5F\u5DF2\u5220\u9664\uFF1B\u8FD9\u4E2A\u4F1A\u8BDDid \u4E0D\u80FD\u518D\u6295\u9012\uFF0C\u5DE5\u4F5C\u533A\u540D\u53EF\u4EE5\u91CD\u65B0\u4F7F\u7528\u3002"
+      ].join("\n") : [
+        `[\u8B66\u544A] \u5DF2\u79FB\u9664\u672C\u673A\u6210\u5458\u8BB0\u5F55 ${task.conversationId}\uFF08${task.member} ${task.memberIp}\uFF09\uFF1B\u6210\u5458\u4FA7\u5F52\u6863/\u5220\u9664\u5931\u8D25\u3002`,
+        `\u6210\u5458\u4FA7\u5931\u8D25\u539F\u56E0\uFF1A${result.memberError ?? "\u672A\u77E5\u9519\u8BEF"}`,
+        "\u672C\u673A\u4EFB\u52A1\u8BB0\u5F55\u548C\u65E5\u5FD7\u5DF2\u5220\u9664\uFF0C\u672C\u673A\u4E0D\u518D\u8DDF\u8E2A\u8FD9\u4E2A\u4F1A\u8BDD\uFF1B\u6210\u5458\u4E0A\u7684\u5BF9\u8BDD\u53EF\u80FD\u4ECD\u7136\u5B58\u5728\uFF0C\u9700\u8981\u65F6\u5230\u6210\u5458\u7684 Web UI \u5F52\u6863/\u5220\u9664\u3002"
+      ].join("\n");
       return {
         ok: true,
-        text: [
-          `\u5DF2\u5220\u9664\u6210\u5458\u4F1A\u8BDD ${task.conversationId}\uFF08${task.member} ${task.memberIp}\uFF0C\u5DE5\u4F5C\u533A ${workspace}\uFF09\u3002`,
-          `\u6210\u5458\u4FA7\u5DF2\u5F52\u6863\u3001\u5220\u9664\u5BF9\u8BDD\u8BB0\u5F55\u3001\u5220\u9664\u5DE5\u4F5C\u533A\u8BB0\u5F55\uFF08${result.recordRemoved ? "\u5DF2\u5220\u9664" : "\u6CA1\u6709\u5BF9\u5E94\u8BB0\u5F55"}\uFF09\u3002`,
-          result.directoryRemoved ? `\u5DE5\u4F5C\u533A\u76EE\u5F55\u5DF2\u6E05\u7A7A\u5E76\u5220\u9664\uFF1A${directory}` : `\u5DE5\u4F5C\u533A\u76EE\u5F55\u6CA1\u6709\u5220\u9664\uFF08\u53EF\u80FD\u4E0D\u5728\u5DE5\u4F5C\u533A\u6839\u76EE\u5F55\u4E0B\uFF0C\u6216\u5220\u9664\u5931\u8D25\uFF09\uFF1A${directory}`,
-          "\u672C\u673A\u7684\u4EFB\u52A1\u8BB0\u5F55\u548C\u65E5\u5FD7\u4E5F\u5DF2\u5220\u9664\uFF1B\u8FD9\u4E2A\u4F1A\u8BDDid \u4E0D\u80FD\u518D\u6295\u9012\uFF0C\u5DE5\u4F5C\u533A\u540D\u53EF\u4EE5\u91CD\u65B0\u4F7F\u7528\u3002"
-        ].join("\n"),
+        text,
         data: {
           conversationId: task.conversationId,
           member: task.member,
@@ -18341,10 +18390,88 @@ ${replyText}` : "",
           workspace,
           cwd: result.cwd,
           removed: true,
-          archived: true,
+          localRemoved: true,
+          memberRemoved,
+          memberError: result.memberError ?? null,
+          archived: memberRemoved,
           workspaceRecordRemoved: result.recordRemoved,
           workspaceDirectoryRemoved: result.directoryRemoved
         }
+      };
+    }
+  };
+  const stopAllMemberDefinition = {
+    name: "stop_all_member",
+    description: [
+      "\u5411\u672C\u5BF9\u8BDD\u6240\u6709\u8FDB\u884C\u4E2D\u7684\u6210\u5458\u5BF9\u8BDD\u53D1\u9001\u4E00\u6761\u56FA\u5B9A\u7684\u505C\u6B62\u8BF7\u6C42\uFF1A",
+      `\u300C${STOP_ALL_MEMBER_PROMPT}\u300D`,
+      "",
+      "\u53EA\u5904\u7406\u672C\u5BF9\u8BDD\u8DDF\u8E2A\u7684 running / starting \u6210\u5458\u5BF9\u8BDD\uFF1B\u4E0D\u4E2D\u65AD\u3001\u4E0D\u53D6\u6D88\u5BF9\u8BDD\uFF0C\u4E5F\u4E0D\u7B49\u5F85\u5B83\u4EEC\u7ED3\u675F\u3002",
+      "\u5BF9\u6BCF\u4E2A\u4F1A\u8BDD\u4F9D\u6B21\u6295\u9012\uFF1B\u67D0\u4E2A\u4F1A\u8BDD\u5931\u8D25\u4F1A\u7EE7\u7EED\u5904\u7406\u5176\u4F59\u7684\u3002",
+      "\u8FD4\u56DE\u53D1\u9001\u6210\u529F/\u5931\u8D25\u6570\u91CF\uFF0C\u4EE5\u53CA\u6BCF\u4E2A\u4F1A\u8BDD\u7684\u6295\u9012\u65B9\u5F0F\uFF08steer \u63D2\u5165\u5F53\u524D\u8F6E\uFF0C\u6216\u6392\u961F\u5230\u4E0B\u4E00\u8F6E\uFF09\u3002"
+    ].join("\n"),
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    },
+    output: {
+      schema: { type: "object", additionalProperties: true },
+      render: (_args, value) => [{
+        type: "text",
+        text: typeof value?.text === "string" ? value.text : JSON.stringify(value, null, 2)
+      }]
+    },
+    isConcurrencySafe: () => false,
+    async execute(_args, exec) {
+      const originSessionId = originSessionOf(exec?.agent);
+      if (originSessionId === "") throw new Error("stop_all_member needs the current session");
+      const running = await memberTasks.inFlightForOrigin(originSessionId);
+      const targets = Array.isArray(running) ? running : [];
+      if (targets.length === 0) {
+        return {
+          ok: true,
+          text: "\u6CA1\u6709\u8FDB\u884C\u4E2D\u7684\u6210\u5458\u5BF9\u8BDD\uFF1B\u6CA1\u6709\u53D1\u9001\u4EFB\u4F55\u6D88\u606F\u3002",
+          data: { total: 0, sent: 0, failed: 0, prompt: STOP_ALL_MEMBER_PROMPT, conversations: [] }
+        };
+      }
+      const results = [];
+      for (const task of targets) {
+        const base = {
+          conversationId: String(task?.conversationId ?? ""),
+          member: String(task?.member ?? ""),
+          memberIp: String(task?.memberIp ?? "")
+        };
+        try {
+          const sent2 = await memberTasks.send({
+            conversationId: base.conversationId,
+            prompt: STOP_ALL_MEMBER_PROMPT,
+            agent: exec.agent,
+            signal: exec.signal
+          });
+          results.push({ ...base, ok: true, delivery: sent2?.lastDelivery ?? null });
+        } catch (error) {
+          results.push({
+            ...base,
+            ok: false,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+      const sent = results.filter((result) => result.ok).length;
+      const failed = results.length - sent;
+      return {
+        ok: failed === 0,
+        text: [
+          `\u5DF2\u5411 ${String(sent)}/${String(results.length)} \u4E2A\u8FDB\u884C\u4E2D\u7684\u6210\u5458\u5BF9\u8BDD\u53D1\u9001\u505C\u6B62\u8BF7\u6C42\uFF1A`,
+          ...results.map((result) => {
+            const target = `${result.conversationId}\uFF08${result.member} ${result.memberIp}\uFF09`;
+            if (!result.ok) return `- ${target}\uFF1A\u5931\u8D25\uFF1A${result.error}`;
+            const delivery = result.delivery === "steer" ? "\u5DF2\u63D2\u5165\u5F53\u524D\u8F6E" : result.delivery === "followup" ? "\u5DF2\u6392\u961F\u5230\u4E0B\u4E00\u8F6E" : "\u5DF2\u6295\u9012";
+            return `- ${target}\uFF1A${delivery}`;
+          })
+        ].join("\n"),
+        data: { total: results.length, sent, failed, prompt: STOP_ALL_MEMBER_PROMPT, conversations: results }
       };
     }
   };
@@ -18413,7 +18540,7 @@ sha256 ${data.sha256}
       };
     }
   };
-  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, setProductStageDefinition, waitMemberDefinition, statusMemberDefinition, removeMemberDefinition, membersDefinition, repackDefinition]) {
+  for (const tool of [buildDefinition, deployDefinition, callMemberDefinition, setMemberScopeDefinition, setProductStageDefinition, waitMemberDefinition, statusMemberDefinition, removeMemberDefinition, stopAllMemberDefinition, membersDefinition, repackDefinition]) {
     try {
       toolsCtx.tools.register(tool);
       ctx.logger?.info?.(`mesh: registered tool ${tool.name}`);

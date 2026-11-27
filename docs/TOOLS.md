@@ -2,8 +2,8 @@
 
 - 插件：`@local/dsh-mesh`
 - 工具注册：`src/lib/tools.mjs` → `registerTools()`
-- 当前共 10 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`set_member_scope`、`set_product_stage`、`wait_member`、`status_member`、`remove_member`
-- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续（不再有 `compress` 参数），`set_member_scope` 单独设置任意会话或自身的身份、标准身份、工作范围、自动压缩阈值和主对话每个大阶段单独的 `call_member` 预算，`set_product_stage` 维护产品版本、A/B/C/D 大阶段、子阶段轮次和目标状态，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）；`remove_member` 输入会话id，在目标成员上归档、删除对话、删除工作区记录并清空工作区目录，同时删掉本机跟踪记录。
+- 当前共 11 个模型可见工具：`build`、`deploy`、`repack`、`members`、`call_member`、`set_member_scope`、`set_product_stage`、`wait_member`、`status_member`、`remove_member`、`stop_all_member`
+- 所有工具都没有 `action` 参数，调用即执行对应行为；`call_member` 用 `conversationId` 区分新建/继续（不再有 `compress` 参数），`set_member_scope` 单独设置任意会话或自身的身份、标准身份、工作范围、自动压缩阈值和主对话每个大阶段单独的 `call_member` 预算，`set_product_stage` 维护产品版本、A/B/C/D 大阶段、子阶段轮次和目标状态，`wait_member` 只做有界等待：用 `all: true` 等本对话所有进行中的会话（推荐），或用 `conversationIds` 指定会话；`status_member` 仍然支持一次传多个会话id（`conversationIds`）；`remove_member` 输入会话id，在目标成员上归档、删除对话、删除工作区记录并清空工作区目录，同时删掉本机跟踪记录；`stop_all_member` 向本对话所有进行中的成员对话发送固定的停止请求。
 - 所有工具统一返回 `{ ok, text, data }`。`text` 是给人看的摘要，`data` 是结构化结果。
 - 同步执行的工具会在 `text` 和 `data` 里都返回日志文件地址，便于调用结束后继续读取完整日志。
 
@@ -21,6 +21,7 @@
 | `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
 | `status_member` | 目标会话状态 + 身份/工作范围 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区/身份/工作范围，已归档的不列出）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
 | `remove_member` | 彻底删除一个对话、它的工作区记录和目录，并停止本机跟踪 | `conversationId` | `false` |
+| `stop_all_member` | 向本对话所有进行中的成员对话发送停止请求，不取消、不等待 | 无 | `false` |
 
 ## 2. 共享基础
 
@@ -642,8 +643,9 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
   本轮参与度、未参与/缺身份提示和「后续可能走向」的条件式调用；
 - 参与度里的标准身份优先取 `member-scopes.json`（按 conversationId），回退任务 profile 快照；
 - 自身行显示有效配置：保持目标（`keep`，默认关闭；开启时附提示语）、避免耗时
-  （`avoidLongJobs`，默认关闭）、`call_member` 预算（`callMemberBudget`，按 A/B/C/D 分阶段；
-  没设的阶段显示 `默认`，运行时取参与成员数 × 2）和压缩阈值（`compressPercent`，默认 35%）；
+  （`avoidLongJobs`，默认关闭）、预算审查（`budgetAudit`，默认关闭）、`call_member` 预算
+  （`callMemberBudget`，按 A/B/C/D 分阶段；没设的阶段显示 `默认`，运行时取参与成员数 × 2）
+  和压缩阈值（`compressPercent`，默认 35%）；
 - 自身缺身份/工作范围时提示 `set_member_scope`（省略 conversationId 或传 `self`）；
   成员会话缺身份/范围的聚合提示不在快照里出现，仍保留在 `status_member` 的结果中；
 - 跟踪了成员会话但还没有产品阶段时，提示用 `set_product_stage` 建立（如 `{ "stage": "A" }`）；
@@ -738,6 +740,8 @@ set_member_scope { "conversationId": "self", "call_member_budget": { "A": 26 } }
   参与成员按当前阶段要求算：A 阶段是所有跟踪的会话，B 是开发/测试/研究员，C 是产品经理，
   D 是业务；成员会话变化后下一次快照重新计算。
 - **独立合并**：先设 A、再设 B 不会清掉 A；每个阶段单独保存。
+- **审查开关**：`set_member_scope { "budgetAudit": true }`（只对自身/主对话生效，默认 false）
+  开启后，预算用尽才会启动下面的 fork 审查；关闭时只用尽提示，不起子代理。
 - **消耗**：成员对话的回复返回到主对话算一次——`wait_member` 取走回复和兜底投递共用
   `task.replies`，回复被接受一次就计一次；不是按派发次数或会话个数计。
 - **窗口**：只统计当前 `roundStartedAt`（旧状态回退 `updatedAt`）之后接受的回复；换阶段、
@@ -753,7 +757,7 @@ set_member_scope { "conversationId": "self", "call_member_budget": { "A": 26 } }
   先 wait_member 取回已派任务的回复。
   ```
 
-- **耗尽审查**：用尽时成员上下文会向服务申请一个审查名额，然后启动一个 **fork 子代理**
+- **耗尽审查**（需 `budgetAudit: true`）：用尽时成员上下文会向服务申请一个审查名额，然后启动一个 **fork 子代理**
   检查主对话是否按当前阶段工作、是否做了超出阶段的工作、预算为什么耗尽。每个小阶段
   （stage + round）最多 **3 次**，两次至少间隔 **10 分钟**；名额持久化在 `product-stages.json`
   的 `audits` 字段，换阶段或开新一轮时清空，只更新目标时保留。审查子代理能看到主对话已完成
@@ -837,6 +841,7 @@ set_member_scope { "identity": "开发", "scope": "插件开发" }
 set_member_scope { "conversationId": "self", "keep": true }
 set_member_scope { "conversationId": "self", "keep": true, "keepPrompt": "继续推进成员结果" }
 set_member_scope { "conversationId": "self", "avoidLongJobs": true }
+set_member_scope { "conversationId": "self", "budgetAudit": true }
 set_member_scope { "conversationId": "self", "callMemberBudget": { "A": 26 } }
 set_member_scope { "conversationId": "<成员会话id>", "role": "测试", "note": "只读复核，不要改内核文件" }
 set_member_scope { "compressPercent": 35 }
@@ -858,6 +863,8 @@ set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "
 - `avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，下一次状态快照会检查距上一次快照
   之间结束、耗时超过 1 分钟的 job，并在注入里列出它们、建议交给成员对话执行；设置成员会话
   时忽略，返回文字会说明。
+- `budgetAudit` 默认 false，只对自身/主对话生效：开启后预算用尽时才启动 fork 子代理审查
+  （每阶段最多 3 次、间隔 10 分钟）；关闭时只用尽提示。设置成员会话时忽略。
 - `callMemberBudget`（别名 `call_member_budget`）是**按大阶段**（A/B/C/D）设置的主对话
   `call_member` 预算，每个阶段整数 1–999；可以只给要设的阶段，没有统一值。没设置的阶段
   运行时默认为该阶段参与成员数 × 2；成员每把一条回复返回给主对话消耗一次，用尽时成员上下文
@@ -867,7 +874,7 @@ set_member_scope { "conversationId": "<成员会话id>", "identity": "测试", "
 - `compressPercent`：自动压缩阈值，数字 1–100，默认 35；成员会话下一次 `call_member` 投递前
   用它检查上下文占比。派活推送移除后，主对话自身不再有推送前压缩时机，该值仍会保存并显示。
 - `compressPercent` 目前只能设置数值，不支持直接清除；要恢复默认就设回 `35`。
-- 至少提供 `identity` / `role` / `scope` / `note` / `keep` / `keepPrompt` / `avoidLongJobs` / `callMemberBudget` / `compressPercent` 之一；设置成员会话时
+- 至少提供 `identity` / `role` / `scope` / `note` / `keep` / `keepPrompt` / `avoidLongJobs` / `budgetAudit` / `callMemberBudget` / `compressPercent` 之一；设置成员会话时
   必须有 `identity` / `role` / `scope` / `note` / `compressPercent` 之一（允许只设 `compressPercent`）。
 - 返回文字显示有效值（例如 `标准身份：测试`、`保持目标：开启（只对主对话生效，提示语「继续」）`、`call_member 预算：A 26 / B 默认 / C 默认 / D 默认（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）`、`压缩阈值：35%`）以及被忽略的字段。
 - “自身”写入当前 session id；成员会话写入 conversationId，并同步本机跟踪任务的 profile
@@ -899,6 +906,30 @@ remove_member { "conversationId": "<会话id>" }
 - 旧版成员没有 `/remove` 路由（404），工具会明确报“插件版本不支持完全删除会话”。
 - 成员 UI 里自行归档的会话：`status_member` 读取目标投影时看到 `archived: true`，会同步把
   本机任务标记为 archived 并移出列表。
+- **本机记录必删**：成员侧可能因旧版本（404）、不可达、没有 workspace registry、目录占用、
+  请求超时等失败。工具会同时发起成员删除并立即 `#forget` 本机记录（停监视/定时器/等待者，
+  删除任务 json 和日志）。成员侧失败时返回 `[警告]`、`data.memberRemoved = false` 和
+  `memberError`，仍然 `ok: true`；本机不再跟踪这个会话，不能再按同一个 id 调 `remove_member`。
+
+### 6.11 `stop_all_member`
+
+```text
+stop_all_member {}
+```
+
+没有参数。取本对话 `originSessionId` 下所有 `running` / `starting` 的成员对话，逐个投递：
+
+```text
+请尽快停止工作，收敛手中工作，该提交推送的尽快处理。
+```
+
+- **只发消息**：不调用取消/归档接口，不等待成员结束；成员按自己的节奏收敛。
+- **顺序投递**：一个会话失败会继续处理后续会话；返回每个会话的投递方式（`steer` 当前轮 /
+  `followup` 下一轮）或错误。
+- **范围**：只处理本对话跟踪的成员会话，不碰其他主对话的成员。
+- 全部成功时 `ok: true`；有失败时 `ok: false`，但仍返回成功/失败数量和逐会话结果。
+  没有进行中的会话时返回 `ok: true` 和“没有发送任何消息”。
+- `data`：`total` / `sent` / `failed` / `prompt` / `conversations`。
 
 ## 7. 典型组合
 

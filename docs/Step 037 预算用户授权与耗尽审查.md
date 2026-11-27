@@ -5,9 +5,9 @@ Step 036 把 `call_member` 预算拆成按大阶段设置，并允许未设置�
 
 - **预算只能由用户调整**：主对话自己调用 `set_member_scope` 改预算时，必须能从最近的用户
   消息里找到明确的调整指示，否则直接拒绝，配置不变。
-- **预算耗尽时自动审查**：成员上下文发现本轮预算用尽，会启动一个 fork 子代理检查当前产品
-  流程；每个小阶段最多 3 次、两次至少间隔 10 分钟。审查结论作为警告和下一步建议投递回
-  主对话。
+- **可选的预算耗尽审查**：用 `set_member_scope { "budgetAudit": true }` 开启后（默认关闭），
+  成员上下文发现本轮预算用尽会启动一个 fork 子代理检查当前产品流程；每个小阶段最多 3 次、
+  两次至少间隔 10 分钟。审查结论作为警告和下一步建议投递回主对话。
 
 ## 预算只能由用户调整
 
@@ -44,13 +44,21 @@ data: { refused: true, reason: "budget_requires_user_instruction" }
 实现位于 `src/lib/user-intent.mjs`：`recentHumanUserMessages()`、`isBudgetAdjustmentText()`、
 `hasBudgetInstructionFromUser()`。
 
-## 预算耗尽时的自动审查
+## 预算耗尽时的审查（可选）
 
-成员上下文每次生成快照时（最多每 60 秒一次）检查当前阶段：
+审查默认关闭。先开启：
 
-1. 当前阶段的预算（显式设置或默认值）；
-2. 本轮已接受的成员回复数（同一套 `task.replies` 计数）；
-3. 已用 >= 预算时，向服务申请一个审查名额。
+```text
+set_member_scope { "budgetAudit": true }
+```
+
+`budgetAudit` 只对自身/主对话生效，设置成员会话时忽略；保存在同一个会话 scope 记录里，
+默认 false。开启后成员上下文每次生成快照时（最多每 60 秒一次）检查当前阶段：
+
+1. 自身 scope 的 `budgetAudit` 是否为 true（否则什么都不做）；
+2. 当前阶段的预算（显式设置或默认值）；
+3. 本轮已接受的成员回复数（同一套 `task.replies` 计数）；
+4. 已用 >= 预算时，向服务申请一个审查名额。
 
 名额持久化在 `product-stages.json` 的项目记录里：
 
@@ -93,7 +101,8 @@ fork 子代理能看到主对话已完成的轮次；prompt 里再带上当前�
 
 ## 边界
 
-- 审查是**建议**，不阻断 `call_member`、`set_product_stage` 或用户调大预算；
+- 审查默认关闭，只有 `budgetAudit: true` 才启动；它是**建议**，不阻断 `call_member`、
+  `set_product_stage` 或用户调大预算；
 - fork 只看到已完成的轮次，当前正在进行的这一轮不在子代理历史里，所以 prompt 额外带上阶段
   事实和最近用户消息；
 - 预算用尽提示本身不再建议主对话自行调大预算；只有用户明确要求时才允许改；
@@ -108,4 +117,4 @@ fork 子代理能看到主对话已完成的轮次；prompt 里再带上当前�
   保留、释放名额。
 - `test/member-context.test.mjs`：预算用尽时只启动一次 fork 审查，prompt 带阶段事实；名额
   申请被拒时不再启动。
-- 全量 `npm test` 590 通过，`npm run typecheck` 通过。
+- 全量 `npm test` 595 通过，`npm run typecheck` 通过。

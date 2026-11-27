@@ -55,10 +55,30 @@ export interface MemberConversationRow {
   lastTask: string
 }
 
+/** The current product stage, as the section header shows it. */
+export interface MemberProductStage {
+  version: string
+  stage: string
+  round: number
+  label: string
+}
+
+/** The current stage's call_member budget, as the section header shows it. */
+export interface MemberBudget {
+  stage: string
+  used: number
+  limit: number
+  remaining: number
+  source: 'explicit' | 'default'
+  exhausted: boolean
+}
+
 interface Snapshot {
   total: number
   running: number
   rows: MemberConversationRow[]
+  stage: MemberProductStage | null
+  budget: MemberBudget | null
 }
 
 /**
@@ -131,13 +151,21 @@ async function load(sessionId: string): Promise<void> {
       credentials: 'same-origin',
     })
     if (response.ok) {
-      const body = await response.json() as { total?: number, running?: number, conversations?: MemberConversationRow[] }
+      const body = await response.json() as {
+        total?: number
+        running?: number
+        conversations?: MemberConversationRow[]
+        stage?: MemberProductStage | null
+        budget?: MemberBudget | null
+      }
       const rows = Array.isArray(body.conversations) ? body.conversations : []
       update(entry, {
         snapshot: {
           total: typeof body.total === 'number' ? body.total : rows.length,
           running: typeof body.running === 'number' ? body.running : 0,
           rows,
+          stage: body.stage ?? null,
+          budget: body.budget ?? null,
         },
       })
     }
@@ -336,6 +364,14 @@ const SECTION_CSS = `
   opacity: 0.55;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+.dsh-mesh-phase {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.dsh-mesh-phase[data-exhausted] {
+  font-weight: 500;
+  opacity: 0.9;
 }
 .dsh-mesh-fold {
   padding: 0 1px;
@@ -642,6 +678,20 @@ export function MemberConversationsProgress({ sessionId }: { sessionId: string }
   const { state, toggleCollapsed, setView } = useMemberSection(sessionId)
   const snapshot = state.snapshot
   if (snapshot === null || snapshot.rows.length === 0) return null
+  const stage = snapshot.stage
+  const budget = snapshot.budget
+  const phaseText = stage === null
+    ? null
+    : `${stage.stage} ${stage.label} · 第${String(stage.round)}轮`
+  const budgetText = budget === null
+    ? null
+    : `预算 ${String(budget.used)}/${String(budget.limit)}${budget.exhausted ? ' 用尽' : ''}${budget.source === 'default' ? '（默认）' : ''}`
+  const phaseTitle = stage === null
+    ? ''
+    : `${stage.version} · ${stage.stage} 阶段（第${String(stage.round)}轮）· ${stage.label}`
+      + (budget === null
+        ? ''
+        : `\n预算：已用 ${String(budget.used)}/${String(budget.limit)}，剩余 ${String(budget.remaining)}（${budget.source === 'default' ? '默认 = 参与成员数 × 2' : '已设置'}）`)
   return (
     <span className="dsh-mesh-progress">
       <button
@@ -653,6 +703,13 @@ export function MemberConversationsProgress({ sessionId }: { sessionId: string }
       >
         {state.collapsed ? '▸' : '▾'}
       </button>
+      {phaseText === null
+        ? null
+        : (
+          <span className="dsh-mesh-phase" title={phaseTitle} data-exhausted={budget?.exhausted === true ? '' : undefined}>
+            {phaseText}{budgetText === null ? '' : ` · ${budgetText}`}
+          </span>
+        )}
       <span className="dsh-mesh-view" role="group" aria-label="成员视图">
         <button
           type="button"

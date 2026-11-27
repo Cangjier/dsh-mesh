@@ -295,12 +295,16 @@ export function normalizeStoredProductStage(value) {
       participation[id] = { turn, at }
     }
   }
+  const roundStartedAt = typeof value.roundStartedAt === 'string' && value.roundStartedAt !== ''
+    ? value.roundStartedAt
+    : ''
   return {
     version,
     stage,
     round,
     goals,
     participation,
+    ...(roundStartedAt === '' ? {} : { roundStartedAt }),
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : '',
     updatedBy: typeof value.updatedBy === 'string' ? value.updatedBy : '',
   }
@@ -331,12 +335,18 @@ export function applyProductStage(previous, input, now = new Date()) {
     : stage === 'A' && prev.stage === 'D' ? prev.round + 1 : prev.round
   const round = Math.min(input.round ?? automaticRound, PRODUCT_ROUND_MAX)
   const reset = prev === null || prev.stage !== stage || prev.round !== round
+  const previousStart = typeof prev?.roundStartedAt === 'string' && prev.roundStartedAt !== ''
+    ? prev.roundStartedAt
+    : (typeof prev?.updatedAt === 'string' ? prev.updatedAt : '')
   return {
     version,
     stage,
     round,
     goals: mergeGoals(prev?.goals, input.goals),
     participation: reset ? {} : { ...(prev?.participation ?? {}) },
+    // A goal-only update keeps the round's start: replies collected before it
+    // still count, and the participation window cannot move under the caller.
+    roundStartedAt: reset || previousStart === '' ? new Date(now).toISOString() : previousStart,
     updatedAt: new Date(now).toISOString(),
     updatedBy: '',
   }
@@ -355,6 +365,35 @@ function goalLine(goal) {
 }
 
 /**
+ * One tracked conversation's status label, in the same vocabulary the member
+ * snapshot uses (空闲 / 进行中 / 异常中止).
+ * @param {object} task tracked conversation.
+ * @returns {string} label.
+ */
+function participantStatus(task) {
+  if (typeof task?.statusLabel === 'string' && task.statusLabel !== '') return task.statusLabel
+  const status = typeof task?.status === 'string' ? task.status : ''
+  if (status === 'running' || status === 'starting') return '进行中'
+  if (status === 'completed') return '空闲'
+  if (status === 'failed' || status === 'interrupted') return '异常中止'
+  return status === '' ? '未知' : status
+}
+
+/**
+ * The newest reply time recorded on one task.
+ * @param {object} task tracked conversation.
+ * @returns {number} epoch milliseconds, or 0 when no reply has an `at`.
+ */
+function latestReplyAt(task) {
+  let latest = 0
+  for (const reply of Array.isArray(task?.replies) ? task.replies : []) {
+    const at = typeof reply?.at === 'string' ? Date.parse(reply.at) : Number.NaN
+    if (Number.isFinite(at) && at > latest) latest = at
+  }
+  return latest
+}
+
+/**
  * The current stage's participant view.
  * @param {object} state stage state.
  * @param {object[]} tasks tracked member conversations.
@@ -363,18 +402,29 @@ function goalLine(goal) {
  */
 export function productStageParticipants(state, tasks, scopes = {}) {
   const list = Array.isArray(tasks) ? tasks : []
+  // A reply after the round started counts even if the participation map was
+  // never written (tasks created before `originCwd`, a plugin restart between
+  // the reply and the record, or a state restored from an older build).
+  const startedAt = Date.parse(
+    typeof state?.roundStartedAt === 'string' && state.roundStartedAt !== ''
+      ? state.roundStartedAt
+      : (typeof state?.updatedAt === 'string' ? state.updatedAt : ''),
+  )
   const entries = list.map((task) => {
     const conversationId = String(task?.conversationId ?? '')
     const stored = scopes[conversationId] ?? null
     const role = roleOfScope(stored) ?? roleOfScope(task?.profile)
+    const replyAt = latestReplyAt(task)
     return {
       conversationId,
       role,
       identity: typeof stored?.identity === 'string' && stored.identity !== ''
         ? stored.identity
         : (typeof task?.profile?.identity === 'string' ? task.profile.identity : null),
-      statusLabel: typeof task?.statusLabel === 'string' ? task.statusLabel : (typeof task?.status === 'string' ? task.status : '未知'),
-      participated: Boolean(state?.participation?.[conversationId]),
+      statusLabel: participantStatus(task),
+      failed: task?.status === 'failed' || task?.status === 'interrupted',
+      participated: Boolean(state?.participation?.[conversationId])
+        || (Number.isFinite(startedAt) && replyAt >= startedAt),
     }
   })
   const requiredRoles = stageRequiredRoles(state?.stage)
@@ -408,11 +458,15 @@ function participantLabel(entry) {
 export function formatProductStageParticipation(state, tasks, scopes = {}) {
   const view = productStageParticipants(state, tasks, scopes)
   const done = view.required.filter(entry => entry.participated)
+  const missingLabel = entry => `${participantLabel(entry)}（${entry.statusLabel}${entry.failed ? '，需先恢复会话' : ''}）`
   const lines = [
     `- 本轮参与：${String(done.length)}/${String(view.required.length)}${done.length === 0 ? '' : `（${done.map(participantLabel).join('；')}）`}`,
   ]
   if (view.missing.length > 0) {
-    lines.push(`- 未参与：${view.missing.map(participantLabel).join('、')}`)
+    lines.push(`- 未参与：${view.missing.map(missingLabel).join('、')}`)
+  }
+  if (view.missing.length > 0 || view.missingRoles.length > 0) {
+    lines.push('- 本轮参与未齐：先给未参与成员派任务（call_member），收到回复后再换阶段；现在换阶段或开新一轮会被拒绝。')
   }
   if (view.missingRoles.length > 0) {
     lines.push(`- 没有成员会话的标准身份：${view.missingRoles.join('、')}`)
@@ -516,7 +570,7 @@ export function productStageParticipationBlockers(state, tasks, scopes = {}) {
   const view = productStageParticipants(state, tasks, scopes)
   const lines = []
   for (const entry of view.missing) {
-    lines.push(`${participantLabel(entry)} 还没有参与本轮（${entry.statusLabel}）`)
+    lines.push(`${participantLabel(entry)} 还没有参与本轮（${entry.statusLabel}${entry.failed ? '，需先恢复会话' : ''}）`)
   }
   for (const role of view.missingRoles) {
     lines.push(`没有${role}身份的成员会话`)

@@ -10753,7 +10753,7 @@ var MemberTaskService = class {
         task.repliesTakenByWait = task.repliesTakenByWait === true;
         if (typeof task.workspace !== "string" || task.workspace.trim() === "") task.workspace = "unknown";
         if (typeof task.originCwd !== "string" || task.originCwd === "") {
-          task.originCwd = this.#originCwdOf(task.originAgentId, task.originSessionId);
+          task.originCwd = await this.#originCwdOf(task.originAgentId, task.originSessionId);
         }
         task.profile = memberTaskProfile(task);
         if (!Array.isArray(task.sentMessages)) {
@@ -11443,14 +11443,32 @@ var MemberTaskService = class {
   }
   /**
    * Recover the project directory of a task recorded before `originCwd` existed.
+   *
+   * A live origin agent answers directly. An archived or not-yet-resumed origin
+   * is still durably stored, and its session header carries `cwd`; read that
+   * header through `sessionPersistence` without making the session live. This
+   * is what lets participation (`noteMemberParticipation`) work for tasks
+   * created before the field existed.
    * @param {string} agentId origin agent id.
    * @param {string} sessionId origin session id.
-   * @returns {string|null} directory, or null when the origin is gone.
+   * @returns {Promise<string|null>} directory, or null when it cannot be resolved.
    */
-  #originCwdOf(agentId, sessionId) {
+  async #originCwdOf(agentId, sessionId) {
     const agents = typeof this.ctx?.get === "function" ? this.ctx.get("agents") : this.ctx?.agents;
     const agent = agents?.get?.(String(agentId ?? "")) ?? agents?.get?.(String(sessionId ?? ""));
-    return callerProjectDir(agent);
+    const live = callerProjectDir(agent);
+    if (live !== null) return live;
+    const id = String(sessionId ?? "");
+    if (id === "") return null;
+    const persistence = typeof this.ctx?.get === "function" ? this.ctx.get("sessionPersistence") : this.ctx?.sessionPersistence;
+    if (persistence === void 0 || typeof persistence.stat !== "function") return null;
+    try {
+      const snapshot = await persistence.stat(id);
+      const cwd = snapshot?.header?.cwd;
+      return typeof cwd === "string" && cwd.trim() !== "" ? cwd.trim() : null;
+    } catch {
+      return null;
+    }
   }
   /**
    * Record one accepted reply as the conversation's participation in the
@@ -11464,7 +11482,16 @@ var MemberTaskService = class {
    */
   async #noteParticipation(task) {
     if (typeof this.service?.noteMemberParticipation !== "function") return;
-    const cwd = typeof task.originCwd === "string" ? task.originCwd : "";
+    let cwd = typeof task.originCwd === "string" ? task.originCwd : "";
+    if (cwd === "") {
+      const resolved = await this.#originCwdOf(task.originAgentId, task.originSessionId);
+      if (resolved !== null) {
+        task.originCwd = resolved;
+        await this.#save(task).catch(() => {
+        });
+      }
+      cwd = resolved ?? "";
+    }
     if (cwd === "") return;
     const replies = Array.isArray(task.replies) ? task.replies : [];
     const newest = replies.length > 0 && Number.isSafeInteger(replies[replies.length - 1]?.turn) ? replies[replies.length - 1].turn : null;
@@ -12907,12 +12934,14 @@ function normalizeStoredProductStage(value) {
       participation[id] = { turn, at };
     }
   }
+  const roundStartedAt = typeof value.roundStartedAt === "string" && value.roundStartedAt !== "" ? value.roundStartedAt : "";
   return {
     version,
     stage,
     round: round2,
     goals,
     participation,
+    ...roundStartedAt === "" ? {} : { roundStartedAt },
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
     updatedBy: typeof value.updatedBy === "string" ? value.updatedBy : ""
   };
@@ -12924,12 +12953,16 @@ function applyProductStage(previous, input, now = /* @__PURE__ */ new Date()) {
   const automaticRound = prev === null ? 1 : stage === "A" && prev.stage === "D" ? prev.round + 1 : prev.round;
   const round2 = Math.min(input.round ?? automaticRound, PRODUCT_ROUND_MAX);
   const reset = prev === null || prev.stage !== stage || prev.round !== round2;
+  const previousStart = typeof prev?.roundStartedAt === "string" && prev.roundStartedAt !== "" ? prev.roundStartedAt : typeof prev?.updatedAt === "string" ? prev.updatedAt : "";
   return {
     version,
     stage,
     round: round2,
     goals: mergeGoals(prev?.goals, input.goals),
     participation: reset ? {} : { ...prev?.participation ?? {} },
+    // A goal-only update keeps the round's start: replies collected before it
+    // still count, and the participation window cannot move under the caller.
+    roundStartedAt: reset || previousStart === "" ? new Date(now).toISOString() : previousStart,
     updatedAt: new Date(now).toISOString(),
     updatedBy: ""
   };
@@ -12940,18 +12973,39 @@ function goalLine(goal) {
   const status = PRODUCT_GOAL_STATUSES.includes(goal?.status) ? goal.status : "\u672A\u5F00\u59CB";
   return `${text}\uFF08${status}\uFF09`;
 }
+function participantStatus(task) {
+  if (typeof task?.statusLabel === "string" && task.statusLabel !== "") return task.statusLabel;
+  const status = typeof task?.status === "string" ? task.status : "";
+  if (status === "running" || status === "starting") return "\u8FDB\u884C\u4E2D";
+  if (status === "completed") return "\u7A7A\u95F2";
+  if (status === "failed" || status === "interrupted") return "\u5F02\u5E38\u4E2D\u6B62";
+  return status === "" ? "\u672A\u77E5" : status;
+}
+function latestReplyAt(task) {
+  let latest = 0;
+  for (const reply of Array.isArray(task?.replies) ? task.replies : []) {
+    const at = typeof reply?.at === "string" ? Date.parse(reply.at) : Number.NaN;
+    if (Number.isFinite(at) && at > latest) latest = at;
+  }
+  return latest;
+}
 function productStageParticipants(state, tasks, scopes = {}) {
   const list = Array.isArray(tasks) ? tasks : [];
+  const startedAt = Date.parse(
+    typeof state?.roundStartedAt === "string" && state.roundStartedAt !== "" ? state.roundStartedAt : typeof state?.updatedAt === "string" ? state.updatedAt : ""
+  );
   const entries = list.map((task) => {
     const conversationId = String(task?.conversationId ?? "");
     const stored = scopes[conversationId] ?? null;
     const role = roleOfScope(stored) ?? roleOfScope(task?.profile);
+    const replyAt = latestReplyAt(task);
     return {
       conversationId,
       role,
       identity: typeof stored?.identity === "string" && stored.identity !== "" ? stored.identity : typeof task?.profile?.identity === "string" ? task.profile.identity : null,
-      statusLabel: typeof task?.statusLabel === "string" ? task.statusLabel : typeof task?.status === "string" ? task.status : "\u672A\u77E5",
-      participated: Boolean(state?.participation?.[conversationId])
+      statusLabel: participantStatus(task),
+      failed: task?.status === "failed" || task?.status === "interrupted",
+      participated: Boolean(state?.participation?.[conversationId]) || Number.isFinite(startedAt) && replyAt >= startedAt
     };
   });
   const requiredRoles = stageRequiredRoles(state?.stage);
@@ -12967,11 +13021,15 @@ function participantLabel(entry) {
 function formatProductStageParticipation(state, tasks, scopes = {}) {
   const view = productStageParticipants(state, tasks, scopes);
   const done = view.required.filter((entry) => entry.participated);
+  const missingLabel = (entry) => `${participantLabel(entry)}\uFF08${entry.statusLabel}${entry.failed ? "\uFF0C\u9700\u5148\u6062\u590D\u4F1A\u8BDD" : ""}\uFF09`;
   const lines = [
     `- \u672C\u8F6E\u53C2\u4E0E\uFF1A${String(done.length)}/${String(view.required.length)}${done.length === 0 ? "" : `\uFF08${done.map(participantLabel).join("\uFF1B")}\uFF09`}`
   ];
   if (view.missing.length > 0) {
-    lines.push(`- \u672A\u53C2\u4E0E\uFF1A${view.missing.map(participantLabel).join("\u3001")}`);
+    lines.push(`- \u672A\u53C2\u4E0E\uFF1A${view.missing.map(missingLabel).join("\u3001")}`);
+  }
+  if (view.missing.length > 0 || view.missingRoles.length > 0) {
+    lines.push("- \u672C\u8F6E\u53C2\u4E0E\u672A\u9F50\uFF1A\u5148\u7ED9\u672A\u53C2\u4E0E\u6210\u5458\u6D3E\u4EFB\u52A1\uFF08call_member\uFF09\uFF0C\u6536\u5230\u56DE\u590D\u540E\u518D\u6362\u9636\u6BB5\uFF1B\u73B0\u5728\u6362\u9636\u6BB5\u6216\u5F00\u65B0\u4E00\u8F6E\u4F1A\u88AB\u62D2\u7EDD\u3002");
   }
   if (view.missingRoles.length > 0) {
     lines.push(`- \u6CA1\u6709\u6210\u5458\u4F1A\u8BDD\u7684\u6807\u51C6\u8EAB\u4EFD\uFF1A${view.missingRoles.join("\u3001")}`);
@@ -13037,7 +13095,7 @@ function productStageParticipationBlockers(state, tasks, scopes = {}) {
   const view = productStageParticipants(state, tasks, scopes);
   const lines = [];
   for (const entry of view.missing) {
-    lines.push(`${participantLabel(entry)} \u8FD8\u6CA1\u6709\u53C2\u4E0E\u672C\u8F6E\uFF08${entry.statusLabel}\uFF09`);
+    lines.push(`${participantLabel(entry)} \u8FD8\u6CA1\u6709\u53C2\u4E0E\u672C\u8F6E\uFF08${entry.statusLabel}${entry.failed ? "\uFF0C\u9700\u5148\u6062\u590D\u4F1A\u8BDD" : ""}\uFF09`);
   }
   for (const role of view.missingRoles) {
     lines.push(`\u6CA1\u6709${role}\u8EAB\u4EFD\u7684\u6210\u5458\u4F1A\u8BDD`);

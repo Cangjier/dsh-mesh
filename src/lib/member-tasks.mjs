@@ -596,7 +596,7 @@ export class MemberTaskService {
         // Older records predate originCwd; recover it from the live origin
         // conversation when that agent is still around.
         if (typeof task.originCwd !== 'string' || task.originCwd === '') {
-          task.originCwd = this.#originCwdOf(task.originAgentId, task.originSessionId)
+          task.originCwd = await this.#originCwdOf(task.originAgentId, task.originSessionId)
         }
         // Old records also predate the profile snapshot; make the "not set"
         // state explicit so every reader handles one shape.
@@ -1363,14 +1363,32 @@ export class MemberTaskService {
 
   /**
    * Recover the project directory of a task recorded before `originCwd` existed.
+   *
+   * A live origin agent answers directly. An archived or not-yet-resumed origin
+   * is still durably stored, and its session header carries `cwd`; read that
+   * header through `sessionPersistence` without making the session live. This
+   * is what lets participation (`noteMemberParticipation`) work for tasks
+   * created before the field existed.
    * @param {string} agentId origin agent id.
    * @param {string} sessionId origin session id.
-   * @returns {string|null} directory, or null when the origin is gone.
+   * @returns {Promise<string|null>} directory, or null when it cannot be resolved.
    */
-  #originCwdOf(agentId, sessionId) {
+  async #originCwdOf(agentId, sessionId) {
     const agents = typeof this.ctx?.get === 'function' ? this.ctx.get('agents') : this.ctx?.agents
     const agent = agents?.get?.(String(agentId ?? '')) ?? agents?.get?.(String(sessionId ?? ''))
-    return callerProjectDir(agent)
+    const live = callerProjectDir(agent)
+    if (live !== null) return live
+    const id = String(sessionId ?? '')
+    if (id === '') return null
+    const persistence = typeof this.ctx?.get === 'function' ? this.ctx.get('sessionPersistence') : this.ctx?.sessionPersistence
+    if (persistence === undefined || typeof persistence.stat !== 'function') return null
+    try {
+      const snapshot = await persistence.stat(id)
+      const cwd = snapshot?.header?.cwd
+      return typeof cwd === 'string' && cwd.trim() !== '' ? cwd.trim() : null
+    } catch {
+      return null
+    }
   }
 
   /**
@@ -1385,7 +1403,17 @@ export class MemberTaskService {
    */
   async #noteParticipation(task) {
     if (typeof this.service?.noteMemberParticipation !== 'function') return
-    const cwd = typeof task.originCwd === 'string' ? task.originCwd : ''
+    let cwd = typeof task.originCwd === 'string' ? task.originCwd : ''
+    if (cwd === '') {
+      // A task loaded before the origin could be resolved (or created by an
+      // older build) still deserves its participation record.
+      const resolved = await this.#originCwdOf(task.originAgentId, task.originSessionId)
+      if (resolved !== null) {
+        task.originCwd = resolved
+        await this.#save(task).catch(() => {})
+      }
+      cwd = resolved ?? ''
+    }
     if (cwd === '') return
     // The reply's own turn is exact; the task's counter can lag one sync read.
     const replies = Array.isArray(task.replies) ? task.replies : []

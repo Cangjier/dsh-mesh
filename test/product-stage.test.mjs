@@ -48,6 +48,7 @@ test('a first call creates one version, round and goal set', () => {
   assert.equal(state.round, 1)
   assert.deepEqual(state.goals, { product: { text: '可用的成员面板', status: '未开始' } })
   assert.deepEqual(state.participation, {})
+  assert.equal(state.roundStartedAt, DAY.toISOString())
   assert.equal(state.updatedAt, DAY.toISOString())
 })
 
@@ -77,6 +78,7 @@ test('a same-stage goal update keeps the version, round and participation', () =
   assert.equal(updated.version, '20261126.1')
   assert.equal(updated.round, 1)
   assert.deepEqual(updated.participation, a.participation)
+  assert.equal(updated.roundStartedAt, a.roundStartedAt, 'a goal update does not restart the round')
   assert.deepEqual(updated.goals.dev, { text: '无 BUG', status: '进行中' })
 })
 
@@ -174,6 +176,23 @@ test('participation is counted for every member in A and for the stage roles lat
   const a = productStageParticipants({ ...b, stage: 'A' }, tasks, scopes)
   assert.deepEqual(a.required.map(entry => entry.conversationId), ['c1', 'c2', 'c3'])
   assert.deepEqual(a.missing.map(entry => entry.conversationId), ['c2', 'c3'])
+})
+
+test('a reply after the round started counts as participation without a recorded map', () => {
+  const state = {
+    version: '20261126.1',
+    stage: 'A',
+    round: 1,
+    goals: {},
+    updatedAt: '2026-11-26T15:12:00.000Z',
+    participation: {},
+  }
+  const after = [{ conversationId: 'c1', statusLabel: '空闲', replies: [{ at: '2026-11-26T17:25:00.000Z' }] }]
+  const before = [{ conversationId: 'c1', statusLabel: '空闲', replies: [{ at: '2026-11-26T15:09:00.000Z' }] }]
+  assert.equal(productStageParticipants(state, after, {}).required[0].participated, true)
+  assert.equal(productStageParticipants(state, before, {}).required[0].participated, false)
+  const explicit = { ...state, roundStartedAt: '2026-11-26T18:00:00.000Z' }
+  assert.equal(productStageParticipants(explicit, after, {}).required[0].participated, false, 'roundStartedAt wins')
 })
 
 test('the stage block leads with the version, goals, participation and possible next moves', () => {

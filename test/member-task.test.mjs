@@ -478,6 +478,37 @@ test('an accepted reply is recorded as this round\'s product-stage participation
   }
 })
 
+test('a legacy task without originCwd recovers it from the stored session header', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-cwd-'))
+  const taskRoot = path.join(dataDir, 'member-tasks')
+  await mkdir(taskRoot, { recursive: true })
+  await writeFile(path.join(taskRoot, 'member-legacy-cwd.json'), `${JSON.stringify(persistedTask({
+    id: 'member-legacy-cwd',
+    status: 'completed',
+    notify: false,
+  }), null, 2)}\n`)
+  const service = {
+    config: { interopToken: 'test-token', interopUseGatePassword: false },
+    dataDir,
+    repositoryRoot: process.cwd(),
+    members: async () => ({ local: { id: 'local', name: 'member-b', ip: '127.0.0.1' }, members: [] }),
+  }
+  const ctx = {
+    get: name => name === 'sessionPersistence'
+      ? { stat: async id => ({ header: { cwd: id === 'session-A' ? '/root/ws/ai-cad' : '' } }) }
+      : undefined,
+  }
+  const tasks = new MemberTaskService({ ctx, service, dataDir, log: () => {} })
+  try {
+    await tasks.init()
+    const task = await tasks.find('conv-recover')
+    assert.equal(task.originCwd, '/root/ws/ai-cad')
+  } finally {
+    await tasks.dispose()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
 test('a graceful stop leaves its running task marked resumable', async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'member-stop-'))
   const service = {

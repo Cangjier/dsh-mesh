@@ -198,7 +198,7 @@ test('the standard role is read from a scope only when it is one of the five', (
   assert.equal(roleOfScope({ identity: '开发' }), null, 'free-text identity is not a standard role')
   assert.equal(roleOfScope(null), null)
   assert.deepEqual(MEMBER_ROLES, ['产品经理', '研究员', '开发', '测试', '业务'])
-  assert.deepEqual(stageRequiredRoles('B'), ['开发', '测试', '研究员', '产品经理'])
+  assert.deepEqual(stageRequiredRoles('B'), ['开发', '测试', '研究员', '产品经理', '业务'])
   assert.deepEqual(stageRequiredRoles('C'), ['产品经理'])
   assert.deepEqual(stageRequiredRoles('D'), ['业务'])
 })
@@ -220,7 +220,7 @@ test('participation is counted for every member in A and for the stage roles lat
   const view = productStageParticipants(b, tasks, scopes)
   assert.deepEqual(view.required.map(entry => entry.conversationId), ['c1', 'c3'])
   assert.deepEqual(view.missing.map(entry => entry.conversationId), ['c3'])
-  assert.deepEqual(view.missingRoles, ['研究员', '产品经理'])
+  assert.deepEqual(view.missingRoles, ['研究员', '产品经理', '业务'])
   assert.deepEqual(view.roleLess.map(entry => entry.conversationId), ['c2'])
 
   const a = productStageParticipants({ ...b, stage: 'A' }, tasks, scopes)
@@ -258,7 +258,7 @@ test('the stage block leads with the version, goals, participation and possible 
   }
   const text = formatProductStageLines(state, tasks, {}).join('\n')
   assert.match(text, /\[产品阶段\] 20261126\.2\.1 · B 阶段（第 2 轮迭代）· 开发与测试/u)
-  assert.match(text, /- 阶段要求：开发、测试、研究员、产品经理参与/u)
+  assert.match(text, /- 阶段要求：开发、测试、研究员、产品经理、业务参与/u)
   assert.match(text, /- 产品目标：可用的成员面板（进行中）/u)
   assert.match(text, /- 开发目标：未设置/u)
   assert.match(text, /- 研究目标：并发模型（已达成）/u)
@@ -307,7 +307,7 @@ test('leaving a stage warns about missing participants and unmet goals', () => {
     participation: { c1: { turn: 1, at: '' } },
   }
   assert.deepEqual(productStageWarnings(b, tasks, {}), [
-    '离开 B 阶段时没有这些身份的成员会话：测试、研究员、产品经理',
+    '离开 B 阶段时没有这些身份的成员会话：测试、研究员、产品经理、业务',
     '离开 B 阶段时开发目标状态不是「已达成」',
   ])
 
@@ -340,6 +340,7 @@ test('an advancing change is blocked until the current round participants answer
     '测试 c2 还没有参与本轮（进行中）',
     '没有研究员身份的成员会话',
     '没有产品经理身份的成员会话',
+    '没有业务身份的成员会话',
   ])
 
   const complete = {
@@ -347,12 +348,13 @@ test('an advancing change is blocked until the current round participants answer
     stage: 'B',
     round: 1,
     goals: {},
-    participation: { c1: { turn: 1, at: '' }, c2: { turn: 2, at: '' }, c3: { turn: 1, at: '' }, c4: { turn: 1, at: '' } },
+    participation: { c1: { turn: 1, at: '' }, c2: { turn: 2, at: '' }, c3: { turn: 1, at: '' }, c4: { turn: 1, at: '' }, c5: { turn: 1, at: '' } },
   }
   const completeTasks = [
     ...tasks,
     { conversationId: 'c3', statusLabel: '空闲', profile: { name: 'B', role: '研究员' } },
     { conversationId: 'c4', statusLabel: '空闲', profile: { name: 'PM', role: '产品经理' } },
+    { conversationId: 'c5', statusLabel: '空闲', profile: { name: 'CAD', role: '业务' } },
   ]
   assert.deepEqual(productStageParticipationBlockers(complete, completeTasks, scopes), [])
 
@@ -526,7 +528,7 @@ test('the stage definitions lead with all four big stages', () => {
   assert.equal(lines[0], '[产品阶段定义] 产品按 A → B → C → D → A 循环：')
   const text = lines.join('\n')
   assert.match(text, /- A 计划与目标：所有成员参与并提出建议/u)
-  assert.match(text, /- B 开发与测试：开发、测试、研究员、产品经理参与/u)
+  assert.match(text, /- B 开发与测试：开发、测试、研究员、产品经理、业务参与/u)
   assert.match(text, /- C 产品经理使用：产品经理真实使用/u)
   assert.match(text, /- D 业务介入：业务人员开展业务工作/u)
 })

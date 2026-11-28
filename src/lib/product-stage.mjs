@@ -4,9 +4,10 @@
  * A main conversation drives one product through four stages:
  *
  *   A  计划与目标   every member proposes, the main conversation decides
- *   B  开发与测试   开发 / 测试 / 研究员 / 产品经理; the round's features must
- *                    have no bug, and the product manager compares competitors
- *                    with the product and reports for the next A
+ *   B  开发与测试   开发 / 测试 / 研究员 / 产品经理 / 业务; the round's
+ *                    features must have no bug, the product manager compares
+ *                    competitors, and the business staff trials the product;
+ *                    both report for the next A
  *   C  产品经理使用 the product manager uses the product until it is released
  *   D  业务介入     the business staff works with it; release returns to A
  *
@@ -39,7 +40,7 @@ export const PRODUCT_STAGE_SHORT = {
 /** What each stage requires from its participants. */
 export const PRODUCT_STAGE_REQUIREMENTS = {
   A: '所有成员参与并提出建议，最后由主对话决定本轮计划与目标。',
-  B: '开发、测试、研究员、产品经理参与；本轮开发的功能没有 BUG（疑难杂症除外）；产品经理调研竞品功能、与自家产品对比并输出报告，为下一轮 A 阶段做准备。',
+  B: '开发、测试、研究员、产品经理、业务参与；本轮开发的功能没有 BUG（疑难杂症除外）；产品经理调研竞品功能、与自家产品对比并输出报告，业务人员试用并提出问题或需求，为下一轮 A 阶段做准备。',
   C: '产品经理真实使用；发现问题回到 B 阶段，直到产品经理放行。',
   D: '业务人员开展业务工作；发现问题回到 C 阶段，业务放行后回到 A 阶段并升产品版本。',
 }
@@ -183,7 +184,7 @@ export function roleOfScope(scope) {
  */
 export function stageRequiredRoles(stage) {
   if (stage === 'A') return [...MEMBER_ROLES]
-  if (stage === 'B') return ['开发', '测试', '研究员', '产品经理']
+  if (stage === 'B') return ['开发', '测试', '研究员', '产品经理', '业务']
   if (stage === 'C') return ['产品经理']
   if (stage === 'D') return ['业务']
   return []

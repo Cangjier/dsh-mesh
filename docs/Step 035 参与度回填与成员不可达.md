@@ -71,7 +71,7 @@ PostDown = ip rule del not fwmark 51820 table 51820; ip rule del table main supp
 3. `.3` 已恢复，用原 `conversationId` 继续那 4 个会话（它们现在是「异常中止」，继续即可），
    再给 UI测试1 发一条简短确认；5 条回复到齐后是 `13/13`；
 4. 再调用 `set_product_stage({ "stage": "B" })`；本轮参与已齐，门槛放行，版本不变、轮次不变；
-5. 进入 B 后参与度重新计（B 要求开发/测试/研究员/产品经理），不要直接跳到 C。
+5. 进入 B 后参与度重新计（B 要求开发/测试/研究员/产品经理/业务），不要直接跳到 C。
 
 如果某个成员会话永久不可用，先建替代会话或归档旧会话：`listForOrigin` 会过滤 archived，
 归档后它不再计入必需参与。

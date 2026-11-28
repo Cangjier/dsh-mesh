@@ -235,6 +235,31 @@ const SECTION_CSS = `
   flex-direction: column;
   gap: 0;
 }
+/* The body's first row: version, stage, budget, then the view switch. */
+.dsh-mesh-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  padding: 2px 8px 4px;
+  font-size: 11px;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+.dsh-mesh-toolbar .dsh-mesh-view {
+  margin-left: auto;
+}
+.dsh-mesh-version {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+}
+.dsh-mesh-budget {
+  white-space: nowrap;
+}
+.dsh-mesh-budget[data-exhausted] {
+  font-weight: 500;
+  opacity: 0.9;
+}
 /* Folded away: an empty marker keeps the section (and its chevron) alive. */
 .dsh-mesh-collapsed {
   height: 0;
@@ -366,10 +391,6 @@ const SECTION_CSS = `
 .dsh-mesh-phase {
   font-size: 11px;
   white-space: nowrap;
-}
-.dsh-mesh-phase[data-exhausted] {
-  font-weight: 500;
-  opacity: 0.9;
 }
 .dsh-mesh-fold {
   padding: 0 1px;
@@ -503,7 +524,9 @@ function TaskText({ text }: { text: string }) {
  */
 function MemberDetail({ row }: { row: MemberConversationRow }) {
   const member = row.memberName !== null && row.memberName !== '' ? row.memberName : row.member
-  const updated = row.updatedAt === null ? null : new Date(row.updatedAt)
+  // "最近任务派发时间" is when the initiator last sent this member a task
+  // (`lastSentAt`), not when the record last changed.
+  const lastSent = row.lastSentAt === null ? null : new Date(row.lastSentAt)
   return (
     <div className="dsh-mesh-detail-member">
       <Space size={8} wrap style={{ marginBottom: 6 }}>
@@ -516,7 +539,7 @@ function MemberDetail({ row }: { row: MemberConversationRow }) {
         size="small"
         bordered
         column={1}
-        styles={{ label: { width: 84, whiteSpace: 'nowrap' }, content: { minWidth: 0 } }}
+        styles={{ label: { width: 128, whiteSpace: 'nowrap' }, content: { minWidth: 0 } }}
         items={[
           { key: 'role', label: '标准身份', children: row.role ?? '未设置' },
           { key: 'identity', label: '身份', children: row.identity ?? '未设置' },
@@ -542,9 +565,9 @@ function MemberDetail({ row }: { row: MemberConversationRow }) {
             ? []
             : [{ key: 'compress', label: '压缩阈值', children: `${String(row.compressPercent)}%` }]),
           ...(row.note === null ? [] : [{ key: 'note', label: '备注', children: row.note }]),
-          ...(updated === null
+          ...(lastSent === null
             ? []
-            : [{ key: 'updated', label: '最近更新', children: updated.toLocaleString() }]),
+            : [{ key: 'lastSent', label: '最近任务派发时间', children: lastSent.toLocaleString() }]),
           ...(row.lastTask === ''
             ? []
             : [{ key: 'task', label: '最近任务', children: <TaskText text={row.lastTask} /> }]),
@@ -578,6 +601,76 @@ function GroupHeading({ title, running, total, folded, onToggle }: {
       <span className="dsh-mesh-group-name">{title}</span>
       <span className="dsh-mesh-group-count">{`${String(running)}/${String(total)}`}</span>
     </button>
+  )
+}
+
+/**
+ * The first row of the section body: the product version, the current stage
+ * and its budget, and the view switch.
+ *
+ * These facts used to sit in the section header beside the title, where the
+ * phase text and the two view controls crowded each other and the panel's
+ * width was not available. The body row has the panel's own width and wraps.
+ * @param props stage, budget, current view and the view switch.
+ * @returns the toolbar row.
+ */
+function PhaseBar({ stage, budget, view, onView }: {
+  stage: MemberProductStage | null
+  budget: MemberBudget | null
+  view: 'grouped' | 'running'
+  onView: (view: 'grouped' | 'running') => void
+}) {
+  const phaseText = stage === null
+    ? null
+    : `${stage.stage} ${stage.label} · 第${String(stage.round)}轮`
+  const budgetText = budget === null
+    ? null
+    : `预算 ${String(budget.used)}/${String(budget.limit)}${budget.exhausted ? ' 用尽' : ''}${budget.source === 'default' ? '（默认）' : ''}`
+  const phaseTitle = stage === null
+    ? ''
+    : `${stage.stage} 阶段（第${String(stage.round)}轮）· ${stage.label}`
+  const budgetTitle = budget === null
+    ? ''
+    : `预算：已用 ${String(budget.used)}/${String(budget.limit)}，剩余 ${String(budget.remaining)}（${budget.source === 'default' ? '默认 = 参与成员数 × 2' : '已设置'}）`
+  return (
+    <div className="dsh-mesh-toolbar">
+      {stage === null
+        ? null
+        : (
+          <span
+            className="dsh-mesh-version"
+            title={`产品版本（Major.Minor.Revision）：${stage.version}；D 完成进入 A 时升版，revision 只增不减`}
+          >
+            {`版本 ${stage.version}`}
+          </span>
+        )}
+      {phaseText === null ? null : <span className="dsh-mesh-phase" title={phaseTitle}>{phaseText}</span>}
+      {budgetText === null
+        ? null
+        : (
+          <span className="dsh-mesh-budget" title={budgetTitle} data-exhausted={budget?.exhausted === true ? '' : undefined}>
+            {budgetText}
+          </span>
+        )}
+      <span className="dsh-mesh-view" role="group" aria-label="成员视图">
+        <button
+          type="button"
+          data-active={view === 'grouped' ? '' : undefined}
+          title="按角色分组"
+          onClick={() => onView('grouped')}
+        >
+          分组
+        </button>
+        <button
+          type="button"
+          data-active={view === 'running' ? '' : undefined}
+          title="平铺，只显示进行中的成员"
+          onClick={() => onView('running')}
+        >
+          平铺
+        </button>
+      </span>
+    </div>
   )
 }
 
@@ -647,6 +740,12 @@ export function MemberConversationsSection({ sessionId, ctx }: { sessionId: stri
         ? <div className="dsh-mesh-collapsed" />
         : (
           <div className="dsh-mesh-members">
+            <PhaseBar
+              stage={snapshot.stage}
+              budget={snapshot.budget}
+              view={state.view}
+              onView={setView}
+            />
             {selectedRow !== null
               // The detail is part of the panel, not a dialog portalled to the
               // page: the Session panel closes on a pointerdown outside itself,
@@ -694,32 +793,18 @@ export function MemberConversationsSection({ sessionId, ctx }: { sessionId: stri
 }
 
 /**
- * The count and fold control beside the section title.
+ * The fold control and the running count beside the section title.
  *
- * The count is running over total, matching each group heading; the chevron
- * folds the whole list away while leaving the title (and this control) in
- * place.
+ * The version, stage, budget and view switch live in the body's first row
+ * ({@link PhaseBar}); the header keeps only what must stay reachable while the
+ * list is folded away: the count and the chevron.
  * @param props slot props (`sessionId`).
- * @returns the phrase and control, or null when the Session tracks none.
+ * @returns the count and control, or null when the Session tracks none.
  */
 export function MemberConversationsProgress({ sessionId }: { sessionId: string }) {
-  const { state, toggleCollapsed, setView } = useMemberSection(sessionId)
+  const { state, toggleCollapsed } = useMemberSection(sessionId)
   const snapshot = state.snapshot
   if (snapshot === null || snapshot.rows.length === 0) return null
-  const stage = snapshot.stage
-  const budget = snapshot.budget
-  const phaseText = stage === null
-    ? null
-    : `${stage.stage} ${stage.label} · 第${String(stage.round)}轮`
-  const budgetText = budget === null
-    ? null
-    : `预算 ${String(budget.used)}/${String(budget.limit)}${budget.exhausted ? ' 用尽' : ''}${budget.source === 'default' ? '（默认）' : ''}`
-  const phaseTitle = stage === null
-    ? ''
-    : `${stage.version} · ${stage.stage} 阶段（第${String(stage.round)}轮）· ${stage.label}`
-      + (budget === null
-        ? ''
-        : `\n预算：已用 ${String(budget.used)}/${String(budget.limit)}，剩余 ${String(budget.remaining)}（${budget.source === 'default' ? '默认 = 参与成员数 × 2' : '已设置'}）`)
   return (
     <span className="dsh-mesh-progress">
       <button
@@ -731,31 +816,6 @@ export function MemberConversationsProgress({ sessionId }: { sessionId: string }
       >
         {state.collapsed ? '▸' : '▾'}
       </button>
-      {phaseText === null
-        ? null
-        : (
-          <span className="dsh-mesh-phase" title={phaseTitle} data-exhausted={budget?.exhausted === true ? '' : undefined}>
-            {phaseText}{budgetText === null ? '' : ` · ${budgetText}`}
-          </span>
-        )}
-      <span className="dsh-mesh-view" role="group" aria-label="成员视图">
-        <button
-          type="button"
-          data-active={state.view === 'grouped' ? '' : undefined}
-          title="按角色分组"
-          onClick={() => setView('grouped')}
-        >
-          分组
-        </button>
-        <button
-          type="button"
-          data-active={state.view === 'running' ? '' : undefined}
-          title="平铺，只显示进行中的成员"
-          onClick={() => setView('running')}
-        >
-          平铺
-        </button>
-      </span>
       <span title={`${String(snapshot.running)} 个进行中 / 共 ${String(snapshot.total)} 个`}>
         {`${String(snapshot.running)}/${String(snapshot.total)}`}
       </span>

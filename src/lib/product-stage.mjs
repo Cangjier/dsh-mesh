@@ -8,9 +8,11 @@
  *   C  产品经理使用 the product manager uses the product until it is released
  *   D  业务介入     the business staff works with it; release returns to A
  *
- * The product version (`YYYYMMDD.N`) only moves when a released D returns to A:
- * same day bumps the minor number, a new day resets it to `.1`. Everything else
- * in one iteration keeps the version and the sub-stage round.
+ * The product version (`YYYYMMDD.N.R`, major.minor.revision) only moves when a
+ * released D returns to A: same day bumps the minor number, a new day resets
+ * major/minor to today's date with `.1`, and the revision only ever grows so
+ * every release keeps a unique, increasing number. Everything else in one
+ * iteration keeps the version and the sub-stage round.
  *
  * The state is persisted per project directory by the mesh service; this module
  * is the pure part: normalisation, the transition rules, and the lines the
@@ -86,8 +88,13 @@ const PRODUCT_GOAL_TEXT_PATTERN = /^(.{1,20}?)[\s：:]*现状[\s：:]*(.+?)[，,
 /** Highest sub-stage round accepted. */
 export const PRODUCT_ROUND_MAX = 999
 
-/** `YYYYMMDD.N`, the product version shape. */
-const PRODUCT_VERSION_PATTERN = /^(\d{8})\.(\d{1,4})$/u
+/**
+ * `YYYYMMDD.N.R`, the product version shape (major.minor.revision).
+ *
+ * The revision is optional so a state written by an older build (`YYYYMMDD.N`)
+ * still reads: {@link normalizeProductVersion} then supplies revision 1.
+ */
+const PRODUCT_VERSION_PATTERN = /^(\d{8})\.(\d{1,4})(?:\.(\d{1,9}))?$/u
 
 /**
  * Today's product date, in the host's local time zone.
@@ -102,19 +109,36 @@ export function productDay(date = new Date()) {
 }
 
 /**
- * Whether a value is a product version.
+ * Whether a value names a product version, in either the current
+ * `major.minor.revision` shape or the pre-revision `major.minor` one.
  * @param {unknown} value candidate.
- * @returns {boolean} true for `YYYYMMDD.N`.
+ * @returns {boolean} true for `YYYYMMDD.N` or `YYYYMMDD.N.R`.
  */
 export function isProductVersion(value) {
-  return typeof value === 'string' && PRODUCT_VERSION_PATTERN.test(value.trim())
+  return normalizeProductVersion(value) !== null
+}
+
+/**
+ * The version in `major.minor.revision` shape.
+ *
+ * A legacy `YYYYMMDD.N` state has no revision stored; it reads as revision 1,
+ * so the state is not dropped and the next release continues from there.
+ * @param {unknown} value candidate.
+ * @returns {string|null} `YYYYMMDD.N.R`, or null when unreadable.
+ */
+export function normalizeProductVersion(value) {
+  const match = typeof value === 'string' ? PRODUCT_VERSION_PATTERN.exec(value.trim()) : null
+  if (match === null) return null
+  const revision = match[3] === undefined ? '1' : match[3]
+  return `${match[1]}.${match[2]}.${revision}`
 }
 
 /**
  * The version the next release takes.
  *
  * Same day: the minor number grows. A new day (or no usable previous version):
- * the version resets to today's date with `.1`.
+ * major/minor reset to today's date with `.1`. The revision never resets: it
+ * is the previous revision plus one, whatever the day or the minor did.
  * @param {unknown} previous the previous version.
  * @param {Date} [now] the moment the release is made.
  * @returns {string} the next version.
@@ -122,9 +146,12 @@ export function isProductVersion(value) {
 export function nextProductVersion(previous, now = new Date()) {
   const day = productDay(now)
   const match = typeof previous === 'string' ? PRODUCT_VERSION_PATTERN.exec(previous.trim()) : null
-  if (match === null || match[1] !== day) return `${day}.1`
+  if (match === null) return `${day}.1.1`
+  // A legacy two-part version counts as revision 1.
+  const revision = (match[3] === undefined ? 1 : Number(match[3])) + 1
+  if (match[1] !== day) return `${day}.1.${String(revision)}`
   const minor = Number(match[2]) + 1
-  return `${day}.${String(minor)}`
+  return `${day}.${String(minor)}.${String(revision)}`
 }
 
 /**
@@ -363,8 +390,8 @@ export function normalizeStoredProductStage(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
   const stage = typeof value.stage === 'string' ? value.stage.trim().toUpperCase() : ''
   if (!PRODUCT_STAGES.includes(stage)) return null
-  const version = typeof value.version === 'string' ? value.version.trim() : ''
-  if (!isProductVersion(version)) return null
+  const version = normalizeProductVersion(value.version)
+  if (version === null) return null
   const round = Number.isSafeInteger(value.round) && value.round >= 1 && value.round <= PRODUCT_ROUND_MAX
     ? value.round
     : null
@@ -418,11 +445,14 @@ export function normalizeStoredProductStage(value) {
 export function applyProductStage(previous, input, now = new Date()) {
   const prev = previous ?? null
   const stage = input.stage ?? prev?.stage ?? 'A'
-  const version = prev === null || !isProductVersion(prev.version)
+  // A legacy two-part version is upgraded here, so the state always keeps the
+  // current three-part shape and the revision continues from it.
+  const previousVersion = normalizeProductVersion(prev?.version)
+  const version = previousVersion === null
     ? nextProductVersion(null, now)
     : stage === 'A' && prev.stage === 'D'
-      ? nextProductVersion(prev.version, now)
-      : prev.version
+      ? nextProductVersion(previousVersion, now)
+      : previousVersion
   const automaticRound = prev === null
     ? 1
     : stage === 'A' && prev.stage === 'D' ? prev.round + 1 : prev.round

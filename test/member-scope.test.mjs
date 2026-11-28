@@ -758,7 +758,7 @@ test('member conversations expose the current stage and budget for the header', 
     service.memberTasks = { listForOrigin: async () => tasks }
     const view = await service.memberConversations('main-1')
     assert.deepEqual(view.stage, {
-      version: '20261126.1', stage: 'A', round: 1, label: '计划与目标',
+      version: '20261126.1.1', stage: 'A', round: 1, label: '计划与目标',
     })
     assert.deepEqual(view.budget, {
       stage: 'A', used: 1, limit: 4, remaining: 3, source: 'explicit', exhausted: false,

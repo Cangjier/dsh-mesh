@@ -12812,22 +12812,27 @@ var PRODUCT_GOAL_CATEGORY_HINT = "\u5E94\u7528\u529F\u80FD / \u5E94\u7528\u754C\
 var PRODUCT_GOAL_FORMAT = "<\u7C7B\u522B> \u73B0\u72B6 <\u73B0\u5728\u600E\u6837>\uFF0C\u9884\u671F <\u8981\u53D8\u6210\u600E\u6837>\u3002";
 var PRODUCT_GOAL_TEXT_PATTERN = /^(.{1,20}?)[\s：:]*现状[\s：:]*(.+?)[，,；;]\s*预期[\s：:]*(.+?)[。.]?$/u;
 var PRODUCT_ROUND_MAX = 999;
-var PRODUCT_VERSION_PATTERN = /^(\d{8})\.(\d{1,4})$/u;
+var PRODUCT_VERSION_PATTERN = /^(\d{8})\.(\d{1,4})(?:\.(\d{1,9}))?$/u;
 function productDay(date = /* @__PURE__ */ new Date()) {
   const value = date instanceof Date && !Number.isNaN(date.getTime()) ? date : /* @__PURE__ */ new Date();
   const month = String(value.getMonth() + 1).padStart(2, "0");
   const day = String(value.getDate()).padStart(2, "0");
   return `${String(value.getFullYear())}${month}${day}`;
 }
-function isProductVersion(value) {
-  return typeof value === "string" && PRODUCT_VERSION_PATTERN.test(value.trim());
+function normalizeProductVersion(value) {
+  const match = typeof value === "string" ? PRODUCT_VERSION_PATTERN.exec(value.trim()) : null;
+  if (match === null) return null;
+  const revision = match[3] === void 0 ? "1" : match[3];
+  return `${match[1]}.${match[2]}.${revision}`;
 }
 function nextProductVersion(previous, now = /* @__PURE__ */ new Date()) {
   const day = productDay(now);
   const match = typeof previous === "string" ? PRODUCT_VERSION_PATTERN.exec(previous.trim()) : null;
-  if (match === null || match[1] !== day) return `${day}.1`;
+  if (match === null) return `${day}.1.1`;
+  const revision = (match[3] === void 0 ? 1 : Number(match[3])) + 1;
+  if (match[1] !== day) return `${day}.1.${String(revision)}`;
   const minor = Number(match[2]) + 1;
-  return `${day}.${String(minor)}`;
+  return `${day}.${String(minor)}.${String(revision)}`;
 }
 function productStageKey(cwd) {
   const text = typeof cwd === "string" ? cwd.trim() : "";
@@ -12980,8 +12985,8 @@ function normalizeStoredProductStage(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const stage = typeof value.stage === "string" ? value.stage.trim().toUpperCase() : "";
   if (!PRODUCT_STAGES.includes(stage)) return null;
-  const version = typeof value.version === "string" ? value.version.trim() : "";
-  if (!isProductVersion(version)) return null;
+  const version = normalizeProductVersion(value.version);
+  if (version === null) return null;
   const round2 = Number.isSafeInteger(value.round) && value.round >= 1 && value.round <= PRODUCT_ROUND_MAX ? value.round : null;
   if (round2 === null) return null;
   const goals = mergeGoals(value.goals, void 0);
@@ -13015,7 +13020,8 @@ function normalizeStoredProductStage(value) {
 function applyProductStage(previous, input, now = /* @__PURE__ */ new Date()) {
   const prev = previous ?? null;
   const stage = input.stage ?? prev?.stage ?? "A";
-  const version = prev === null || !isProductVersion(prev.version) ? nextProductVersion(null, now) : stage === "A" && prev.stage === "D" ? nextProductVersion(prev.version, now) : prev.version;
+  const previousVersion = normalizeProductVersion(prev?.version);
+  const version = previousVersion === null ? nextProductVersion(null, now) : stage === "A" && prev.stage === "D" ? nextProductVersion(previousVersion, now) : previousVersion;
   const automaticRound = prev === null ? 1 : stage === "A" && prev.stage === "D" ? prev.round + 1 : prev.round;
   const round2 = Math.min(input.round ?? automaticRound, PRODUCT_ROUND_MAX);
   const reset = prev === null || prev.stage !== stage || prev.round !== round2;
@@ -18002,7 +18008,7 @@ function registerTools(ctx, toolsCtx, service) {
       "B \u5F00\u53D1\u4E0E\u6D4B\u8BD5\uFF08\u5F00\u53D1/\u6D4B\u8BD5/\u7814\u7A76\u5458\u53C2\u4E0E\uFF1B\u672C\u8F6E\u5F00\u53D1\u7684\u529F\u80FD\u6CA1\u6709 BUG\uFF0C\u7591\u96BE\u6742\u75C7\u9664\u5916\uFF09\uFF1B",
       "C \u4EA7\u54C1\u7ECF\u7406\u4F7F\u7528\uFF08\u4EA7\u54C1\u7ECF\u7406\u771F\u5B9E\u4F7F\u7528\uFF0C\u53D1\u73B0\u95EE\u9898\u56DE\u5230 B \u9636\u6BB5\uFF0C\u76F4\u5230\u4EA7\u54C1\u7ECF\u7406\u653E\u884C\uFF09\uFF1B",
       "D \u4E1A\u52A1\u4ECB\u5165\uFF08\u4E1A\u52A1\u4EBA\u5458\u5F00\u5C55\u4E1A\u52A1\u5DE5\u4F5C\uFF0C\u53D1\u73B0\u95EE\u9898\u56DE\u5230 C \u9636\u6BB5\uFF0C\u4E1A\u52A1\u653E\u884C\u540E\u56DE\u5230 A \u9636\u6BB5\uFF09\u3002",
-      "\u4EA7\u54C1\u7248\u672C\u81EA\u52A8\u7EF4\u62A4\uFF0C\u4E0D\u9700\u8981\u4F20\u5165\uFF1AD \u5B8C\u6210\u8FDB\u5165 A \u65F6\u5347\u7248\uFF08\u540C\u4E00\u5929\u5C0F\u7248\u672C +1\uFF0C\u8DE8\u5929\u91CD\u7F6E\u4E3A\u5F53\u5929 .1\uFF09\u3002",
+      "\u4EA7\u54C1\u7248\u672C\u81EA\u52A8\u7EF4\u62A4\uFF0C\u4E0D\u9700\u8981\u4F20\u5165\uFF0C\u683C\u5F0F\u4E3A Major.Minor.Revision\uFF08\u5982 20261128.1.1\uFF09\uFF1AD \u5B8C\u6210\u8FDB\u5165 A \u65F6\u5347\u7248\uFF0C\u540C\u4E00\u5929 minor +1\u3001\u8DE8\u5929\u91CD\u7F6E\u4E3A\u5F53\u5929 .1\uFF1Brevision \u4E0D\u4F1A\u91CD\u7F6E\uFF0C\u6BCF\u6B21\u5347\u7248\u53EA\u4F1A\u4E00\u76F4\u589E\u52A0\u3002",
       "`goals` \u53EA\u6539\u4F20\u5165\u7684\u76EE\u6807\uFF1Aproduct \u4EA7\u54C1\u76EE\u6807 / dev \u5F00\u53D1\u76EE\u6807 / research \u7814\u7A76\u76EE\u6807\uFF1B\u6BCF\u9879 { category, text, status }\uFF0Cstatus \u53D6 \u672A\u5F00\u59CB / \u8FDB\u884C\u4E2D / \u5DF2\u8FBE\u6210 / \u672A\u8FBE\u6210\u3002category \u662F\u76EE\u6807\u7C7B\u522B\uFF08\u7701\u7565\u65F6\u4ECE text \u5F00\u5934\u8BC6\u522B\uFF09\uFF0C\u63D0\u4F9B category \u65F6 text \u53EA\u5199\u300C\u73B0\u72B6 \u2026\uFF0C\u9884\u671F \u2026\u300D\u3002",
       "\u76EE\u6807\u6587\u672C\u56FA\u5B9A\u683C\u5F0F\uFF1A\u300C<\u7C7B\u522B> \u73B0\u72B6 <\u73B0\u5728\u600E\u6837>\uFF0C\u9884\u671F <\u8981\u53D8\u6210\u600E\u6837>\u3002\u300D\uFF0C\u7C7B\u522B\u5982 \u5E94\u7528\u529F\u80FD / \u5E94\u7528\u754C\u9762 / \u5E94\u7528\u670D\u52A1 / \u7B97\u6CD5 / \u6570\u636E / \u6027\u80FD / \u7A33\u5B9A\u6027 / \u5B89\u5168 / \u5DE5\u7A0B\u8D28\u91CF / \u4EA4\u4ED8 / \u2026\uFF1B\u4F8B\uFF1A\u5E94\u7528\u529F\u80FD \u73B0\u72B6 \u53EA\u80FD\u505A\u57FA\u7840\u5EFA\u6A21\uFF0C\u9884\u671F \u652F\u6301\u53C2\u6570\u5316\u7279\u5F81\u4E0E\u5386\u53F2\u56DE\u653E\u3002\u4E0D\u7B26\u5408\u65F6\u8C03\u7528\u88AB\u62D2\u7EDD\u3001\u72B6\u6001\u4E0D\u53D8\u3002",
       "`round` \u662F\u5B50\u9636\u6BB5\u8F6E\u6B21\uFF08\u7B2C\u51E0\u8F6E\u8FED\u4EE3\uFF09\uFF1A\u7701\u7565\u65F6 D \u8FDB\u5165 A \u81EA\u52A8 +1\uFF0C\u5176\u4ED6\u9636\u6BB5\u6CBF\u7528\u5F53\u524D\u8F6E\u6B21\uFF1B\u4E5F\u53EF\u4EE5\u663E\u5F0F\u6307\u5B9A\u3002",

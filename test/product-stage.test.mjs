@@ -529,6 +529,7 @@ test('the stage definitions lead with all four big stages', () => {
   const text = lines.join('\n')
   assert.match(text, /- A 计划与目标：所有成员参与并提出建议/u)
   assert.match(text, /- B 开发与测试：开发、测试、研究员、产品经理、业务参与/u)
+  assert.match(text, /业务人员试用上一个部署版本（当前线上版本）/u)
   assert.match(text, /- C 产品经理使用：产品经理真实使用/u)
   assert.match(text, /- D 业务介入：业务人员开展业务工作/u)
 })

@@ -540,7 +540,7 @@ test('a stage without responses names the missing member and the missing role', 
     const decision = await h.preStep(h.payload, h.next)
     const text = decision.messages[0].content[0].text
     assert.match(text, /- 本轮参与：0\/0/u)
-    assert.match(text, /- 没有成员会话的标准身份：开发、测试、研究员/u)
+    assert.match(text, /- 没有成员会话的标准身份：开发、测试、研究员、产品经理/u)
     assert.match(text, /- 标准身份未设置：c1（身份未设置）、c2（身份未设置）/u)
   } finally {
     h.context.dispose()

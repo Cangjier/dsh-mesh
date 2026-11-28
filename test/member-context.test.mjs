@@ -129,7 +129,6 @@ test('a step with running member conversations carries one status snapshot', asy
     assert.equal(text.match(/^- 身份：/gmu)?.length, 1, 'only the self line')
     assert.doesNotMatch(text, /会话：c[12]（B 10\.66\.66\.2）/u)
     assert.doesNotMatch(text, /进行中|空闲|异常中止/u)
-    assert.doesNotMatch(text, /wait_member/u)
   } finally {
     h.context.dispose()
   }
@@ -277,10 +276,63 @@ test('a snapshot shows the self identity, work scope and effective settings', ()
     selfId: 'session-a',
     selfScope: { identity: '网关', scope: '成员发现', compressPercent: 12.5 },
   })
-  assert.match(text, /身份：网关（自身，会话 session-a）；工作范围：成员发现；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）；预算审查：关闭（只对主对话生效）；call_member 预算：A 默认 \/ B 默认 \/ C 默认 \/ D 默认（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）；压缩阈值：12\.5%/u)
+  assert.match(text, /身份：网关（自身，会话 session-a）；工作范围：成员发现；保持目标：关闭（只对主对话生效）；避免耗时：关闭（只对主对话生效）；预算审查：关闭（只对主对话生效）；wait_member：开启（只对主对话生效）；turn\/end 自动压缩：关闭（只对主对话生效）；call_member 预算：A 默认 \/ B 默认 \/ C 默认 \/ D 默认（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）；压缩阈值：12\.5%/u)
   assert.match(text, /保持目标：关闭/u)
   assert.match(text, /避免耗时：关闭/u)
   assert.doesNotMatch(text, /还没有身份\/工作范围/u)
+})
+
+test('turn end compacts the main conversation above its threshold', async () => {
+  const compacted = []
+  const compaction = { async compactNow(agent) { compacted.push(agent) } }
+  const tokenMeter = { contextPressure: () => ({ pressureTokens: 50_000, contextWindow: 100_000 }) }
+  const h = harness({
+    tasks: [],
+    scopes: { 'session-a': { compressOnTurnEnd: true, compressPercent: 40 } },
+    services: { tokenMeter, compaction },
+  })
+  try {
+    turn(h, 1)
+    await sleep(80)
+    assert.equal(compacted.length, 1, '50% > 40% compacts once')
+    assert.equal(compacted[0].id, 'session-a')
+    assert.equal(h.context.selfCompressAt.has('session-a'), true)
+  } finally {
+    h.context.dispose()
+  }
+})
+
+test('turn end does not compact at or below the threshold or with the switch off', async () => {
+  const make = (percent, scope) => {
+    const compacted = []
+    const compaction = { async compactNow() { compacted.push(1) } }
+    const tokenMeter = { contextPressure: () => ({ pressureTokens: percent, contextWindow: 100 }) }
+    const h = harness({ tasks: [], scopes: { 'session-a': scope }, services: { tokenMeter, compaction } })
+    return { h, compacted }
+  }
+  for (const [percent, scope] of [
+    [40, { compressOnTurnEnd: true, compressPercent: 40 }],
+    [30, { compressOnTurnEnd: true, compressPercent: 40 }],
+    [90, { compressOnTurnEnd: false, compressPercent: 40 }],
+  ]) {
+    const { h, compacted } = make(percent, scope)
+    try {
+      turn(h, 1)
+      await sleep(80)
+      assert.equal(compacted.length, 0, `${String(percent)}% with ${JSON.stringify(scope)} must not compact`)
+    } finally {
+      h.context.dispose()
+    }
+  }
+})
+
+test('a snapshot shows wait_member as off when the main conversation switched it off', () => {
+  const text = formatMemberStatusSnapshot([], {
+    now: 1_000_000,
+    selfId: 'session-a',
+    selfScope: { waitMember: false },
+  })
+  assert.match(text, /wait_member：关闭（只对主对话生效）/u)
 })
 
 test('a snapshot shows the default 35% threshold', () => {

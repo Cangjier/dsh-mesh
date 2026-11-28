@@ -130,6 +130,23 @@ test('goal text follows the category / 现状 / 预期 shape', () => {
   )
 })
 
+test('an explicit goal category composes the fixed text', () => {
+  const normalized = normalizeProductStageInput({ goals: {
+    product: { category: '应用功能', text: '现状 只能做基础建模，预期 支持参数化特征。' },
+    dev: { category: '性能', text: '性能：现状 2 秒，预期 1 秒。' },
+  } })
+  assert.equal(normalized.goals.product.text, '应用功能 现状 只能做基础建模，预期 支持参数化特征。')
+  assert.equal(normalized.goals.dev.text, '性能 现状 2 秒，预期 1 秒。')
+  assert.throws(
+    () => normalizeProductStageInput({ goals: { product: { category: '应用功能' } } }),
+    /category must be sent together with text/u,
+  )
+  assert.throws(
+    () => normalizeProductStageInput({ goals: { product: { category: '应用功能', text: '算法 现状 x，预期 y' } } }),
+    /must start with 现状/u,
+  )
+})
+
 test('goal text and status can be cleared independently', () => {
   const a = applyProductStage(null, {
     stage: 'A',

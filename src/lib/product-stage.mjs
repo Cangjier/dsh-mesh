@@ -164,28 +164,56 @@ export function stageRequiredRoles(stage) {
  * Trim and length-check one goal text.
  * @param {unknown} value raw text.
  * @param {string} key goal key, for the error message.
+ * @param {unknown} [category] explicit category; omitted means parse it from the text.
  * @returns {string|null} trimmed text, or null when cleared.
  */
-function normalizeGoalText(value, key) {
+function normalizeGoalText(value, key, category) {
   if (typeof value !== 'string') throw new Error(`${key} goal text must be a string`)
-  const text = value.trim()
+  let text = value.trim()
   if (text.length > PRODUCT_GOAL_TEXT_MAX) {
     throw new Error(`${key} goal text is too long: ${String(text.length)} > ${String(PRODUCT_GOAL_TEXT_MAX)} characters`)
   }
   if (text === '') return null
+  if (category !== undefined) {
+    const chosen = normalizeGoalCategory(category, key)
+    let body = text
+    // Accept both the full fixed shape and the "现状 …，预期 …" tail; an
+    // explicitly chosen category wins, so a repeated prefix is dropped.
+    if (body.startsWith(chosen)) body = body.slice(chosen.length)
+    body = body.trim().replace(/^[：:\s]+/u, '')
+    if (!/^现状/u.test(body)) {
+      throw new Error(`${key} goal text with category must start with 现状 …，预期 …；收到：${text.slice(0, 80)}`)
+    }
+    text = `${chosen} ${body}`
+  }
   const match = PRODUCT_GOAL_TEXT_PATTERN.exec(text)
   if (match === null) throw goalFormatError(key, text)
-  const category = match[1].trim().replace(/[\s：:，,。；;]+$/u, '')
+  const parsedCategory = match[1].trim().replace(/[\s：:，,。；;]+$/u, '')
   const current = match[2].trim().replace(/[\s，,；;。.]+$/u, '')
   const expected = match[3].trim().replace(/[\s。.]+$/u, '')
-  if (category === '' || /[，,。；;\n]/u.test(category) || current === '' || expected === '') {
+  if (parsedCategory === '' || /[，,。；;\n]/u.test(parsedCategory) || current === '' || expected === '') {
     throw goalFormatError(key, text)
   }
-  const normalized = `${category} 现状 ${current}，预期 ${expected}。`
+  const normalized = `${parsedCategory} 现状 ${current}，预期 ${expected}。`
   if (normalized.length > PRODUCT_GOAL_TEXT_MAX) {
     throw new Error(`${key} goal text is too long after formatting: ${String(normalized.length)} > ${String(PRODUCT_GOAL_TEXT_MAX)} characters`)
   }
   return normalized
+}
+
+/**
+ * Normalise one explicit goal category.
+ * @param {unknown} value raw category.
+ * @param {string} key goal key, for the error message.
+ * @returns {string} the category without a trailing colon or punctuation.
+ */
+function normalizeGoalCategory(value, key) {
+  if (typeof value !== 'string') throw new Error(`${key} goal category must be a string`)
+  const category = value.trim().replace(/[：:，,。；;\s]+$/u, '')
+  if (category === '' || category.length > 20 || /[，,。；;\n]/u.test(category)) {
+    throw new Error(`${key} goal category must be 1-20 characters without punctuation: ${value.slice(0, 40)}`)
+  }
+  return category
 }
 
 /**
@@ -245,10 +273,15 @@ function normalizeGoalPatch(patch) {
       throw new Error(`${key} goal must be a string or an object with text/status`)
     }
     for (const field of Object.keys(value)) {
-      if (field !== 'text' && field !== 'status') throw new Error(`unknown ${key} goal field: ${field}`)
+      if (field !== 'text' && field !== 'status' && field !== 'category') {
+        throw new Error(`unknown ${key} goal field: ${field}`)
+      }
+    }
+    if (value.category !== undefined && value.text === undefined) {
+      throw new Error(`${key} goal category must be sent together with text`)
     }
     const entry = {}
-    if (value.text !== undefined) entry.text = normalizeGoalText(value.text, key)
+    if (value.text !== undefined) entry.text = normalizeGoalText(value.text, key, value.category)
     if (value.status !== undefined) entry.status = normalizeGoalStatus(value.status, key)
     goals[key] = entry
   }

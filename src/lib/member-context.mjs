@@ -59,6 +59,9 @@ const HOST_CACHE_MS = 5 * 60_000
 /** How many long-job records one session keeps between snapshots. */
 const LONG_JOBS_MAX = 20
 
+/** How often one main conversation may compact itself at turn end. */
+const SELF_COMPRESS_COOLDOWN_MS = 10 * 60_000
+
 /** Source kind of the injected/pushed message; it must never read as user input. */
 export const MEMBER_CONTEXT_SOURCE = 'member-context'
 
@@ -165,7 +168,7 @@ function formatSelfLine(selfId, selfScope) {
     ? selfScope.keepPrompt
     : DEFAULT_KEEP_PROMPT
   const budget = formatCallMemberBudgetSettings(selfScope?.callMemberBudget)
-  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${keep ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；预算审查：${selfScope?.budgetAudit === true ? '开启' : '关闭'}（只对主对话生效）；call_member 预算：${budget}（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
+  return `- 身份：${selfScope?.identity ?? '未设置'}（自身，会话 ${selfId === '' ? 'unknown' : selfId}）；工作范围：${selfScope?.scope ?? '未设置'}；保持目标：${keep ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}；避免耗时：${selfScope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）；预算审查：${selfScope?.budgetAudit === true ? '开启' : '关闭'}（只对主对话生效）；wait_member：${selfScope?.waitMember === false ? '关闭' : '开启'}（只对主对话生效）；turn/end 自动压缩：${selfScope?.compressOnTurnEnd === true ? '开启' : '关闭'}（只对主对话生效）；call_member 预算：${budget}（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）；压缩阈值：${formatMemberPercent(effectiveCompressPercent(selfScope))}`
 }
 
 /**
@@ -246,6 +249,8 @@ export function createMemberContext({
   const keepPending = new Set()
   /** @type {Map<string, object[]>} session id -> settled jobs over the warn threshold */
   const longJobs = new Map()
+  /** @type {Map<string, number>} session id -> last self-compaction attempt */
+  const selfCompressAt = new Map()
   const disposers = []
   let closed = false
 
@@ -561,7 +566,56 @@ export function createMemberContext({
   }
 
   /**
-   * Handle one session event for the long-job buffer and the keep nudge.
+   * Compact the main conversation itself when its context occupancy is above
+   * the self threshold at turn end.
+   *
+   * Only an explicit `compressOnTurnEnd: true` opts in. The occupancy comes
+   * from the host token meter (`pressureTokens / contextWindow`, the same
+   * reading the composer meter shows); the threshold is the self scope's
+   * `compressPercent` (default 35). The compaction uses the host's explicit
+   * `compactNow`, which is allowed below the provider's automatic threshold,
+   * and only runs while the agent is idle. Attempts are rate-limited so a
+   * compaction that cannot shrink the retained tail is not retried every turn.
+   * @param {string} sessionId main conversation id.
+   * @param {number|null} turn the turn that just ended.
+   * @returns {Promise<void>} resolution after the attempt.
+   */
+  async function maybeSelfCompress(sessionId, turn) {
+    if (closed || isMemberSession(sessionId)) return
+    const scopes = await readScopes()
+    if (closed || turns.get(sessionId) !== turn) return
+    const selfScope = scopes[sessionId] ?? null
+    if (selfScope?.compressOnTurnEnd !== true) return
+    // Let the ended turn settle before touching the agent.
+    await new Promise(resolve => setImmediate(resolve))
+    if (closed || turns.get(sessionId) !== turn) return
+    const get = typeof ctx?.get === 'function' ? name => ctx.get(name) : () => undefined
+    const agent = get('agents')?.get(sessionId)
+    if (agent === undefined || agent === null || agent.status !== 'idle') return
+    const meter = get('tokenMeter')
+    const compaction = get('compaction')
+    if (typeof meter?.contextPressure !== 'function' || typeof compaction?.compactNow !== 'function') return
+    const pressure = meter.contextPressure(agent.session)
+    const used = pressure?.pressureTokens
+    const capacity = pressure?.contextWindow
+    if (!Number.isFinite(used) || !Number.isFinite(capacity) || capacity <= 0) return
+    const percent = Math.min(100, Math.round(used / capacity * 100))
+    const threshold = effectiveCompressPercent(selfScope)
+    if (percent <= threshold) return
+    const last = selfCompressAt.get(sessionId) ?? 0
+    if (now() - last < SELF_COMPRESS_COOLDOWN_MS) return
+    selfCompressAt.set(sessionId, now())
+    try {
+      await compaction.compactNow(agent, new AbortController().signal)
+      log(`self compaction for ${sessionId}: ${formatMemberPercent(percent)} > ${formatMemberPercent(threshold)}`)
+    } catch (error) {
+      // busy/cancelled/no-op are outcomes, not reasons to break the loop.
+      log(`self compaction skipped for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * Handle one session event for the long-job buffer, self compaction and the keep nudge.
    * @param {any} session session.
    * @param {any} event session event.
    * @returns {void}
@@ -594,9 +648,13 @@ export function createMemberContext({
     turns.set(sessionId, turn)
     // The turn a keep nudge started is the nudge itself: it must not push
     // again, or a conversation with no members running would loop forever.
-    if (keepPending.delete(sessionId)) return
-    void maybeKeep(sessionId, turn).catch(error => {
-      log(`member keep check failed: ${error instanceof Error ? error.message : String(error)}`)
+    // Self compaction still runs on that turn; only the nudge is suppressed.
+    const nudged = keepPending.delete(sessionId)
+    void (async () => {
+      await maybeSelfCompress(sessionId, turn)
+      if (!nudged) await maybeKeep(sessionId, turn)
+    })().catch(error => {
+      log(`member turn-end check failed: ${error instanceof Error ? error.message : String(error)}`)
     })
   }
 
@@ -610,6 +668,7 @@ export function createMemberContext({
       turns.delete(id)
       keepPending.delete(id)
       longJobs.delete(id)
+      selfCompressAt.delete(id)
     }))
   }
 
@@ -619,6 +678,7 @@ export function createMemberContext({
     lastInjection,
     turns,
     keepPending,
+    selfCompressAt,
     dispose() {
       closed = true
       for (const dispose of disposers.splice(0)) {
@@ -628,6 +688,7 @@ export function createMemberContext({
       turns.clear()
       keepPending.clear()
       longJobs.clear()
+      selfCompressAt.clear()
     },
   }
 }

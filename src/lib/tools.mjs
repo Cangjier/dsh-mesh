@@ -32,6 +32,7 @@ import {
   formatProductStageResult,
   isAdvancingProductStage,
   normalizeProductStageInput,
+  PRODUCT_GOAL_CATEGORY_HINT,
   productStageParticipationBlockers,
   productStageWarnings,
 } from './product-stage.mjs'
@@ -407,7 +408,7 @@ export function registerTools(ctx, toolsCtx, service) {
   const setMemberScopeDefinition = {
     name: 'set_member_scope',
     description: [
-      '设置一个成员会话或当前主对话（自身）的身份、标准身份、工作范围以及自动压缩参数。',
+      '设置一个成员会话或当前主对话（自身）的身份、标准身份、工作范围，以及自继续、wait_member、turn-end 压缩等开关。',
       '',
       '`conversationId` 省略、`self`、`local` 或等于当前会话 id 时设置“自身”；其他值作为成员会话 id。',
       '`identity` / `role` / `scope` / `note` 是可选的字符串，只传要改的字段；空字符串表示清除。',
@@ -418,11 +419,13 @@ export function registerTools(ctx, toolsCtx, service) {
       '`keepPrompt`（也可写 `keep_prompt`）是这条用户消息的正文，默认「继续」，最长 200 字符；空字符串恢复默认。只对自身/主对话生效，设置成员会话时忽略。',
       '`avoidLongJobs` 默认 false，只对自身/主对话生效：开启后，主对话下一次状态快照会列出距上一次快照之间结束、耗时超过 1 分钟的 job，并建议交给成员对话执行。设置成员会话时忽略。',
       '`budgetAudit` 默认 false，只对自身/主对话生效：开启后，call_member 预算耗尽时启动 fork 子代理审查产品流程（每个小阶段最多 3 次、间隔至少 10 分钟）。设置成员会话时忽略。',
+      '`waitMember` 默认 true，只对自身/主对话生效：设为 false 后 wait_member 直接返回 ok:false，不再阻塞等待；成员回复仍会自动投递。设置成员会话时忽略。',
+      '`compressOnTurnEnd` 默认 false，只对自身/主对话生效：开启后每个 turn/end 读取本对话上下文占比，超过 compressPercent 就用 DSH 的显式压缩（compactNow）压缩一次；只压缩主对话，成员会话不受影响。设置成员会话时忽略。',
       '`callMemberBudget`（也可写 `call_member_budget`）是**每个大阶段单独**的 call_member 预算，可只给要设的阶段（A/B/C/D），每个整数 1–999，没有统一值；只对自身/主对话生效。没设置的阶段在运行时默认为该阶段**参与成员数量 × 2**（还没有参与成员时按 1 计）。成员每把一条回复返回给主对话（wait_member 取走或兜底投递）算对应阶段消耗一次；预算用完时成员上下文会强调必须进入下一个阶段，并及时用 set_product_stage 更新阶段和目标状态。设置成员会话时忽略。',
       `预算额度只能由用户调整：设置 callMemberBudget 时工具会读取最近 ${String(BUDGET_AUTH_MESSAGE_WINDOW)} 条用户消息，只有其中存在“预算 + 调整/设置 + 数字”的明确指示才写入；没有则返回 ok:false，配置不变。`,
       '预算用尽时，成员上下文会自动启动一个 fork 子代理审查当前产品流程（每个小阶段最多 3 次、间隔至少 10 分钟）：检查是否按阶段工作、是否超出阶段、预算为什么耗尽；如果主对话使用不合理，审查结论会作为警告和下一步建议投递回主对话。',
-      `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；成员会话下一次 call_member 投递前，上下文占比超过阈值就先压缩。`,
-      '至少提供 identity、role、scope、note、keep、keepPrompt、avoidLongJobs、budgetAudit、callMemberBudget、compressPercent 之一；设置成员会话时必须有 identity、role、scope、note 或 compressPercent 之一。',
+      `\`compressPercent\`：自动压缩阈值（数字 1–100，默认 ${String(DEFAULT_COMPRESS_PERCENT)}）；成员会话下一次 call_member 投递前超过阈值就先压缩；主对话开启 compressOnTurnEnd 后作为 turn/end 的压缩阈值。`,
+      '至少提供 identity、role、scope、note、keep、keepPrompt、avoidLongJobs、budgetAudit、waitMember、compressOnTurnEnd、callMemberBudget、compressPercent 之一；设置成员会话时必须有 identity、role、scope、note 或 compressPercent 之一。',
       '成员会话可以未被本机跟踪，设置仍会保存，只是不会同步任务快照。',
       '这个工具只保存设置，不给成员会话发消息、不自动加投递前缀；随对话一起设置/更新用 call_member 的 identity/role/scope 参数。',
     ].join('\n'),
@@ -472,6 +475,14 @@ export function registerTools(ctx, toolsCtx, service) {
           type: 'boolean',
           description: '只对自身/主对话生效，默认 false；开启后 call_member 预算耗尽时自动起 fork 子代理审查产品流程（每阶段最多 3 次、间隔 10 分钟）。设置成员会话时忽略。',
         },
+        waitMember: {
+          type: 'boolean',
+          description: '只对自身/主对话生效，默认 true；设为 false 后 wait_member 直接返回 ok:false，不再阻塞等待，成员回复仍会自动投递。设置成员会话时忽略。',
+        },
+        compressOnTurnEnd: {
+          type: 'boolean',
+          description: '只对自身/主对话生效，默认 false；开启后每个 turn/end 检查本对话上下文占比，超过 compressPercent 就压缩一次（DSH compactNow，只压主对话）。设置成员会话时忽略。',
+        },
         callMemberBudget: callMemberBudgetSchema(),
         call_member_budget: {
           ...callMemberBudgetSchema(),
@@ -481,7 +492,7 @@ export function registerTools(ctx, toolsCtx, service) {
           type: 'number',
           minimum: 1,
           maximum: 100,
-          description: '自动压缩阈值（百分比，默认 35）；成员会话下次投递前上下文占比超过该值就先压缩。',
+          description: '自动压缩阈值（百分比，默认 35）；成员会话下次投递前超过该值就先压缩；主对话开启 compressOnTurnEnd 后作为 turn/end 的压缩阈值。',
         },
       },
       additionalProperties: false,
@@ -506,10 +517,12 @@ export function registerTools(ctx, toolsCtx, service) {
       const hasKeepPrompt = args.keepPrompt !== undefined || args.keep_prompt !== undefined
       const hasAvoidLongJobs = args.avoidLongJobs !== undefined
       const hasBudgetAudit = args.budgetAudit !== undefined
+      const hasWaitMember = args.waitMember !== undefined
+      const hasCompressOnTurnEnd = args.compressOnTurnEnd !== undefined
       const hasCallMemberBudget = args.callMemberBudget !== undefined || args.call_member_budget !== undefined
       const hasCompressPercent = args.compressPercent !== undefined
-      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasKeepPrompt && !hasAvoidLongJobs && !hasBudgetAudit && !hasCallMemberBudget && !hasCompressPercent) {
-        throw new Error('identity, role, scope, note, keep, keepPrompt, avoidLongJobs, budgetAudit, callMemberBudget, or compressPercent is required')
+      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasKeepPrompt && !hasAvoidLongJobs && !hasBudgetAudit && !hasWaitMember && !hasCompressOnTurnEnd && !hasCallMemberBudget && !hasCompressPercent) {
+        throw new Error('identity, role, scope, note, keep, keepPrompt, avoidLongJobs, budgetAudit, waitMember, compressOnTurnEnd, callMemberBudget, or compressPercent is required')
       }
       if (args.keepPrompt !== undefined && args.keep_prompt !== undefined) {
         throw new Error('use only one of keepPrompt and keep_prompt')
@@ -519,7 +532,7 @@ export function registerTools(ctx, toolsCtx, service) {
       }
       if (isSelf && selfId === '') throw new Error('cannot set the current session scope: no current session')
       if (!isSelf && !hasIdentity && !hasRole && !hasScope && !hasNote && !hasCompressPercent) {
-        throw new Error('keep, keepPrompt, avoidLongJobs, budgetAudit and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation')
+        throw new Error('keep, keepPrompt, avoidLongJobs, budgetAudit, waitMember, compressOnTurnEnd and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation')
       }
       const patch = {
         ...(hasIdentity ? { identity: args.identity } : {}),
@@ -532,6 +545,8 @@ export function registerTools(ctx, toolsCtx, service) {
           : {}),
         ...(isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {}),
         ...(isSelf && hasBudgetAudit ? { budgetAudit: args.budgetAudit } : {}),
+        ...(isSelf && hasWaitMember ? { waitMember: args.waitMember } : {}),
+        ...(isSelf && hasCompressOnTurnEnd ? { compressOnTurnEnd: args.compressOnTurnEnd } : {}),
         ...(isSelf && hasCallMemberBudget
           ? { callMemberBudget: args.callMemberBudget !== undefined ? args.callMemberBudget : args.call_member_budget }
           : {}),
@@ -578,12 +593,14 @@ export function registerTools(ctx, toolsCtx, service) {
               `保持目标：${scope?.keep === true ? `开启（只对主对话生效，提示语「${keepPrompt}」）` : '关闭（只对主对话生效）'}`,
               `避免耗时：${scope?.avoidLongJobs === true ? '开启' : '关闭'}（只对主对话生效）`,
               `预算审查：${scope?.budgetAudit === true ? '开启（只对主对话生效）' : '关闭（只对主对话生效）'}`,
+              `wait_member：${scope?.waitMember === false ? '关闭（只对主对话生效）' : '开启（只对主对话生效）'}`,
+              `turn/end 自动压缩：${scope?.compressOnTurnEnd === true ? '开启（只对主对话生效）' : '关闭（只对主对话生效）'}`,
               `call_member 预算：${budgetText}（只对主对话生效，每个大阶段单独计；未设置按参与成员数 × 2）`,
               `压缩阈值：${formatOneDecimal(compressThreshold)}%`,
             ]
           : [`压缩阈值：${formatOneDecimal(compressThreshold)}%（投递前超过该占比自动压缩）`]),
-        ...(!isSelf && (hasKeep || hasKeepPrompt || hasAvoidLongJobs || hasBudgetAudit || hasCallMemberBudget)
-          ? ['keep / keepPrompt / avoidLongJobs / budgetAudit / callMemberBudget 只对主对话自身生效，设置成员会话时已忽略。']
+        ...(!isSelf && (hasKeep || hasKeepPrompt || hasAvoidLongJobs || hasBudgetAudit || hasWaitMember || hasCompressOnTurnEnd || hasCallMemberBudget)
+          ? ['keep / keepPrompt / avoidLongJobs / budgetAudit / waitMember / compressOnTurnEnd / callMemberBudget 只对主对话自身生效，设置成员会话时已忽略。']
           : []),
         ...(isSelf && hasRole ? ['role 只对成员会话生效，设置自身时已忽略。'] : []),
         ...(isSelf && hasNote ? ['note 只对成员会话生效，设置自身时已忽略。'] : []),
@@ -603,6 +620,8 @@ export function registerTools(ctx, toolsCtx, service) {
           keepPrompt: isSelf ? keepPrompt : null,
           avoidLongJobs: scope?.avoidLongJobs === true,
           budgetAudit: isSelf ? (scope?.budgetAudit === true) : null,
+          waitMember: isSelf ? scope?.waitMember !== false : null,
+          compressOnTurnEnd: isSelf ? scope?.compressOnTurnEnd === true : null,
           callMemberBudget: isSelf ? (scope?.callMemberBudget ?? null) : null,
           tracked,
           note: !isSelf ? (scope?.note ?? null) : null,
@@ -611,6 +630,8 @@ export function registerTools(ctx, toolsCtx, service) {
           ignoredKeepPrompt: !isSelf && hasKeepPrompt,
           ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
           ignoredBudgetAudit: !isSelf && hasBudgetAudit,
+          ignoredWaitMember: !isSelf && hasWaitMember,
+          ignoredCompressOnTurnEnd: !isSelf && hasCompressOnTurnEnd,
           ignoredCallMemberBudget: !isSelf && hasCallMemberBudget,
           ignoredNote: isSelf && hasNote,
         },
@@ -628,10 +649,15 @@ export function registerTools(ctx, toolsCtx, service) {
       type: 'object',
       additionalProperties: false,
       properties: {
+        category: {
+          type: 'string',
+          maxLength: 20,
+          description: `目标类别（如 ${PRODUCT_GOAL_CATEGORY_HINT}；也可用其他短类别词）；省略时从 text 开头识别。提供 category 时 text 只写「现状 …，预期 …」。`,
+        },
         text: {
           type: 'string',
           maxLength: 300,
-          description: `${label}文本，固定格式「<类别> 现状 <现在怎样>，预期 <要变成怎样>。」（类别如 应用功能 / 应用界面 / 应用服务 / 算法 / 数据 / 性能 / 稳定性 / 安全 / 工程质量 / 交付 / …）；例：应用功能 现状 只能做基础建模，预期 支持参数化特征。空字符串表示清除。`,
+          description: `${label}文本，固定格式「<类别> 现状 <现在怎样>，预期 <要变成怎样>。」；提供 category 时 text 只写「现状 …，预期 …」，否则 text 开头必须带类别。空字符串表示清除。`,
         },
         status: {
           type: 'string',
@@ -652,7 +678,7 @@ export function registerTools(ctx, toolsCtx, service) {
       'C 产品经理使用（产品经理真实使用，发现问题回到 B 阶段，直到产品经理放行）；',
       'D 业务介入（业务人员开展业务工作，发现问题回到 C 阶段，业务放行后回到 A 阶段）。',
       '产品版本自动维护，不需要传入：D 完成进入 A 时升版（同一天小版本 +1，跨天重置为当天 .1）。',
-      '`goals` 只改传入的目标：product 产品目标 / dev 开发目标 / research 研究目标；每项 { text, status }，status 取 未开始 / 进行中 / 已达成 / 未达成。',
+      '`goals` 只改传入的目标：product 产品目标 / dev 开发目标 / research 研究目标；每项 { category, text, status }，status 取 未开始 / 进行中 / 已达成 / 未达成。category 是目标类别（省略时从 text 开头识别），提供 category 时 text 只写「现状 …，预期 …」。',
       '目标文本固定格式：「<类别> 现状 <现在怎样>，预期 <要变成怎样>。」，类别如 应用功能 / 应用界面 / 应用服务 / 算法 / 数据 / 性能 / 稳定性 / 安全 / 工程质量 / 交付 / …；例：应用功能 现状 只能做基础建模，预期 支持参数化特征与历史回放。不符合时调用被拒绝、状态不变。',
       '`round` 是子阶段轮次（第几轮迭代）：省略时 D 进入 A 自动 +1，其他阶段沿用当前轮次；也可以显式指定。',
       '`stage` 省略时沿用当前阶段（首次调用默认 A），只更新目标状态时可以省略。',
@@ -770,6 +796,7 @@ export function registerTools(ctx, toolsCtx, service) {
       'state=done 时可以用返回的会话id继续投递：call_member { conversationId, prompt }；',
       '结果里会显示目标对话的上下文占比；超过该会话的压缩阈值时，下次 call_member 投递前会自动压缩',
       '每次调用有上限（默认 30000，最大 300000 毫秒），不会无限阻塞；用户停止当前对话会中止本次等待。',
+      '本对话可以用 set_member_scope 的 waitMember:false 关闭等待；关闭后本工具返回 ok:false，成员回复仍会自动投递。',
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -798,6 +825,19 @@ export function registerTools(ctx, toolsCtx, service) {
     async execute(args, exec) {
       const timeoutMs = Number.isSafeInteger(args.timeoutMs) ? args.timeoutMs : 30_000
       const originSessionId = originSessionOf(exec.agent)
+      const waitScope = typeof service.memberScope === 'function'
+        ? await service.memberScope(originSessionId).catch(() => null)
+        : null
+      if (waitScope?.waitMember === false) {
+        return {
+          ok: false,
+          text: [
+            'wait_member 已被关闭（set_member_scope { "waitMember": false }），本次没有等待。',
+            '成员的结果仍会自动投递到本对话；需要等待时让用户把 waitMember 打开。',
+          ].join('\n'),
+          data: { disabled: true, waitMember: false },
+        }
+      }
       if (typeof args.conversationId === 'string' && args.conversationId.trim() !== '') {
         throw new Error('wait_member 不再接受 conversationId：只等一个会话用 conversationIds: ["<会话id>"]；等全部进行中的会话用 all: true')
       }

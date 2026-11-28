@@ -12844,26 +12844,44 @@ function stageRequiredRoles(stage) {
   if (stage === "D") return ["\u4E1A\u52A1"];
   return [];
 }
-function normalizeGoalText(value, key) {
+function normalizeGoalText(value, key, category) {
   if (typeof value !== "string") throw new Error(`${key} goal text must be a string`);
-  const text = value.trim();
+  let text = value.trim();
   if (text.length > PRODUCT_GOAL_TEXT_MAX) {
     throw new Error(`${key} goal text is too long: ${String(text.length)} > ${String(PRODUCT_GOAL_TEXT_MAX)} characters`);
   }
   if (text === "") return null;
+  if (category !== void 0) {
+    const chosen = normalizeGoalCategory(category, key);
+    let body = text;
+    if (body.startsWith(chosen)) body = body.slice(chosen.length);
+    body = body.trim().replace(/^[：:\s]+/u, "");
+    if (!/^现状/u.test(body)) {
+      throw new Error(`${key} goal text with category must start with \u73B0\u72B6 \u2026\uFF0C\u9884\u671F \u2026\uFF1B\u6536\u5230\uFF1A${text.slice(0, 80)}`);
+    }
+    text = `${chosen} ${body}`;
+  }
   const match = PRODUCT_GOAL_TEXT_PATTERN.exec(text);
   if (match === null) throw goalFormatError(key, text);
-  const category = match[1].trim().replace(/[\s：:，,。；;]+$/u, "");
+  const parsedCategory = match[1].trim().replace(/[\s：:，,。；;]+$/u, "");
   const current = match[2].trim().replace(/[\s，,；;。.]+$/u, "");
   const expected = match[3].trim().replace(/[\s。.]+$/u, "");
-  if (category === "" || /[，,。；;\n]/u.test(category) || current === "" || expected === "") {
+  if (parsedCategory === "" || /[，,。；;\n]/u.test(parsedCategory) || current === "" || expected === "") {
     throw goalFormatError(key, text);
   }
-  const normalized = `${category} \u73B0\u72B6 ${current}\uFF0C\u9884\u671F ${expected}\u3002`;
+  const normalized = `${parsedCategory} \u73B0\u72B6 ${current}\uFF0C\u9884\u671F ${expected}\u3002`;
   if (normalized.length > PRODUCT_GOAL_TEXT_MAX) {
     throw new Error(`${key} goal text is too long after formatting: ${String(normalized.length)} > ${String(PRODUCT_GOAL_TEXT_MAX)} characters`);
   }
   return normalized;
+}
+function normalizeGoalCategory(value, key) {
+  if (typeof value !== "string") throw new Error(`${key} goal category must be a string`);
+  const category = value.trim().replace(/[：:，,。；;\s]+$/u, "");
+  if (category === "" || category.length > 20 || /[，,。；;\n]/u.test(category)) {
+    throw new Error(`${key} goal category must be 1-20 characters without punctuation: ${value.slice(0, 40)}`);
+  }
+  return category;
 }
 function goalFormatError(key, text) {
   return new Error(
@@ -12896,10 +12914,15 @@ function normalizeGoalPatch(patch) {
       throw new Error(`${key} goal must be a string or an object with text/status`);
     }
     for (const field of Object.keys(value)) {
-      if (field !== "text" && field !== "status") throw new Error(`unknown ${key} goal field: ${field}`);
+      if (field !== "text" && field !== "status" && field !== "category") {
+        throw new Error(`unknown ${key} goal field: ${field}`);
+      }
+    }
+    if (value.category !== void 0 && value.text === void 0) {
+      throw new Error(`${key} goal category must be sent together with text`);
     }
     const entry = {};
-    if (value.text !== void 0) entry.text = normalizeGoalText(value.text, key);
+    if (value.text !== void 0) entry.text = normalizeGoalText(value.text, key, value.category);
     if (value.status !== void 0) entry.status = normalizeGoalStatus(value.status, key);
     goals[key] = entry;
   }
@@ -13349,6 +13372,14 @@ function normalizeMemberScopePatch(patch = {}) {
   if (patch.budgetAudit !== void 0) {
     if (typeof patch.budgetAudit !== "boolean") throw new Error("budgetAudit must be a boolean");
     normalized.budgetAudit = patch.budgetAudit;
+  }
+  if (patch.waitMember !== void 0) {
+    if (typeof patch.waitMember !== "boolean") throw new Error("waitMember must be a boolean");
+    normalized.waitMember = patch.waitMember;
+  }
+  if (patch.compressOnTurnEnd !== void 0) {
+    if (typeof patch.compressOnTurnEnd !== "boolean") throw new Error("compressOnTurnEnd must be a boolean");
+    normalized.compressOnTurnEnd = patch.compressOnTurnEnd;
   }
   if (patch.callMemberBudget !== void 0) {
     normalized.callMemberBudget = normalizeCallMemberBudgets(patch.callMemberBudget);
@@ -13964,10 +13995,12 @@ var MeshService = class {
         const keepPrompt = savedScopeText(value.keepPrompt, MEMBER_KEEP_PROMPT_MAX);
         const avoidLongJobs = typeof value.avoidLongJobs === "boolean" ? value.avoidLongJobs : void 0;
         const budgetAudit = typeof value.budgetAudit === "boolean" ? value.budgetAudit : void 0;
+        const waitMember = typeof value.waitMember === "boolean" ? value.waitMember : void 0;
+        const compressOnTurnEnd = typeof value.compressOnTurnEnd === "boolean" ? value.compressOnTurnEnd : void 0;
         const callMemberBudget = savedCallMemberBudgets(value.callMemberBudget);
         const note = savedScopeText(value.note, MEMBER_NOTE_MAX);
         const compressPercent = savedScopeNumber(value.compressPercent, (candidate) => candidate >= 1 && candidate <= 100);
-        if (identity === null && role === null && scope === null && keep === void 0 && keepPrompt === null && avoidLongJobs === void 0 && budgetAudit === void 0 && callMemberBudget === void 0 && note === null && compressPercent === void 0) continue;
+        if (identity === null && role === null && scope === null && keep === void 0 && keepPrompt === null && avoidLongJobs === void 0 && budgetAudit === void 0 && waitMember === void 0 && compressOnTurnEnd === void 0 && callMemberBudget === void 0 && note === null && compressPercent === void 0) continue;
         scopes[rawId.trim()] = {
           ...identity === null ? {} : { identity },
           ...role === null ? {} : { role },
@@ -13976,6 +14009,8 @@ var MeshService = class {
           ...keepPrompt === null ? {} : { keepPrompt },
           ...avoidLongJobs === void 0 ? {} : { avoidLongJobs },
           ...budgetAudit === void 0 ? {} : { budgetAudit },
+          ...waitMember === void 0 ? {} : { waitMember },
+          ...compressOnTurnEnd === void 0 ? {} : { compressOnTurnEnd },
           ...callMemberBudget === void 0 ? {} : { callMemberBudget },
           ...note === null ? {} : { note },
           ...compressPercent === void 0 ? {} : { compressPercent }
@@ -13989,7 +14024,7 @@ var MeshService = class {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, budgetAudit?: boolean, note?: string, compressPercent?: number}|null>} scope.
+   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, budgetAudit?: boolean, waitMember?: boolean, compressOnTurnEnd?: boolean, note?: string, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? "").trim();
@@ -14037,6 +14072,8 @@ var MeshService = class {
     }
     if (normalized.avoidLongJobs !== void 0) next.avoidLongJobs = normalized.avoidLongJobs;
     if (normalized.budgetAudit !== void 0) next.budgetAudit = normalized.budgetAudit;
+    if (normalized.waitMember !== void 0) next.waitMember = normalized.waitMember;
+    if (normalized.compressOnTurnEnd !== void 0) next.compressOnTurnEnd = normalized.compressOnTurnEnd;
     if (normalized.callMemberBudget !== void 0) {
       next.callMemberBudget = { ...next.callMemberBudget ?? {}, ...normalized.callMemberBudget };
     }
@@ -16997,6 +17034,7 @@ var MEMBER_STATUS_INTERVAL_MS = 6e4;
 var LONG_JOB_WARN_MS = 6e4;
 var HOST_CACHE_MS = 5 * 6e4;
 var LONG_JOBS_MAX = 20;
+var SELF_COMPRESS_COOLDOWN_MS = 10 * 6e4;
 var MEMBER_CONTEXT_SOURCE = "member-context";
 var DEFAULT_KEEP_PROMPT = "\u7EE7\u7EED";
 function formatMemberPercent(value) {
@@ -17041,7 +17079,7 @@ function formatSelfLine(selfId, selfScope) {
   const keep = selfScope?.keep === true;
   const keepPrompt = typeof selfScope?.keepPrompt === "string" && selfScope.keepPrompt !== "" ? selfScope.keepPrompt : DEFAULT_KEEP_PROMPT;
   const budget = formatCallMemberBudgetSettings(selfScope?.callMemberBudget);
-  return `- \u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF08\u81EA\u8EAB\uFF0C\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${keep ? `\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u63D0\u793A\u8BED\u300C${keepPrompt}\u300D\uFF09` : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u9884\u7B97\u5BA1\u67E5\uFF1A${selfScope?.budgetAudit === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1Bcall_member \u9884\u7B97\uFF1A${budget}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC\u8BA1\uFF1B\u672A\u8BBE\u7F6E\u6309\u53C2\u4E0E\u6210\u5458\u6570 \xD7 2\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
+  return `- \u8EAB\u4EFD\uFF1A${selfScope?.identity ?? "\u672A\u8BBE\u7F6E"}\uFF08\u81EA\u8EAB\uFF0C\u4F1A\u8BDD ${selfId === "" ? "unknown" : selfId}\uFF09\uFF1B\u5DE5\u4F5C\u8303\u56F4\uFF1A${selfScope?.scope ?? "\u672A\u8BBE\u7F6E"}\uFF1B\u4FDD\u6301\u76EE\u6807\uFF1A${keep ? `\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u63D0\u793A\u8BED\u300C${keepPrompt}\u300D\uFF09` : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}\uFF1B\u907F\u514D\u8017\u65F6\uFF1A${selfScope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1B\u9884\u7B97\u5BA1\u67E5\uFF1A${selfScope?.budgetAudit === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1Bwait_member\uFF1A${selfScope?.waitMember === false ? "\u5173\u95ED" : "\u5F00\u542F"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1Bturn/end \u81EA\u52A8\u538B\u7F29\uFF1A${selfScope?.compressOnTurnEnd === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09\uFF1Bcall_member \u9884\u7B97\uFF1A${budget}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC\u8BA1\uFF1B\u672A\u8BBE\u7F6E\u6309\u53C2\u4E0E\u6210\u5458\u6570 \xD7 2\uFF09\uFF1B\u538B\u7F29\u9608\u503C\uFF1A${formatMemberPercent(effectiveCompressPercent(selfScope))}`;
 }
 function formatMemberStatusSnapshot(tasks, options = {}) {
   const list = Array.isArray(tasks) ? tasks : [];
@@ -17089,6 +17127,7 @@ function createMemberContext({
   const turns = /* @__PURE__ */ new Map();
   const keepPending = /* @__PURE__ */ new Set();
   const longJobs = /* @__PURE__ */ new Map();
+  const selfCompressAt = /* @__PURE__ */ new Map();
   const disposers = [];
   let closed = false;
   async function readScopes() {
@@ -17290,6 +17329,37 @@ function createMemberContext({
       log(`member keep push failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  async function maybeSelfCompress(sessionId, turn) {
+    if (closed || isMemberSession(sessionId)) return;
+    const scopes = await readScopes();
+    if (closed || turns.get(sessionId) !== turn) return;
+    const selfScope = scopes[sessionId] ?? null;
+    if (selfScope?.compressOnTurnEnd !== true) return;
+    await new Promise((resolve) => setImmediate(resolve));
+    if (closed || turns.get(sessionId) !== turn) return;
+    const get = typeof ctx?.get === "function" ? (name) => ctx.get(name) : () => void 0;
+    const agent = get("agents")?.get(sessionId);
+    if (agent === void 0 || agent === null || agent.status !== "idle") return;
+    const meter = get("tokenMeter");
+    const compaction = get("compaction");
+    if (typeof meter?.contextPressure !== "function" || typeof compaction?.compactNow !== "function") return;
+    const pressure = meter.contextPressure(agent.session);
+    const used = pressure?.pressureTokens;
+    const capacity = pressure?.contextWindow;
+    if (!Number.isFinite(used) || !Number.isFinite(capacity) || capacity <= 0) return;
+    const percent = Math.min(100, Math.round(used / capacity * 100));
+    const threshold = effectiveCompressPercent(selfScope);
+    if (percent <= threshold) return;
+    const last = selfCompressAt.get(sessionId) ?? 0;
+    if (now() - last < SELF_COMPRESS_COOLDOWN_MS) return;
+    selfCompressAt.set(sessionId, now());
+    try {
+      await compaction.compactNow(agent, new AbortController().signal);
+      log(`self compaction for ${sessionId}: ${formatMemberPercent(percent)} > ${formatMemberPercent(threshold)}`);
+    } catch (error) {
+      log(`self compaction skipped for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   function onEvent(session, event) {
     if (closed || session === void 0 || event === void 0) return;
     const sessionId = String(session.id ?? "");
@@ -17316,9 +17386,12 @@ function createMemberContext({
     if (event.type !== "turn/end") return;
     const turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : turns.get(sessionId) ?? null;
     turns.set(sessionId, turn);
-    if (keepPending.delete(sessionId)) return;
-    void maybeKeep(sessionId, turn).catch((error) => {
-      log(`member keep check failed: ${error instanceof Error ? error.message : String(error)}`);
+    const nudged = keepPending.delete(sessionId);
+    void (async () => {
+      await maybeSelfCompress(sessionId, turn);
+      if (!nudged) await maybeKeep(sessionId, turn);
+    })().catch((error) => {
+      log(`member turn-end check failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
   if (typeof ctx?.on === "function") {
@@ -17331,6 +17404,7 @@ function createMemberContext({
       turns.delete(id);
       keepPending.delete(id);
       longJobs.delete(id);
+      selfCompressAt.delete(id);
     }));
   }
   return {
@@ -17339,6 +17413,7 @@ function createMemberContext({
     lastInjection,
     turns,
     keepPending,
+    selfCompressAt,
     dispose() {
       closed = true;
       for (const dispose of disposers.splice(0)) {
@@ -17351,6 +17426,7 @@ function createMemberContext({
       turns.clear();
       keepPending.clear();
       longJobs.clear();
+      selfCompressAt.clear();
     }
   };
 }
@@ -17684,7 +17760,7 @@ function registerTools(ctx, toolsCtx, service) {
   const setMemberScopeDefinition = {
     name: "set_member_scope",
     description: [
-      "\u8BBE\u7F6E\u4E00\u4E2A\u6210\u5458\u4F1A\u8BDD\u6216\u5F53\u524D\u4E3B\u5BF9\u8BDD\uFF08\u81EA\u8EAB\uFF09\u7684\u8EAB\u4EFD\u3001\u6807\u51C6\u8EAB\u4EFD\u3001\u5DE5\u4F5C\u8303\u56F4\u4EE5\u53CA\u81EA\u52A8\u538B\u7F29\u53C2\u6570\u3002",
+      "\u8BBE\u7F6E\u4E00\u4E2A\u6210\u5458\u4F1A\u8BDD\u6216\u5F53\u524D\u4E3B\u5BF9\u8BDD\uFF08\u81EA\u8EAB\uFF09\u7684\u8EAB\u4EFD\u3001\u6807\u51C6\u8EAB\u4EFD\u3001\u5DE5\u4F5C\u8303\u56F4\uFF0C\u4EE5\u53CA\u81EA\u7EE7\u7EED\u3001wait_member\u3001turn-end \u538B\u7F29\u7B49\u5F00\u5173\u3002",
       "",
       "`conversationId` \u7701\u7565\u3001`self`\u3001`local` \u6216\u7B49\u4E8E\u5F53\u524D\u4F1A\u8BDD id \u65F6\u8BBE\u7F6E\u201C\u81EA\u8EAB\u201D\uFF1B\u5176\u4ED6\u503C\u4F5C\u4E3A\u6210\u5458\u4F1A\u8BDD id\u3002",
       "`identity` / `role` / `scope` / `note` \u662F\u53EF\u9009\u7684\u5B57\u7B26\u4E32\uFF0C\u53EA\u4F20\u8981\u6539\u7684\u5B57\u6BB5\uFF1B\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002",
@@ -17695,11 +17771,13 @@ function registerTools(ctx, toolsCtx, service) {
       "`keepPrompt`\uFF08\u4E5F\u53EF\u5199 `keep_prompt`\uFF09\u662F\u8FD9\u6761\u7528\u6237\u6D88\u606F\u7684\u6B63\u6587\uFF0C\u9ED8\u8BA4\u300C\u7EE7\u7EED\u300D\uFF0C\u6700\u957F 200 \u5B57\u7B26\uFF1B\u7A7A\u5B57\u7B26\u4E32\u6062\u590D\u9ED8\u8BA4\u3002\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       "`avoidLongJobs` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0C\u4E3B\u5BF9\u8BDD\u4E0B\u4E00\u6B21\u72B6\u6001\u5FEB\u7167\u4F1A\u5217\u51FA\u8DDD\u4E0A\u4E00\u6B21\u5FEB\u7167\u4E4B\u95F4\u7ED3\u675F\u3001\u8017\u65F6\u8D85\u8FC7 1 \u5206\u949F\u7684 job\uFF0C\u5E76\u5EFA\u8BAE\u4EA4\u7ED9\u6210\u5458\u5BF9\u8BDD\u6267\u884C\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       "`budgetAudit` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\uFF0Ccall_member \u9884\u7B97\u8017\u5C3D\u65F6\u542F\u52A8 fork \u5B50\u4EE3\u7406\u5BA1\u67E5\u4EA7\u54C1\u6D41\u7A0B\uFF08\u6BCF\u4E2A\u5C0F\u9636\u6BB5\u6700\u591A 3 \u6B21\u3001\u95F4\u9694\u81F3\u5C11 10 \u5206\u949F\uFF09\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
+      "`waitMember` \u9ED8\u8BA4 true\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u8BBE\u4E3A false \u540E wait_member \u76F4\u63A5\u8FD4\u56DE ok:false\uFF0C\u4E0D\u518D\u963B\u585E\u7B49\u5F85\uFF1B\u6210\u5458\u56DE\u590D\u4ECD\u4F1A\u81EA\u52A8\u6295\u9012\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
+      "`compressOnTurnEnd` \u9ED8\u8BA4 false\uFF0C\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF1A\u5F00\u542F\u540E\u6BCF\u4E2A turn/end \u8BFB\u53D6\u672C\u5BF9\u8BDD\u4E0A\u4E0B\u6587\u5360\u6BD4\uFF0C\u8D85\u8FC7 compressPercent \u5C31\u7528 DSH \u7684\u663E\u5F0F\u538B\u7F29\uFF08compactNow\uFF09\u538B\u7F29\u4E00\u6B21\uFF1B\u53EA\u538B\u7F29\u4E3B\u5BF9\u8BDD\uFF0C\u6210\u5458\u4F1A\u8BDD\u4E0D\u53D7\u5F71\u54CD\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       "`callMemberBudget`\uFF08\u4E5F\u53EF\u5199 `call_member_budget`\uFF09\u662F**\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC**\u7684 call_member \u9884\u7B97\uFF0C\u53EF\u53EA\u7ED9\u8981\u8BBE\u7684\u9636\u6BB5\uFF08A/B/C/D\uFF09\uFF0C\u6BCF\u4E2A\u6574\u6570 1\u2013999\uFF0C\u6CA1\u6709\u7EDF\u4E00\u503C\uFF1B\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\u3002\u6CA1\u8BBE\u7F6E\u7684\u9636\u6BB5\u5728\u8FD0\u884C\u65F6\u9ED8\u8BA4\u4E3A\u8BE5\u9636\u6BB5**\u53C2\u4E0E\u6210\u5458\u6570\u91CF \xD7 2**\uFF08\u8FD8\u6CA1\u6709\u53C2\u4E0E\u6210\u5458\u65F6\u6309 1 \u8BA1\uFF09\u3002\u6210\u5458\u6BCF\u628A\u4E00\u6761\u56DE\u590D\u8FD4\u56DE\u7ED9\u4E3B\u5BF9\u8BDD\uFF08wait_member \u53D6\u8D70\u6216\u515C\u5E95\u6295\u9012\uFF09\u7B97\u5BF9\u5E94\u9636\u6BB5\u6D88\u8017\u4E00\u6B21\uFF1B\u9884\u7B97\u7528\u5B8C\u65F6\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u5F3A\u8C03\u5FC5\u987B\u8FDB\u5165\u4E0B\u4E00\u4E2A\u9636\u6BB5\uFF0C\u5E76\u53CA\u65F6\u7528 set_product_stage \u66F4\u65B0\u9636\u6BB5\u548C\u76EE\u6807\u72B6\u6001\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002",
       `\u9884\u7B97\u989D\u5EA6\u53EA\u80FD\u7531\u7528\u6237\u8C03\u6574\uFF1A\u8BBE\u7F6E callMemberBudget \u65F6\u5DE5\u5177\u4F1A\u8BFB\u53D6\u6700\u8FD1 ${String(BUDGET_AUTH_MESSAGE_WINDOW)} \u6761\u7528\u6237\u6D88\u606F\uFF0C\u53EA\u6709\u5176\u4E2D\u5B58\u5728\u201C\u9884\u7B97 + \u8C03\u6574/\u8BBE\u7F6E + \u6570\u5B57\u201D\u7684\u660E\u786E\u6307\u793A\u624D\u5199\u5165\uFF1B\u6CA1\u6709\u5219\u8FD4\u56DE ok:false\uFF0C\u914D\u7F6E\u4E0D\u53D8\u3002`,
       "\u9884\u7B97\u7528\u5C3D\u65F6\uFF0C\u6210\u5458\u4E0A\u4E0B\u6587\u4F1A\u81EA\u52A8\u542F\u52A8\u4E00\u4E2A fork \u5B50\u4EE3\u7406\u5BA1\u67E5\u5F53\u524D\u4EA7\u54C1\u6D41\u7A0B\uFF08\u6BCF\u4E2A\u5C0F\u9636\u6BB5\u6700\u591A 3 \u6B21\u3001\u95F4\u9694\u81F3\u5C11 10 \u5206\u949F\uFF09\uFF1A\u68C0\u67E5\u662F\u5426\u6309\u9636\u6BB5\u5DE5\u4F5C\u3001\u662F\u5426\u8D85\u51FA\u9636\u6BB5\u3001\u9884\u7B97\u4E3A\u4EC0\u4E48\u8017\u5C3D\uFF1B\u5982\u679C\u4E3B\u5BF9\u8BDD\u4F7F\u7528\u4E0D\u5408\u7406\uFF0C\u5BA1\u67E5\u7ED3\u8BBA\u4F1A\u4F5C\u4E3A\u8B66\u544A\u548C\u4E0B\u4E00\u6B65\u5EFA\u8BAE\u6295\u9012\u56DE\u4E3B\u5BF9\u8BDD\u3002",
-      `\`compressPercent\`\uFF1A\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u6570\u5B57 1\u2013100\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_COMPRESS_PERCENT)}\uFF09\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0B\u4E00\u6B21 call_member \u6295\u9012\u524D\uFF0C\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u538B\u7F29\u3002`,
-      "\u81F3\u5C11\u63D0\u4F9B identity\u3001role\u3001scope\u3001note\u3001keep\u3001keepPrompt\u3001avoidLongJobs\u3001budgetAudit\u3001callMemberBudget\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001role\u3001scope\u3001note \u6216 compressPercent \u4E4B\u4E00\u3002",
+      `\`compressPercent\`\uFF1A\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u6570\u5B57 1\u2013100\uFF0C\u9ED8\u8BA4 ${String(DEFAULT_COMPRESS_PERCENT)}\uFF09\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0B\u4E00\u6B21 call_member \u6295\u9012\u524D\u8D85\u8FC7\u9608\u503C\u5C31\u5148\u538B\u7F29\uFF1B\u4E3B\u5BF9\u8BDD\u5F00\u542F compressOnTurnEnd \u540E\u4F5C\u4E3A turn/end \u7684\u538B\u7F29\u9608\u503C\u3002`,
+      "\u81F3\u5C11\u63D0\u4F9B identity\u3001role\u3001scope\u3001note\u3001keep\u3001keepPrompt\u3001avoidLongJobs\u3001budgetAudit\u3001waitMember\u3001compressOnTurnEnd\u3001callMemberBudget\u3001compressPercent \u4E4B\u4E00\uFF1B\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FC5\u987B\u6709 identity\u3001role\u3001scope\u3001note \u6216 compressPercent \u4E4B\u4E00\u3002",
       "\u6210\u5458\u4F1A\u8BDD\u53EF\u4EE5\u672A\u88AB\u672C\u673A\u8DDF\u8E2A\uFF0C\u8BBE\u7F6E\u4ECD\u4F1A\u4FDD\u5B58\uFF0C\u53EA\u662F\u4E0D\u4F1A\u540C\u6B65\u4EFB\u52A1\u5FEB\u7167\u3002",
       "\u8FD9\u4E2A\u5DE5\u5177\u53EA\u4FDD\u5B58\u8BBE\u7F6E\uFF0C\u4E0D\u7ED9\u6210\u5458\u4F1A\u8BDD\u53D1\u6D88\u606F\u3001\u4E0D\u81EA\u52A8\u52A0\u6295\u9012\u524D\u7F00\uFF1B\u968F\u5BF9\u8BDD\u4E00\u8D77\u8BBE\u7F6E/\u66F4\u65B0\u7528 call_member \u7684 identity/role/scope \u53C2\u6570\u3002"
     ].join("\n"),
@@ -17749,6 +17827,14 @@ function registerTools(ctx, toolsCtx, service) {
           type: "boolean",
           description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF1B\u5F00\u542F\u540E call_member \u9884\u7B97\u8017\u5C3D\u65F6\u81EA\u52A8\u8D77 fork \u5B50\u4EE3\u7406\u5BA1\u67E5\u4EA7\u54C1\u6D41\u7A0B\uFF08\u6BCF\u9636\u6BB5\u6700\u591A 3 \u6B21\u3001\u95F4\u9694 10 \u5206\u949F\uFF09\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
         },
+        waitMember: {
+          type: "boolean",
+          description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 true\uFF1B\u8BBE\u4E3A false \u540E wait_member \u76F4\u63A5\u8FD4\u56DE ok:false\uFF0C\u4E0D\u518D\u963B\u585E\u7B49\u5F85\uFF0C\u6210\u5458\u56DE\u590D\u4ECD\u4F1A\u81EA\u52A8\u6295\u9012\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
+        },
+        compressOnTurnEnd: {
+          type: "boolean",
+          description: "\u53EA\u5BF9\u81EA\u8EAB/\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u9ED8\u8BA4 false\uFF1B\u5F00\u542F\u540E\u6BCF\u4E2A turn/end \u68C0\u67E5\u672C\u5BF9\u8BDD\u4E0A\u4E0B\u6587\u5360\u6BD4\uFF0C\u8D85\u8FC7 compressPercent \u5C31\u538B\u7F29\u4E00\u6B21\uFF08DSH compactNow\uFF0C\u53EA\u538B\u4E3B\u5BF9\u8BDD\uFF09\u3002\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5FFD\u7565\u3002"
+        },
         callMemberBudget: callMemberBudgetSchema(),
         call_member_budget: {
           ...callMemberBudgetSchema(),
@@ -17758,7 +17844,7 @@ function registerTools(ctx, toolsCtx, service) {
           type: "number",
           minimum: 1,
           maximum: 100,
-          description: "\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u767E\u5206\u6BD4\uFF0C\u9ED8\u8BA4 35\uFF09\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0B\u6B21\u6295\u9012\u524D\u4E0A\u4E0B\u6587\u5360\u6BD4\u8D85\u8FC7\u8BE5\u503C\u5C31\u5148\u538B\u7F29\u3002"
+          description: "\u81EA\u52A8\u538B\u7F29\u9608\u503C\uFF08\u767E\u5206\u6BD4\uFF0C\u9ED8\u8BA4 35\uFF09\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0B\u6B21\u6295\u9012\u524D\u8D85\u8FC7\u8BE5\u503C\u5C31\u5148\u538B\u7F29\uFF1B\u4E3B\u5BF9\u8BDD\u5F00\u542F compressOnTurnEnd \u540E\u4F5C\u4E3A turn/end \u7684\u538B\u7F29\u9608\u503C\u3002"
         }
       },
       additionalProperties: false
@@ -17783,10 +17869,12 @@ function registerTools(ctx, toolsCtx, service) {
       const hasKeepPrompt = args.keepPrompt !== void 0 || args.keep_prompt !== void 0;
       const hasAvoidLongJobs = args.avoidLongJobs !== void 0;
       const hasBudgetAudit = args.budgetAudit !== void 0;
+      const hasWaitMember = args.waitMember !== void 0;
+      const hasCompressOnTurnEnd = args.compressOnTurnEnd !== void 0;
       const hasCallMemberBudget = args.callMemberBudget !== void 0 || args.call_member_budget !== void 0;
       const hasCompressPercent = args.compressPercent !== void 0;
-      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasKeepPrompt && !hasAvoidLongJobs && !hasBudgetAudit && !hasCallMemberBudget && !hasCompressPercent) {
-        throw new Error("identity, role, scope, note, keep, keepPrompt, avoidLongJobs, budgetAudit, callMemberBudget, or compressPercent is required");
+      if (!hasIdentity && !hasRole && !hasScope && !hasNote && !hasKeep && !hasKeepPrompt && !hasAvoidLongJobs && !hasBudgetAudit && !hasWaitMember && !hasCompressOnTurnEnd && !hasCallMemberBudget && !hasCompressPercent) {
+        throw new Error("identity, role, scope, note, keep, keepPrompt, avoidLongJobs, budgetAudit, waitMember, compressOnTurnEnd, callMemberBudget, or compressPercent is required");
       }
       if (args.keepPrompt !== void 0 && args.keep_prompt !== void 0) {
         throw new Error("use only one of keepPrompt and keep_prompt");
@@ -17796,7 +17884,7 @@ function registerTools(ctx, toolsCtx, service) {
       }
       if (isSelf && selfId === "") throw new Error("cannot set the current session scope: no current session");
       if (!isSelf && !hasIdentity && !hasRole && !hasScope && !hasNote && !hasCompressPercent) {
-        throw new Error("keep, keepPrompt, avoidLongJobs, budgetAudit and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation");
+        throw new Error("keep, keepPrompt, avoidLongJobs, budgetAudit, waitMember, compressOnTurnEnd and callMemberBudget only apply to the current session; set identity, role, scope, note, or compressPercent for a member conversation");
       }
       const patch = {
         ...hasIdentity ? { identity: args.identity } : {},
@@ -17807,6 +17895,8 @@ function registerTools(ctx, toolsCtx, service) {
         ...isSelf && hasKeepPrompt ? { keepPrompt: args.keepPrompt !== void 0 ? args.keepPrompt : args.keep_prompt } : {},
         ...isSelf && hasAvoidLongJobs ? { avoidLongJobs: args.avoidLongJobs } : {},
         ...isSelf && hasBudgetAudit ? { budgetAudit: args.budgetAudit } : {},
+        ...isSelf && hasWaitMember ? { waitMember: args.waitMember } : {},
+        ...isSelf && hasCompressOnTurnEnd ? { compressOnTurnEnd: args.compressOnTurnEnd } : {},
         ...isSelf && hasCallMemberBudget ? { callMemberBudget: args.callMemberBudget !== void 0 ? args.callMemberBudget : args.call_member_budget } : {},
         ...hasCompressPercent ? { compressPercent: args.compressPercent } : {}
       };
@@ -17838,10 +17928,12 @@ function registerTools(ctx, toolsCtx, service) {
           `\u4FDD\u6301\u76EE\u6807\uFF1A${scope?.keep === true ? `\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u63D0\u793A\u8BED\u300C${keepPrompt}\u300D\uFF09` : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}`,
           `\u907F\u514D\u8017\u65F6\uFF1A${scope?.avoidLongJobs === true ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09`,
           `\u9884\u7B97\u5BA1\u67E5\uFF1A${scope?.budgetAudit === true ? "\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09" : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}`,
+          `wait_member\uFF1A${scope?.waitMember === false ? "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09" : "\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}`,
+          `turn/end \u81EA\u52A8\u538B\u7F29\uFF1A${scope?.compressOnTurnEnd === true ? "\u5F00\u542F\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09" : "\u5173\u95ED\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF09"}`,
           `call_member \u9884\u7B97\uFF1A${budgetText}\uFF08\u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u751F\u6548\uFF0C\u6BCF\u4E2A\u5927\u9636\u6BB5\u5355\u72EC\u8BA1\uFF1B\u672A\u8BBE\u7F6E\u6309\u53C2\u4E0E\u6210\u5458\u6570 \xD7 2\uFF09`,
           `\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%`
         ] : [`\u538B\u7F29\u9608\u503C\uFF1A${formatOneDecimal(compressThreshold)}%\uFF08\u6295\u9012\u524D\u8D85\u8FC7\u8BE5\u5360\u6BD4\u81EA\u52A8\u538B\u7F29\uFF09`],
-        ...!isSelf && (hasKeep || hasKeepPrompt || hasAvoidLongJobs || hasBudgetAudit || hasCallMemberBudget) ? ["keep / keepPrompt / avoidLongJobs / budgetAudit / callMemberBudget \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
+        ...!isSelf && (hasKeep || hasKeepPrompt || hasAvoidLongJobs || hasBudgetAudit || hasWaitMember || hasCompressOnTurnEnd || hasCallMemberBudget) ? ["keep / keepPrompt / avoidLongJobs / budgetAudit / waitMember / compressOnTurnEnd / callMemberBudget \u53EA\u5BF9\u4E3B\u5BF9\u8BDD\u81EA\u8EAB\u751F\u6548\uFF0C\u8BBE\u7F6E\u6210\u5458\u4F1A\u8BDD\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...isSelf && hasRole ? ["role \u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...isSelf && hasNote ? ["note \u53EA\u5BF9\u6210\u5458\u4F1A\u8BDD\u751F\u6548\uFF0C\u8BBE\u7F6E\u81EA\u8EAB\u65F6\u5DF2\u5FFD\u7565\u3002"] : [],
         ...!isSelf && !tracked ? ["\u672C\u673A\u672A\u8DDF\u8E2A\u8BE5\u4F1A\u8BDD\uFF0C\u53EA\u4FDD\u5B58\u8BBE\u7F6E\u3002"] : []
@@ -17860,6 +17952,8 @@ function registerTools(ctx, toolsCtx, service) {
           keepPrompt: isSelf ? keepPrompt : null,
           avoidLongJobs: scope?.avoidLongJobs === true,
           budgetAudit: isSelf ? scope?.budgetAudit === true : null,
+          waitMember: isSelf ? scope?.waitMember !== false : null,
+          compressOnTurnEnd: isSelf ? scope?.compressOnTurnEnd === true : null,
           callMemberBudget: isSelf ? scope?.callMemberBudget ?? null : null,
           tracked,
           note: !isSelf ? scope?.note ?? null : null,
@@ -17868,6 +17962,8 @@ function registerTools(ctx, toolsCtx, service) {
           ignoredKeepPrompt: !isSelf && hasKeepPrompt,
           ignoredAvoidLongJobs: !isSelf && hasAvoidLongJobs,
           ignoredBudgetAudit: !isSelf && hasBudgetAudit,
+          ignoredWaitMember: !isSelf && hasWaitMember,
+          ignoredCompressOnTurnEnd: !isSelf && hasCompressOnTurnEnd,
           ignoredCallMemberBudget: !isSelf && hasCallMemberBudget,
           ignoredNote: isSelf && hasNote
         }
@@ -17879,10 +17975,15 @@ function registerTools(ctx, toolsCtx, service) {
       type: "object",
       additionalProperties: false,
       properties: {
+        category: {
+          type: "string",
+          maxLength: 20,
+          description: `\u76EE\u6807\u7C7B\u522B\uFF08\u5982 ${PRODUCT_GOAL_CATEGORY_HINT}\uFF1B\u4E5F\u53EF\u7528\u5176\u4ED6\u77ED\u7C7B\u522B\u8BCD\uFF09\uFF1B\u7701\u7565\u65F6\u4ECE text \u5F00\u5934\u8BC6\u522B\u3002\u63D0\u4F9B category \u65F6 text \u53EA\u5199\u300C\u73B0\u72B6 \u2026\uFF0C\u9884\u671F \u2026\u300D\u3002`
+        },
         text: {
           type: "string",
           maxLength: 300,
-          description: `${label}\u6587\u672C\uFF0C\u56FA\u5B9A\u683C\u5F0F\u300C<\u7C7B\u522B> \u73B0\u72B6 <\u73B0\u5728\u600E\u6837>\uFF0C\u9884\u671F <\u8981\u53D8\u6210\u600E\u6837>\u3002\u300D\uFF08\u7C7B\u522B\u5982 \u5E94\u7528\u529F\u80FD / \u5E94\u7528\u754C\u9762 / \u5E94\u7528\u670D\u52A1 / \u7B97\u6CD5 / \u6570\u636E / \u6027\u80FD / \u7A33\u5B9A\u6027 / \u5B89\u5168 / \u5DE5\u7A0B\u8D28\u91CF / \u4EA4\u4ED8 / \u2026\uFF09\uFF1B\u4F8B\uFF1A\u5E94\u7528\u529F\u80FD \u73B0\u72B6 \u53EA\u80FD\u505A\u57FA\u7840\u5EFA\u6A21\uFF0C\u9884\u671F \u652F\u6301\u53C2\u6570\u5316\u7279\u5F81\u3002\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002`
+          description: `${label}\u6587\u672C\uFF0C\u56FA\u5B9A\u683C\u5F0F\u300C<\u7C7B\u522B> \u73B0\u72B6 <\u73B0\u5728\u600E\u6837>\uFF0C\u9884\u671F <\u8981\u53D8\u6210\u600E\u6837>\u3002\u300D\uFF1B\u63D0\u4F9B category \u65F6 text \u53EA\u5199\u300C\u73B0\u72B6 \u2026\uFF0C\u9884\u671F \u2026\u300D\uFF0C\u5426\u5219 text \u5F00\u5934\u5FC5\u987B\u5E26\u7C7B\u522B\u3002\u7A7A\u5B57\u7B26\u4E32\u8868\u793A\u6E05\u9664\u3002`
         },
         status: {
           type: "string",
@@ -17902,7 +18003,7 @@ function registerTools(ctx, toolsCtx, service) {
       "C \u4EA7\u54C1\u7ECF\u7406\u4F7F\u7528\uFF08\u4EA7\u54C1\u7ECF\u7406\u771F\u5B9E\u4F7F\u7528\uFF0C\u53D1\u73B0\u95EE\u9898\u56DE\u5230 B \u9636\u6BB5\uFF0C\u76F4\u5230\u4EA7\u54C1\u7ECF\u7406\u653E\u884C\uFF09\uFF1B",
       "D \u4E1A\u52A1\u4ECB\u5165\uFF08\u4E1A\u52A1\u4EBA\u5458\u5F00\u5C55\u4E1A\u52A1\u5DE5\u4F5C\uFF0C\u53D1\u73B0\u95EE\u9898\u56DE\u5230 C \u9636\u6BB5\uFF0C\u4E1A\u52A1\u653E\u884C\u540E\u56DE\u5230 A \u9636\u6BB5\uFF09\u3002",
       "\u4EA7\u54C1\u7248\u672C\u81EA\u52A8\u7EF4\u62A4\uFF0C\u4E0D\u9700\u8981\u4F20\u5165\uFF1AD \u5B8C\u6210\u8FDB\u5165 A \u65F6\u5347\u7248\uFF08\u540C\u4E00\u5929\u5C0F\u7248\u672C +1\uFF0C\u8DE8\u5929\u91CD\u7F6E\u4E3A\u5F53\u5929 .1\uFF09\u3002",
-      "`goals` \u53EA\u6539\u4F20\u5165\u7684\u76EE\u6807\uFF1Aproduct \u4EA7\u54C1\u76EE\u6807 / dev \u5F00\u53D1\u76EE\u6807 / research \u7814\u7A76\u76EE\u6807\uFF1B\u6BCF\u9879 { text, status }\uFF0Cstatus \u53D6 \u672A\u5F00\u59CB / \u8FDB\u884C\u4E2D / \u5DF2\u8FBE\u6210 / \u672A\u8FBE\u6210\u3002",
+      "`goals` \u53EA\u6539\u4F20\u5165\u7684\u76EE\u6807\uFF1Aproduct \u4EA7\u54C1\u76EE\u6807 / dev \u5F00\u53D1\u76EE\u6807 / research \u7814\u7A76\u76EE\u6807\uFF1B\u6BCF\u9879 { category, text, status }\uFF0Cstatus \u53D6 \u672A\u5F00\u59CB / \u8FDB\u884C\u4E2D / \u5DF2\u8FBE\u6210 / \u672A\u8FBE\u6210\u3002category \u662F\u76EE\u6807\u7C7B\u522B\uFF08\u7701\u7565\u65F6\u4ECE text \u5F00\u5934\u8BC6\u522B\uFF09\uFF0C\u63D0\u4F9B category \u65F6 text \u53EA\u5199\u300C\u73B0\u72B6 \u2026\uFF0C\u9884\u671F \u2026\u300D\u3002",
       "\u76EE\u6807\u6587\u672C\u56FA\u5B9A\u683C\u5F0F\uFF1A\u300C<\u7C7B\u522B> \u73B0\u72B6 <\u73B0\u5728\u600E\u6837>\uFF0C\u9884\u671F <\u8981\u53D8\u6210\u600E\u6837>\u3002\u300D\uFF0C\u7C7B\u522B\u5982 \u5E94\u7528\u529F\u80FD / \u5E94\u7528\u754C\u9762 / \u5E94\u7528\u670D\u52A1 / \u7B97\u6CD5 / \u6570\u636E / \u6027\u80FD / \u7A33\u5B9A\u6027 / \u5B89\u5168 / \u5DE5\u7A0B\u8D28\u91CF / \u4EA4\u4ED8 / \u2026\uFF1B\u4F8B\uFF1A\u5E94\u7528\u529F\u80FD \u73B0\u72B6 \u53EA\u80FD\u505A\u57FA\u7840\u5EFA\u6A21\uFF0C\u9884\u671F \u652F\u6301\u53C2\u6570\u5316\u7279\u5F81\u4E0E\u5386\u53F2\u56DE\u653E\u3002\u4E0D\u7B26\u5408\u65F6\u8C03\u7528\u88AB\u62D2\u7EDD\u3001\u72B6\u6001\u4E0D\u53D8\u3002",
       "`round` \u662F\u5B50\u9636\u6BB5\u8F6E\u6B21\uFF08\u7B2C\u51E0\u8F6E\u8FED\u4EE3\uFF09\uFF1A\u7701\u7565\u65F6 D \u8FDB\u5165 A \u81EA\u52A8 +1\uFF0C\u5176\u4ED6\u9636\u6BB5\u6CBF\u7528\u5F53\u524D\u8F6E\u6B21\uFF1B\u4E5F\u53EF\u4EE5\u663E\u5F0F\u6307\u5B9A\u3002",
       "`stage` \u7701\u7565\u65F6\u6CBF\u7528\u5F53\u524D\u9636\u6BB5\uFF08\u9996\u6B21\u8C03\u7528\u9ED8\u8BA4 A\uFF09\uFF0C\u53EA\u66F4\u65B0\u76EE\u6807\u72B6\u6001\u65F6\u53EF\u4EE5\u7701\u7565\u3002",
@@ -18013,7 +18114,8 @@ function registerTools(ctx, toolsCtx, service) {
       "\u53D1\u8D77\u5BF9\u8BDD\u5F53\u65F6\u6B63\u5728\u6267\u884C turn \u65F6\uFF0C\u8FD9\u6761\u7ED3\u679C\u4F1A\u76F4\u63A5\u63D2\u5165\u5F53\u524D turn\uFF08\u4E0D\u7B49 turn \u7ED3\u675F\uFF09\u3002",
       "state=done \u65F6\u53EF\u4EE5\u7528\u8FD4\u56DE\u7684\u4F1A\u8BDDid\u7EE7\u7EED\u6295\u9012\uFF1Acall_member { conversationId, prompt }\uFF1B",
       "\u7ED3\u679C\u91CC\u4F1A\u663E\u793A\u76EE\u6807\u5BF9\u8BDD\u7684\u4E0A\u4E0B\u6587\u5360\u6BD4\uFF1B\u8D85\u8FC7\u8BE5\u4F1A\u8BDD\u7684\u538B\u7F29\u9608\u503C\u65F6\uFF0C\u4E0B\u6B21 call_member \u6295\u9012\u524D\u4F1A\u81EA\u52A8\u538B\u7F29",
-      "\u6BCF\u6B21\u8C03\u7528\u6709\u4E0A\u9650\uFF08\u9ED8\u8BA4 30000\uFF0C\u6700\u5927 300000 \u6BEB\u79D2\uFF09\uFF0C\u4E0D\u4F1A\u65E0\u9650\u963B\u585E\uFF1B\u7528\u6237\u505C\u6B62\u5F53\u524D\u5BF9\u8BDD\u4F1A\u4E2D\u6B62\u672C\u6B21\u7B49\u5F85\u3002"
+      "\u6BCF\u6B21\u8C03\u7528\u6709\u4E0A\u9650\uFF08\u9ED8\u8BA4 30000\uFF0C\u6700\u5927 300000 \u6BEB\u79D2\uFF09\uFF0C\u4E0D\u4F1A\u65E0\u9650\u963B\u585E\uFF1B\u7528\u6237\u505C\u6B62\u5F53\u524D\u5BF9\u8BDD\u4F1A\u4E2D\u6B62\u672C\u6B21\u7B49\u5F85\u3002",
+      "\u672C\u5BF9\u8BDD\u53EF\u4EE5\u7528 set_member_scope \u7684 waitMember:false \u5173\u95ED\u7B49\u5F85\uFF1B\u5173\u95ED\u540E\u672C\u5DE5\u5177\u8FD4\u56DE ok:false\uFF0C\u6210\u5458\u56DE\u590D\u4ECD\u4F1A\u81EA\u52A8\u6295\u9012\u3002"
     ].join("\n"),
     parameters: {
       type: "object",
@@ -18042,6 +18144,17 @@ function registerTools(ctx, toolsCtx, service) {
     async execute(args, exec) {
       const timeoutMs = Number.isSafeInteger(args.timeoutMs) ? args.timeoutMs : 3e4;
       const originSessionId = originSessionOf(exec.agent);
+      const waitScope = typeof service.memberScope === "function" ? await service.memberScope(originSessionId).catch(() => null) : null;
+      if (waitScope?.waitMember === false) {
+        return {
+          ok: false,
+          text: [
+            'wait_member \u5DF2\u88AB\u5173\u95ED\uFF08set_member_scope { "waitMember": false }\uFF09\uFF0C\u672C\u6B21\u6CA1\u6709\u7B49\u5F85\u3002',
+            "\u6210\u5458\u7684\u7ED3\u679C\u4ECD\u4F1A\u81EA\u52A8\u6295\u9012\u5230\u672C\u5BF9\u8BDD\uFF1B\u9700\u8981\u7B49\u5F85\u65F6\u8BA9\u7528\u6237\u628A waitMember \u6253\u5F00\u3002"
+          ].join("\n"),
+          data: { disabled: true, waitMember: false }
+        };
+      }
       if (typeof args.conversationId === "string" && args.conversationId.trim() !== "") {
         throw new Error('wait_member \u4E0D\u518D\u63A5\u53D7 conversationId\uFF1A\u53EA\u7B49\u4E00\u4E2A\u4F1A\u8BDD\u7528 conversationIds: ["<\u4F1A\u8BDDid>"]\uFF1B\u7B49\u5168\u90E8\u8FDB\u884C\u4E2D\u7684\u4F1A\u8BDD\u7528 all: true');
       }

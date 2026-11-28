@@ -275,6 +275,24 @@ test('wait_member all waits every running conversation of this origin', async ()
   }
 })
 
+test('wait_member is refused when the main conversation switched it off', async () => {
+  const member = await fakeMember()
+  const { service, dataDir } = await buildStub(member.port)
+  service.memberScope = async () => ({ waitMember: false })
+  const wait = register(service).get('wait_member')
+  try {
+    const result = await wait.execute({ all: true }, { agent: { session: { id: 'session-a' } } })
+    assert.equal(result.ok, false)
+    assert.equal(result.data.disabled, true)
+    assert.equal(result.data.waitMember, false)
+    assert.match(result.text, /wait_member 已被关闭/u)
+    assert.match(result.text, /set_member_scope/u)
+  } finally {
+    await member.close()
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
 test('wait_member all with nothing running is ok and lists every conversation', async () => {
   const member = await fakeMember()
   const { service, dataDir } = await buildStub(member.port)

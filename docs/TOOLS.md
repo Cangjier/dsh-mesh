@@ -16,7 +16,7 @@
 | `repack` | 用当前仓库刷新已有离线包 | `package` | `false` |
 | `members` | 只读成员发现 | 无 | `true` |
 | `call_member` | 在另一个成员上新建/继续对话 | `prompt` + `member` / `conversationId` / `cwd` / `workspace` / `identity` / `role` / `scope` | `false` |
-| `set_member_scope` | 设置成员会话或自身的身份、标准身份、工作范围、备注、自继续、分阶段 `call_member` 预算与压缩阈值 | `conversationId` / `identity` / `role` / `scope` / `note` / `keep` / `keepPrompt` / `avoidLongJobs` / `callMemberBudget` / `call_member_budget` / `compressPercent` | `false` |
+| `set_member_scope` | 设置成员会话或自身的身份、标准身份、工作范围、备注、自继续、`wait_member` 开关、主对话 turn-end 自动压缩、分阶段 `call_member` 预算与压缩阈值 | `conversationId` / `identity` / `role` / `scope` / `note` / `keep` / `keepPrompt` / `avoidLongJobs` / `waitMember` / `compressOnTurnEnd` / `callMemberBudget` / `call_member_budget` / `compressPercent` | `false` |
 | `set_product_stage` | 设置产品阶段、子阶段轮次和三个目标及状态；目标文本固定格式 `<类别> 现状 …，预期 …。`；版本自动维护 | `stage` / `round` / `goals` | `false` |
 | `wait_member` | 有界等待成员会话，按轮返回；任意一个先返回 | `all` / `conversationIds` `timeoutMs` | `true` |
 | `status_member` | 目标会话状态 + 身份/工作范围 + 最近两次用户消息 + 最近一次思考；同时列出本对话跟踪的全部会话（状态/工作区/身份/工作范围，已归档的不列出）；可一次查多个 | `conversationId` / `conversationIds` | `true` |
@@ -693,6 +693,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 - **子阶段轮次** `round`：默认 `D -> A` 自动 `+1`，其他阶段沿用当前轮次；显式传 `round` 可开启新一轮（阶段或轮次变化会清空本轮参与记录）。
 - **目标**：`product` 产品目标 / `dev` 开发目标 / `research` 研究目标；每项 `{ text, status }`，`status` 取 未开始 / 进行中 / 已达成 / 未达成。只改传入的项，`text` 为空表示清除该目标。
 - **目标文本固定格式**：`<类别> 现状 <现在怎样>，预期 <要变成怎样>。`，类别如 应用功能 / 应用界面 / 应用服务 / 算法 / 数据 / 性能 / 稳定性 / 安全 / 工程质量 / 交付 / …（也接受其他短类别词）；例 `应用功能 现状 只能做基础建模，预期 支持参数化特征与历史回放。`。工具会去掉多余冒号、统一全角逗号和结尾句号；不符合格式时返回 `ok:false`、状态不变，并给出格式与例子。
+- **类别可显式设置**：`goals.<key>.category`（可选）；提供时 `text` 只写「现状 …，预期 …」，工具拼成固定格式；省略时从 `text` 开头识别。只给 `category` 不给 `text` 会被拒绝。
 - **参与度**：成员的一轮回复被接受时（`wait_member` 取走和兜底投递共用同一张回复表）自动记到当前 `(stage, round)`；读取时还会把 `roundStartedAt` 之后有新回复的会话算作已参与（兼容旧任务 `originCwd` 缺失、插件重启）。阶段或轮次变化后重新计；只更新目标不会移动本轮开始时间。
 - **前进门槛**：换到下一阶段或开启新一轮 `round` 时，本轮要求的成员必须全部参与；否则 `set_product_stage` 返回 `ok:false`（`data.blocked: true`），状态不写入，并列出未参与的成员和没有对应身份的成员会话。退回上一阶段返工（B→A、C→B、D→C）和只更新目标不受此限制。
 - **放行检查**：成功前进时，工具结果用 `[放行检查]` 列出上一阶段未满足的目标（离开 A 产品目标未设置、离开 B 开发目标不是「已达成」、离开 C 产品目标不是「已达成」）和未设置标准身份的成员；这些只提示，不阻断。
@@ -700,7 +701,7 @@ state=running   → 这段时间没有新回复（done=false, timedOut=true）�
 - 成员的标准身份由 `set_member_scope` 的 `role` 设置（产品经理 / 研究员 / 开发 / 测试 / 业务）；未设置的成员在快照里被点名，不按自由文本 `identity` 推断。
 
 ```text
-set_product_stage { "stage": "A", "goals": { "product": { "text": "应用功能 现状 只有成员列表，预期 可用的成员面板。" } } }
+set_product_stage { "stage": "A", "goals": { "product": { "category": "应用功能", "text": "现状 只有成员列表，预期 可用的成员面板。" } } }
 set_product_stage { "stage": "B" }
 set_product_stage { "goals": { "dev": { "status": "已达成" } } }
 set_product_stage { "stage": "A" }
@@ -721,6 +722,27 @@ set_product_stage { "stage": "C", "round": 2 }
 - 投递后把会话记入 `keepPending`：由「继续」拉起的这一轮 `turn/end` 只清标记、不再投递，
   避免自循环；下一轮正常结束仍会继续；
 - 成员会话（`isMemberSession`）永不投递；`keep` 只存本机，不注入成员、不随投递发送。
+
+### 6.6.2.1 `wait_member` 开关
+
+`set_member_scope { "waitMember": false }`（只对主对话生效，默认 true）关闭后：
+
+- `wait_member` 在调用开始时读自身 scope，发现关闭就直接返回 `ok:false`
+  （`data.disabled = true`），不阻塞、不取走结果；
+- 成员回复仍按原规则自动投递到主对话，`status_member` / `call_member` 不受影响；
+- 只影响本对话，按会话保存；成员会话忽略这个设置；
+- 开关只在调用开始时读取，已经开始的等待不会被中途取消。
+
+### 6.6.2.2 主对话 turn-end 自动压缩
+
+`set_member_scope { "compressOnTurnEnd": true, "compressPercent": 40 }`（只对主对话生效，默认
+关闭）开启后：
+
+- 每个 `turn/end` 后检查一次自身上下文占比：`tokenMeter.contextPressure` 的
+  `pressureTokens / contextWindow`，严格大于 `compressPercent` 才压缩；
+- agent 必须 idle；压缩用 DSH 的显式 `compaction.compactNow`，不受提供方自动阈值限制；
+- 每个会话最多每 10 分钟尝试一次；`busy`/`cancelled`/没有安全区间只记日志；
+- 先压缩、后走 `keep` 判断；只压主对话，成员会话仍走投递前压缩。
 
 ### 6.6.3 `call_member` 预算
 

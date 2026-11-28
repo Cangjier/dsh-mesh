@@ -171,10 +171,13 @@ export function normalizeCallMemberBudgets(value) {
  * shared value. A stage without an entry runs on the default computed at read
  * time (twice its participating members). `budgetAudit` is the opt-in switch
  * for the budget-exhaustion audit (default false, main conversation only).
- * `compressPercent` a number within 1..100. The caller merges the result into
- * the stored record.
- * @param {{identity?: unknown, role?: unknown, scope?: unknown, keep?: unknown, keepPrompt?: unknown, avoidLongJobs?: unknown, budgetAudit?: unknown, callMemberBudget?: unknown, note?: unknown, compressPercent?: unknown}} [patch] raw patch.
- * @returns {{identity?: string|null, role?: string|null, scope?: string|null, keep?: boolean, keepPrompt?: string|null, avoidLongJobs?: boolean, budgetAudit?: boolean, callMemberBudget?: Record<string, number>, note?: string|null, compressPercent?: number}} normalised patch.
+ * `compressPercent` a number within 1..100. `waitMember` is the main
+ * conversation's switch for the `wait_member` tool (default true);
+ * `compressOnTurnEnd` is the main conversation's switch for compacting itself
+ * when its context occupancy exceeds `compressPercent` at turn end (default
+ * false). The caller merges the result into the stored record.
+ * @param {{identity?: unknown, role?: unknown, scope?: unknown, keep?: unknown, keepPrompt?: unknown, avoidLongJobs?: unknown, budgetAudit?: unknown, waitMember?: unknown, compressOnTurnEnd?: unknown, callMemberBudget?: unknown, note?: unknown, compressPercent?: unknown}} [patch] raw patch.
+ * @returns {{identity?: string|null, role?: string|null, scope?: string|null, keep?: boolean, keepPrompt?: string|null, avoidLongJobs?: boolean, budgetAudit?: boolean, waitMember?: boolean, compressOnTurnEnd?: boolean, callMemberBudget?: Record<string, number>, note?: string|null, compressPercent?: number}} normalised patch.
  */
 export function normalizeMemberScopePatch(patch = {}) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
@@ -232,6 +235,14 @@ export function normalizeMemberScopePatch(patch = {}) {
   if (patch.budgetAudit !== undefined) {
     if (typeof patch.budgetAudit !== 'boolean') throw new Error('budgetAudit must be a boolean')
     normalized.budgetAudit = patch.budgetAudit
+  }
+  if (patch.waitMember !== undefined) {
+    if (typeof patch.waitMember !== 'boolean') throw new Error('waitMember must be a boolean')
+    normalized.waitMember = patch.waitMember
+  }
+  if (patch.compressOnTurnEnd !== undefined) {
+    if (typeof patch.compressOnTurnEnd !== 'boolean') throw new Error('compressOnTurnEnd must be a boolean')
+    normalized.compressOnTurnEnd = patch.compressOnTurnEnd
   }
   if (patch.callMemberBudget !== undefined) {
     normalized.callMemberBudget = normalizeCallMemberBudgets(patch.callMemberBudget)
@@ -976,11 +987,14 @@ export class MeshService {
         const keepPrompt = savedScopeText(value.keepPrompt, MEMBER_KEEP_PROMPT_MAX)
         const avoidLongJobs = typeof value.avoidLongJobs === 'boolean' ? value.avoidLongJobs : undefined
         const budgetAudit = typeof value.budgetAudit === 'boolean' ? value.budgetAudit : undefined
+        const waitMember = typeof value.waitMember === 'boolean' ? value.waitMember : undefined
+        const compressOnTurnEnd = typeof value.compressOnTurnEnd === 'boolean' ? value.compressOnTurnEnd : undefined
         const callMemberBudget = savedCallMemberBudgets(value.callMemberBudget)
         const note = savedScopeText(value.note, MEMBER_NOTE_MAX)
         const compressPercent = savedScopeNumber(value.compressPercent, candidate => candidate >= 1 && candidate <= 100)
         if (identity === null && role === null && scope === null && keep === undefined && keepPrompt === null
-          && avoidLongJobs === undefined && budgetAudit === undefined && callMemberBudget === undefined && note === null && compressPercent === undefined) continue
+          && avoidLongJobs === undefined && budgetAudit === undefined && waitMember === undefined
+          && compressOnTurnEnd === undefined && callMemberBudget === undefined && note === null && compressPercent === undefined) continue
         scopes[rawId.trim()] = {
           ...(identity === null ? {} : { identity }),
           ...(role === null ? {} : { role }),
@@ -989,6 +1003,8 @@ export class MeshService {
           ...(keepPrompt === null ? {} : { keepPrompt }),
           ...(avoidLongJobs === undefined ? {} : { avoidLongJobs }),
           ...(budgetAudit === undefined ? {} : { budgetAudit }),
+          ...(waitMember === undefined ? {} : { waitMember }),
+          ...(compressOnTurnEnd === undefined ? {} : { compressOnTurnEnd }),
           ...(callMemberBudget === undefined ? {} : { callMemberBudget }),
           ...(note === null ? {} : { note }),
           ...(compressPercent === undefined ? {} : { compressPercent }),
@@ -1003,7 +1019,7 @@ export class MeshService {
   /**
    * One conversation's scope, or null.
    * @param {string} conversationId conversation or session id.
-   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, budgetAudit?: boolean, note?: string, compressPercent?: number}|null>} scope.
+   * @returns {Promise<{identity?: string, role?: string, scope?: string, keep?: boolean, keepPrompt?: string, avoidLongJobs?: boolean, callMemberBudget?: Record<string, number>, budgetAudit?: boolean, waitMember?: boolean, compressOnTurnEnd?: boolean, note?: string, compressPercent?: number}|null>} scope.
    */
   async memberScope(conversationId) {
     const id = String(conversationId ?? '').trim()
@@ -1052,6 +1068,8 @@ export class MeshService {
     }
     if (normalized.avoidLongJobs !== undefined) next.avoidLongJobs = normalized.avoidLongJobs
     if (normalized.budgetAudit !== undefined) next.budgetAudit = normalized.budgetAudit
+    if (normalized.waitMember !== undefined) next.waitMember = normalized.waitMember
+    if (normalized.compressOnTurnEnd !== undefined) next.compressOnTurnEnd = normalized.compressOnTurnEnd
     if (normalized.callMemberBudget !== undefined) {
       // Each big stage is set separately: a patch for A must not wipe B.
       next.callMemberBudget = { ...(next.callMemberBudget ?? {}), ...normalized.callMemberBudget }
